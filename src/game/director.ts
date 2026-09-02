@@ -36,6 +36,7 @@ import {
   assignCrew, ruckDistributor, assignReceiver,
   widestGap, avoidTouch, maxSpeed, FORWARDS,
 } from './intelligence';
+import { MatchAudio } from './audio';
 
 /* ============================ INPUT ============================ */
 
@@ -675,6 +676,9 @@ export class Director {
    * audio layer all read the same events, so a tackle and the line about it
    * can never desynchronise. (Named eventBus — `events` is the match log.) */
   eventBus: BroadcastEvent[] = [];
+  /* T-10 — the audio layer. Presentation only; reads the same frameEvents
+   * bus as the camera and the commentary. Silent until a user gesture. */
+  audio = new MatchAudio();
   private emitEv(e: BroadcastEvent) { if (this.eventBus.length < 24) this.eventBus.push(e); }
   /** Everything that happened this frame, for presentation only. */
   frameEvents: BroadcastEvent[] = [];
@@ -747,6 +751,8 @@ export class Director {
   lawCall(key: string, call: string, team: 'A' | 'B') {
     this.refSignal = 1.8;
     this.refSignalText = call;
+    /* T-10 — every law call has a whistle. */
+    this.audio.whistle('LONG');
     this.teams[team].stats.penaltiesConceded++;
     this.say(call);
     if (!this.lawsExplained.has(key)) {
@@ -837,6 +843,17 @@ export class Director {
     this.frameEvents = this.eventBus.splice(0);
     this.updateCamera(dt);
     this.commentarySequencer();
+    /* T-10 — the CROWD NOISE option gates the whole audio layer. */
+    this.audio.level = this.options.crowd ?? 2;
+    if (this.audio.level > 0) {
+      const fpNow = this.focusPoint();
+      const in22 = Math.abs(fpNow.z - FIELD.tryZ) < 22 || Math.abs(fpNow.z - FIELD.tryZFar) < 22;
+      const ratio = (this.teams.A.nation.crowd + this.teams.B.nation.crowd) / 2;
+      this.audio.update(dt, this.momentum, in22, ratio);
+      for (const ev of this.frameEvents) {
+        this.audio.event(ev.type, ev.type === 'TACKLE' ? ev.force : 0.5);
+      }
+    }
     this.syncActors();
     this.t += dt;
 

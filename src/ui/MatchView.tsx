@@ -53,6 +53,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       const k = e.key.toLowerCase();
       if (KEYMAP[k]) e.preventDefault();
       keys.current.add(k);
+      /* T-10 — browser policy: audio may only start inside a user gesture. */
+      dirRef.current?.audio.userGesture();
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
     window.addEventListener('keydown', down);

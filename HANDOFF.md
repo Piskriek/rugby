@@ -622,7 +622,7 @@ referee CALL announcements, which are not commentary) and 13 tension lines.
 ---
 
 ### T-10 · Audio
-**Type:** Presentation · **Effort:** L · **Risk:** Low
+**Type:** Presentation · **Effort:** L · **Risk:** Low · **STATUS: DONE**
 
 The entire atmosphere layer is a caption. This is the largest gap between how
 the game plays and how a rugby game should feel.
@@ -639,6 +639,19 @@ Gate behind a mute toggle; start on first user gesture (browser policy).
 
 **Acceptance:** Crowds audibly swell on a line break. Every law call has a
 whistle. No audio before the first interaction.
+
+**Done:** `src/game/audio.ts` — WebAudio, zero assets, three layers: a looped
+noise crowd bed through a lowpass whose amplitude follows `momentum`, swells
+inside the attacking 22, spikes on line breaks and tries, and is mixed by the
+travelling-support ratio (the filter opens as the crowd loudens); impact
+bursts pitched by tackle force and the kick off the boot; and the whistle —
+two detuned square oscillators with a downward bend, a long blast for every
+law call (`lawCall`) and the short-double for a try. Fed from the same
+`frameEvents` bus as T-08/T-09. The AudioContext is created/resumed only
+inside a real keydown (MatchView calls `audio.userGesture()`); before that
+every method is a no-op, so headless harness runs and the pre-interaction
+game are silent. The existing CROWD NOISE option gates the whole layer
+(OFF = full mute, LOW = −7 dB, FULL).
 
 ---
 
