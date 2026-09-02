@@ -743,7 +743,7 @@ this **before** you write the resolver, not after.
 ---
 
 ### T-14 · Behaviour dataset viewer in the media guide
-**Type:** Tooling · **Effort:** M · **Risk:** None
+**Type:** Tooling · **Effort:** M · **Risk:** None · **STATUS: DONE**
 
 100 points × 15 shirts is 1,500 authored positions and there is currently no way
 to look at them. Authoring errors — a winger placed at `y=50`, a beat out of
@@ -756,6 +756,19 @@ the run lines for that shirt with their family colour from `LINE_FAMILIES`. Show
 
 **Why it matters:** it makes the remaining twelve shirts far cheaper to author,
 because the author can see the previous shirt's spacing while writing the next.
+
+**Done:** BEHAVIOUR tab in the media guide. `datasetReport().problems` at the
+top in red (or the green NO PROBLEMS banner), then percent complete with
+authored/pending shirts and the run-line count. Shirt picker 1–15 (pending
+shirts dimmed but selectable — their run lines still draw); all twenty
+situations. Left: the five beats as a numbered path on the full-pitch dataset
+grid (x along, y across, try lines / 22s / halfway marked) with instruction
+and fallback per beat. Right: the shirt's run lines in the ruck-relative
+metres frame they are authored in (gain line, ruck, upfield axis), coloured
+by LINE_FAMILIES, with purpose / if-occupied / trigger per line. The two
+frames are drawn side by side rather than falsely overlaid — beats are
+absolute pitch percentages, run lines are ruck-relative metres. Renders
+headless (SSR smoke test) and in the vite build.
 
 ---
 

@@ -16,6 +16,9 @@ import { ATTACK_SHAPES, DEFENCE_SYSTEMS, CAMERA_PLAN, PLAYBOOK, SHAPE_POINT_COUN
 import { animationPointCount } from '../game/animation';
 import { paperPointCount } from '../game/papercraft';
 import { KEYMAP } from './MatchView';
+import { datasetReport, behaviourFor, runLinesFor, AUTHORED_POSITIONS } from '../game/behaviour';
+import { SITUATIONS, SITUATION_META, SituationId } from '../game/behaviour/types';
+import { LINE_FAMILIES } from '../game/behaviour/lines';
 
 export type Mode = 'FRIENDLY' | 'LEAGUE' | 'WORLD_CUP' | 'FIVE_NATIONS' | 'CLINIC' | 'REPLAYS' | 'CLASSIC' | 'TUTORIAL';
 
@@ -423,6 +426,149 @@ export function OptionsScreen({ options, setOptions, onBack, onReset }: {
 
 /* ============================ MEDIA GUIDE ============================ */
 
+/* ============================ BEHAVIOUR DATASET (T-14) ============================ */
+
+/** The five beats of one shirt's situation, on the full-pitch dataset grid
+ *  (x 0..100 along the pitch, y 0..100 across it), plus the shirt's run lines
+ *  in the ruck-relative metres frame they are authored in. */
+function BehaviourTab() {
+  const rep = useMemo(() => datasetReport(), []);
+  const [shirt, setShirt] = useState(1);
+  const [sit, setSit] = useState<SituationId>('own-scrum-mid');
+  const [side, setSide] = useState<'attack' | 'defence'>('attack');
+  const pts = behaviourFor(shirt, sit);
+  const lines = runLinesFor(shirt, side);
+  const meta = SITUATION_META[sit];
+
+  // pitch grid: 104x104 viewBox with a 2-unit margin
+  const PX = (x: number) => 2 + x, PY = (y: number) => 2 + y;
+
+  return (
+    <div className="space-y-2">
+      {/* honesty first: the report's problems, in red, at the top */}
+      {rep.problems.length > 0 ? (
+        <div className="border-2 border-[#ff6a5a] bg-[#1a0e0e] p-2">
+          <div className="text-[10px] font-black tracking-[0.2em] text-[#ff6a5a]">DATASET REPORT — {rep.problems.length} PROBLEM{rep.problems.length > 1 ? 'S' : ''}</div>
+          {rep.problems.map((pr) => <div key={pr} className="text-[9px] leading-snug text-[#e8a49c]">• {pr}</div>)}
+        </div>
+      ) : (
+        <div className="border border-[#6ee7a0] bg-[#0e1a12] p-2 text-[10px] font-black tracking-[0.2em] text-[#6ee7a0]">DATASET REPORT — NO PROBLEMS</div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 border border-[#26314a] bg-[#0e1522] px-2 py-1 text-[9px] text-[#7f8ea6]">
+        <span className="font-black text-[#e8cf46]">{rep.percentComplete}% COMPLETE</span>
+        <span>{rep.totalPoints}/{rep.expectedPoints} points</span>
+        <span>·</span><span>AUTHORED: {rep.authoredPositions.join(', ') || '—'}</span>
+        <span>·</span><span>PENDING: {rep.pendingPositions.join(', ') || '— NONE'}</span>
+        <span>·</span><span>{rep.runLines} RUN LINES, ALL FIFTEEN SHIRTS</span>
+      </div>
+
+      {/* shirt picker */}
+      <div className="flex flex-wrap gap-1">
+        {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => {
+          const authored = AUTHORED_POSITIONS.includes(n);
+          return (
+            <Btn key={n} small active={shirt === n} onClick={() => setShirt(n)}>
+              <span className={authored ? '' : 'opacity-40'}>{n}{authored ? '' : ' ·'}</span>
+            </Btn>
+          );
+        })}
+        <span className="self-center text-[9px] text-[#7f8ea6]">DIMMED = POSITIONAL DATA PENDING · RUN LINES STILL DRAW</span>
+      </div>
+
+      {/* situation picker */}
+      <div className="flex flex-wrap gap-1">
+        {SITUATIONS.map((s) => (
+          <Btn key={s} small active={sit === s} onClick={() => setSit(s)}>{SITUATION_META[s].label}</Btn>
+        ))}
+      </div>
+
+      <div className="grid gap-2 md:grid-cols-2">
+        {/* the five beats, on the pitch grid */}
+        <div className="border border-[#26314a] bg-[#0e1522] p-2">
+          <div className="mb-1 text-[10px] font-black tracking-[0.2em] text-[#f4efe2]">
+            SHIRT {shirt} · {SITUATION_META[sit].label} · {meta.attacking ? 'OUR BALL' : 'DEFENDING'} ({meta.phase})
+          </div>
+          <svg viewBox="0 0 104 104" className="w-full bg-[#0a0e16]">
+            {/* touchlines, try lines, 22s, halfway */}
+            <rect x={PX(0)} y={PY(0)} width={100} height={100} fill="none" stroke="#3d4b66" strokeWidth={0.7} />
+            {[0, 100].map((x) => <line key={x} x1={PX(x)} y1={PY(0)} x2={PX(x)} y2={PY(100)} stroke="#e8cf46" strokeWidth={0.5} />)}
+            {[22, 50, 78].map((x) => <line key={x} x1={PX(x)} y1={PY(0)} x2={PX(x)} y2={PY(100)} stroke="#3d4b66" strokeWidth={0.35} strokeDasharray="1.5 1.5" />)}
+            <text x={PX(50)} y={PY(-0.5)} fontSize={2.4} fill="#7f8ea6" textAnchor="middle">HALFWAY</text>
+            {/* the beat path */}
+            {pts.length > 1 && (
+              <polyline
+                points={pts.map((pt) => `${PX(pt.x)},${PY(pt.y)}`).join(' ')}
+                fill="none" stroke="#6ee7a0" strokeWidth={0.7} strokeDasharray="2 1"
+              />
+            )}
+            {pts.map((pt, i) => (
+              <g key={pt.id}>
+                <circle cx={PX(pt.x)} cy={PY(pt.y)} r={2.6} fill="#e8cf46" stroke="#0a0e16" strokeWidth={0.5} />
+                <text x={PX(pt.x)} y={PY(pt.y) + 0.9} fontSize={2.8} fill="#0a0e16" textAnchor="middle" fontWeight={900}>{i + 1}</text>
+              </g>
+            ))}
+            {pts.length === 0 && (
+              <text x={52} y={52} fontSize={4} fill="#ff6a5a" textAnchor="middle">NO AUTHORED POINTS FOR SHIRT {shirt}</text>
+            )}
+          </svg>
+          <div className="mt-1 space-y-1">
+            {pts.map((pt) => (
+              <div key={pt.id} className="border-l-2 border-[#e8cf46] pl-2">
+                <div className="text-[9px] font-black tracking-[0.15em] text-[#e8cf46]">{pt.beat}. {pt.beatName.toUpperCase()} — ({pt.x}, {pt.y})</div>
+                <div className="text-[9px] leading-snug text-[#cfd8e6]">{pt.instruction}</div>
+                <div className="text-[9px] leading-snug text-[#7f8ea6]">FALLBACK: {pt.fallback}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* the run lines, ruck-relative metres */}
+        <div className="border border-[#26314a] bg-[#0e1522] p-2">
+          <div className="mb-1 flex items-center justify-between">
+            <div className="text-[10px] font-black tracking-[0.2em] text-[#f4efe2]">RUN LINES — SHIRT {shirt}</div>
+            <div className="flex gap-1">
+              <Btn small active={side === 'attack'} onClick={() => setSide('attack')}>ATTACK</Btn>
+              <Btn small active={side === 'defence'} onClick={() => setSide('defence')}>DEFENCE</Btn>
+            </div>
+          </div>
+          <svg viewBox="-16 -20 40 40" className="w-full bg-[#0a0e16]">
+            {/* depth axis: ruck at (0,0), gain line vertical through it */}
+            <line x1={0} y1={-18} x2={0} y2={18} stroke="#e8cf46" strokeWidth={0.4} strokeDasharray="1 1" />
+            <text x={0.6} y={-16.5} fontSize={1.6} fill="#e8cf46">GAIN LINE</text>
+            <circle cx={0} cy={0} r={0.8} fill="#f4efe2" />
+            <text x={1} y={1.2} fontSize={1.6} fill="#7f8ea6">RUCK</text>
+            {/* upfield = +x */}
+            <text x={12} y={-16.5} fontSize={1.6} fill="#7f8ea6">UPFIELD →</text>
+            {lines.map((l) => {
+              const col = LINE_FAMILIES[l.family]?.color ?? '#7f8ea6';
+              return (
+                <g key={l.id}>
+                  <polyline points={l.path.map(([dx, dy]) => `${dx},${dy}`).join(' ')} fill="none" stroke={col} strokeWidth={0.5} />
+                  <circle cx={l.path[0][0]} cy={l.path[0][1]} r={0.55} fill={col} />
+                  <circle cx={l.path[l.path.length - 1][0]} cy={l.path[l.path.length - 1][1]} r={0.55} fill={col} />
+                </g>
+              );
+            })}
+            {lines.length === 0 && <text x={2} y={0} fontSize={2} fill="#ff6a5a">NO LINES FOR THIS SHIRT/SIDE</text>}
+          </svg>
+          <div className="mt-1 space-y-1">
+            {lines.map((l) => (
+              <div key={l.id} className="border-l-2 pl-2" style={{ borderColor: LINE_FAMILIES[l.family]?.color ?? '#7f8ea6' }}>
+                <div className="text-[9px] font-black tracking-[0.15em]" style={{ color: LINE_FAMILIES[l.family]?.color ?? '#7f8ea6' }}>
+                  {l.name.toUpperCase()} · {LINE_FAMILIES[l.family]?.label ?? l.family} · {l.speed.toUpperCase()} · {l.lengthM} m
+                </div>
+                <div className="text-[9px] leading-snug text-[#cfd8e6]">{l.purpose}</div>
+                <div className="text-[9px] leading-snug text-[#7f8ea6]">IF OCCUPIED: {l.ifOccupied}</div>
+                <div className="text-[9px] leading-snug text-[#7f8ea6]">TRIGGER: {l.trigger}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function GuideScreen({ onBack }: { onBack: () => void }) {
   const count = useMemo(() => dataPointCount(), []);
   const [tab, setTab] = useState<string>(MANUAL[0].id);
@@ -447,6 +593,7 @@ export function GuideScreen({ onBack }: { onBack: () => void }) {
     { id: 'SQUADS', label: 'SQUADS' },
     { id: 'LAWS', label: 'LAWS' },
     { id: 'AI', label: 'AI MODEL' },
+    { id: 'BEHAVIOUR', label: 'BEHAVIOUR' },
     { id: 'NUM', label: 'THE NUMBERS' },
   ];
   return (
@@ -556,6 +703,7 @@ export function GuideScreen({ onBack }: { onBack: () => void }) {
         </Panel>
       )}
 
+      {tab === 'BEHAVIOUR' && (<BehaviourTab />)}
       {tab === 'AI' && (
         <div className="space-y-3">
           <Panel title="DIFFICULTY LADDER">
