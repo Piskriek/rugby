@@ -3235,7 +3235,34 @@ export class Director {
          * fall-through, and no assertion. */
         s.winner = true;
         const dTeam: 'A' | 'B' = s.thrower === 'A' ? 'B' : 'A';
-        const won = R() < 0.55 + this.teams[s.thrower].nation.att.lineout / 400 + (s.quality - 0.5) * 0.5;
+        /* T-06 — THE LIFT IS MECHANICAL. The catch is not a dice roll: each
+         * side's best jumper at the ball's plane rises to an EFFECTIVE REACH
+         * — base spring, plus the lift (mean power of the designated
+         * lifters, scaled by having both of them and by jump timing), minus
+         * the stretch of reaching away laterally. The thrower's jumper jumps
+         * on the call (timing follows throw quality); the defence reacts.
+         * Whoever reaches higher at the plane takes it. */
+        const reachOf = (team: 'A' | 'B') => {
+          const js = s.players.filter((q) => q.team === team && q.role === 'JUMPER');
+          if (!js.length) return 0;
+          js.sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x));
+          const q = js[0];
+          const live = this.L(team, q.num);
+          const lifters = s.players.filter((w) => w.team === team && w.role === 'LIFTER'
+            && this.L(team, w.num).sinbin <= 0);
+          const pows = lifters.map((w) => this.L(team, w.num).attrs.PWR);
+          const liftQ = pows.length ? pows.reduce((a, b) => a + b, 0) / pows.length / 100 : 0;
+          const both = Math.min(1, pows.length / 2);
+          const stretch = Math.min(0.5, Math.abs(q.x - s.ball.x) * 0.12);
+          const tech = this.teams[team].nation.att.lineout / 100 * 0.12;
+          const timing = team === s.thrower ? 0.25 + s.quality * 0.75 : 0.78;
+          return 2.4 + live.attrs.PWR / 100 * 0.1 + liftQ * both * 0.9 * timing + tech - stretch;
+        };
+        /* No two jumps are timed alike: a hand-span of noise on each side,
+         * so an even battle is a contest, not a formality. */
+        const margin = reachOf(s.thrower) - reachOf(dTeam) + (s.quality - 0.5) * 0.3 + (R() - 0.5) * 0.34;
+        s.contestMargin = margin;
+        const won = margin > 0 || (margin === 0 && R() < 0.6);
         const bx = s.ball.x, bz = s.markZ, drive = s.driveCall, thrower = s.thrower;
 
         // A badly crooked throw is a free kick regardless of who caught it.
@@ -3268,10 +3295,18 @@ export class Director {
     }
     void input;
     for (const p of s.players) {
-      if (p.role !== 'JUMPER') continue;
-      const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
-      const target = contesting ? (Math.abs(p.x - s.ball.x) < 1.6 ? s.ball.y : 0.4) : 0.4;
-      p.handY = approach(p.handY, target, 6, dt);
+      if (p.role === 'JUMPER') {
+        const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
+        const target = contesting ? (Math.abs(p.x - s.ball.x) < 1.6 ? s.ball.y : 0.4) : 0.4;
+        p.handY = approach(p.handY, target, 6, dt);
+      } else if (p.role === 'LIFTER') {
+        /* T-06: one shared timeline — the lifters' hands rise with their own
+         * jumper, half a beat behind him, instead of animating alone. */
+        const near = s.players
+          .filter((q) => q.team === p.team && q.role === 'JUMPER')
+          .sort((a, b) => Math.abs(a.x - p.x) - Math.abs(b.x - p.x))[0];
+        if (near) p.handY = approach(p.handY, near.handY * 0.5, 6, dt);
+      }
     }
   }
 
