@@ -24,7 +24,10 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
   /* T-32. The conversion ritual: fanfare (celebrate), then the walk to the tee.
    * The kick button is dead until the kicker has actually set the ball. */
   if (s.stage === 'FANFARE') {
-    if (s.t > 2.2) { s.stage = 'WALKUP'; s.t = 0; d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`); }
+    /* W-011: a corner try's conversion waits for the TMO review — the
+     * celebration and the check share the fanfare window (4.2 s, still
+     * well inside the KICK phase limit). */
+    if (s.t > (d.tmo ? 4.2 : 2.2)) { s.stage = 'WALKUP'; s.t = 0; d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`); }
     return;
   }
   if (s.stage === 'WALKUP') {
@@ -384,9 +387,16 @@ export function kickLanded(d: Director, s: KickState) {
     return;
   }
   const dTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
-  if (R() < 0.5) {
-    d.startOpen(dTeam, s.bx, s.bz, rec.num, 1);
-  } else {
+  /* T-18. YOU CATCH A KICK, YOU RUN IT BACK. Half of all fielded kicks used
+   * to become a scrum for the catching side — a law that does not exist and
+   * a phase that produces no pass and no tackle. The fielder counters (with
+   * the chase arriving, which is where kick-chase tackles come from); a
+   * knock in the fielding is the honest minority that does give the scrum.
+   * Scrums stay green off the lineout/maul error stream alone. */
+  if (R() < 0.22) {
+    d.say('KNOCKED ON FIELDING THE KICK');
     d.startScrum(dTeam, s.bx, s.bz);
+  } else {
+    d.startOpen(dTeam, s.bx, s.bz, rec.num, 1, 0, 0.9);
   }
 }

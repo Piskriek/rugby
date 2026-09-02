@@ -212,14 +212,13 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
         d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
         return;
       }
-      /* no jackal on the ground and still shoved back past the line — the
-       * attack has been driven back over its own ball, which in law means
-       * bodies off their feet in front of the hindmost foot. Penalty — and
-       * possession won at the breakdown is a turnover in the box score. */
-      d.teams[dTeam].stats.turnovers++;
-      s.resultWhy = `DRIVEN OFF THE BALL — DEFENCE ${s.defCrew.length} v ${s.crew.length}`;
-      d.beginPenalty(dTeam, REFEREE_CALLS.HANDS_IN, s.players[0].num);
-      return;
+      /* T-18. Real referees ping not-releasing two to four times a match,
+       * not eleven — the rate was ending a red-zone possession in every
+       * other phase. */
+      if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+        d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
+        return;
+      }
     }
   }
 

@@ -154,7 +154,13 @@ export function updateCamera(d: Director, dt: number) {
    * while YAW always eases slowly: the whip gate is about angular judder,
    * and a phase cut barely changes the yaw anyway. */
   const dist = Math.hypot(target.x - d.cam.x, target.z - d.cam.z);
-  const far = dist > 12;
+  /* T-18. The old 12 m "far" threshold held the ease at rate 3 until the
+   * subject was twelve metres away — a carrier at full pace (8 m/s) sat
+   * near the bottom edge of frame for two seconds at a time and the
+   * ball-on-screen gate flaked on one match in six. Rate 3 only inside
+   * six metres (broadcast drift), rate 8 beyond it: the rig keeps up with
+   * anything a rugby player can do. */
+  const far = dist > 6;
   /* Cap the per-frame travel at 5.5 m: the cut is fast but the rig is still
    * a rig — it never moves more than a real gantry could survive. */
   const kPos = Math.min(1 - Math.exp(-dt * (far ? 8 : 3.0)), dist > 0.01 ? 5.5 / dist : 1);
