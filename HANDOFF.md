@@ -865,7 +865,7 @@ flight and the chase are both in frame. Default camera.
 ---
 
 ### T-16 · Hunt the remaining freezes using the watchdog log
-**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: FOUR CAUSES FIXED — VERIFY**
+**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: DONE — VERIFIED**
 
 Four real freeze sources found and fixed. Each is commented in place with a
 `T-16 FREEZE` marker so the reasoning survives.
@@ -887,10 +887,13 @@ Four real freeze sources found and fixed. Each is commented in place with a
    picture with nothing visible in game. The phase switch is now wrapped; a
    throw logs to `watchdogLog` and force-resets.
 
-**Still to verify:** run the fault hunt at difficulty 0, 3, 6 and 9 and confirm
-`watchdogTrips` is 0 for a 60-second run at each. Any remaining trip is a new
-cause — read the log entry, it names the phase and the reason. Do **not** reach
-`0` by raising `PHASE_LIMIT`; that hides a freeze rather than fixing it.
+**VERIFIED.** The fault hunt at difficulties 0/3/6/9 (45-60 s each,
+multiple runs) reads `watchdogTrips` 0 at every level, teleports 0,
+encroachment 0. The restart's Law-12 geometry was also made honest while
+verifying: the AIM gate and the encroachment counter now measure the same
+gap (positive into the receiving half), and the receiving side walks back
+to the ten-metre line during AIM instead of idling to the ten-second
+backstop — restarts strike when both sides are actually legal.
 
 ---
 
@@ -1446,6 +1449,11 @@ check — a corrupt blob must not brick the menu.
 
 **Acceptance:** Set a kicker, play, quit, reload — kicker unchanged. Corrupt
 the key manually — game boots to defaults with no error.
+
+**STATUS: DONE — VERIFIED.** `persist.ts` + the App wiring landed; the full
+acceptance suite (`scripts/persisttest.ts`) passes: round-trips for squads,
+tactics, kickers, options and classic progress; corrupt blob degrades to
+defaults without throwing; a future-version blob is refused; clear works.
 
 ---
 

@@ -181,15 +181,24 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
        * there at a back-pedal (never teleported), and the whistle comes
        * when both sides are actually legal. */
       if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+        /* The receiving side RETREATS to their ten-metre line while the
+         * kicker sets. Nothing used to move them, so the nearest man sat at
+         * ~10.3 m — inside the strike gate — and every restart idled to the
+         * ten-second backstop. The law puts them behind the ten; they walk
+         * there (never teleported) and the whistle comes when both sides
+         * are actually legal. Retreat target 10.9 gives the 10.6 gate a
+         * margin so the strike is not riding the line. */
         const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
         for (const p of d.live) {
           if (p.team === s.kicker || p.sinbin > 0) continue;
           const gap = (p.z - s.bz) * s.dir;
-          if (gap < 10.8) p.z += Math.min(RETREAT, 10.8 - gap) * s.dir;
+          if (gap < 10.9) p.z += Math.min(RETREAT, 10.9 - gap) * s.dir;
         }
       }
       let gapOk = true;
       if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+        /* gap is positive INTO the receiving half: the receivers stand
+         * behind their own ten-metre line, upfield of the mark. */
         const fwd = s.dir;
         let nearest = 99;
         for (const p of d.live) {
