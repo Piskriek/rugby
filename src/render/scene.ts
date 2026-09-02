@@ -1,0 +1,477 @@
+/**
+ * SCENE RENDERER — draws the whole match: stadium, the persistent cast of stocky
+ * retro actors (depth-sorted, rig-animated), the ball, and in-world mini-game overlays.
+ */
+import { Director, Actor } from '../game/director';
+import {
+  drawStadium, project, ball, poly, PALETTES, SKINS, HAIRS,
+  drawGoalPosts, HOME_POST_Z, Camera, View,
+} from './retro';
+import { C_CLIPS, sampleC, drawCoronal, CPose } from './coronal';
+import { drawFlatPaper, isSideOnCam } from './paper';
+
+function poseFor(clip: string, t: number): CPose {
+  const c = C_CLIPS[clip] ?? C_CLIPS.idle;
+  return sampleC(c, t);
+}
+
+const CLIP_MAP: Record<string, string> = {
+  idle: 'idle', jog: 'jog', sprint: 'sprint', carry: 'carry',
+  lineoutStand: 'ready', lineoutPreGrip: 'ready',
+  lineoutJump: 'lineoutJump', lineoutLift: 'lineoutLift',
+  lineoutThrow: 'lineoutThrow', lineoutCatch: 'catchHigh', tapDown: 'catchHigh',
+  scrumCrouch: 'scrumCrouch', scrumBind: 'scrumBind', scrumDrive: 'scrumDrive',
+  scrumStrike: 'scrumDrive', scrumCollapse: 'tackle',
+  maulBind: 'maulBind', maulDrive: 'maulBind', maulHold: 'scrumBind',
+  tackleHit: 'tackle', tackled: 'grounded', jackal: 'jackal',
+  cleanout: 'cleanout', ruckBind: 'maulBind', offload: 'pass',
+  nineSquat: 'ready', nineFeed: 'pass', ninePass: 'pass',
+  kickStep: 'kick', refReady: 'refReady', refSignal: 'refSignal',
+};
+function mapClip(name: string): string { return CLIP_MAP[name] ?? 'idle'; }
+
+export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
+  const cam = d.cam;
+  const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
+  const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
+  const cam2: Camera = { ...cam, shake: 0 };
+
+  drawStadium(ctx, cam2, v, d.t, d.pitch);
+  drawGoalPosts(ctx, cam2, v, -HOME_POST_Z, false);
+
+  /* Facing is judged against the camera's own forward vector, not against the
+   * pitch axis, so the read stays correct whatever angle the rig is on. */
+  const cf = { x: Math.sin(cam.yaw), z: Math.cos(cam.yaw) };
+  const seesBack = (a: Actor): boolean => (0 * cf.x + a.rf * cf.z) > 0;
+
+  /* --- ball --- */
+  let ballWorld: { x: number; y: number; z: number; spin: number; visible: boolean } = { x: 0, y: 0, z: 0, spin: 0, visible: false };
+  if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
+    const s = d.scrim!;
+    if (s.ball.state !== 'HELD') {
+      ballWorld = { x: d.scrumAnchor.x + s.ball.x, y: s.ball.y + 0.06, z: d.scrumAnchor.z + s.ball.z, spin: s.ball.z * 0.6, visible: true };
+    }
+  } else if ((d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') && d.lo && d.lo.ball.state !== 'HELD') {
+    ballWorld = { x: d.lo.ball.x, y: d.lo.ball.y + 0.05, z: d.lo.ball.z, spin: d.lo.ball.x * 0.35, visible: true };
+  } else if ((d.phase === 'KICK' || d.phase === 'KICK_REPLAY') && d.kk) {
+    const k = d.kk;
+    ballWorld = { x: k.bx, y: k.by + 0.12, z: k.bz, spin: k.t * 3.2, visible: k.stage !== 'SETUP' };
+  } else if (d.phase === 'OPEN_PLAY' && d.op) {
+    const o = d.op;
+    // T-35. While a pass is in flight the ball is live between passer and receiver.
+    if (o.ball.live) {
+      ballWorld = { x: o.ball.x, y: o.ball.y, z: o.ball.z, spin: o.t * 5, visible: true };
+    } else {
+      ballWorld = { x: o.carrierX + 0.3, y: 1.05, z: o.carrierZ, spin: o.t * 1.6, visible: true };
+    }
+  } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
+    const m = d.ml;
+    const yawRad = (m.yaw * Math.PI) / 180;
+    const lz = -m.dir * m.ballRank * 0.78;
+    ballWorld = {
+      x: m.x - lz * Math.sin(yawRad), y: 1.02,
+      z: m.z + lz * Math.cos(yawRad), spin: m.t * 0.6, visible: true,
+    };
+  } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
+    const b = d.bd;
+    const carrier = b.players.find((p) => p.role === 'CARRIER');
+    if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
+      ballWorld = { x: b.ball.x, y: 0.16, z: b.ball.z, spin: b.t * 0.5, visible: true };
+    } else if (carrier) {
+      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z, spin: b.t * 2.2, visible: true };
+    }
+  }
+
+  /* --- collect drawables --- */
+  type Item = { f: number; draw: () => void };
+  const items: Item[] = [];
+
+  for (const a of d.actors) {
+    const p = project(cam2, v, a.rx, 0, a.rz, jx, jy);
+    if (!p) continue;
+    if (p.sx < -260 || p.sx > v.w + 260 || p.sy < -320 || p.sy > v.h + 320) continue;
+    const mapped = mapClip(a.renderClip);
+    const pal = a.team === 'REF' ? PALETTES.REF : PALETTES[a.team];
+    const skin = SKINS[(a.num * 5 + (a.team === 'B' ? 2 : 0)) % SKINS.length];
+    const hair = HAIRS[(a.num * 3 + (a.team === 'B' ? 1 : 0)) % HAIRS.length];
+    const sideOn = isSideOnCam(cam.yaw) && a.team !== 'REF';
+    const lying = mapped === 'grounded';
+    items.push({
+      f: p.f,
+      draw: () => {
+        const pose = poseFor(mapped, a.clipT + a.jitter);
+        const clarity = 1 - Math.min(0.6, Math.max(0, (p.f - 22) / 95));
+        if (lying) {
+          // The paper falls flat on the turf — a horizontal body, not a crouch.
+          drawFlatPaper(ctx, {
+            sx: p.sx, sy: p.sy, scale: p.sc * a.size, pal,
+            skin, hair, number: a.num,
+            fromBehind: seesBack(a),
+            cap: a.num <= 3 && a.team !== 'REF',
+            clarity,
+          });
+          return;
+        }
+        drawCoronal(ctx, {
+          sx: p.sx, sy: p.sy, scale: p.sc * a.size, pose,
+          kit: pal.kit, kitDark: pal.kitDark, kitLight: pal.kitLight,
+          trim: pal.trim, shorts: pal.shorts, socks: pal.socks,
+          skin, hair, number: a.num,
+          fromBehind: seesBack(a),
+          cap: a.num <= 3 && a.team !== 'REF',
+          clarity,
+          sideOn,
+        });
+      },
+    });
+  }
+
+  if (ballWorld.visible) {
+    const p = project(cam2, v, ballWorld.x, ballWorld.y, ballWorld.z, jx, jy);
+    if (p) {
+      const sh = project(cam2, v, ballWorld.x, 0, ballWorld.z, jx, jy);
+      items.push({
+        f: p.f - 0.01,
+        draw: () => {
+          if (sh) {
+            ctx.globalAlpha = 0.22;
+            ctx.beginPath(); ctx.ellipse(sh.sx, sh.sy, p.sc * 0.16, p.sc * 0.06, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#0d1408'; ctx.fill(); ctx.globalAlpha = 1;
+          }
+          ball(ctx, p.sx, p.sy, Math.max(3, p.sc * 0.11), ballWorld.spin);
+        },
+      });
+    }
+  }
+
+  items.sort((a, b) => b.f - a.f);
+  for (const it of items) it.draw();
+
+  drawGoalPosts(ctx, cam2, v, HOME_POST_Z, true);
+
+  /* --- mini-game overlays --- */
+  if (d.phase === 'SCRUM' || d.phase === 'REPLAY') drawScrumOverlay(ctx, d, v, cam2, jx, jy);
+  if (d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') drawLineoutOverlay(ctx, d, v, cam2, jx, jy);
+  if (d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') drawBreakdownOverlay(ctx, d, v, cam2, jx, jy);
+  if (d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') drawMaulOverlay(ctx, d, v, cam2, jx, jy);
+  if (d.phase === 'OPEN_PLAY') drawOpenPlayOverlay(ctx, d, v, cam2, jx, jy);
+  if (d.phase === 'KICK' || d.phase === 'KICK_REPLAY') drawKickOverlay(ctx, d, v, cam2, jx, jy);
+}
+
+function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.op!;
+  const glz = s.carrierZ - s.gained * s.dir;
+  const a = project(cam, v, s.carrierX - 16, 0.03, glz, jx, jy);
+  const b = project(cam, v, s.carrierX + 16, 0.03, glz, jx, jy);
+  if (a && b) {
+    ctx.strokeStyle = 'rgba(255,215,106,0.5)'; ctx.lineWidth = 2.5; ctx.setLineDash([9, 7]);
+    ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const c0 = project(cam, v, s.carrierX, 2.4, s.carrierZ, jx, jy);
+  const c1 = project(cam, v, s.carrierX, 2.4, s.carrierZ + s.dir * 4, jx, jy);
+  if (c0 && c1) {
+    ctx.strokeStyle = '#6ee7a0'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(c0.sx, c0.sy); ctx.lineTo(c1.sx, c1.sy); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c1.sx, c1.sy, 6, 0, Math.PI * 2); ctx.fillStyle = '#6ee7a0'; ctx.fill();
+  }
+  const cp = project(cam, v, s.carrierX, 0, s.carrierZ, jx, jy);
+  if (cp) {
+    const zone = zoneLabel(s.z, s.dir);
+    void cp;
+    const pc = project(cam, v, s.carrierX, 2.2, s.carrierZ, jx, jy);
+    if (pc) {
+      const w = pc.sc * 1.6, hgt = Math.max(3, pc.sc * 0.09);
+      const p = Math.min(1, s.pressure);
+      ctx.fillStyle = 'rgba(14,14,20,0.6)';
+      ctx.fillRect(pc.sx - w / 2, pc.sy, w, hgt);
+      ctx.fillStyle = p > 0.75 ? '#ff6a5a' : p > 0.45 ? '#ffd76a' : '#6ee7a0';
+      ctx.fillRect(pc.sx - w / 2, pc.sy, w * p, hgt);
+      ctx.strokeStyle = 'rgba(244,239,226,0.5)'; ctx.lineWidth = 1;
+      ctx.strokeRect(pc.sx - w / 2, pc.sy, w, hgt);
+    }
+    /* T-37. The controls belong in the HUD (top-left), not floating above the
+     * carrier. Only live telemetry stays in-world. */
+    worldLabel(ctx, cam, v, s.carrierX, 3.1, s.carrierZ,
+      `PHASE ${s.phase} · +${s.gained.toFixed(1)} m · ${s.toLine.toFixed(0)} m TO GO · ZONE ${zone}`,
+      s.lineBreak ? '#6ee7a0' : '#cfcabb', jx, jy);
+  }
+}
+
+function zoneLabel(z: number, dir: number): string {
+  const toLine = Math.abs(dir * 50 - z);
+  if (toLine <= 22) return 'A (THEIR 22)';
+  if (toLine <= 50) return 'B (THEIR HALF)';
+  if (toLine <= 78) return 'C (OUR HALF)';
+  return 'D (OUR 22)';
+}
+
+function drawKickOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.kk!;
+  if (s.history.length > 2) {
+    ctx.strokeStyle = 'rgba(255,235,170,0.6)'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    let started = false;
+    for (const h of s.history) {
+      const p = project(cam, v, h.x, h.y, h.z, jx, jy);
+      if (!p) continue;
+      if (!started) { ctx.moveTo(p.sx, p.sy); started = true; } else ctx.lineTo(p.sx, p.sy);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,235,170,0.22)'; ctx.lineWidth = 2;
+    ctx.beginPath(); started = false;
+    for (const h of s.history) {
+      const p = project(cam, v, h.x, 0.02, h.z, jx, jy);
+      if (!p) continue;
+      if (!started) { ctx.moveTo(p.sx, p.sy); started = true; } else ctx.lineTo(p.sx, p.sy);
+    }
+    ctx.stroke();
+  }
+  if (s.type === 'FIFTY_22') {
+    const tz = s.dir * 28;
+    const a = project(cam, v, -35, 0.03, tz, jx, jy);
+    const b = project(cam, v, 35, 0.03, tz, jx, jy);
+    if (a && b) {
+      ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.setLineDash([10, 8]);
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+      ctx.setLineDash([]);
+      label(ctx, '22 — LAND IN FIELD, OUT BEYOND THIS', (a.sx + b.sx) / 2, a.sy - 10, '#ffd76a');
+    }
+  }
+  const cp = project(cam, v, s.bx, 0, s.bz, jx, jy);
+  if (cp) {
+    if (s.profile.atGoal && s.goalProb > 0) {
+      worldLabel(ctx, cam, v, s.bx, s.by + 2.4, s.bz,
+        `${s.goalDistance.toFixed(0)} M · ${s.goalAngle.toFixed(0)}° OFF · ${(s.goalProb * 100).toFixed(0)}%`,
+        s.goalProb > 0.7 ? '#6ee7a0' : s.goalProb > 0.45 ? '#ffd76a' : '#ff6a5a', jx, jy);
+    } else {
+      worldLabel(ctx, cam, v, s.bx, s.by + 2.6, s.bz, s.profile.label.toUpperCase(), '#f4efe2', jx, jy);
+      worldLabel(ctx, cam, v, s.bx, s.by + 1.9, s.bz,
+        `HANG ${s.hangTime.toFixed(2)}s · APEX ${s.apex.toFixed(1)} m · ${s.distance.toFixed(0)} m`,
+        '#cfcabb', jx, jy);
+    }
+  }
+}
+
+function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.ml!;
+  const t0 = project(cam, v, s.x - 12, 0.03, s.tryLineZ, jx, jy);
+  const t1 = project(cam, v, s.x + 12, 0.03, s.tryLineZ, jx, jy);
+  if (t0 && t1) {
+    ctx.strokeStyle = '#ffe58a'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(t0.sx, t0.sy); ctx.lineTo(t1.sx, t1.sy); ctx.stroke();
+    label(ctx, 'TRY LINE', (t0.sx + t1.sx) / 2, t0.sy - 10, '#ffe58a');
+  }
+
+  const bar = (team: 'A' | 'D', f: number, off: number, col: string) => {
+    const len = Math.min(4.5, (f / 6000) * 4.0);
+    const sgn = team === 'A' ? 1 : -1;
+    const a = project(cam, v, s.x + off, 2.7, s.z - s.dir * sgn * 0.5, jx, jy);
+    const b = project(cam, v, s.x + off, 2.7, s.z - s.dir * sgn * (0.5 + len), jx, jy);
+    if (!a || !b) return;
+    ctx.strokeStyle = col; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+    label(ctx, `${(f / 1000).toFixed(2)} kN`, (a.sx + b.sx) / 2, (a.sy + b.sy) / 2 - 10, col);
+  };
+  if (s.stage === 'DRIVE' || s.stage === 'STALL' || s.stage === 'ENGAGE') {
+    bar('A', s.forceA, -2.4, '#ff6a5a');
+    bar('D', s.forceD, 2.4, '#7fa3e6');
+  }
+
+  const rankCols = ['#ff6a5a', '#ffd76a', '#6ee7a0'];
+  const rp = project(cam, v, s.x, 2.0, s.z, jx, jy);
+  if (rp) {
+    label(ctx, `BALL AT RANK ${s.ballRank + 1}/${s.ranks}${s.ballRank >= s.ranks - 1 ? ' — SAFE' : ''}`,
+      rp.sx, rp.sy, rankCols[Math.min(2, s.ballRank)]);
+  }
+
+  const cp = project(cam, v, s.x, 0, s.z, jx, jy);
+  if (cp) {
+    const toLine = Math.abs(s.tryLineZ - s.z);
+    const spdCol = s.speed > 0.6 ? '#6ee7a0' : s.speed > 0.12 ? '#ffd76a' : '#ff6a5a';
+    void cp;
+    worldLabel(ctx, cam, v, s.x, 4.2, s.z,
+      `+${s.gained.toFixed(1)} m · ${s.speed.toFixed(2)} m/s · ${toLine.toFixed(1)} m TO GO`, spdCol, jx, jy);
+    const stall = s.stallClock > 0 ? `STOPPED ${s.stallClock.toFixed(1)}s / 5.0s` : s.stoppedOnce ? 'STOPPED ONCE' : 'DRIVING';
+    worldLabel(ctx, cam, v, s.x, 3.5, s.z,
+      `${stall} · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(0)}°`, s.useItCalled ? '#ff6a5a' : '#f4efe2', jx, jy);
+  }
+}
+
+function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.bd!;
+  const dir = s.attacking === 'A' ? 1 : -1;
+
+  const gl0 = project(cam, v, s.contactX - 6, 0.02, s.contactZ - s.gainLine * dir, jx, jy);
+  const gl1 = project(cam, v, s.contactX + 6, 0.02, s.contactZ - s.gainLine * dir, jx, jy);
+  if (gl0 && gl1 && s.stage !== 'SET' && s.stage !== 'CARRY') {
+    ctx.strokeStyle = 'rgba(255,215,106,0.6)'; ctx.lineWidth = 2.5; ctx.setLineDash([8, 6]);
+    ctx.beginPath(); ctx.moveTo(gl0.sx, gl0.sy); ctx.lineTo(gl1.sx, gl1.sy); ctx.stroke();
+    ctx.setLineDash([]);
+    label(ctx, 'GAIN LINE', (gl0.sx + gl1.sx) / 2, gl0.sy - 8, 'rgba(255,215,106,0.85)');
+  }
+
+  if (s.ruckFormed) {
+    for (const side of [1, -1]) {
+      const a = project(cam, v, s.contactX - 7, 0.02, s.contactZ + side * dir * 1.4, jx, jy);
+      const b = project(cam, v, s.contactX + 7, 0.02, s.contactZ + side * dir * 1.4, jx, jy);
+      if (!a || !b) continue;
+      ctx.strokeStyle = side > 0 ? 'rgba(127,163,230,0.5)' : 'rgba(255,106,90,0.5)';
+      ctx.lineWidth = 2; ctx.setLineDash([5, 5]);
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  if (s.jackalActive && !s.ruckFormed) {
+    const p = project(cam, v, s.ball.x, 0.02, s.ball.z, jx, jy);
+    if (p) {
+      const pulse = 0.7 + Math.sin(s.t * 14) * 0.3;
+      ctx.strokeStyle = `rgba(255,90,70,${pulse})`; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.ellipse(p.sx, p.sy, p.sc * 0.7, p.sc * 0.26, 0, 0, Math.PI * 2); ctx.stroke();
+      label(ctx, 'COMMIT - SPACE', p.sx, p.sy - p.sc * 0.5, '#ff8a72');
+    }
+  }
+
+  /* T-38. The ruck read is an ordered sequence, not a stat dump:
+   *   COMMIT - SPACE   (a jackal is on the ball)
+   *   A/D - CLEAROUT   (working to win it)
+   *   SECURED          (the ball is won)
+   * plus a countdown from the ruck clock; at 0 the nine releases to the fly-half. */
+  const limit = [1.5, 3, 5][d.options.ruckLaw ?? 2];
+  if (s.groundAt >= 0) {
+    const elapsed = s.t - s.groundAt;
+    const remaining = Math.max(0, limit - elapsed);
+    const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
+    const cp = project(cam, v, s.contactX, 0, s.contactZ, jx, jy);
+    if (cp) {
+      if (s.stage === 'RECYCLE') {
+        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'SECURED', '#6ee7a0', jx, jy);
+      } else if (s.jackalActive) {
+        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'COMMIT - SPACE', '#ffd76a', jx, jy);
+      } else {
+        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'A/D - CLEAROUT', '#6ee7a0', jx, jy);
+      }
+      // The countdown itself, large and banded.
+      ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
+      ctx.strokeText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+      ctx.fillStyle = band;
+      ctx.fillText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+      ctx.textAlign = 'left';
+      const gain = s.gainLine;
+      worldLabel(ctx, cam, v, s.contactX, 3.1, s.contactZ,
+        `${gain >= 0 ? '+' : ''}${gain.toFixed(1)} m · PHASE ${s.phase}`, '#f4efe2', jx, jy);
+    }
+  }
+}
+
+function drawScrumOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.scrim!;
+  const ax = d.scrumAnchor.x, az = d.scrumAnchor.z;
+  const active = ['ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE'].includes(s.stage);
+  if (!active) return;
+
+  const fA = s.packs.A.forceTransmitted, fB = s.packs.B.forceTransmitted;
+  const draw = (team: 'A' | 'B') => {
+    const f = team === 'A' ? fA : fB;
+    const len = Math.min(3.2, (f / 8000) * 2.6) * (team === 'A' ? 1 : -1);
+    const from = project(cam, v, ax + (team === 'A' ? -1.9 : 1.9), 3.1, az + 1.9 * (team === 'A' ? 1 : -1), jx, jy);
+    const to = project(cam, v, ax + (team === 'A' ? -1.9 : 1.9), 3.1, az + (1.9 + len) * (team === 'A' ? 1 : -1), jx, jy);
+    if (!from || !to) return;
+    const col = team === 'A' ? '#ff6a5a' : '#7fa3e6';
+    ctx.strokeStyle = col; ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(from.sx, from.sy); ctx.lineTo(to.sx, to.sy); ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(to.sx, to.sy, 7, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+    label(ctx, `${(f / 1000).toFixed(2)} kN`, (from.sx + to.sx) / 2, (from.sy + to.sy) / 2 - 12, col);
+  };
+  draw('A'); draw('B');
+
+  worldLabel(ctx, cam, v, ax, 3.6, az,
+    `DRIVE ${(s.netDrive * 100).toFixed(0)} cm · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(1)}° · RISK ${(Math.min(1, s.collapseRisk) * 100).toFixed(0)}%`,
+    '#f4efe2', jx, jy);
+}
+
+function drawLineoutOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const s = d.lo!;
+  const tp = project(cam, v, s.call.targetX, 0, s.markZ, jx, jy);
+  if (tp && (s.stage === 'CALL' || s.stage === 'THROW' || s.stage === 'CONTEST')) {
+    ctx.strokeStyle = '#ffd76a'; ctx.lineWidth = 3; ctx.setLineDash([6, 5]);
+    ctx.beginPath(); ctx.ellipse(tp.sx, tp.sy, tp.sc * 0.55, tp.sc * 0.2, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (s.ball.state === 'FLIGHT' && s.history.length > 2) {
+    ctx.strokeStyle = 'rgba(255,235,170,0.55)'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    let started = false;
+    for (let i = Math.max(0, s.history.length - 26); i < s.history.length; i++) {
+      const h = s.history[i];
+      const p = project(cam, v, h.ballX, h.ballY, s.markZ, jx, jy);
+      if (!p) continue;
+      if (!started) { ctx.moveTo(p.sx, p.sy); started = true; } else ctx.lineTo(p.sx, p.sy);
+    }
+    ctx.stroke();
+  }
+  if (s.winner) {
+    const j = s.players.find((p) => p.id === s.ball.heldBy);
+    if (j) {
+      const p = project(cam, v, j.x, j.handY + 0.35, j.z, jx, jy);
+      if (p) label(ctx, `${j.handY.toFixed(2)} m`, p.sx, p.sy, '#ffd76a');
+    }
+  }
+  if (s.stage === 'CONTEST' || s.stage === 'CATCH') {
+    worldLabel(ctx, cam, v, -26, 5.6, s.markZ,
+      `APEX ${s.ball.apexY.toFixed(2)} m · MARGIN ${(s.contestMargin * 100).toFixed(0)} cm`, '#f4efe2', jx, jy);
+  }
+}
+
+function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, colour: string) {
+  ctx.font = '900 13px ui-sans-serif, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = colour; ctx.fillText(text, x, y);
+}
+
+function worldLabel(
+  ctx: CanvasRenderingContext2D, cam: Camera, v: View,
+  wx: number, wy: number, wz: number, text: string, colour: string,
+  jx: number, jy: number,
+) {
+  const p = project(cam, v, wx, wy, wz, jx, jy);
+  if (!p) return;
+  if (p.sx < -200 || p.sx > v.w + 200) return;
+  const size = Math.max(9, Math.min(16, p.sc * 0.26));
+  ctx.font = `900 ${size}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.lineWidth = Math.max(3, size * 0.3); ctx.strokeStyle = 'rgba(14,14,20,0.85)';
+  ctx.strokeText(text, p.sx, p.sy);
+  ctx.fillStyle = colour; ctx.fillText(text, p.sx, p.sy);
+}
+
+export { drawMinimap } from './minimap';
+
+/* ---------------- wipe transition ---------------- */
+export function drawWipe(ctx: CanvasRenderingContext2D, v: View, w: number) {
+  if (w <= 0.001) return;
+  const h = v.h * w;
+  ctx.fillStyle = '#101017';
+  ctx.fillRect(0, 0, v.w, h * 0.5);
+  ctx.fillRect(0, v.h - h * 0.5, v.w, h * 0.5);
+  ctx.fillStyle = '#e8cf46';
+  ctx.fillRect(0, h * 0.5 - 3, v.w, 6);
+  ctx.fillRect(0, v.h - h * 0.5 - 3, v.w, 6);
+  if (w > 0.6) {
+    ctx.globalAlpha = (w - 0.6) / 0.4;
+    ctx.fillStyle = '#101017';
+    ctx.fillRect(0, 0, v.w, v.h);
+    ctx.globalAlpha = 1;
+  }
+}
+
+export function debugPoly(v: View): [number, number][] {
+  return [[0, 0], [v.w, 0], [v.w, v.h], [0, v.h]];
+}
+void poly;
