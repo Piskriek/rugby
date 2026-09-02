@@ -70,7 +70,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
        * other phase. */
-      if (R() < 0.036 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06) {
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
       }

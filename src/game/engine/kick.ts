@@ -351,9 +351,16 @@ export function kickLanded(d: Director, s: KickState) {
     return;
   }
   const dTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
-  if (R() < 0.5) {
-    d.startOpen(dTeam, s.bx, s.bz, rec.num, 1);
-  } else {
+  /* T-18. YOU CATCH A KICK, YOU RUN IT BACK. Half of all fielded kicks used
+   * to become a scrum for the catching side — a law that does not exist and
+   * a phase that produces no pass and no tackle. The fielder counters (with
+   * the chase arriving, which is where kick-chase tackles come from); a
+   * knock in the fielding is the honest minority that does give the scrum.
+   * Scrums stay green off the lineout/maul error stream alone. */
+  if (R() < 0.22) {
+    d.say('KNOCKED ON FIELDING THE KICK');
     d.startScrum(dTeam, s.bx, s.bz);
+  } else {
+    d.startOpen(dTeam, s.bx, s.bz, rec.num, 1, 0, 0.9);
   }
 }

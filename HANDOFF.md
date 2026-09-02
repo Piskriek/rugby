@@ -893,7 +893,7 @@ every shirt × situation resolves to exactly five beats (no holes).
 ---
 
 ### T-18 · Make the stats audit pass
-**Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16
+**Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16 · **STATUS: DONE (86%, 12/14 — points/tries residual documented below)**
 
 `statsAudit.ts` simulates three CPU-v-CPU matches and grades 14 statistics
 against professional ranges. Run it. Every metric outside its range names a
@@ -952,19 +952,56 @@ Fixed, in the order that mattered:
 TACKLES ~97, RUCKS ~151, SCRUMS 8.1, LINEOUTS 15.5, PENS 14.7, KICKS 42.7,
 METRES ~390, BREAKS 2.7–3.2, TURNOVERS ~11, OFFLOADS ~16 — all green.
 
-**Remaining reds (do not re-fix the six above):** POINTS ~7 (floor 12),
-TRIES ~0.5/team (floor 1), PASSES ~150 (floor 180). Diagnosis trail: red-zone
-*entries* are healthy (16.5/match) and close-range tries work (the reach
-window is 2.4 m); what is missing is conversion — the multi-phase drive nets
-1–2 m against a defence that resets at full speed every ruck, deep line
-breaks are still caught 85% (chaser 8.8 m/s vs carrier 8.0 with ball), and
-the kick-to-corner cycle returns to the 22 but the lineout drive mauls only
-18% of the time. Candidate levers, untried: support-line depth for the second
-wave off a break (the 7 rides the hip — link him to the finisher's line),
-maul frequency off close lineouts (`driveCall` fires only on MIDDLE/TAIL
-calls), and per-phase defensive fatigue so a 10-phase grind actually bends.
-Watch the TACKLES gate — it flakes at the 8 threshold on 3-match samples;
-use 20+ matches for any verdict.
+**STATUS: DONE — 86%, 12/14 (acceptance ≥80% met).** A second pass took the
+board from 79% to 86%: TACKLES 98.7, PASSES 194, RUCKS 151, SCRUMS 8.3,
+LINEOUTS 15.8, PENS 15.6, KICKS 41, METRES 387, BREAKS 3.7, TURNOVERS 11.9,
+OFFLOADS 17.7 all green. What did it (each measured on 60-120 matches):
+
+7. **THE MOVE IS THE MOVE.** Called passing plays (sweep, miss, loop,
+   tunnel) now EXECUTE down the line: the receiver's first decision comes
+   at 0.12-0.34 s (a receiver running a called move has decided before the
+   ball arrives; the old flat 0.3-0.8 s cadence meant 23 of 56 non-nine
+   decisions a match were already at 0.8+ pressure — the rush met him
+   before his first thought), and he passes on at 75% while uncovered and
+   under 0.8 pressure. The widest man has no passOpts and carries: the
+   move runs out of width exactly as a real one does.
+8. **CROSS_FIELD IS NOT A PASSING PLAY.** It was on the quick-release and
+   chain lists — a kick call wearing passing-play clothes. ~20 episodes a
+   match chained to the ten and died as a cross-kick: no pass, no tackle,
+   no try. Removing it from both lists is what let TACKLES (96.5-98.7) and
+   PASSES (187-194) go green TOGETHER — until then every pass knob traded
+   tackles one-for-one at about -0.45 T per P.
+9. **YOU CATCH A KICK, YOU RUN IT BACK.** `kickLanded` gave half of all
+   fielded kicks to a scrum for the catching side — a law that does not
+   exist and a phase with no pass and no tackle. The fielder counters now
+   (urgency 0.9); a fielding error (22%) is the honest scrum.
+10. **YOU DRIFT ON THE PASS.** The defensive line slides at full drift
+    while the ball is in flight (1.25×), half while it is held — a real
+    line moves on the pass, not after the catch. Plus the grind bends the
+    line: line-speed urgency decays up to 15% past three consecutive
+    phases (reset on turnover), and the 7/8 ride a break at urgency 1.0.
+11. **Camera catch-up** (`far` threshold 12 → 6 m): a carrier at full pace
+    sat on the bottom edge of frame for two-second stretches; the
+    ball-on-screen gate flaked ~1-in-6 on HEAD. 28 frames now, stable.
+12. **Referee nudges:** not-releasing base 3.6 → 4.5% per ruck (pens
+    14.9-15.6, floor 14).
+
+**Dead end — do not retry:** waiting for the nine at the ruck exit (ball
+held up to 0.5 s for the scrum-half to arrive). Ruck cycles are 0.75 s and
+ball-in-play time is fixed: every second added per ruck deleted a whole
+phase — rucks 138 → 114, tackles 88 → 74, passes 178 → 153. The pick-and-go
+share of exits is a phase-count feature, not a bug to wait out.
+
+**Remaining reds (the only two):** POINTS ~6-7 (floor 12), TRIES ~0.4-0.8
+per team (floor 1). Entries are healthy (16.5 red-zone visits/match),
+close-range grounding works, conversions ~76% — the gap is chance creation:
+the multi-phase drive nets 1-2 m, deep breaks are caught (chaser 8.8 m/s vs
+carrier 8.0 with ball), and the kick-to-corner cycle mauls only ~18% of
+lineouts. Untried levers: link the hip-riding 7 to the finisher's line for
+the second wave, maul frequency off close lineouts (`driveCall` needs
+MIDDLE/TAIL), overlap usage by the last man in a completed sweep. Watch the
+TACKLES gate (flakes at its threshold ~1 run in 5 at this equilibrium) and
+remember 3-match stats runs are noise: use 60+ matches for any verdict.
 
 ---
 

@@ -827,7 +827,7 @@ export class Director {
     // Hand control over whenever the phase or the possession changes.
     if (this.phase !== this.lastHandoffPhase || this.possession !== this.lastHandoffPoss) {
       const changedPhase = this.phase !== this.lastHandoffPhase;
-      if (this.possession !== this.lastHandoffPoss) this.lastTurnoverAt = this.t;
+      if (this.possession !== this.lastHandoffPoss) { this.lastTurnoverAt = this.t; this.phasesGained = 0; }
       this.lastHandoffPhase = this.phase;
       this.lastHandoffPoss = this.possession;
       this.handoffControl();
@@ -1435,7 +1435,7 @@ export class Director {
       const carC = this.L(this.op.attacking, this.op.carrierNum);
       for (const q of this.live) {
         if (q.team === def || q.sinbin > 0 || q.beatenT > 0 || q.down) continue;
-        if ((q.z - carC.z) * dir < 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 14) coverChase.add(q.num);
+        if ((q.z - carC.z) * dir < 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
       }
       const carLat = this.op.carrierX - f.x;
       for (const r of DEFENCE_CHANNELS
@@ -1530,7 +1530,11 @@ export class Director {
           const off = p.num === 7 ? 1.9 : -1.4;
           p.tx = clamp(car.x + off, -33, 33);
           p.tz = clamp(car.z - dir * (p.num === 7 ? 1.6 : 4.0), -59, 59);
-          p.urgency = 0.92;
+          /* T-18. THE SECOND WAVE. Through a broken line the support does
+           * not jog — the offload has to be at full pace or the cover
+           * meets the ball-carrier alone. 0.92 urgency left the seven
+           * trailing every break by two metres a second. */
+          p.urgency = this.op?.lineBreak ? 1 : 0.92;
           p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
           steer(p, dt, true);
           continue;
@@ -1647,14 +1651,32 @@ export class Director {
         const m = defenceMark(p.num, s);
         let lat = (ch ? ch.lat : (m.x - f.x)) * (0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4);
         let tx = f.x + lat;
-        if (this.op) tx += (this.op.carrierX - f.x) * defSys.drift * 0.5;
+        /* T-18. YOU DRIFT ON THE PASS. A real line slides while the ball is
+         * in flight — it does not wait for the catch and then react. The
+         * old 0.5 factor, applied only to the stationary carrier, left the
+         * far side of a multi-pass move uncovered every time: the sweep
+         * completed, the last receiver was loose, and tackles fell twenty
+         * a match below the floor while passes rose. Full drift while the
+         * ball flies, half while it is held. */
+        if (this.op) {
+          const dw = this.op.ball.live ? defSys.drift * 1.25 : defSys.drift * 0.5;
+          tx += (this.op.carrierX - f.x) * dw;
+        }
         const umb = defSys.umbrella * (Math.abs(lat) / 22);
         const tz = f.z + dir * (m.z - f.z) * 0.9 + dir * umb;
         p.tx = clamp(tx, -33, 33);
         p.tz = clamp(tz, -59, 59);
         p.job = defSys.job;
         const react = 1 - clamp((100 - p.attrs.AWA) / 400, 0, 0.22);
-        p.urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1);
+        /* T-18. THE GRIND BENDS THE LINE. A defence that has given up the
+         * gain line six phases running is backpedalling: line speed decays
+         * with the attack's consecutive-phase count, capped at 15% — a
+         * ten-phase grind is supposed to bend, not reset fresh every ruck.
+         * This is team-agnostic physics-of-fatigue, not difficulty: both
+         * defences get it equally, and it resets the moment possession
+         * turns over. */
+        const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
+        p.urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
         }
       }
 
