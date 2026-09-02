@@ -166,6 +166,8 @@ export interface MaulState {
   stallClock: number; stoppedOnce: boolean; useItCalled: boolean; warned: boolean;
   tryLineZ: number; attacking: 'A' | 'B';
   committed: number; transferCd: number;
+  /** T-18: formed off a lineout take — the pack drives as one */
+  fromLineout: boolean;
 }
 
 export interface BreakdownState {
@@ -1460,7 +1462,14 @@ export class Director {
         // Otherwise the man stands where the shape says he stands.
         if (slot) {
           const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
-          const depth = slot.depth * atkShape.depthBias * (0.7 + (this.slider(atk, 'tempo') / 100) * 0.5);
+          let depth = slot.depth * atkShape.depthBias * (0.7 + (this.slider(atk, 'tempo') / 100) * 0.5);
+          /* T-18. Inside the opposition 14 the shape goes FLAT — pick and go
+           * from the base. At full depth the pod caught the ball three metres
+           * behind the ruck and every red-zone phase LOST three metres of
+           * ground: attacks entered at eight metres out and marched slowly
+           * back to halfway. */
+          const toLine = dir > 0 ? FIELD.tryZFar - s.ballZ : s.ballZ - FIELD.tryZ;
+          if (toLine < 20) depth = Math.min(depth, 0.5 + toLine * 0.08);
           // Flip the shape if the attack is going the other way.
           const flip = this.op && this.op.open < 0 ? -1 : 1;
           p.tx = clamp(f.x + lateral * s.open * flip, -33, 33);
@@ -2128,7 +2137,12 @@ export class Director {
       const sp = (chase ? 6.8 : 4.2) * (0.88 + react * 0.14) * (0.7 + aware * 0.3);
       // gap seeking: defenders hold their lane, they do not ball-watch
       const mark = defenceMark(p.num, this.shape());
-      const towardBall = d < 12;
+      /* T-18. While the ball is in FLIGHT the line holds its lane and reads
+       * the pass — it does not sprint at the man who has already given it
+       * up. Converging on the passer through the pass sequence gave the
+       * defence three free metres every phase and the attack could never
+       * close the last six metres to the line. */
+      const towardBall = d < 12 && !s.ball.live;
       const driftX = towardBall ? (car.x - p.x) * 0.5 : (mark.x - p.x);
       const targetZ = towardBall ? car.z - s.dir * 0.5 : mark.z;
       const tz2 = targetZ - (towardBall ? 0 : 0);
@@ -2202,7 +2216,7 @@ export class Director {
       if (!s.beatTried) s.beatTried = new Set<number>();
       if (!s.beatTried.has(nearest.num)) {
         s.beatTried.add(nearest.num);
-        const slip = clamp(0.05 + (carrierP.attrs.SKL - tackler.attrs.SKL) / 900 + (carrierP.attrs.PWR - grip) / 1000, 0.02, 0.16);
+        const slip = clamp(0.07 + (carrierP.attrs.SKL - tackler.attrs.SKL) / 900 + (carrierP.attrs.PWR - grip) / 1000, 0.03, 0.18);
         if (R() < slip) {
           this.teams[dTeam].stats.missed++;
           this.commentate('BIG_HIT', '— AND HE BEATS THE TACKLE!');
@@ -2215,7 +2229,18 @@ export class Director {
           car.vx += (R() - 0.5) * 1.2;
         }
       }
-      if (tackler.beatenT <= 0 && R() < chance * dt * 10) { this.startBreakdown(nearest.num); return; }
+      if (tackler.beatenT <= 0 && R() < chance * dt * 10) {
+        /* T-18 — THE REACH. A carrier driven at the line from close range
+         * grounds it before the tackle can hold him up. This low drive over
+         * the line is how close-range tries are actually scored; without it
+         * the tackle froze him half a metre short every time and the red
+         * zone converted nothing. */
+        const line = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
+        const distLine = (line - car.z) * s.dir;
+        if (distLine < 1.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { this.scoreTry(); return; }
+        this.startBreakdown(nearest.num);
+        return;
+      }
       if (R() < 0.1 * dt * 10) this.commentate('BIG_HIT');
     }
 
@@ -2321,7 +2346,12 @@ export class Director {
     this.run(s.attacking, s.carrierNum).passes++;
 
     // assist widens the window rather than removing the error
-    const errorChance = clamp(opt.risk * (1 - this.assists.pass * 0.5), 0.01, 0.4);
+    /* T-18. Professional teams complete ~90% of passes, even in traffic —
+     * the old rate threw 8-15% away, and the red zone (every receiver
+     * covered, every pass at the risk cap) turned over half its entries on
+     * spilled balls. The risk model still decides WHICH passes are hard; the
+     * absolute rate is calibrated to the real thing. */
+    const errorChance = clamp(opt.risk * 0.45 * (1 - this.assists.pass * 0.5), 0.008, 0.18);
     if (R() < errorChance) {
       const strict = this.options.fwdPass ?? 1;
       if (strict < 2 && R() < 0.5) {
@@ -2438,6 +2468,11 @@ export class Director {
       if (s.carrierNum === 9 && intent === 'KICK' && call !== 'BOX_KICK' && call !== 'TERRITORY_PUNT') {
         intent = this.passOpts.length ? 'PASS' : 'CARRY';
       }
+      /* T-18 — THE PICK AND GO. Inside eight metres the nine keeps it and
+       * goes himself: the receiver is still walking in from depth, the flat
+       * pass loses two metres, and the pick over the guard is how close-range
+       * phases are actually played. */
+      if (toLine < 8 && s.carrierNum === 9 && s.protect > 0 && intent === 'PASS') intent = 'CARRY';
       if (intent === 'CARRY' && this.op?.carrierNum === 9 && this.passOpts.length && R() < 0.85) intent = 'PASS';
       // T-39. The CPU actually moves the ball: in space with an option, it will
       // pass rather than always carry — once the carry has been committed to.
@@ -2467,7 +2502,11 @@ export class Director {
         if (!legal && call === 'CROSS_FIELD' && ownHalf) { intent = 'KICK'; s.aiPlay = 'TERRITORY_PUNT'; this.lastCall = 'TERRITORY_PUNT'; }
         else if (!legal) intent = s.pressure > 0.82 ? 'CONTACT' : 'CARRY';
       }
-      if (intent === 'DROP' && (toLine > 38 || s.heldT < 0.5)) intent = 'CARRY';
+      /* T-18. A drop goal is the stuck-attack release or the dying-seconds
+       * play — not the first option of a red-zone visit. The TIGHT-zone
+       * scoring bonus had the ten dropping at the posts on phase two, which
+       * converted almost nothing and ended the attack every time. */
+      if (intent === 'DROP' && (toLine > 38 || s.heldT < 0.5 || s.phase < 5)) intent = 'CARRY';
       // Nobody steps into a wall.
       if (s.pressure > 0.86 && intent === 'CARRY' && s.protect <= 0 && R() < 0.5) intent = 'CONTACT';
       if (s.pressure > 0.72 && intent === 'PASS' && s.protect <= 0 && R() < 0.3) intent = 'CONTACT';
@@ -2518,6 +2557,12 @@ export class Director {
     const s = this.op!;
     const atk = s.attacking, dir = s.dir;
     const car = this.L(atk, s.carrierNum);
+    /* T-18. FALL FORWARD: a carrier brought down at pace lands a stride
+     * beyond the contact point, not dead on it. Without this the ruck formed
+     * where he was first touched and every phase lost the metre the tackle
+     * radius already cost. */
+    const fall = clamp(car.vz * dir * 0.13, 0, 1.3);
+    car.z += dir * fall;
     const cx = car.x, cz = car.z;
     const dTeam: 'A' | 'B' = this.defending();
 
@@ -2542,8 +2587,18 @@ export class Director {
     }
     this.run(atk, s.carrierNum).carries++;
 
-    // offload: only available with a support inside 3 m
-    const support = this.live.find((p) => p.team === atk && p !== car && Math.hypot(p.x - cx, p.z - cz) < 3.2 && p.sinbin <= 0);
+    /* T-18. An offload goes to a support RUNNING ONTO THE BALL — level with
+     * the carrier or ahead of him. The old code took ANY team-mate within
+     * 3.2 m, which is almost always a man trailing the play: the "offload"
+     * lost two or three metres every phase, which is why attacks marched
+     * slowly backwards and the red zone converted nothing. A trailing man is
+     * not an offload; he is the next ruck. */
+    const supports = this.live
+      .filter((p) => p.team === atk && p !== car && p.sinbin <= 0
+        && !p.down && (p.z - cz) * dir > -1.0
+        && Math.hypot(p.x - cx, p.z - cz) < 3.2)
+      .sort((a, b) => (b.z - a.z) * dir);
+    const support = supports[0];
     const offloadChance = (this.slider(atk, 'offload') / 100) * 0.18 + car.attrs.SKL / 1000;
     if (support && R() < offloadChance) {
       this.teams[atk].stats.offloads++;
@@ -2642,9 +2697,12 @@ export class Director {
         /* T-18 — real matches turn over ~18-22 times INCLUDING errors; with a
          * ruck every few seconds the old rates flipped possession constantly
          * and no side could build phases. */
+        /* T-18. A contested steal against a committed attack is the rare
+         * exception (~5% in professional rugby), not one phase in five —
+         * the old range turned over four in ten red-zone drives. */
         const steal = uncontested
           ? clamp(0.28 + (defCrew - atkCrew) * 0.08 + jackalSkill / 800, 0.18, 0.4)
-          : clamp(0.05 + (defCrew - atkCrew) * 0.06 + jackalSkill / 800 - s.commitA * 0.04, 0.02, 0.2);
+          : clamp(0.03 + (defCrew - atkCrew) * 0.04 + jackalSkill / 900 - s.commitA * 0.03, 0.015, 0.12);
         s.window = clamp(0.4 + (s.waggle - 4.2) * 0.12 + s.commitA * 0.14, 0.35, 1.8);
         if (s.jackalActive && R() < steal) {
           /* T-18 — only the side that WON it is credited. Both counters used
@@ -2659,7 +2717,10 @@ export class Director {
           this.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
           return;
         }
-        if (R() < 0.055 + (this.slider(atk, 'aggression') / 100) * 0.08) {
+        /* T-18. Real referees ping not-releasing two to four times a match,
+         * not eleven — the rate was ending a red-zone possession in every
+         * other phase. */
+        if (R() < 0.036 + (this.slider(atk, 'aggression') / 100) * 0.06) {
           this.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
           return;
         }
@@ -2674,7 +2735,13 @@ export class Director {
     if (s.ruckFormed) {
       const fwd = s.attacking === 'A' ? 1 : -1;
       const atkLine = s.contactZ - fwd * 1.0;
-      const defLine = s.contactZ + fwd * 1.0;
+      /* T-18. The hindmost foot is the LAW, but a defender does not set a
+       * tackle standing on it — the guard comes from two metres behind the
+       * line, arriving as the carrier does. With the guard on the foot
+       * itself the carrier was contacted the frame he caught a flat ball,
+       * every phase lost a metre and a half, and attacks marched slowly
+       * backwards out of the red zone. */
+      const defLine = s.contactZ + fwd * 3.0;
       const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
       for (const p of this.live) {
         if (p.sinbin > 0 || p.down) continue;
@@ -2718,7 +2785,8 @@ export class Director {
         // The nine plays it from the side of the ruck, a stride behind the ball,
         // which is where he actually stands — not on top of the contact point.
         const side = s.contactX > 0 ? -1.8 : 1.8;
-        this.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * 1.4, dist.num, s.phase + 1, s.gainLine, 0.75);
+        const nearLine = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 20;
+        this.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * (nearLine ? 0.5 : 1.4), dist.num, s.phase + 1, s.gainLine, 0.75);
       }
     }
     void _input; void dTeam;
@@ -2762,7 +2830,7 @@ export class Director {
       ballRank: 1, ranks, speed: 0, gained: 0,
       stallClock: 0, stoppedOnce: false, useItCalled: false, warned: false,
       tryLineZ: dir > 0 ? FIELD.tryZFar : FIELD.tryZ, attacking: team,
-      committed: 5, transferCd: 0,
+      committed: 5, transferCd: 0, fromLineout,
     };
     this.phase = 'MAUL';
     if (fromLineout) this.say('CAUGHT, AND THE MAUL IS FORMED');
@@ -2798,7 +2866,12 @@ export class Director {
       if (R() < dt * 0.25 && s.transferCd <= 0) { s.ballRank = Math.min(s.ranks - 1, s.ballRank + 1); s.transferCd = 1.8; }
     }
     s.transferCd = Math.max(0, s.transferCd - dt);
-    s.forceA = approach(s.forceA, 2600 + this.teams[atk].nation.att.maul * 26 + commit * 320, 2.2, dt);
+    /* T-18. Off a lineout the attacking pack is bound as one — the drive
+     * has more shove than a broken-play maul formed around a tackled man.
+     * Without the bonus the forces cancelled and a five-metre lineout drive
+     * could not reach the line before the referee lost patience. */
+    const lineoutDrive = s.fromLineout ? 1300 : 0;
+    s.forceA = approach(s.forceA, 2600 + lineoutDrive + this.teams[atk].nation.att.maul * 26 + commit * 320, 2.2, dt);
     s.forceD = approach(s.forceD, 2400 + this.teams[def].nation.att.maul * 24 + (6 - commit) * 300, 1.6, dt);
 
     const net = (s.forceA - s.forceD) / 1400;
@@ -3122,7 +3195,10 @@ export class Director {
       const thr = s.players.find((p) => p.role === 'THROWER')!;
       const side = thr.x >= 0 ? 1 : -1;
       s.call = { targetX: side * (31.2 - Math.abs(c.targetX) * 0.72), label: c.label, jumpers: c.jumpers, kind: c.kind };
-      s.driveCall = c.kind === 'MIDDLE';
+      /* T-18. The middle call drives the maul; inside the ten a tail call
+       * drives too — a five-metre lineout exists to be driven over. */
+      const nearLine = Math.abs(s.markZ) > 40;
+      s.driveCall = c.kind === 'MIDDLE' || (nearLine && (c.kind === 'TAIL' || c.kind === 'MIDDLE'));
     } else if (s.stage === 'THROW') {
       if (human) {
         if (s.meterOn) {
