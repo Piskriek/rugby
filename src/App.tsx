@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_SLIDERS, OPTION_ITEMS, TEAM_BY_ID, FIVE_NATIONS_IDS, LEAGUE_DEFAULT,
-  TROPHIES, WORLD_CUP_POOLS,
+  WORLD_CUP_POOLS,
 } from './game/data';
 import { CLASSIC_MATCHES } from './game/jlr';
 import { MatchConfig, Slider } from './game/director';
@@ -303,4 +303,3 @@ export default function App() {
   );
 }
 
-void TROPHIES;

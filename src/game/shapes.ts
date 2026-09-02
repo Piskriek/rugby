@@ -67,18 +67,11 @@ function build(
   const slots: PodSlot[] = [];
   // The pack is split across the pods. Front row and locks go to the middle
   // pods (shortest sprint); back row distributes to the edges.
-  const podOrder: number[][] = [];
-  let cursor = 0;
-  for (const g of groups) {
-    const take: number[] = [];
-    for (let i = 0; i < g.size; i++) take.push(cursor++);
-    podOrder.push(take);
-  }
   // The eight forwards, ordered so the nearest men fill the middle pods.
   const pack = [1, 3, 4, 5, 2, 6, 8, 7];
   let pi = 0;
   const assigned: number[] = [];
-  groups.forEach((g, gi) => {
+  groups.forEach((g) => {
     const list: number[] = [];
     for (let i = 0; i < g.size && pi < pack.length; i++) list.push(pack[pi++]);
     assigned.push(...list);
@@ -99,7 +92,6 @@ function build(
                 : 'SUPPORT',
       });
     });
-    void podOrder; void gi;
   });
   // Backs sit deeper, behind the middle man of the pod they are playing off.
   for (const b of backs) slots.push({ num: b.num, role: 'BACKLINE', lat: b.lat, depth: b.depth, job: b.job });

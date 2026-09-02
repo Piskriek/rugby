@@ -4,7 +4,7 @@
  */
 import { Director, Actor } from '../game/director';
 import {
-  drawStadium, project, ball, poly, PALETTES, SKINS, HAIRS,
+  drawStadium, project, ball, PALETTES, SKINS, HAIRS,
   drawGoalPosts, HOME_POST_Z, Camera, View,
 } from './retro';
 import { C_CLIPS, sampleC, drawCoronal, CPose } from './coronal';
@@ -178,7 +178,6 @@ function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View
   const cp = project(cam, v, s.carrierX, 0, s.carrierZ, jx, jy);
   if (cp) {
     const zone = zoneLabel(s.z, s.dir);
-    void cp;
     const pc = project(cam, v, s.carrierX, 2.2, s.carrierZ, jx, jy);
     if (pc) {
       const w = pc.sc * 1.6, hgt = Math.max(3, pc.sc * 0.09);
@@ -289,7 +288,6 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
   if (cp) {
     const toLine = Math.abs(s.tryLineZ - s.z);
     const spdCol = s.speed > 0.6 ? '#6ee7a0' : s.speed > 0.12 ? '#ffd76a' : '#ff6a5a';
-    void cp;
     worldLabel(ctx, cam, v, s.x, 4.2, s.z,
       `+${s.gained.toFixed(1)} m · ${s.speed.toFixed(2)} m/s · ${toLine.toFixed(1)} m TO GO`, spdCol, jx, jy);
     const stall = s.stallClock > 0 ? `STOPPED ${s.stallClock.toFixed(1)}s / 5.0s` : s.stoppedOnce ? 'STOPPED ONCE' : 'DRIVING';
@@ -474,4 +472,3 @@ export function drawWipe(ctx: CanvasRenderingContext2D, v: View, w: number) {
 export function debugPoly(v: View): [number, number][] {
   return [[0, 0], [v.w, 0], [v.w, v.h], [0, v.h]];
 }
-void poly;

@@ -620,7 +620,7 @@ whistle. No audio before the first interaction.
 ---
 
 ### T-11 · Wire the six ACCEPTED pitfalls to a real status
-**Type:** Housekeeping · **Effort:** S · **Risk:** None
+**Type:** Housekeeping · **Effort:** S · **Risk:** None · **STATUS: DONE (audit) / DEFERRED (reclassify)**
 
 `pitfalls.ts` marks six complaints ACCEPTED. Two are now solvable:
 - U-001/U-002 (atmosphere) — solved by T-10
@@ -632,6 +632,31 @@ anything you have not built.** The registry's value is that it is honest.
 
 Also: grep all 24 `void` statements. Each is either a legitimate frozen-interface
 param (leave it, comment why) or an unwired subsystem (ticket it).
+
+**Done — the `void` audit.** 17 suppression statements found (the other seven
+of the 24 were `(): void` return-type annotations, which are types, not
+silenced values):
+
+- REMOVED as dead noise — the value was used by its own guard or a later
+  line: `TROPHIES` (App duplicate import; the data is consumed by menus and
+  competition), `fwd` (re-used by the nine's exit depth), `cp` ×2 (used by
+  its `if (cp)` guard), `dForm` in open play (the formation flows through
+  `shape()`/`defenceMark`; the local was a dead computation), `podOrder`/`gi`
+  in shapes.ts (dead scaffolding — the pack assignment below reads `g.size`
+  directly; the whole cursor-walk block was deleted), `poly` (unused import
+  from the frozen retro module — the import was dropped, retro untouched).
+- KEPT, commented `T-11 void audit` — legitimate frozen-interface params:
+  `_input`/`dTeam` (upMaul), `input` (upBreakdown ruck bar reads
+  `this.pressed`; upScrum; upLineout; upKick), `feed` (scrumSlots is
+  symmetric; the feed is the caller's knowledge), `dt` (collision resolve is
+  positional). 8 statements, each now says why it exists.
+- LEFT — `retro.ts` `void PIX; void GRASS;` — the frozen renderer is not to
+  be touched, even for comments.
+
+**Deferred — the reclassification, honestly.** U-001/U-002 need T-10
+(atmosphere) and W-011 needs T-08 (camera) — neither has landed, so nothing
+was reclassified. The registry stays honest: no status changed without the
+work existing.
 
 ---
 

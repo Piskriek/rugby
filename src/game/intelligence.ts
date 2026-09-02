@@ -197,6 +197,8 @@ export function separate(all: Live[], dt: number) {
           b.x += nx * push; b.z += nz * push;
         }
       }
+      /* T-11 void audit: frozen-interface param — the collision resolve is
+       * positional (separation per frame), dt is not needed here. */
       void dt;
     }
   }

@@ -2118,7 +2118,6 @@ export class Director {
 
     // ---- defenders: honest contact radius, honest reaction ----
     const dTeam = this.defending();
-    const dForm = FORMATION_BY_ID(this.teams[dTeam].defence);
     const diff = DIFFICULTY_TABLE[clamp(this.difficulty, 0, 9)];
     const dists: { num: number; d: number }[] = [];
     for (const p of this.live) {
@@ -2151,7 +2150,6 @@ export class Director {
       p.urgency = 1;
       p.job = contractFor(p.num).job.DEFENCE_LINE ?? 'DEFEND YOUR CHANNEL';
     }
-    void dForm;
     dists.sort((a, b) => a.d - b.d);
     const nearest = dists[0];
     /* T-18. The old weights (nearest/9, +0.09 per man within 11 m) meant any
@@ -2780,7 +2778,6 @@ export class Director {
          * them there all phase; nothing more is needed here, and the old
          * one-shot teleport (several metres, one frame) is exactly the fault
          * class the hunt exists to catch. */
-        void fwd;
         this.clearRuck();
         // The nine plays it from the side of the ruck, a stride behind the ball,
         // which is where he actually stands — not on top of the contact point.
@@ -2789,6 +2786,10 @@ export class Director {
         this.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * (nearLine ? 0.5 : 1.4), dist.num, s.phase + 1, s.gainLine, 0.75);
       }
     }
+    /* T-11 void audit: `_input`/`dTeam` are frozen-interface params — the
+     * update loop calls every phase updater with the same signature. Maul
+     * input is read via this.pressed above; the defending side is known from
+     * the maul state itself. Not unwired subsystems. */
     void _input; void dTeam;
   }
 
@@ -2911,6 +2912,8 @@ export class Director {
       this.startOpen(atk, s.x + 1.2, s.z - s.dir * 2.2, dist.num, 1, 0, 0.6);
       return;
     }
+    /* T-11 void audit: frozen-interface param — the ruck timing bar is read
+     * via this.pressed earlier in the updater; the param itself is unused. */
     void input;
   }
 
@@ -2931,6 +2934,8 @@ export class Director {
         });
       });
     }
+    /* T-11 void audit: frozen-interface param — the slots are symmetric and
+     * the feed side is the caller's knowledge (startScrum places and drives). */
     void feed;
     return out;
   }
