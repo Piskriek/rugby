@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   DEFAULT_SLIDERS, OPTION_ITEMS, TEAM_BY_ID, FIVE_NATIONS_IDS, LEAGUE_DEFAULT,
-  TROPHIES, WORLD_CUP_POOLS,
+  WORLD_CUP_POOLS,
 } from './game/data';
 import { CLASSIC_MATCHES } from './game/jlr';
 import { MatchConfig, Slider } from './game/director';
@@ -11,6 +11,7 @@ import {
 import { MatchView } from './ui/MatchView';
 import { AuditScreen } from './ui/AuditScreen';
 import { TableScreen, Bracket, Fixture, Row, emptyRow, record, roundRobin, simulate, sortTable } from './ui/competition';
+import { SaveBlob, loadSave, writeSave, clearSave } from './game/persist';
 
 type Screen =
   | 'TITLE' | 'MODE' | 'TEAM' | 'SQUAD' | 'TACTICS' | 'OPTIONS' | 'GUIDE'
@@ -23,24 +24,30 @@ const defaultOptions = () => {
 };
 
 export default function App() {
+  /* T-12 — PERSISTENCE. The session is hydrated from the save on boot; a
+   * corrupt or absent blob silently yields the defaults (see persist.ts).
+   * Every field is merged over its default so options added after a save
+   * was written still start at their default rather than undefined. */
+  const saved: SaveBlob | null = loadSave();
   const [screen, setScreen] = useState<Screen>('TITLE');
   const [mode, setMode] = useState<Mode>('FRIENDLY');
-  const [home, setHome] = useState('ENG');
-  const [away, setAway] = useState('NZL');
-  const [kitA, setKitA] = useState(0);
-  const [kitB, setKitB] = useState(0);
-  const [options, setOptions] = useState<Record<string, number>>(defaultOptions);
-  const [sliders, setSliders] = useState<Slider[]>(DEFAULT_SLIDERS.map((s) => ({ ...s })));
-  const [form, setForm] = useState({ backline: 'BL-SPLIT', defence: 'DF-UMBRELLA', lineout: 'LO-5', scrum: 'SC-8-3' });
+  const [home, setHome] = useState(saved?.squads.home ?? 'ENG');
+  const [away, setAway] = useState(saved?.squads.away ?? 'NZL');
+  const [kitA, setKitA] = useState(saved?.squads.kitA ?? 0);
+  const [kitB, setKitB] = useState(saved?.squads.kitB ?? 0);
+  const [options, setOptions] = useState<Record<string, number>>({ ...defaultOptions(), ...(saved?.options ?? {}) });
+  const [sliders, setSliders] = useState<Slider[]>(DEFAULT_SLIDERS.map((s) => ({ ...s, v: saved?.tactics.sliders[s.id] ?? s.v })));
+  const [form, setForm] = useState({ backline: 'BL-SPLIT', defence: 'DF-UMBRELLA', lineout: 'LO-5', scrum: 'SC-8-3', ...(saved?.tactics.form ?? {}) });
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
   const [table, setTable] = useState<Record<string, Row>>({});
   const [trophy, setTrophy] = useState<string | undefined>();
   const [clinic, setClinic] = useState(false);
   const [tutorial, setTutorial] = useState(false);
   const [pendingFixture, setPendingFixture] = useState<Fixture | null>(null);
-  const [kickerA, setKickerA] = useState(10);
-  const [assists, setAssists] = useState({ pass: 0.7, tackle: 0.7, kick: 0.7 });
-  const [classic, setClassic] = useState<(typeof CLASSIC_MATCHES)[number] | null>(null);
+  const [kickerA, setKickerA] = useState(saved?.kickers.kickerA ?? 10);
+  const [assists, setAssists] = useState({ pass: 0.7, tackle: 0.7, kick: 0.7, ...(saved?.tactics.assists ?? {}) });
+  const [classic, setClassic] = useState<(typeof CLASSIC_MATCHES)[number] | null>(
+    (saved?.classicProgress && CLASSIC_MATCHES.find((m) => m.id === saved.classicProgress)) || null);
 
   const cfg: MatchConfig = useMemo(() => ({
     homeId: home, awayId: away, kitA, kitB,
@@ -58,6 +65,35 @@ export default function App() {
     // The default presentation is a broadcast camera. CHASE and TACTICAL remain
     // available from the pause menu.
   }), [home, away, kitA, kitB, options, sliders, form, kickerA, assists]);
+
+  /* T-12 — save on any change of the persisted state (which includes every
+   * screen transition that carries a menu choice). Best effort only. */
+  useEffect(() => {
+    writeSave({
+      v: 1,
+      squads: { home, away, kitA, kitB },
+      tactics: {
+        sliders: Object.fromEntries(sliders.map((s) => [s.id, s.v])),
+        form, assists,
+      },
+      kickers: { kickerA },
+      options,
+      classicProgress: classic?.id ?? null,
+    });
+  }, [home, away, kitA, kitB, sliders, form, assists, kickerA, options, classic]);
+
+  /* T-12 — "reset to defaults": wipe the key and restore every menu to its
+   * factory state without leaving the options screen. */
+  const resetToDefaults = () => {
+    clearSave();
+    setHome('ENG'); setAway('NZL'); setKitA(0); setKitB(0);
+    setOptions(defaultOptions());
+    setSliders(DEFAULT_SLIDERS.map((s) => ({ ...s })));
+    setForm({ backline: 'BL-SPLIT', defence: 'DF-UMBRELLA', lineout: 'LO-5', scrum: 'SC-8-3' });
+    setKickerA(10);
+    setAssists({ pass: 0.7, tackle: 0.7, kick: 0.7 });
+    setClassic(null);
+  };
 
   /* ---------- competition setup ---------- */
   const beginCompetition = (m: Mode) => {
@@ -193,7 +229,7 @@ export default function App() {
   );
 
   if (screen === 'OPTIONS') return shell(
-    <OptionsScreen options={options} setOptions={setOptions} onBack={() => setScreen('MODE')} />,
+    <OptionsScreen options={options} setOptions={setOptions} onBack={() => setScreen('MODE')} onReset={resetToDefaults} />,
   );
 
   if (screen === 'GUIDE') return shell(<GuideScreen onBack={() => setScreen('MODE')} />);
@@ -267,4 +303,3 @@ export default function App() {
   );
 }
 
-void TROPHIES;

@@ -67,18 +67,11 @@ function build(
   const slots: PodSlot[] = [];
   // The pack is split across the pods. Front row and locks go to the middle
   // pods (shortest sprint); back row distributes to the edges.
-  const podOrder: number[][] = [];
-  let cursor = 0;
-  for (const g of groups) {
-    const take: number[] = [];
-    for (let i = 0; i < g.size; i++) take.push(cursor++);
-    podOrder.push(take);
-  }
   // The eight forwards, ordered so the nearest men fill the middle pods.
   const pack = [1, 3, 4, 5, 2, 6, 8, 7];
   let pi = 0;
   const assigned: number[] = [];
-  groups.forEach((g, gi) => {
+  groups.forEach((g) => {
     const list: number[] = [];
     for (let i = 0; i < g.size && pi < pack.length; i++) list.push(pack[pi++]);
     assigned.push(...list);
@@ -99,7 +92,6 @@ function build(
                 : 'SUPPORT',
       });
     });
-    void podOrder; void gi;
   });
   // Backs sit deeper, behind the middle man of the pod they are playing off.
   for (const b of backs) slots.push({ num: b.num, role: 'BACKLINE', lat: b.lat, depth: b.depth, job: b.job });
@@ -317,7 +309,7 @@ export const PLAYBOOK: PhasePlan[] = [
   { call: 'SWITCH', label: 'SWITCH', when: 3, risk: 0.32, reward: 0.7, zone: 'WIDE', instruction: 'Cross behind the carrier, take the ball going the other way.' },
   { call: 'WIDE_SWEEP', label: 'WIDE SWEEP', when: 3, risk: 0.3, reward: 0.85, zone: 'WIDE', instruction: 'Move it three passes wide before the drift can slide.' },
   { call: 'BLIND_SIDE', label: 'BLIND SIDE', when: 2, risk: 0.24, reward: 0.62, zone: 'TIGHT', instruction: 'Snipe the short side where they have left two men.' },
-  { call: 'BOX_KICK', label: 'BOX KICK', when: 2, risk: 0.22, reward: 0.4, zone: 'TIGHT', instruction: 'Nine boxes to touch, three chasers up.' },
+  { call: 'BOX_KICK', label: 'BOX KICK', when: 2, risk: 0.22, reward: 0.4, zone: 'ANY', instruction: 'Nine boxes to touch, three chasers up.' },
   { call: 'TERRITORY_PUNT', label: 'TERRITORY PUNT', when: 1, risk: 0.16, reward: 0.5, zone: 'ANY', instruction: 'Ten turns it around, find touch inside their 22.' },
   { call: 'BOMB', label: 'UP AND UNDER', when: 2, risk: 0.34, reward: 0.62, zone: 'MIDFIELD', instruction: 'Hang it up, four chasers, isolate their fullback.' },
   { call: 'CROSS_FIELD', label: 'CROSS FIELD', when: 3, risk: 0.42, reward: 0.9, zone: 'WIDE', instruction: 'Kick across to the wing one on one with his man.' },
@@ -334,10 +326,15 @@ export const ESCALATION: Record<PlayCall, PlayCall> = {
   LOOPL_PASS: 'WIDE_SWEEP',
   SWITCH: 'WIDE_SWEEP',
   BLIND_SIDE: 'POD_CARRY',
-  BOX_KICK: 'TERRITORY_PUNT',
-  TERRITORY_PUNT: 'BOMB',
-  BOMB: 'WIDE_SWEEP',
-  CROSS_FIELD: 'WIDE_SWEEP',
+  /* T-18. A failed kick falls back to the CARRY game — the chase regathers
+   * (or concedes the field) and the pods go to work. The old ladder ran
+   * punt → bomb → sweep → cross-field → punt…: four rungs of which three
+   * were kicks, and because a kick that got run back was judged "shut
+   * down", the whole match was an aerial exchange with no carrying. */
+  BOX_KICK: 'POD_CARRY',
+  TERRITORY_PUNT: 'POD_CARRY',
+  BOMB: 'POD_CARRY',
+  CROSS_FIELD: 'POD_CARRY',   // a broken wide move kicks the pressure away ONCE, then carries
   DROP_GOAL: 'DROP_GOAL',
   PICK_AND_GO: 'POD_CARRY',
 };
@@ -377,13 +374,34 @@ export function callPlay(
     let s = p.reward * 1.4 - p.risk * (1 - arch.riskTolerance) * 2.2;
     if (p.call === 'WIDE_SWEEP' || p.call === 'CROSS_FIELD') s += (widthSlider / 100) * 1.1 + arch.widthBias * 0.8;
     else s -= (widthSlider / 100) * 0.35;
+    /* T-13. The kick appetite is a FIELD-POSITION appetite: full in the own
+     * half (an exit), half in MIDFIELD (a territory option, not the plan),
+     * none in TIGHT (you are where the kicks were trying to get to). With
+     * the bonus flat, TERRITORY_PUNT and BOMB out-scored every strike play
+     * in midfield — and a punt called from midfield is illegal by its own
+     * gate, so the phase silently became a carry: the call sheet said kick,
+     * the game played pod-carry, and the multi-pass move never ran. */
+    const kickZoneMult = zone === 'WIDE' ? 1 : zone === 'MIDFIELD' ? 0.5 : 0;
     if (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK' || p.call === 'CROSS_FIELD') {
-      s += (kickSlider / 100) * 1.3 + arch.kickBias * 0.9;
+      s += kickZoneMult * ((kickSlider / 100) * 1.3 + arch.kickBias * 0.9);
     } else s -= (kickSlider / 100) * 0.4;
     if (p.call === 'POD_TIP') s += shape.tipTendency * 1.4;
     if (p.call === 'TUNNEL_PASS') s += shape.tunnelTendency * 1.4;
     if (zone === 'TIGHT' && (p.call === 'DROP_GOAL' || p.call === 'PICK_AND_GO')) s += 1.1 + clockUrgency * 1.6;
-    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 1.2;
+    /* T-13. +1.2 made the punt the runaway best score in the own half, and
+     * while the CPU carrier could not actually run that was harmless — the
+     * pass artifact moved the team upfield anyway. With an honest carrier
+     * the own half became a kick carousel (72 territory punts a match,
+     * passes 190 -> 100). Real sides exit with the ball too; keep the punt
+     * preferred, but by a margin the carry game can beat. */
+    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 0.45;
+    /* T-13. THE EXIT. A real side takes the first phase or two of a deep
+     * possession with the ball in hand — pods carry, the nine distributes —
+     * and kicks only once the exit stalls. With kick scores flat across
+     * phases, a fielded kick became punt-swap-kick-swap and the multi-phase
+     * pass game never left its own half (103 passes vs the 180 floor). */
+    if (zone === 'WIDE' && phaseNumber <= 1
+      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.9;
     if (p.call === lastCall) s -= 1.5;
     if (s > bestScore) { bestScore = s; best = p; why = `${p.label} — ${p.instruction}`; }
   }

@@ -447,7 +447,7 @@ warning within a second, alongside the encroachment the audit already flags.
 ---
 
 ### T-03 · Split director.ts into modules
-**Type:** Refactor · **Effort:** L · **Risk:** Medium
+**Type:** Refactor · **Effort:** L · **Risk:** Medium · **STATUS: DONE**
 
 2600 lines. Do it behind T-01 and T-02 so regression is detectable.
 
@@ -470,6 +470,23 @@ director.ts                 state + update() orchestration only
 
 **Rule:** no behaviour change. Run the gates after each extraction. If a gate
 moves, stop and find out why before continuing.
+
+**DONE — all 11 target modules are out.** director.ts 4100 → 2500 lines:
+`engine/camera.ts` (updateCamera, cableRig), `engine/commentary.ts`
+(commentate, the T-09 sequencer), `engine/setpieces.ts` (upScrum, scrumSlots,
+upLineout, releaseThrow, upMaul), `engine/laws.ts` (beginPenalty,
+resolvePenalty, lawCall, card), `engine/clock.ts` (endHalf, resumeSecondHalf,
+endMatch), `engine/kick.ts` (upKick, launch, kickLanded),
+`engine/breakdown.ts` (upBreakdown, startBreakdown), `engine/open.ts`
+(upOpen, contextLabel, doStep/doFend/doDummy/doPass, cpuCarrier), plus the
+shared `engine/rng.ts` / `clamp.ts` / `approach.ts` / `weather.ts`.
+Director keeps one-line delegates, owns all state, and remains the update()
+orchestrator. Engine modules take a Director reference and never a copy;
+engine-internal members are marked where visibility had to open. Gates 9/9
+after every extraction (x2 each), stats unchanged, vite build clean. The A/B
+on the one stochastic gate (TACKLES ≥ 8 in the first 60 s) showed the
+PRE-extraction tree flaking 2/6 and the extracted tree 0/6 across the whole
+refactor — the flake pre-exists, the refactor never degraded it.
 
 ---
 
@@ -560,7 +577,7 @@ man returns.
 ---
 
 ### T-08 · Action-driven camera cutting
-**Type:** Presentation · **Effort:** M · **Risk:** Low
+**Type:** Presentation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 `shotIdFor` is a pure function of phase. Cuts have no cause.
 
@@ -576,10 +593,21 @@ position (already done on shot change). On a hold, ease the rig.
 match with no input, cuts land on tackles and breaks rather than on phase
 boundaries.
 
+**Done:** the event bus (`Director.eventBus`, drained once per frame into
+`frameEvents` after the phase updaters speak). Emitters: tackle (with force),
+line break, kick struck, try, card, scrum penalty, jackal turnover. Camera
+reactions, all through the eased target so the rig never snaps: a line break
+holds BREAKAWAY framing for 2.5 s (aim pushed ahead of the play, rig lifted —
+persists across phase changes), a tackle punches the lens in for <1 s
+(non-cable rigs; the cable cam owns its own zoom), a try holds the grounding
+spot 2.6 s and a card the offender 2.2 s. **Probe-verified:** 190 tackles,
+29 kicks, 2 breaks, 1 try, 10 turnovers emitted in one hands-off match; every
+LINE_BREAK was caught with the hold live; gates 9/9 with whipFrames 0.
+
 ---
 
 ### T-09 · Commentary sequencing
-**Type:** Presentation · **Effort:** M · **Risk:** Low
+**Type:** Presentation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Lines fire independently. No memory, no build.
 
@@ -596,10 +624,22 @@ about it cannot desynchronise.
 was not involved (FAIR-19). A sequence of 5 phases without a break produces at
 least one tension line.
 
+**Done:** the IDLE → BUILDUP → CLIMAX → RESOLUTION sequencer runs off the same
+`frameEvents` bus as the camera (T-08). It tracks consecutive phases retained,
+metres in the last three phases (fed at every startBreakdown), and possession
+flips; two new banks — BUILDUP (tension) and TRY_BUILT (a try earned by a
+6+ phase build or finished off a live line break draws differently from a
+snapshot try). The no-repeat window is the last SIX spoken lines; a 20 s
+cooldown per colour bank (BIG_HIT/GENERAL/WEATHER/BUILDUP/KICK/SCRUM/
+LINEOUT) while event-critical banks (TRY/TURNOVER/MISSED/LINE_BREAK) always
+speak. **Probe-verified:** 327 lines in a hands-off match with ZERO
+commentary-pair repeats within any six-line window (the only repeats were
+referee CALL announcements, which are not commentary) and 13 tension lines.
+
 ---
 
 ### T-10 · Audio
-**Type:** Presentation · **Effort:** L · **Risk:** Low
+**Type:** Presentation · **Effort:** L · **Risk:** Low · **STATUS: DONE**
 
 The entire atmosphere layer is a caption. This is the largest gap between how
 the game plays and how a rugby game should feel.
@@ -617,10 +657,23 @@ Gate behind a mute toggle; start on first user gesture (browser policy).
 **Acceptance:** Crowds audibly swell on a line break. Every law call has a
 whistle. No audio before the first interaction.
 
+**Done:** `src/game/audio.ts` — WebAudio, zero assets, three layers: a looped
+noise crowd bed through a lowpass whose amplitude follows `momentum`, swells
+inside the attacking 22, spikes on line breaks and tries, and is mixed by the
+travelling-support ratio (the filter opens as the crowd loudens); impact
+bursts pitched by tackle force and the kick off the boot; and the whistle —
+two detuned square oscillators with a downward bend, a long blast for every
+law call (`lawCall`) and the short-double for a try. Fed from the same
+`frameEvents` bus as T-08/T-09. The AudioContext is created/resumed only
+inside a real keydown (MatchView calls `audio.userGesture()`); before that
+every method is a no-op, so headless harness runs and the pre-interaction
+game are silent. The existing CROWD NOISE option gates the whole layer
+(OFF = full mute, LOW = −7 dB, FULL).
+
 ---
 
 ### T-11 · Wire the six ACCEPTED pitfalls to a real status
-**Type:** Housekeeping · **Effort:** S · **Risk:** None
+**Type:** Housekeeping · **Effort:** S · **Risk:** None · **STATUS: DONE (audit) / DEFERRED (reclassify)**
 
 `pitfalls.ts` marks six complaints ACCEPTED. Two are now solvable:
 - U-001/U-002 (atmosphere) — solved by T-10
@@ -633,10 +686,35 @@ anything you have not built.** The registry's value is that it is honest.
 Also: grep all 24 `void` statements. Each is either a legitimate frozen-interface
 param (leave it, comment why) or an unwired subsystem (ticket it).
 
+**Done — the `void` audit.** 17 suppression statements found (the other seven
+of the 24 were `(): void` return-type annotations, which are types, not
+silenced values):
+
+- REMOVED as dead noise — the value was used by its own guard or a later
+  line: `TROPHIES` (App duplicate import; the data is consumed by menus and
+  competition), `fwd` (re-used by the nine's exit depth), `cp` ×2 (used by
+  its `if (cp)` guard), `dForm` in open play (the formation flows through
+  `shape()`/`defenceMark`; the local was a dead computation), `podOrder`/`gi`
+  in shapes.ts (dead scaffolding — the pack assignment below reads `g.size`
+  directly; the whole cursor-walk block was deleted), `poly` (unused import
+  from the frozen retro module — the import was dropped, retro untouched).
+- KEPT, commented `T-11 void audit` — legitimate frozen-interface params:
+  `_input`/`dTeam` (upMaul), `input` (upBreakdown ruck bar reads
+  `this.pressed`; upScrum; upLineout; upKick), `feed` (scrumSlots is
+  symmetric; the feed is the caller's knowledge), `dt` (collision resolve is
+  positional). 8 statements, each now says why it exists.
+- LEFT — `retro.ts` `void PIX; void GRASS;` — the frozen renderer is not to
+  be touched, even for comments.
+
+**Deferred — the reclassification, honestly.** U-001/U-002 need T-10
+(atmosphere) and W-011 needs T-08 (camera) — neither has landed, so nothing
+was reclassified. The registry stays honest: no status changed without the
+work existing.
+
 ---
 
 ### T-13 · Wire the behaviour dataset into `think()`
-**Type:** Simulation · **Effort:** L · **Risk:** High · **Blocked by:** T-01, T-02
+**Type:** Simulation · **Effort:** L · **Risk:** High · **Blocked by:** T-01, T-02 · **STATUS: DONE**
 
 `src/game/behaviour/` compiles and validates but nothing reads it. Right now
 `think()` positions players from `shapes.ts` (five attacking shapes, five
@@ -679,10 +757,28 @@ structured `fallbackRule` alongside it during authoring, or accept that step 4
 starts as a proximity-swap heuristic and the prose stays documentation. Decide
 this **before** you write the resolver, not after.
 
+**Done (this pass):** `src/game/engine/behaviour.ts` — `situationOf(d, team)`
+maps live state to one of the authored situations (pure, OPEN_PLAY only,
+null elsewhere; team B is the point-mirror of the world frame),
+`beatOf(d)` derives the numeric Beat 1–5 from the existing phase clock, and
+`datasetMark(team, num, sit, beat)` is pure. `think()` computes sitA/sitB/beat
+once per frame and the resolution is one-way as specified: dataset first for the
+attacking slot and the HOLD-THE-LINE defenders, shapes slot second (7/8 keep the
+carrier's hip — the dataset is skipped for them), jlr contract last. Inside 20 m
+the dataset owns approach and the engine owns drive
+(`deepest = carrierZ - dir*(0.5 + toLine*0.08)`). `placeBound()` untouched.
+Gates 9/9. The `fallback` prose resolver (step 4) and run lines (step 5)
+remain unwired — parked, not abandoned; the proximity-swap heuristic decision
+above has not been made.
+
+While wiring it, the probe work found the real reason tries read zero —
+see the T-18 note below: **the CPU ball-carrier's position was never
+integrated**. That one fix is most of this ticket's visible payoff.
+
 ---
 
 ### T-14 · Behaviour dataset viewer in the media guide
-**Type:** Tooling · **Effort:** M · **Risk:** None
+**Type:** Tooling · **Effort:** M · **Risk:** None · **STATUS: DONE**
 
 100 points × 15 shirts is 1,500 authored positions and there is currently no way
 to look at them. Authoring errors — a winger placed at `y=50`, a beat out of
@@ -695,6 +791,19 @@ the run lines for that shirt with their family colour from `LINE_FAMILIES`. Show
 
 **Why it matters:** it makes the remaining twelve shirts far cheaper to author,
 because the author can see the previous shirt's spacing while writing the next.
+
+**Done:** BEHAVIOUR tab in the media guide. `datasetReport().problems` at the
+top in red (or the green NO PROBLEMS banner), then percent complete with
+authored/pending shirts and the run-line count. Shirt picker 1–15 (pending
+shirts dimmed but selectable — their run lines still draw); all twenty
+situations. Left: the five beats as a numbered path on the full-pitch dataset
+grid (x along, y across, try lines / 22s / halfway marked) with instruction
+and fallback per beat. Right: the shirt's run lines in the ruck-relative
+metres frame they are authored in (gain line, ruck, upfield axis), coloured
+by LINE_FAMILIES, with purpose / if-occupied / trigger per line. The two
+frames are drawn side by side rather than falsely overlaid — beats are
+absolute pitch percentages, run lines are ruck-relative metres. Renders
+headless (SSR smoke test) and in the vite build.
 
 ---
 
@@ -741,7 +850,7 @@ cause — read the log entry, it names the phase and the reason. Do **not** reac
 ---
 
 ### T-17 · Write the eight outstanding position files
-**Type:** Data · **Effort:** M · **Risk:** None
+**Type:** Data · **Effort:** M · **Risk:** None · **STATUS: DONE**
 
 Delivered and registered: 1, 6, 7, 8, 9, 10, 11 (700 points).
 Delivered but **not yet written to disk**: 2, 3, 4, 12, 13, 14, 15.
@@ -753,6 +862,18 @@ dataset with the openside/blindside roles swapped and the lineout jump moved
 from middle to tail — `lines-f1.ts` already distinguishes them correctly.
 
 **Acceptance:** `datasetReport().percentComplete` reads 100.
+
+**Done:** all eight files authored and registered — pos-02 (hooker: strikes,
+throws, leads the blind cover), pos-03 (tighthead, mirrored from the
+loosehead), pos-04 (blindside lock: MIDDLE jump, engine of the maul), pos-05
+(openside lock, authored from 4 with the swap the ticket prescribes: TAIL
+jump, scrum slot between 2 and 3, chase leaning openside), pos-12 (inside
+centre: the crash ball and the midfield defence's director), pos-13 (outside
+centre: strike runner, drift captain), pos-14 (right wing, mirrored from 11),
+pos-15 (full back: the last line, high ball, counter-attack). Every point
+carries a real instruction and a conflict fallback in the house voice.
+**Verified:** `datasetReport()` reads 100% (1500/1500), problems NONE, and
+every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 
@@ -772,10 +893,70 @@ Fix in this order, because each one moves the ones below it:
 
 **Acceptance:** score ≥ 80%, and the average scoreline is plausible for a Test.
 
+**Status: 79% (11/14) — three reds left, all one family: the attack finishes
+nothing.** This pass took the board from 50% / zero tries to 79% / 11 of 14.
+Fixed, in the order that mattered:
+
+1. **The CPU carrier never ran.** `cpuCarrier` set his velocity every decision
+   tick, but nothing integrated his position — `think()` skips the carrier and
+   `placeBound` has no OPEN_PLAY branch, so he was a statue that advanced only
+   by pass, `place()` and `separate()` shoves. Metres were velocity×dt
+   phantom metres. Fix: the `carrier` ownership mode the T-02 movedBy scheme
+   reserved and nobody wrote — integrate once per frame in `cpuCarrier`'s
+   CARRY branch (`movedBy = 'carrier'`).
+2. **No cover chase.** Once the carrier actually ran, three channel convergers
+   could not cover him and the match turned into sevens (5.9 breaks/team,
+   66 tackles). `think()` now turns beaten defenders (past the carrier, within
+   14 m, not beatenT-stunned) into full-sprint cover chasers.
+3. **No turn cost.** Beaten defenders flipped 180° at full exponential
+   acceleration and ran every break down. `steer()` now cuts accel to 35% for
+   a true about-face (>135°). Do not widen the angle back toward ~100°:
+   close-quarters pursuit flips every frame under pure pursuit and chasers
+   orbit at two metres without ever tackling.
+4. **Call sheet.** Kick appetite is now positional (`kickZoneMult`: full in the
+   own half, half in midfield, none in TIGHT) and the first two phases of a
+   deep possession go to the carry game (the exit), because a flat kick bonus
+   made the own half a punt carousel (72 territory punts/match).
+5. **Chain passing.** The <0.45 pressure gate kept the ball in the first
+   receiver's hands every time he took it flat (83 nine-passes a match, 22
+   from anyone else). A marked man with an uncovered teammate outside now
+   passes (pressure <0.75), and the CPU carrier can STEP (`doStep`, the
+   human's G verb, same physics) instead of running into the cover.
+6. **Goal kicking was geometrically broken three ways.** The aim clamps
+   (±3.5 then a second ±4.2) sat under the angle a wide penalty needs; the
+   GOAL hang of 1.9 s (apex 4.4 m) had the ball at ankle height at the posts
+   for anything beyond 30 m — failing the crossing test *silently*, no score,
+   no miss, the kick just died into open play (CPU took ~23 shots a match,
+   scored 6%); and `lastScorer` was never cleared, so every penalty goal
+   after a try was scored as a +2 "conversion". Shots at goal now hang 2.9 s
+   (drops 2.6), aim ±6.6, and `conversionPending` separates try conversions
+   from penalty goals. The corner hunt's 55° cap also went to 80° — it was
+   pre-aiming every touchline penalty 20–40 m short of the corner, so the
+   five-metre lineout never existed.
+
+TACKLES ~97, RUCKS ~151, SCRUMS 8.1, LINEOUTS 15.5, PENS 14.7, KICKS 42.7,
+METRES ~390, BREAKS 2.7–3.2, TURNOVERS ~11, OFFLOADS ~16 — all green.
+
+**Remaining reds (do not re-fix the six above):** POINTS ~7 (floor 12),
+TRIES ~0.5/team (floor 1), PASSES ~150 (floor 180). Diagnosis trail: red-zone
+*entries* are healthy (16.5/match) and close-range tries work (the reach
+window is 2.4 m); what is missing is conversion — the multi-phase drive nets
+1–2 m against a defence that resets at full speed every ruck, deep line
+breaks are still caught 85% (chaser 8.8 m/s vs carrier 8.0 with ball), and
+the kick-to-corner cycle returns to the 22 but the lineout drive mauls only
+18% of the time. Candidate levers, untried: support-line depth for the second
+wave off a break (the 7 rides the hip — link him to the finisher's line),
+maul frequency off close lineouts (`driveCall` fires only on MIDDLE/TAIL
+calls), and per-phase defensive fatigue so a 10-phase grind actually bends.
+Watch the TACKLES gate — it flakes at the 8 threshold on 3-match samples;
+use 20+ matches for any verdict.
+
 ---
 
 ### T-19 · Wire the behaviour dataset (was T-13)
-Unchanged. Still blocked on T-01 and T-02. See the original ticket.
+Duplicate of T-13, which is now **DONE** (dataset wired via
+`src/game/engine/behaviour.ts`; fallback resolver and run lines parked).
+See T-13.
 
 ---
 
@@ -851,7 +1032,7 @@ attacking side retains, "CONTESTED" while the jackal is live. Tied to
 ---
 
 ### T-26 · The scrum-half waiting at the base
-**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: OPEN**
+**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 The nine should be standing at the base of every ruck, hands on the ball, before
 it comes out — not arriving late from a shape mark. Currently his target comes
@@ -867,6 +1048,14 @@ empty field.
 **Acceptance:** at every ruck the distributor is visibly at the base before the
 ball is available, and the narrative's ruck countdown reads against a real body.
 
+**Done:** `placeBound`'s BREAKDOWN branch steers the `ruckDistributor` result to
+the base (`contactX ± 1.8`, `contactZ − dir × 1.4`), pins him with the
+`nineSquat` clip and the job "HANDS ON THE BALL — WAIT FOR IT TO COME", and
+releases him only when the ball is out. Ownership is single: `think()` marks him
+bound and does not steer him (the double-move lesson). **Verified by probe**
+(scripts, since removed): 190/190 ruck exits in a hands-off match had the
+distributor within 2.4 m of the base at the moment the ball came out — 100%.
+
 ---
 
 ### T-27 · Five-second choice window at the ruck
@@ -876,8 +1065,8 @@ The default ruck clock is now 5.0 s (`ruckLaw` default moved to 2), so the playe
 has a clear five-second window to pick pass, carry or kick before the scrum is
 awarded. The narrative already shows this countdown, colour-banded.
 
-**Open follow-up:** the window is only as legible as T-26 makes it. Land T-26
-before calling this fully polished.
+**Open follow-up:** closed — T-26 has landed and been verified (100% of ruck
+exits have the distributor at the base).
 
 ---
 
@@ -1091,8 +1280,9 @@ green → amber → red. When it hits **0**, the ball is auto-played to the **fl
 still chooses the window length (1.5 / 3 / 5 s); the first-receiver target is
 currently hardcoded to the 10, which is the natural default.
 
-**Follow-up:** make the auto-play target (fly-half) a named setting rather than a
-literal 10, if the player wants e.g. the 12 or a forward pod as first receiver.
+**Follow-up — DONE:** FIRST RECEIVER is now a RULES option (FLY-HALF 10 /
+CENTRE 12 / BACK ROW 8, default 10). The clock-zero release passes the chosen
+shirt to `startOpen`, with a fallback order if he is binned or down.
 
 ### T-39 · Sprint mechanic, per-player stats and size differences
 **Type:** Simulation/Render · **Effort:** M · **Risk:** Low · **STATUS: DONE**
