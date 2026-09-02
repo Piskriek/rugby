@@ -940,6 +940,19 @@ every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 
+### MERGE VERDICT — main (T-18 86%, T-03 extraction, TMO) merged into this branch
+
+The remote branch merged main (a891ea5); this tree carries BOTH change sets.
+Merged board (16 matches, d3): **43% (6/14)** — points 8.6, tries 0.6,
+tackles 69.8, RUCKS 105.3, scrums 7.7, lineouts 12.7, pens 18 OK, passes
+142.5, turnovers 8.8, split 43.9% OK. main alone claimed 86% (12/14); this
+branch alone was 50% (7/14). THE COMBINATION REGRESSED — each calibration
+was tuned against its own physics: this branch's T-05 contest spends real
+clock per ruck, and main's pass/kick cycle (which got passes to 142) was
+priced against a cheaper ruck. Next ticket is ONE re-balance on the merged
+tree: re-price main's pass/kick levers against the contest's clock cost,
+attacking tackles->rucks first (T-18 order), 16+ match verdicts only.
+
 ### AUDIT SEEDS 1–6 vs THE HANDOVER BASE (501436b) — comparison recorded
 
 90 s per seed at difficulty 3, matched seeds, both trees: CURRENT FAIL ~492/seed
