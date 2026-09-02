@@ -65,7 +65,7 @@ export const RULES: Rule[] = [
 
   /* ---------- RESTART LEGALITY ---------- */
   { kind: 'KICKOFF', id: 'LAW-103', standard: 'LAW', law: 'Law 12 — kick-off from the centre of the halfway line', claim: 'The kick-off mark is on halfway', check: (p) => bool(p, 'markLawful') ? ok() : bad(`kick-off taken from z=${num(p, 'mark')} m — halfway is z=0`) },
-  { kind: 'KICKOFF', id: 'LAW-104', standard: 'LAW', law: 'Law 12 — the 22-metre drop-out', claim: 'A drop-out is taken from the 22-metre line', check: (p) => bool(p, 'markIs22Metre') !== false ? ok() : bad(`drop-out taken from z=${num(p, 'mark')} m, not the 22`) },
+  { kind: 'KICKOFF', id: 'LAW-104', standard: 'LAW', law: 'Law 12 — the 22-metre drop-out', claim: 'A drop-out is taken from the 22-metre line', /* N/A on restart points — the trace marks the field null there, and bool() reads null as false */ check: (p) => (p.d.markIs22Metre === false ? bad(`drop-out taken from z=${num(p, 'mark')} m, not the 22`) : ok()) },
   { kind: 'KICKOFF', id: 'LAW-105', standard: 'LAW', law: 'Law 12 — all kickers behind the ball', claim: 'Nobody on the kicking team is ahead of the ball', check: (p) => bool(p, 'kickingTeamBehindBall') ? ok() : bad(`${num(p, 'kickingTeamOffsideCount')} of the kicking team ahead of the ball at their own restart`) },
   { kind: 'KICKOFF', id: 'LAW-106', standard: 'LAW', law: 'Law 12 — receivers behind the ten-metre line', claim: 'No receiver is inside the ten-metre line at the kick', check: (p) => bool(p, 'receivingSideLegal') ? ok() : bad(`${num(p, 'receiversInside10m')} receivers inside the ten-metre line`) },
   { kind: 'KICKOFF', id: 'UX-107', standard: 'UX', claim: 'The receiving side is already in an attacking shape', check: (p) => bool(p, 'restartShapeIsPods') ? ok() : bad('receiving side bunched — no recognisable shape') },
@@ -79,7 +79,9 @@ export const RULES: Rule[] = [
   { kind: 'SHAPE', id: 'UX-113', standard: 'UX', claim: 'When the human side has the ball, the human controls the carrier', check: (p) => (p.d.controlledIsCarrier === null || bool(p, 'controlledIsCarrier')) ? ok() : bad('the human is not controlling the ball carrier') },
 
   /* ---------- CAMERA ---------- */
-  { kind: 'CAMERA', id: 'LOG-22', standard: 'LOGIC', claim: 'Camera is above the ground and looking down at a sane angle', check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.4 && num(p, 'fov') > 0.04 && num(p, 'fov') < 1.2) ? ok() : bad(`bad rig: h=${num(p, 'height')} tilt=${num(p, 'tilt')} fov=${num(p, 'fov')}`) },
+  { kind: 'CAMERA', id: 'LOG-22', standard: 'LOGIC', claim: 'Camera is above the ground and looking down at a sane angle', /* fov <= 1.2: 1.2 is the shipped default lens and sits ON the bound — an
+ * exclusive < flagged the game's own factory setting 54 times a run. */
+check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.4 && num(p, 'fov') > 0.04 && num(p, 'fov') <= 1.2) ? ok() : bad(`bad rig: h=${num(p, 'height')} tilt=${num(p, 'tilt')} fov=${num(p, 'fov')}`) },
   { kind: 'CAMERA', id: 'UX-114', standard: 'UX', claim: 'The camera is on the touchline gantry, framing across the pitch', check: (p) => bool(p, 'cameraTracksLaterally') ? ok() : bad(`camera only ${num(p, 'standbackMetres')} m off the touchline — it is standing on the pitch`) },
   { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The camera is not parked behind the goal line', check: (p) => !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
   { kind: 'CAMERA', id: 'UX-116', standard: 'UX', claim: 'A named shot is selected for this phase', check: (p) => str(p, 'shot').length > 0 && str(p, 'shotName').length > 0 ? ok() : bad('no named shot for this phase') },

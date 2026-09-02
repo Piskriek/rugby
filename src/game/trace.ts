@@ -35,9 +35,9 @@ export const TRACE_LIMIT = 1000;
  * real input feedback rather than a game that plays itself.
  */
 
-interface BotState { wait: number; flip: number; presses: number; releases: number }
+export interface BotState { wait: number; flip: number; presses: number; releases: number }
 
-function botInput(d: Director, dt: number, st: BotState): { inp: Input; pressed: Set<string>; released: string[] } {
+export function botInput(d: Director, dt: number, st: BotState): { inp: Input; pressed: Set<string>; released: string[] } {
   const inp: Input = { ...NO_INPUT };
   const pressed = new Set<string>();
   const released: string[] = [];
@@ -190,8 +190,16 @@ function emit(d: Director, rec: Recorder) {
   /* 1 — where the players are */
   const all = d.live;
   const focus = d.focus();
-  // Kick-off legality: the mark must be halfway, and both sides in lawful places.
-  if (d.kk && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT') && d.kk.t < 2) {
+  /* Kick-off legality: the mark must be halfway (or the 22 for a drop-out),
+   * and both sides in lawful places — all of it measured AT THE KICK. The
+   * old window was "the first two seconds of the kick state", which sampled
+   * the AIM walk (receivers lawfully mid-retreat) and the FLIGHT itself,
+   * where kk.bz is the FLYING BALL — the audit was told kick-offs were
+   * taken from z=3.2 and z=8.9, i.e. from mid-air. The first frames of
+   * FLIGHT are exactly "at the strike": the ball has left the tee but
+   * moved only centimetres, and nobody has had time to move. */
+  if (d.kk && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT')
+    && d.kk.stage === 'FLIGHT' && d.kk.t < 2) {
     const markOk = d.kk.type === 'RESTART' ? Math.abs(d.kk.bz) < 1.5 : Math.abs(Math.abs(d.kk.bz) - 28) < 2;
     const rec2 = all.filter((p) => p.team === d.kk!.kicker && (p.z - d.kk!.bz) * (d.kk!.kicker === 'A' ? 1 : -1) > 0.5).length;
     const other: 'A' | 'B' = d.kk.kicker === 'A' ? 'B' : 'A';

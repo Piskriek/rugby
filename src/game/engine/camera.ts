@@ -209,8 +209,16 @@ export function cableRig(
   const wide = d.cableEase;
 
   // Where the rig wants to be: behind the ball, along the attacking axis.
-  const trail = spec.standback * z.standbackMul * (1 + wide * 0.85);
-  const height = spec.height * z.heightMul * (1 + wide * 0.7);
+  /* T-18/UX-23 — THE LENS COMES IN WHEN THE BALL IS DOWN. The wide framing
+   * is for the hang; FLIGHT also contains the bounce-and-roll, and the old
+   * geometry kept the rig backed off, high and ultra-wide while a grounded
+   * ball trickled away at shin height — riding the bottom edge of the
+   * frame for seconds at a time. After the first bounce the wide EXTRAS
+   * (trail, height, the lens widening) release by rollK and the rig closes
+   * onto the contest for the ball. The hang is untouched: bounces == 0. */
+  const rollK = k && inFlight && k.bounces > 0 ? 0.35 : 1;
+  const trail = spec.standback * z.standbackMul * (1 + wide * 0.85 * rollK);
+  const height = spec.height * z.heightMul * (1 + wide * 0.7 * rollK);
 
   /* While the ball is in the air, sit between the ball and where it will land
    * so both are framed. Otherwise anchor on the ball itself.
@@ -249,9 +257,25 @@ export function cableRig(
   d.cableH = clamp(d.cableH, 9, 46);
 
   /* Look at a point ahead of the ball, so the frame leads play instead of
-   * trailing it. The rig is always end-on: it looks the way you attack. */
+   * trailing it. The rig is always end-on: it looks the way you attack.
+   *
+   * T-18/UX-23 — FOLLOW IT DOWN. The lead that framed the hang keeps
+   * aiming PAST the ball while it descends, and the last two seconds of
+   * every long kick rode the ball down the bottom edge of the frame
+   * (offscreen-gate faults clustered on PUNT:FLIGHT tails). A broadcast
+   * lens rides the ball down onto the catcher: as it drops, the lead
+   * collapses onto the landing point. Height-scaled, so the frame leads
+   * again the moment the next kick goes up. */
   const aimX = anchorX;
-  const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6);
+  const dropK = k && inFlight ? clamp(k.by / 9, 0.3, 1) : 1;
+  /* THE LEAD IS EARNED BY SPEED. The aim leads the subject so a running
+   * attack reads into space — but a STOPPED or crawling ball needs no lead,
+   * and holding one put every grounded ruck-ball at the bottom edge of the
+   * frame while the rig overtook it (the second half of the offscreen
+   * faults). The lead scales with the subject's own velocity. */
+  const spd = k ? Math.hypot(k.vx, k.vz) : (d.op ? Math.hypot(d.op.vx, d.op.vz) : 0);
+  const leadK = clamp(0.35 + spd / 9, 0.35, 1);
+  const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
   const ground = Math.max(5, Math.hypot(dx, dz));
@@ -260,7 +284,7 @@ export function cableRig(
   // as an aerial view of the whole contest.
   const tilt = Math.atan2(d.cableH - 1.2, ground) * (1 + wide * 0.10);
   const slant = Math.hypot(ground, d.cableH - 1.2);
-  const px = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28);
+  const px = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28 * rollK);
   const focal = Math.max(1, px * slant);
 
   return {

@@ -793,7 +793,12 @@ export class Director {
         this.pendingPenalty = null;
         this.say('ADVANTAGE OVER — PLAY ON');
       } else if (this.advantage <= 0 && this.pendingPenalty) {
-        this.resolvePenalty();
+        /* A ball in the air finishes its flight. The whistle brings play
+         * back for the penalty, but the ball still comes down — killing a
+         * mid-air kick left a ball that vanished at 1.3 m and never
+         * bounced. This re-fires every frame, so the penalty resolves the
+         * instant the kick is done. */
+        if (!this.kk || this.kk.stage !== 'FLIGHT') this.resolvePenalty();
       }
     }
 

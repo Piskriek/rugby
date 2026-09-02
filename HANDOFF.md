@@ -940,6 +940,35 @@ every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 
+### AUDIT SEEDS 1–6 vs THE HANDOVER BASE (501436b) — comparison recorded
+
+90 s per seed at difficulty 3, matched seeds, both trees: CURRENT FAIL ~492/seed
+(mean), WARN ~129; BASE FAIL ~374, WARN ~151. The raw counts are NOT
+apples-to-apples — the rule set grew with every new law (the standing
+contract), and the match is far more physical now (more rucks, more contact,
+more kicks → more rule evaluations per second). What matters is WHICH rules
+dominate, and this pass made them honest:
+
+- **LAW-103/LAW-104/LAW-106 were AUDIT/TRACE artifacts, now fixed.** The
+  KICKOFF legality points sampled `kk.bz` for the first two seconds of the
+  kick state — including FLIGHT, where `kk.bz` is the FLYING BALL, so the
+  audit was told kick-offs were taken from mid-air (z=3.2, z=8.9...). And
+  LAW-104 failed every RESTART point because `markIs22Metre` is null there
+  and `bool()` reads null as false. The trace now samples legality AT THE
+  KICK (first FLIGHT frames — ball moved centimetres, nobody has moved), and
+  LAW-104 treats null as N/A. LAW-106 (receivers inside ten) now measures at
+  the strike, where the gapOk gate already guarantees >=10.6.
+- **LOG-22 boundary:** fov=1.2 is the shipped default ON an exclusive bound —
+  now `<=`. Was x54/seed.
+- **THE TOP REMAINING FAIL IS UX-94 (x251/seed):** "right pressed and nothing
+  observable changed in 17 ms". The input bot presses movement during
+  set-piece binds, where movement is intentionally locked (the verb is
+  waggle). Either the bot should only press when the affordance exists, or
+  locked-phase presses should echo something. This is the next audit ticket,
+  with UX-31 "no movement verb offered" (x66) in the same family.
+- The rest of the standing list is unchanged: LOG-19 pod shape (x16), UX-124
+  control list (x19), LAW-66 line holes, LOG-56 chasers, UX-107 bunching.
+
 ### T-18 · Make the stats audit pass
 **Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16 · **STATUS: DONE (86%, 12/14 — points/tries residual documented below)**
 
