@@ -714,7 +714,7 @@ work existing.
 ---
 
 ### T-13 · Wire the behaviour dataset into `think()`
-**Type:** Simulation · **Effort:** L · **Risk:** High · **Blocked by:** T-01, T-02
+**Type:** Simulation · **Effort:** L · **Risk:** High · **Blocked by:** T-01, T-02 · **STATUS: DONE**
 
 `src/game/behaviour/` compiles and validates but nothing reads it. Right now
 `think()` positions players from `shapes.ts` (five attacking shapes, five
@@ -756,6 +756,24 @@ in the three authored ones.
 structured `fallbackRule` alongside it during authoring, or accept that step 4
 starts as a proximity-swap heuristic and the prose stays documentation. Decide
 this **before** you write the resolver, not after.
+
+**Done (this pass):** `src/game/engine/behaviour.ts` — `situationOf(d, team)`
+maps live state to one of the authored situations (pure, OPEN_PLAY only,
+null elsewhere; team B is the point-mirror of the world frame),
+`beatOf(d)` derives the numeric Beat 1–5 from the existing phase clock, and
+`datasetMark(team, num, sit, beat)` is pure. `think()` computes sitA/sitB/beat
+once per frame and the resolution is one-way as specified: dataset first for the
+attacking slot and the HOLD-THE-LINE defenders, shapes slot second (7/8 keep the
+carrier's hip — the dataset is skipped for them), jlr contract last. Inside 20 m
+the dataset owns approach and the engine owns drive
+(`deepest = carrierZ - dir*(0.5 + toLine*0.08)`). `placeBound()` untouched.
+Gates 9/9. The `fallback` prose resolver (step 4) and run lines (step 5)
+remain unwired — parked, not abandoned; the proximity-swap heuristic decision
+above has not been made.
+
+While wiring it, the probe work found the real reason tries read zero —
+see the T-18 note below: **the CPU ball-carrier's position was never
+integrated**. That one fix is most of this ticket's visible payoff.
 
 ---
 
@@ -875,10 +893,70 @@ Fix in this order, because each one moves the ones below it:
 
 **Acceptance:** score ≥ 80%, and the average scoreline is plausible for a Test.
 
+**Status: 79% (11/14) — three reds left, all one family: the attack finishes
+nothing.** This pass took the board from 50% / zero tries to 79% / 11 of 14.
+Fixed, in the order that mattered:
+
+1. **The CPU carrier never ran.** `cpuCarrier` set his velocity every decision
+   tick, but nothing integrated his position — `think()` skips the carrier and
+   `placeBound` has no OPEN_PLAY branch, so he was a statue that advanced only
+   by pass, `place()` and `separate()` shoves. Metres were velocity×dt
+   phantom metres. Fix: the `carrier` ownership mode the T-02 movedBy scheme
+   reserved and nobody wrote — integrate once per frame in `cpuCarrier`'s
+   CARRY branch (`movedBy = 'carrier'`).
+2. **No cover chase.** Once the carrier actually ran, three channel convergers
+   could not cover him and the match turned into sevens (5.9 breaks/team,
+   66 tackles). `think()` now turns beaten defenders (past the carrier, within
+   14 m, not beatenT-stunned) into full-sprint cover chasers.
+3. **No turn cost.** Beaten defenders flipped 180° at full exponential
+   acceleration and ran every break down. `steer()` now cuts accel to 35% for
+   a true about-face (>135°). Do not widen the angle back toward ~100°:
+   close-quarters pursuit flips every frame under pure pursuit and chasers
+   orbit at two metres without ever tackling.
+4. **Call sheet.** Kick appetite is now positional (`kickZoneMult`: full in the
+   own half, half in midfield, none in TIGHT) and the first two phases of a
+   deep possession go to the carry game (the exit), because a flat kick bonus
+   made the own half a punt carousel (72 territory punts/match).
+5. **Chain passing.** The <0.45 pressure gate kept the ball in the first
+   receiver's hands every time he took it flat (83 nine-passes a match, 22
+   from anyone else). A marked man with an uncovered teammate outside now
+   passes (pressure <0.75), and the CPU carrier can STEP (`doStep`, the
+   human's G verb, same physics) instead of running into the cover.
+6. **Goal kicking was geometrically broken three ways.** The aim clamps
+   (±3.5 then a second ±4.2) sat under the angle a wide penalty needs; the
+   GOAL hang of 1.9 s (apex 4.4 m) had the ball at ankle height at the posts
+   for anything beyond 30 m — failing the crossing test *silently*, no score,
+   no miss, the kick just died into open play (CPU took ~23 shots a match,
+   scored 6%); and `lastScorer` was never cleared, so every penalty goal
+   after a try was scored as a +2 "conversion". Shots at goal now hang 2.9 s
+   (drops 2.6), aim ±6.6, and `conversionPending` separates try conversions
+   from penalty goals. The corner hunt's 55° cap also went to 80° — it was
+   pre-aiming every touchline penalty 20–40 m short of the corner, so the
+   five-metre lineout never existed.
+
+TACKLES ~97, RUCKS ~151, SCRUMS 8.1, LINEOUTS 15.5, PENS 14.7, KICKS 42.7,
+METRES ~390, BREAKS 2.7–3.2, TURNOVERS ~11, OFFLOADS ~16 — all green.
+
+**Remaining reds (do not re-fix the six above):** POINTS ~7 (floor 12),
+TRIES ~0.5/team (floor 1), PASSES ~150 (floor 180). Diagnosis trail: red-zone
+*entries* are healthy (16.5/match) and close-range tries work (the reach
+window is 2.4 m); what is missing is conversion — the multi-phase drive nets
+1–2 m against a defence that resets at full speed every ruck, deep line
+breaks are still caught 85% (chaser 8.8 m/s vs carrier 8.0 with ball), and
+the kick-to-corner cycle returns to the 22 but the lineout drive mauls only
+18% of the time. Candidate levers, untried: support-line depth for the second
+wave off a break (the 7 rides the hip — link him to the finisher's line),
+maul frequency off close lineouts (`driveCall` fires only on MIDDLE/TAIL
+calls), and per-phase defensive fatigue so a 10-phase grind actually bends.
+Watch the TACKLES gate — it flakes at the 8 threshold on 3-match samples;
+use 20+ matches for any verdict.
+
 ---
 
 ### T-19 · Wire the behaviour dataset (was T-13)
-Unchanged. Still blocked on T-01 and T-02. See the original ticket.
+Duplicate of T-13, which is now **DONE** (dataset wired via
+`src/game/engine/behaviour.ts`; fallback resolver and run lines parked).
+See T-13.
 
 ---
 

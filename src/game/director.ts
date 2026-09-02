@@ -39,6 +39,7 @@ import {
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
+import { situationOf, beatOf, datasetMark } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul } from './engine/setpieces';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
@@ -305,6 +306,8 @@ export class Director {
   events: MatchEvent[] = [];
   feed: { text: string; text2?: string; at: number }[] = [];
   lastScorer: { num: number; name: string; team: 'A' | 'B'; min: number; kind: string } | null = null;
+  /** T-13: true only between a try and the conversion strike — see kickScored. */
+  conversionPending = false;
   replayOf: Phase | null = null;
   replayTimer = 0;
   refSignal = 0;
@@ -803,6 +806,7 @@ export class Director {
     // Hand control over whenever the phase or the possession changes.
     if (this.phase !== this.lastHandoffPhase || this.possession !== this.lastHandoffPoss) {
       const changedPhase = this.phase !== this.lastHandoffPhase;
+      if (this.possession !== this.lastHandoffPoss) this.lastTurnoverAt = this.t;
       this.lastHandoffPhase = this.phase;
       this.lastHandoffPoss = this.possession;
       this.handoffControl();
@@ -815,6 +819,8 @@ export class Director {
   }
 
   private lastHandoffPhase: Phase | null = null;
+  /** T-13: when possession last changed — the turnover situations key off it. */
+  lastTurnoverAt = -99;
   private lastHandoffPoss: 'A' | 'B' | null = null;
 
   /* ============================ WATCHDOG ============================
@@ -1360,6 +1366,11 @@ export class Director {
   private think(dt: number, input: Input) {
     const s = this.shape();
     const atk = this.possession;
+    /* T-13 — the behaviour dataset is the most specific source of positional
+     * truth. One situation per side per frame (pure reads of live state),
+     * and the beat comes from the existing phase clock. */
+    const sitA = situationOf(this, 'A'), sitB = situationOf(this, 'B');
+    const beat = beatOf(this);
     const def = this.defending();
     const dir = s.dir;
     const diff = DIFFICULTY_TABLE[clamp(this.difficulty, 0, 9)];
@@ -1391,7 +1402,20 @@ export class Director {
 
     // Which defenders leave the line and converge: the men in the carrier's channel.
     const convergers = new Set<number>();
-    if (this.op) {
+    /* T-13. THE COVER CHASE. A defender the carrier has gone past turns and
+     * chases — at sprint, all of them, from anywhere within thirty metres.
+     * Until the carrier actually ran (T-13 carrier integration) this never
+     * mattered; after it, three channel convergers could not cover a full-
+     * pace runner and the match turned into sevens (5.9 line breaks a team,
+     * 66 tackles). The line holds its shape — dataset still owns the intact
+     * line — but once a man is beaten, pursuit is the only job. */
+    const coverChase = new Set<number>();
+    if (this.op && !this.op.ball.live) {
+      const carC = this.L(this.op.attacking, this.op.carrierNum);
+      for (const q of this.live) {
+        if (q.team === def || q.sinbin > 0 || q.beatenT > 0 || q.down) continue;
+        if ((q.z - carC.z) * dir < 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 14) coverChase.add(q.num);
+      }
       const carLat = this.op.carrierX - f.x;
       for (const r of DEFENCE_CHANNELS
         .map((c) => ({ num: c.num, d: Math.abs(c.lat - carLat) }))
@@ -1491,6 +1515,39 @@ export class Director {
           continue;
         }
 
+        /* T-13 resolution order: 1) dataset, 2) shape slot, 3) contract.
+         * The seven and eight keep the carrier's hip (see above) — the
+         * offload lanes the calibrated attack runs on; the dataset's
+         * authored trail lines would pull them ten metres off it. */
+        if (slot) {
+          const sit = p.team === 'A' ? sitA : sitB;
+          const dsm = sit ? datasetMark(p.team, p.num, sit, beat) : null;
+          if (dsm) {
+            p.tx = clamp(dsm.x, -33, 33);
+            let z = dsm.z;
+            /* T-13/T-18. The authored red-zone beats march the pods to the
+             * 22 and hold them 15 m out — an honest arrival, but nobody
+             * threatens the line from there and tries died to zero. Inside
+             * 20 m the dataset owns the APPROACH (lateral spot, job, timing)
+             * and the engine owns the DRIVE: the mark is flattened to the
+             * same pick-and-go depth the shape fix uses, so the carries,
+             * the dive and the reach-over actually happen. */
+            if (sit === 'red-zone-22' && this.op) {
+              const o = this.op;
+              const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
+              if (toLine < 20) {
+                const deepest = o.carrierZ - o.dir * (0.5 + toLine * 0.08);
+                z = o.dir > 0 ? Math.max(z, deepest) : Math.min(z, deepest);
+              }
+            }
+            p.tz = clamp(z, -59, 59);
+            p.job = dsm.job;
+            p.urgency = 0.9;
+            steer(p, dt, true);
+            continue;
+          }
+        }
+
         // Otherwise the man stands where the shape says he stands.
         if (slot) {
           const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
@@ -1532,6 +1589,13 @@ export class Director {
         p.tz = clamp(car.z - this.op!.dir * lead, -58, 58);
         p.job = defSys.job;
         p.urgency = 1;
+      } else if (coverChase.has(p.num)) {
+        // T-13 cover chase: beaten men hunt the carrier at full tilt.
+        const car = this.L(atk, this.op!.carrierNum);
+        p.tx = clamp(car.x, -33, 33);
+        p.tz = clamp(car.z, -58, 58);
+        p.job = 'COVER CHASE — RUN HIM DOWN';
+        p.urgency = 1;
       } else if (this.kk && this.kk.stage === 'FLIGHT' && p.team === this.receivingSide()) {
         // FIELD THE KICK. The receiving side runs to where the ball will land.
         const lp = this.landingPrediction();
@@ -1544,6 +1608,18 @@ export class Director {
           p.job = 'GET TO WHERE THE BALL IS GOING TO DROP';
         } else { p.tx = home.x; p.tz = home.z; p.urgency = 0.5; }
       } else {
+        /* T-13: the dataset first for the line men too — the authored fold,
+         * pillar and chase beats are richer than the channel map. The
+         * pursuit and kick-fielding branches above are event-driven and
+         * stay exactly as they are. */
+        const sitD = p.team === 'A' ? sitA : sitB;
+        const dsm = sitD ? datasetMark(p.team, p.num, sitD, beat) : null;
+        if (dsm) {
+          p.tx = clamp(dsm.x, -33, 33);
+          p.tz = clamp(dsm.z, -59, 59);
+          p.job = dsm.job;
+          p.urgency = 0.85;
+        } else {
         // HOLD THE LINE. Everyone else keeps the shape connected so a hole wider
         // than the system allows cannot open.
         const ch = DEFENCE_CHANNELS.find((q) => q.num === p.num);
@@ -1558,6 +1634,7 @@ export class Director {
         p.job = defSys.job;
         const react = 1 - clamp((100 - p.attrs.AWA) / 400, 0, 0.22);
         p.urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1);
+        }
       }
 
       // CPU difficulty raises decision quality only, never speed
@@ -1565,7 +1642,7 @@ export class Director {
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
-      steer(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num));
+      steer(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num));
     }
 
     separate(this.live, dt);
@@ -2189,7 +2266,12 @@ export class Director {
 
   kickScored( /* T-03: engine-internal */s: KickState) {
     s.stage = 'RESULT'; s.result = 'SCORED';
-    const isConv = this.lastScorer?.kind === 'TRY';
+    /* T-13. lastScorer was never cleared, so every PENALTY goal for the
+     * rest of the half after any try was scored as a +2 "conversion" —
+     * the try's conversion is the one GOAL kick launched while the
+     * scorer is still the last scorer, i.e. before any restart. */
+    const isConv = s.type === 'GOAL' && this.lastScorer?.kind === 'TRY' && this.conversionPending;
+    if (s.type === 'GOAL') this.conversionPending = false;
     const pts = s.type === 'GOAL' ? (isConv ? POINTS.CONVERSION : POINTS.PENALTY) : POINTS.DROP_GOAL;
     this.teams[s.kicker].score += pts;
     this.events.push({ min: this.minute, team: s.kicker, kind: s.type, text: `${this.teams[s.kicker].nation.short} +${pts} — ${s.kickerName}` });
@@ -2220,6 +2302,7 @@ export class Director {
     this.teams[team].score += POINTS.TRY;
     this.run(team, num).metres += 20;
     this.lastScorer = { num, name: p.name, team, min: this.minute, kind: 'TRY' };
+    this.conversionPending = true;
     this.events.push({ min: this.minute, team, kind: 'TRY', text: `TRY — ${p.name}` });
     this.momentum = clamp(this.momentum + (team === 'A' ? 1 : -1) * 0.3, -1, 1);
     /* T-08: the try is the loudest event of all. T-09: a try EARNED — seven

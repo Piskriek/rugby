@@ -102,7 +102,17 @@ export function steer(p: Live, dt: number, sprint: boolean) {
     const tvx = nx * want * ramp, tvz = nz * want * ramp;
     // one continuous curve — the accel rate is the only difference between
     // a prop and a wing, so sprint never feels like a different game
-    const accel = 9 + (p.attrs.SPD / 100) * 5;
+    let accel = 9 + (p.attrs.SPD / 100) * 5;
+    /* T-13. THE TURN. A beaten defender turning back THROUGH himself cannot
+     * accelerate at the full rate — he plants, redirects, builds again.
+     * Until this, a flipped-180 defender accelerated at the full
+     * exponential rate and ran every break down from behind (+0.8 m/s on
+     * the carrier). The cost applies only to a true about-face (past 135
+     * degrees): at smaller angles a defender is side-stepping, not
+     * turning, and a mild flip every frame under pure pursuit left close
+     * chasers orbiting at two metres, unable ever to make the tackle. */
+    const heading = Math.hypot(p.vx, p.vz);
+    if (heading > 1.2 && (p.vx * nx + p.vz * nz) / heading < -0.707) accel *= 0.35;
     p.vx += (tvx - p.vx) * (1 - Math.exp(-accel * dt));
     p.vz += (tvz - p.vz) * (1 - Math.exp(-accel * dt));
   }

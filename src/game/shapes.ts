@@ -374,13 +374,34 @@ export function callPlay(
     let s = p.reward * 1.4 - p.risk * (1 - arch.riskTolerance) * 2.2;
     if (p.call === 'WIDE_SWEEP' || p.call === 'CROSS_FIELD') s += (widthSlider / 100) * 1.1 + arch.widthBias * 0.8;
     else s -= (widthSlider / 100) * 0.35;
+    /* T-13. The kick appetite is a FIELD-POSITION appetite: full in the own
+     * half (an exit), half in MIDFIELD (a territory option, not the plan),
+     * none in TIGHT (you are where the kicks were trying to get to). With
+     * the bonus flat, TERRITORY_PUNT and BOMB out-scored every strike play
+     * in midfield — and a punt called from midfield is illegal by its own
+     * gate, so the phase silently became a carry: the call sheet said kick,
+     * the game played pod-carry, and the multi-pass move never ran. */
+    const kickZoneMult = zone === 'WIDE' ? 1 : zone === 'MIDFIELD' ? 0.5 : 0;
     if (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK' || p.call === 'CROSS_FIELD') {
-      s += (kickSlider / 100) * 1.3 + arch.kickBias * 0.9;
+      s += kickZoneMult * ((kickSlider / 100) * 1.3 + arch.kickBias * 0.9);
     } else s -= (kickSlider / 100) * 0.4;
     if (p.call === 'POD_TIP') s += shape.tipTendency * 1.4;
     if (p.call === 'TUNNEL_PASS') s += shape.tunnelTendency * 1.4;
     if (zone === 'TIGHT' && (p.call === 'DROP_GOAL' || p.call === 'PICK_AND_GO')) s += 1.1 + clockUrgency * 1.6;
-    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 1.2;
+    /* T-13. +1.2 made the punt the runaway best score in the own half, and
+     * while the CPU carrier could not actually run that was harmless — the
+     * pass artifact moved the team upfield anyway. With an honest carrier
+     * the own half became a kick carousel (72 territory punts a match,
+     * passes 190 -> 100). Real sides exit with the ball too; keep the punt
+     * preferred, but by a margin the carry game can beat. */
+    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 0.45;
+    /* T-13. THE EXIT. A real side takes the first phase or two of a deep
+     * possession with the ball in hand — pods carry, the nine distributes —
+     * and kicks only once the exit stalls. With kick scores flat across
+     * phases, a fielded kick became punt-swap-kick-swap and the multi-phase
+     * pass game never left its own half (103 passes vs the 180 floor). */
+    if (zone === 'WIDE' && phaseNumber <= 1
+      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.9;
     if (p.call === lastCall) s -= 1.5;
     if (s > bestScore) { bestScore = s; best = p; why = `${p.label} — ${p.instruction}`; }
   }

@@ -178,8 +178,15 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   s.pressure = approach(s.pressure, clamp(1 - (nearest?.d ?? 9) / 7 + ring * 0.04, 0, 1), 5, dt);
   /* T-18. A line break is beating the line and coming clear — six metres
    * through a set defensive line (with the beat man recovering behind the
-   * play) is a genuine break; the old nine counted once-a-match accidents. */
-  if (s.gained > 6 && !s.lineBreak) {
+   * play) is a genuine break; the old nine counted once-a-match accidents.
+   * T-13. COMING CLEAR means exactly that: the nearest defender beyond
+   * 3.5 m. A carry that punches six metres through a soft pocket with the
+   * chase already at two metres is a half-break — it was inflating the
+   * count (7.8/team) while converting almost nothing, because there is no
+   * race to win from there. Only the genuine clearance arms the finisher
+   * rules (keeper, sprint, posts line); the pocket punch takes its tackle
+   * like every other hard carry. */
+  if (s.gained > 6 && !s.lineBreak && (nearest?.d ?? 9) > 3.5) {
     s.lineBreak = true;
     d.teams[s.attacking].stats.lineBreaks++;
     d.run(s.attacking, s.carrierNum).breaks++;
@@ -252,7 +259,11 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * zone converted nothing. */
       const line = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
       const distLine = (line - car.z) * s.dir;
-      if (distLine < 1.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { d.scoreTry(); return; }
+      /* T-13. A reaching lunge covers two-plus metres — the old 1.4 m
+       * window sat INSIDE the 1.1 m tackle contact radius, so the tackle
+       * roll always fired first and the red zone converted by attrition
+       * only (16.5 entries a match, 3 tries). */
+      if (distLine < 2.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { d.scoreTry(); return; }
       d.startBreakdown(nearest.num);
       return;
     }
@@ -453,12 +464,36 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
     // T-39. The CPU actually moves the ball: in space with an option, it will
     // pass rather than always carry — once the carry has been committed to.
     /* T-18 chain passing: a carrier in space with an uncovered man moves
-     * it on — that is where multi-pass movements come from. */
+     * it on — that is where multi-pass movements come from.
+     * T-13: but NOT through a broken line — the chain-pass rule is how the
+     * ball was moved off every break the moment pressure dropped, and the
+     * support man took the tackle. Structured attack passes; the finisher
+     * runs. */
     const uncovered = (d.passOpts as any[]).some((o) => !o.covered);
-    if (intent === 'CARRY' && s.pressure < 0.45 && d.passOpts.length && s.heldT > 0.35 && R() < (uncovered ? 0.55 : 0.3)) intent = 'PASS';
+    /* T-13. The old <0.45 pressure gate kept the ball in the first
+     * receiver's hands every time he took it flat (honest pressure at the
+     * catch is 0.5-0.7) — 83 nine-passes a match and only 22 from anyone
+     * else. A marked man with an UNCOVERED teammate outside moves the ball;
+     * that is what running lines are for. Only a covered man in space
+     * (pressure genuinely low) risks the pass. The >0.86 CONTACT conversion
+     * above still forces the tackle when a defender is actually on him. */
+    if (intent === 'CARRY' && !s.lineBreak && d.passOpts.length && s.heldT > 0.35
+      && ((uncovered && s.pressure < 0.75) || s.pressure < 0.45)
+      && R() < (uncovered ? 0.55 : 0.3)) intent = 'PASS';
     // Called passing plays need their runners to have time to get moving —
     // except the nine's distribution, which by its nature goes immediately.
     if (intent === 'PASS' && s.heldT < 0.35 && s.pressure < 0.5 && d.op?.carrierNum !== 9) intent = 'CARRY';
+    /* T-13. THE FINISHER KEEPS THE BALL. A carrier through the line used
+     * to pass 0.15-0.5 s into the break — the cadence beat the moment and
+     * the SUPPORT man took the tackle: 81 breaks, none scored. While the
+     * road ahead is open he backs himself; when the cover arrives the
+     * support game resumes. */
+    if (s.lineBreak && intent === 'PASS') {
+      const defsNow = d.live.filter((q) => q.team !== s.attacking);
+      const roadOpen = !defsNow.some((q) => (q.z - car.z) * s.dir > -0.5
+        && Math.abs(q.z - car.z) < 7 && Math.abs(q.x - car.x) < 4.5);
+      if (roadOpen) intent = 'CARRY';
+    }
     /* T-18/T-24. A kick is a territory decision, not a reflex. Kicks happen
      * from the own half (territory punt, box kick), from a developed phase
      * (bomb, cross-field) or in range (drop goal). Kicking inside the
@@ -514,15 +549,67 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
       return;
     case 'CONTACT': d.startBreakdown(); return;
     default: {
+      /* T-13. THE CPU STEPS. The human has G (step) and F (fend); the CPU
+       * carrier had nothing — a breakaway with a covering defender closing
+       * square-on could only run into the tackle, so the chase ran down
+       * every break from depth (89% caught). The step is the finisher's
+       * answer: same verb, same physics, same skill check as the human
+       * key. It is footwork, not difficulty — the attempt rate does not
+       * scale with the difficulty table. */
+      if (s.stepCd <= 0) {
+        const dTeam0 = d.defending();
+        const near0 = d.live
+          .filter((q) => q.team === dTeam0 && q.sinbin <= 0 && q.beatenT <= 0)
+          .sort((a, b) => Math.hypot(a.x - car.x, a.z - car.z) - Math.hypot(b.x - car.x, b.z - car.z))[0];
+        if (near0 && Math.hypot(near0.x - car.x, near0.z - car.z) < 2.4
+          && Math.abs(near0.x - car.x) < 2.5) {
+          d.doStep(dt);
+        }
+      }
       // T-39. The CPU carrier used to run a fixed 6.3 m/s regardless of his
       // stats — that is why "they run exactly the same speed". Use his own
       // maxSpeed, sprinting when he has space in front.
+      /* T-13. THE FINISHER'S SPRINT. The old gate sprinted only when
+       * pressure < 0.55 — but a LINE BREAK is exactly the moment pressure
+       * is HIGH behind him and the space is AHEAD: every break was run down
+       * by the 6.8 m/s pursuit (46 breaks, 45 caught, none scored). The
+       * gate now reads the road in front: no defender within six metres in
+       * the lane, or the break flag live, and he goes. A wing in the clear
+       * (9+ m/s) outruns the chase; a forward in the clear does not —
+       * which is exactly rugby. */
       const defs = d.live.filter((p) => p.team === d.defending());
       const gx = widestGap(defs, car.x);
-      const targetX = avoidTouch(gx, car.z, s.dir);
-      const spd = maxSpeed(car, true, s.pressure < 0.55, car.stamina);
+      /* T-13. A breakaway from depth aims UPFIELD, not at the corner flag
+       * 70 m away — the old target hugged touch and ran itself out. The
+       * corner is for the last 25 m; before that he cuts for the posts. */
+      let targetX = avoidTouch(gx, car.z, s.dir);
+      const toLineRun = s.dir > 0 ? FIELD.tryZFar - car.z : car.z - FIELD.tryZ;
+      /* T-13. The finisher's line: already WIDE (past the chase) he takes
+       * the corner at the widest gap — that is the winger's try; in midfield
+       * he cuts for the posts off the fullback's shoulder. */
+      if (s.lineBreak && toLineRun > 25 && Math.abs(car.x) < 15) targetX = car.x * 0.6;
+      const spaceAhead = !defs.some((q) => (q.z - car.z) * s.dir > -0.5
+        && Math.abs(q.z - car.z) < 6 && Math.abs(q.x - car.x) < 4);
+      const sprint = s.lineBreak || spaceAhead || s.pressure < 0.55;
+      const spd = maxSpeed(car, true, sprint, car.stamina);
       car.vx = approach(car.vx, clamp(targetX - car.x, -1, 1) * spd * 0.45, 5, dt);
-      car.vz = approach(car.vz, spd * s.dir, 3.8, dt);
+      car.vz = approach(car.vz, spd * s.dir, sprint ? 5.6 : 3.8, dt);
+      /* T-13. THE CARRIER RUNS. think() skips the carrier (the phase owns him)
+       * and placeBound has no OPEN_PLAY branch — so after cpuCarrier set his
+       * velocity, NOTHING integrated his position. The CPU ball-carrier was a
+       * statue: velocity read 7 m/s while he stood on the same blade of grass
+       * until a pass, a place() or a separate() shove moved him. Every break
+       * was run down by defenders who DO steer (82 breaks, 77 caught, 0 tries),
+       * and the metres stat — velocity x dt — counted runs he never took. This
+       * is the `carrier` ownership mode the T-02 tag reserved and nobody
+       * wrote: integrate here, exactly once per frame. */
+      if (car.movedBy && import.meta.env.DEV && car.movedBy !== 'carrier') {
+        console.warn(`[T-02] shirt ${car.num} moved by ${car.movedBy}, then carrier in one frame`);
+      }
+      car.x = clamp(car.x + car.vx * dt, -34.5, 34.5);
+      car.z = clamp(car.z + car.vz * dt, -61, 61);
+      car.movedBy = 'carrier';
+      if (Math.abs(car.vz) > 0.4) car.face = car.vz > 0 ? 1 : -1;
     }
   }
 }

@@ -89,7 +89,12 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
           const gz = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
           const dz = Math.max(4, (gz - s.bz) * s.dir);
           const deg = (Math.atan2(-s.bx, dz) * 180) / Math.PI;
-          aimTo = clamp(deg / 10, -3.5, 3.5);
+          /* T-13. The clamp used to be +-3.5 (35 degrees) — narrower than
+           * the angle a touchline penalty actually needs (a mark 27 m wide
+           * and 24 m out asks for 48 degrees). Every wide-angle shot was
+           * pre-aimed wide of the upright and the CPU kicked ~33% for goal;
+           * the aim is geometric, so let it point where the posts are. */
+          aimTo = clamp(deg / 10, -6.6, 6.6);
           const need = Math.hypot(s.bx, dz) + 4;
           powerTo = clamp((need - 9) / 43, 0.35, 1);
           break;
@@ -122,7 +127,12 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
               powerTo = 0.95 + R() * 0.05;
               fwdForAim = Math.sqrt(Math.max(16, reach * reach - lateral * lateral));
             }
-            const deg = Math.min(55, (Math.atan2(lateral, fwdForAim) * 180) / Math.PI);
+            /* T-13. The 55-degree cap sat under the real angle of a corner
+             * hunt — a penalty 12 m out and central asks for ~75 degrees of
+             * diagonal — so every corner kick was pre-aimed short, crossed
+             * touch 20-40 m upfield and the five-metre lineout (the drive
+             * platform, where red-zone tries come from) never existed. */
+            const deg = Math.min(80, (Math.atan2(lateral, fwdForAim) * 180) / Math.PI);
             aimTo = wide * (deg / 10);
           } else if (s.bz * s.dir < 0 || Math.abs(s.bz) < 20) {
             if (R() < 0.4) {
@@ -144,7 +154,10 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
           }
           break;
       }
-      s.aim = clamp(aimTo, -4.2, 4.2);
+      /* T-13. +-4.2 (42 degrees) sat under the angle a wide penalty or
+       * touchline conversion needs; the case-level clamp above is the
+       * honest one, so this must not re-tighten it. */
+      s.aim = clamp(aimTo, -6.6, 6.6);
       s.power = powerTo;
       s.accuracy = d.kickerAccuracy(s) * (0.8 + diff.reaction * 0.2);
       /* The restart is struck when the formation has actually assembled — the
@@ -297,9 +310,15 @@ export function launch(d: Director, power: number, accuracy: number, wind: numbe
   const dist = d.kickReach(s, power);
 
   // Hang time per type, tuned so the apex stays realistic (g·hang²/8).
+  /* T-13. A goal kick is the HIGHEST arc in the game — real shots at goal
+   * hang ~3 s and cross the bar 3-6 m up on the way down. The old 1.9 s
+   * hang (apex 4.4 m) had the ball descending to ankle height exactly at
+   * the posts for anything beyond 30 m: it failed the crossing test
+   * silently, no SCORE, no MISS, and the kick just died into open play.
+   * CPU teams were taking ~23 shots a match and scoring 6% of them. */
   const hang = s.type === 'GRUBBER' ? 1.0
-    : s.type === 'DROP_GOAL' ? 2.2
-      : s.type === 'GOAL' ? 1.9
+    : s.type === 'DROP_GOAL' ? 2.6
+      : s.type === 'GOAL' ? 2.9
         : s.type === 'BOMB' ? 3.4
           : s.type === 'RESTART' || s.type === 'DROP_OUT' ? 2.9
             : 2.0;   // punt — a flat, chasing territory kick
