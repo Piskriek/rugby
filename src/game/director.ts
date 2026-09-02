@@ -203,6 +203,14 @@ export interface BreakdownState {
   power: { A: number; B: number }; window: number; result: string; resultWhy: string;
   contestMeter: number; meterDir: number; meterOn: boolean; waggle: number;
   commitA: number; commitB: number; advantageOf: number;
+  /* T-05 — the sustained contest. `axis` is the ball on a −1..+1 axis: +1 the
+   * attacking side has cleared everything, −1 the defence is over it. Driven
+   * by the net of the two sides' forces, damped, resolved at ±0.75.
+   * `contestT` is seconds since the shove began. */
+  axis: number; axisVel: number; contestT: number;
+  /** T-05 — seconds the defence has held the ball below −0.5. A jackal with
+   * sustained hands on it is the law's turnover, not a dice roll. */
+  redT: number;
 }
 
 /* ============================ CONFIG ============================ */
@@ -1097,7 +1105,13 @@ export class Director {
          * and his slot is offset past the carrier, so pinning him outright was a
          * 1.5 m jump. Only the tackled carrier himself is pinned exactly. */
         if (q.role === 'CARRIER') {
-          this.place(p, q.x, q.z, 'bound');
+          /* T-02. On the tackle frame the open-play physics already owned this
+           * man — cpuCarrier integrated him, then the radius test ended the
+           * episode — and the slot below was recorded FROM his position. The
+           * pin applies from the next frame; writing him again now would be
+           * the same-frame double-move the ownership contract exists to
+           * prevent. The velocity still dies: he is being brought to ground. */
+          if (!p.movedBy) this.place(p, q.x, q.z, 'bound');
           p.vx = 0; p.vz = 0;
         } else {
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
@@ -1106,6 +1120,7 @@ export class Director {
           const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(q.x - p.x, q.z - p.z)));
           p.x += (q.x - p.x) * k;
           p.z += (q.z - p.z) * k;
+          p.movedBy = 'bound';   // T-02: the ease is a writer too — own it
           if (Math.hypot(q.x - p.x, q.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
         }
         p.face = q.team === s.attacking ? 1 : -1;
@@ -1353,9 +1368,16 @@ export class Director {
    * T-02 — the single sanctioned way for a system other than `steer()` to move a
    * player. Warns in dev when a player is moved twice in one frame by two
    * different systems, which is the root of the teleport bugs.
+   *
+   * The warn measures DISPLACEMENT, not authorship: a set piece handing a
+   * player back at the exact coordinates he already occupies — the breakdown
+   * pinning the tackled carrier where the tackle caught him — is the
+   * sanctioned phase hand-off, not a double move. 0.5 m is half the tackle
+   * radius; a real double-write shoves a man that far and reads on screen.
    */
   place(p: Live, x: number, z: number, who: string) {
-    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who) {
+    const ddx = x - p.x, ddz = z - p.z;
+    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
     }
     p.movedBy = who;
@@ -1395,6 +1417,7 @@ export class Director {
         ch.vz = approach(ch.vz, dep * sp * 0.94, 7, dt);
         ch.x = clamp(ch.x + ch.vx * dt, -34, 34);
         ch.z = clamp(ch.z + ch.vz * dt, -60, 60);
+        ch.movedBy = 'input';   // T-02: input is an integration writer
       }
       separate(this.live, dt);
       return;
@@ -1472,6 +1495,7 @@ export class Director {
         ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 7, dt);
       ctrlHuman.x = clamp(ctrlHuman.x + ctrlHuman.vx * dt, -34.2, 34.2);
       ctrlHuman.z = clamp(ctrlHuman.z + ctrlHuman.vz * dt, -60, 60);
+      ctrlHuman.movedBy = 'input';   // T-02: input is an integration writer
       if (Math.abs(ctrlHuman.vz) > 0.4) ctrlHuman.face = ctrlHuman.vz > 0 ? 1 : -1;
       const sp2 = Math.hypot(ctrlHuman.vx, ctrlHuman.vz);
       ctrlHuman.clipT += dt;

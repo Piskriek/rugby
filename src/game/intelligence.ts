@@ -119,7 +119,13 @@ export function steer(p: Live, dt: number, sprint: boolean) {
 
   p.x = clamp(p.x + p.vx * dt, -34.5, 34.5);
   p.z = clamp(p.z + p.vz * dt, -61, 61);
-  if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer') {
+  /* T-02. Integration writers — the carrier physics, the human input — set a
+   * velocity; this exponential blend is designed to absorb an existing one, so
+   * following them within a frame is a retarget, not a fight. A PLACEMENT is
+   * different: it sets position outright, and steering on top of one is the
+   * same-frame double-move that used to read as teleporting. Warn on that. */
+  if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer'
+    && p.movedBy !== 'carrier' && p.movedBy !== 'input') {
     console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then steer() again in one frame`);
   }
   p.movedBy = 'steer';

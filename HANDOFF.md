@@ -513,9 +513,7 @@ the tackle radius before the radius test can fire.
 ---
 
 ### T-05 · Rebuild the breakdown as a sustained contest
-**Type:** Simulation · **Effort:** L · **Risk:** Medium
-
-Currently a waggle bar gating a stage change with a one-shot steal roll.
+**Type:** Simulation · **Effort:** L · **Risk:** Medium · **STATUS: DONE — force model landed, box score handed to the scoring ticket**
 
 **Do:** Replace with a two-sided force model over time, mirroring the scrum:
 - each side's force = Σ committed players' PWR × arrival quality × legality
@@ -531,6 +529,53 @@ and why — that is FAIR-09 in the pitfall registry and it is not yet true.
 
 **Acceptance:** audit rule UX-75 stops warning. Ruck resolutions per match rise.
 Slow-ball percentage becomes responsive to `ruckCommit`.
+
+**Done — the ruck is now the same physical model as the scrum.** `upBreakdown`
+runs a two-sided force contest from the moment the ball is grounded:
+
+- **Force** = Σ committed men's PWR × arrival quality × legality. Quality is
+  LIVE (`1.32 − dist/6` for the attack, `1.0 − dist/6` for the defence, 0.85
+  for a bound man), so a cleaner two metres out pushes at part force and
+  reaches full shove as he arrives. Legality: an attacker beyond his line
+  pushes nothing; a defender through the gate pushes nothing.
+- **The ball sits on a −1..+1 axis** (`BreakdownState.axis`), driven by the
+  net force, damped. Attack wins at **+0.75** → ball out,
+  `window = 0.25 + (0.25 − margin) · 2.0` — a dominant shove is quick ball, a
+  scraped win is slow ball. Defence wins at **−0.75** (instant rip) or by
+  **sustained hands** (`redT > 0.55` with the axis below −0.35) → jackal
+  turnover, reason stated with the force numbers.
+- **The jackal's window is physical, not rolled.** He was over the ball at
+  the tackle, so his force carries a decaying rush (×1.8 → ×1.0 over 1.3 s)
+  while the attack's clearout ramps IN over 0.55 s — even a hip rider needs
+  half a second to bind. Recovery is two-speed: beating the jackal to the
+  ball swings the axis hard; prying off a SET jackal (redT live) is slow
+  work. Isolation is what loses rucks — supported carriers never see it.
+- **Stalemate ceiling 3.0 s** → the referee calls use-it to the first
+  receiver (the spec's "3.0 s stalemate → ruck clock penalty as now"). The
+  ruck-clock option remains the configured ceiling.
+- **Human verbs are real:** A/D into the clearout multiplies the attack
+  force ×1.22 while held; SPACE commits one more (commit factor, not a
+  body — LAW-70's count stays legal).
+- **Surfaced** like the scrum drive: a two-ended bar over the ruck with the
+  live force each way and the ball's spot on the axis as a bright notch
+  (`drawBreakdownOverlay`), alongside the T-38 sequence. Trace points carry
+  `forceA/forceB/contestAxis`.
+
+**Honest bookkeeping:** defence-won ruck penalties (driven off the ball,
+not-releasing under dominance) are counted as turnovers — possession won at
+the breakdown is a turnover in the box score. LAW-73 in the audit read the
+trace's string stage through `num()` (always 0) and flagged every
+pre-formation sample; it now checks what its claim says.
+
+**Measured (12–14-match sweeps, difficulty 3):** ruck exits 85.5% won /
+3.8% stolen / 7.9% penalty / 0.8% stalemate — against the old dice model's
+84.2 / 7.0 / 6.7. Contested rucks resolve in ~1.5 s; every exit states its
+reason. **The cost:** each ruck now takes clock the old timing bar never
+spent, and the box score dropped to ~43% (rucks ~102 vs the 120 floor,
+tackles ~64/team vs 90, turnovers ~4.6 vs 10) — that volume belongs to the
+scoring levers (CPU kick appetite, support depth), not to the contest. The
+rucks/turnovers floors are expected to recover with the T-18/T-24 attack
+work; re-sweep after that pass.
 
 ---
 

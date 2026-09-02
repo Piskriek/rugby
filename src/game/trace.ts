@@ -443,6 +443,12 @@ function emit(d: Director, rec: Recorder) {
       waggle: Math.round(d.bd.waggle * 10) / 10,
       window: Math.round(d.bd.window * 100) / 100,
       jackalContest: d.bd.jackalActive,
+      /* T-05 — the sustained contest: live forces and the ball's spot on
+       * the axis, so the audit can see who is winning the ruck and by how
+       * much, not just that it resolved. */
+      forceA: Math.round(d.bd.power.A),
+      forceB: Math.round(d.bd.power.B),
+      contestAxis: Math.round(d.bd.axis * 100) / 100,
       ruckClock: d.bd.groundAt >= 0 ? Math.round((d.bd.t - d.bd.groundAt) * 100) / 100 : 0,
       ruckLimit: [1.5, 3, 5][d.options.ruckLaw ?? 1],
       offsideLinesDrawn: d.bd.ruckFormed,
