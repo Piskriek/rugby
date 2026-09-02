@@ -173,6 +173,21 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
        * with three men still inside the line — legal assembly, unlawful
        * kick. Strike only when the nearest receiver is at least 9.5 m
        * back (8 s hard backstop — nobody walks that slowly). */
+      /* SCORING PASS — and the receiving side retreats to earn it. Nothing
+       * used to MOVE them back, so the nearest man loitered at 10.3 m,
+       * gapOk stayed false, and every restart sat in AIM until the ten
+       * second backstop — ten seconds of dead clock, two to four times a
+       * match. The law puts them behind the ten-metre line; they now walk
+       * there at a back-pedal (never teleported), and the whistle comes
+       * when both sides are actually legal. */
+      if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+        const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
+        for (const p of d.live) {
+          if (p.team === s.kicker || p.sinbin > 0) continue;
+          const gap = (p.z - s.bz) * s.dir;
+          if (gap < 10.8) p.z += Math.min(RETREAT, 10.8 - gap) * s.dir;
+        }
+      }
       let gapOk = true;
       if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
         const fwd = s.dir;

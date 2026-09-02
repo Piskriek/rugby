@@ -111,7 +111,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * part of half a second to bind and drive after the carrier lands. The
      * clearout arrives; it is not there on the frame the ruck forms — which
      * is exactly the jackal's window, and exactly why the fight exists. */
-    const atkRamp = Math.min(1, s.contestT / 0.55);
+    const atkRamp = Math.min(1, s.contestT / 0.4);
     const atkF = sideForce(s.crew, atk) * commitF * atkRamp;
 
     if (humanAtk && pressed.has('action')) {
@@ -128,7 +128,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * carrier — no hip rider within three metres — loses that race; a
      * supported one never sees it. This is where breakdown turnovers are
      * earned, not rolled. */
-    const jackalRush = 1 + 0.8 * Math.max(0, 1 - s.contestT / 1.3);
+    const jackalRush = 1 + 1.0 * Math.max(0, 1 - s.contestT / 1.0);
     const defF = sideForce(s.defCrew, dTeam) * (0.78 + diff.reaction * 0.22)
       * (1 + (jackal ? jackal.attrs.AWA : 40) / 350)
       * (s.commitA <= 1 ? 1.22 : 1)    // a one-man ruck is a stealable ruck
@@ -148,7 +148,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * past it — is pried off slowly, because that is what a set jackal is:
      * the fight the defending side wanted. This is where sustained hands
      * becomes a steal instead of a race the attack always wins. */
-    const recover = net > 0 ? (s.redT > 0.15 ? 10.5 : 20.0) : 3.0;
+    const recover = net > 0 ? (s.redT > 0.15 ? 10.5 : 20.0) : 3.6;
     s.axisVel += net * recover * dt;
     s.axisVel *= Math.exp(-0.8 * dt);
     s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
@@ -176,7 +176,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * what makes slow-ball responsive to `ruckCommit`. */
     if (s.axis >= 0.75) {
       const margin = s.axis - 0.75;                     // 0 .. 0.25
-      s.window = clamp(0.25 + (0.25 - margin) * 2.0, 0.25, 0.6);
+      s.window = clamp(0.15 + (0.25 - margin) * 1.4, 0.15, 0.35);
       s.ballOutAt = s.t + s.window;   // T-05: the presentation window starts when the ball is WON
       s.jackalActive = false;
       s.resultWhy = `BALL WON — ${s.crew.length} v ${s.defCrew.length} CLEARED, FORCE ${(atkF / 100).toFixed(1)} v ${(defF / 100).toFixed(1)} kN`;
@@ -184,7 +184,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
     }
     /* DEFENCE WINS — the ball crosses −0.75. A jackal, not a dice: the
      * reason names the numbers, as FAIR-09 asks. */
-    else if (s.axis <= -0.75 || (s.redT > 0.55 && s.axis < -0.35)) {
+    else if (s.axis <= -0.75 || (s.redT > 0.3 && s.axis < -0.35)) {
       s.axis = Math.min(s.axis, -0.75);
       if (s.jackalActive && jackal) {
         d.teams[dTeam].stats.turnovers++;

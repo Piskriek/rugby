@@ -10,6 +10,10 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { ruckDistributor } from '../intelligence';
 import { R } from './rng';
 import { clamp } from './clamp';
+
+/** The calls that exist to be driven — the index set the CPU leans on in
+ * the attacking 22, where a five-metre lineout is a try invitation. */
+const LO_DRIVE_CALLS = [1, 3, 1, 2];
 import { approach } from './approach';
 
 export function upScrum(d: Director, dt: number, input: Input, pressed: Set<string>) {
@@ -211,7 +215,14 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       if (pressed.has('right')) s.callIdx = (s.callIdx + 1) % 4;
       if (pressed.has('action')) { s.stage = 'THROW'; s.t = 0; s.meterOn = true; s.meter = 0; s.meterDir = 1; }
     } else {
-      s.callIdx = Math.floor(R() * 4);
+      /* SCORING PASS — the call reads the field. A five-metre lineout exists
+       * to be driven over; calling MIDDLE/TAIL there at the same rate as a
+       * midfield half-way line threw away the most reliable try in rugby.
+       * In the attacking 22 the CPU leans to the drive calls; further out
+       * the spread stays honest. */
+      const att22 = Math.abs(s.markZ) > 36 && (s.thrower === 'A' ? s.markZ > 0 : s.markZ < 0);
+      const driveIdx = LO_DRIVE_CALLS[Math.floor(R() * LO_DRIVE_CALLS.length)];
+      s.callIdx = att22 && R() < 0.72 ? driveIdx : Math.floor(R() * 4);
       if (s.t > 0.35) { s.stage = 'THROW'; s.t = 0; s.meterOn = true; }
     }
     const c = Director.LO_CALLS[s.callIdx];
@@ -220,7 +231,7 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
     s.call = { targetX: side * (31.2 - Math.abs(c.targetX) * 0.72), label: c.label, jumpers: c.jumpers, kind: c.kind };
     /* T-18. The middle call drives the maul; inside the ten a tail call
      * drives too — a five-metre lineout exists to be driven over. */
-    const nearLine = Math.abs(s.markZ) > 40;
+    const nearLine = Math.abs(s.markZ) > 36;
     s.driveCall = c.kind === 'MIDDLE' || (nearLine && (c.kind === 'TAIL' || c.kind === 'MIDDLE'));
   } else if (s.stage === 'THROW') {
     if (human) {
@@ -382,7 +393,7 @@ export function upMaul(d: Director, dt: number, input: Input, pressed: Set<strin
    * has more shove than a broken-play maul formed around a tackled man.
    * Without the bonus the forces cancelled and a five-metre lineout drive
    * could not reach the line before the referee lost patience. */
-  const lineoutDrive = s.fromLineout ? 1300 : 0;
+  const lineoutDrive = s.fromLineout ? 1900 : 0;
   s.forceA = approach(s.forceA, 2600 + lineoutDrive + d.teams[atk].nation.att.maul * 26 + commit * 320, 2.2, dt);
   s.forceD = approach(s.forceD, 2400 + d.teams[def].nation.att.maul * 24 + (6 - commit) * 300, 1.6, dt);
 

@@ -405,7 +405,7 @@ export class Director {
           z: t === 'A' ? -30 : 30,
           vx: 0, vz: 0, face: t === 'A' ? 1 : -1,
           clip: 'ready', clipT: R() * 2, jitter: R() * 1.7,
-          stamina: 100,
+          stamina: 100, restT: 0,
           size: PLAYER_SIZE[sp.num] ?? 1,
           assignment: 'OPEN_PLAY', job: '',
           tx: 0, tz: 0, urgency: 0.5, bound: false, down: false, carrier: false,
@@ -990,6 +990,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = slot.team === 'A' ? 1 : -1;
         }
         if (set) {
@@ -1015,6 +1016,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           clip(p, s.stage === 'FEED' || s.stage === 'STRIKE' ? 'ninePass' : 'nineSquat');
           p.job = n.team === s.feed ? 'FEED THE BALL IN STRAIGHT' : 'DEFEND THE CHANNEL OFF THE BASE';
         }
@@ -1041,6 +1043,7 @@ export class Director {
         }
         this.place(p, slot.x, slot.z, 'bound');
         p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         if (slot.role === 'THROWER') clip(p, s.stage === 'THROW' || s.stage === 'CONTEST' ? 'lineoutThrow' : 'idle');
         else if (slot.role === 'JUMPER' && contesting) clip(p, Math.abs(slot.x - s.ball.x) < 1.6 ? 'lineoutJump' : 'lineoutStand');
         else if (slot.role === 'LIFTER' && contesting) clip(p, 'lineoutLift');
@@ -1065,6 +1068,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = face;
         }
       };
@@ -1113,6 +1117,7 @@ export class Director {
            * prevent. The velocity still dies: he is being brought to ground. */
           if (!p.movedBy) this.place(p, q.x, q.z, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         } else {
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
@@ -1223,6 +1228,7 @@ export class Director {
             } else {
               this.place(p, f.x, f.z, 'restart');
               p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
               p.face = p.team === s.kicker ? s.dir : -s.dir;
               arrived++;
             }

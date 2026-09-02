@@ -380,6 +380,10 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * absolute rate is calibrated to the real thing. */
   const errorChance = clamp(opt.risk * 0.45 * (1 - d.assists.pass * 0.5), 0.008, 0.18);
   if (R() < errorChance) {
+    /* A spilled pass is a turnover in any box score — the ball changed
+     * hands through an error, which is exactly the "in the tackle and from
+     * errors" family the realism ranges measure alongside steals. */
+    d.teams[d.defending()].stats.turnovers++;
     const strict = d.options.fwdPass ?? 1;
     if (strict < 2 && R() < 0.5) {
       d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
@@ -502,8 +506,15 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
      * other match statistic was LOW. */
     if (intent === 'KICK') {
       const ownHalf = toLine > 50;
+      /* SCORING PASS — the exit needs a carry first. The old gate let a
+       * TERRITORY_PUNT fire on the catch: receive, boot, receive, boot — a
+       * carousel that ate the match clock and starved every volume metric
+       * (rucks, tackles, passes all read half of professional counts).
+       * Real sides take phases into contact before the territory kick,
+       * unless the line is about to swallow them. */
+      const exitEarned = s.phase >= 2 || s.pressure > 0.8;
       const legal =
-        (call === 'TERRITORY_PUNT' && ownHalf) ||
+        (call === 'TERRITORY_PUNT' && ownHalf && exitEarned) ||
         (call === 'BOX_KICK' && s.carrierNum === 9 && ownHalf && s.heldT > 0.5) ||
         (call === 'BOMB' && s.heldT > 1.1 && toLine > 26) ||
         (call === 'CROSS_FIELD' && s.heldT > 0.9 && toLine > 26);
