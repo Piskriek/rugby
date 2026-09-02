@@ -381,7 +381,7 @@ export function callPlay(
      * in midfield — and a punt called from midfield is illegal by its own
      * gate, so the phase silently became a carry: the call sheet said kick,
      * the game played pod-carry, and the multi-pass move never ran. */
-    const kickZoneMult = zone === 'WIDE' ? 1 : zone === 'MIDFIELD' ? 0.5 : 0;
+    const kickZoneMult = zone === 'WIDE' ? 1 : zone === 'MIDFIELD' ? 0.38 : 0;
     if (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK' || p.call === 'CROSS_FIELD') {
       s += kickZoneMult * ((kickSlider / 100) * 1.3 + arch.kickBias * 0.9);
     } else s -= (kickSlider / 100) * 0.4;
@@ -394,7 +394,7 @@ export function callPlay(
      * the own half became a kick carousel (72 territory punts a match,
      * passes 190 -> 100). Real sides exit with the ball too; keep the punt
      * preferred, but by a margin the carry game can beat. */
-    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 0.45;
+    if (zone === 'WIDE' && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB')) s += 0.25;
     /* T-13. THE EXIT. A real side takes the first phase or two of a deep
      * possession with the ball in hand — pods carry, the nine distributes —
      * and kicks only once the exit stalls. With kick scores flat across

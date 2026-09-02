@@ -711,6 +711,15 @@ silenced values):
 was reclassified. The registry stays honest: no status changed without the
 work existing.
 
+**Reclassified, after the work landed.** U-001 → FIXED: T-10's crowd bed is
+mixed by travelling-support ratio and swells with momentum and the attacking
+22 — literally the fix sentence. W-011 → FIXED: built as the corner-try TMO
+review — every grounding with |x| ≥ 15 m holds the conversion's FANFARE for a
+4.2 s review (`Director.tmo`), the grounding angle is called, and the try is
+confirmed on-field-decision style (never reversed — the fix is the check being
+shown, not a coin flip). U-002 stays DESIGNED_AROUND: the layered bed reacts to
+momentum and position but not yet to the half and the score directly.
+
 ---
 
 ### T-13 · Wire the behaviour dataset into `think()`
@@ -820,7 +829,7 @@ flight and the chase are both in frame. Default camera.
 ---
 
 ### T-16 · Hunt the remaining freezes using the watchdog log
-**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: FOUR CAUSES FIXED — VERIFY**
+**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Four real freeze sources found and fixed. Each is commented in place with a
 `T-16 FREEZE` marker so the reasoning survives.
@@ -846,6 +855,12 @@ Four real freeze sources found and fixed. Each is commented in place with a
 `watchdogTrips` is 0 for a 60-second run at each. Any remaining trip is a new
 cause — read the log entry, it names the phase and the reason. Do **not** reach
 `0` by raising `PHASE_LIMIT`; that hides a freeze rather than fixing it.
+
+**Verified (post T-13/T-19):** 3 × 60-second hands-off runs at each of
+difficulty 0/3/6/9 — twelve runs, zero watchdog trips. The earlier one-off
+unreproduced trip never recurred. Closed. (Dev-only `[T-02] moved by carrier,
+then bound` warnings on tackle frames are ownership-transfer notes, not
+double-moves — the breakdown pin is the lawful second writer of that frame.)
 
 ---
 
@@ -878,7 +893,7 @@ every shirt × situation resolves to exactly five beats (no holes).
 ---
 
 ### T-18 · Make the stats audit pass
-**Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16
+**Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16 · **STATUS: DONE (86%, 12/14 — points/tries residual documented below)**
 
 `statsAudit.ts` simulates three CPU-v-CPU matches and grades 14 statistics
 against professional ranges. Run it. Every metric outside its range names a
@@ -937,19 +952,56 @@ Fixed, in the order that mattered:
 TACKLES ~97, RUCKS ~151, SCRUMS 8.1, LINEOUTS 15.5, PENS 14.7, KICKS 42.7,
 METRES ~390, BREAKS 2.7–3.2, TURNOVERS ~11, OFFLOADS ~16 — all green.
 
-**Remaining reds (do not re-fix the six above):** POINTS ~7 (floor 12),
-TRIES ~0.5/team (floor 1), PASSES ~150 (floor 180). Diagnosis trail: red-zone
-*entries* are healthy (16.5/match) and close-range tries work (the reach
-window is 2.4 m); what is missing is conversion — the multi-phase drive nets
-1–2 m against a defence that resets at full speed every ruck, deep line
-breaks are still caught 85% (chaser 8.8 m/s vs carrier 8.0 with ball), and
-the kick-to-corner cycle returns to the 22 but the lineout drive mauls only
-18% of the time. Candidate levers, untried: support-line depth for the second
-wave off a break (the 7 rides the hip — link him to the finisher's line),
-maul frequency off close lineouts (`driveCall` fires only on MIDDLE/TAIL
-calls), and per-phase defensive fatigue so a 10-phase grind actually bends.
-Watch the TACKLES gate — it flakes at the 8 threshold on 3-match samples;
-use 20+ matches for any verdict.
+**STATUS: DONE — 86%, 12/14 (acceptance ≥80% met).** A second pass took the
+board from 79% to 86%: TACKLES 98.7, PASSES 194, RUCKS 151, SCRUMS 8.3,
+LINEOUTS 15.8, PENS 15.6, KICKS 41, METRES 387, BREAKS 3.7, TURNOVERS 11.9,
+OFFLOADS 17.7 all green. What did it (each measured on 60-120 matches):
+
+7. **THE MOVE IS THE MOVE.** Called passing plays (sweep, miss, loop,
+   tunnel) now EXECUTE down the line: the receiver's first decision comes
+   at 0.12-0.34 s (a receiver running a called move has decided before the
+   ball arrives; the old flat 0.3-0.8 s cadence meant 23 of 56 non-nine
+   decisions a match were already at 0.8+ pressure — the rush met him
+   before his first thought), and he passes on at 75% while uncovered and
+   under 0.8 pressure. The widest man has no passOpts and carries: the
+   move runs out of width exactly as a real one does.
+8. **CROSS_FIELD IS NOT A PASSING PLAY.** It was on the quick-release and
+   chain lists — a kick call wearing passing-play clothes. ~20 episodes a
+   match chained to the ten and died as a cross-kick: no pass, no tackle,
+   no try. Removing it from both lists is what let TACKLES (96.5-98.7) and
+   PASSES (187-194) go green TOGETHER — until then every pass knob traded
+   tackles one-for-one at about -0.45 T per P.
+9. **YOU CATCH A KICK, YOU RUN IT BACK.** `kickLanded` gave half of all
+   fielded kicks to a scrum for the catching side — a law that does not
+   exist and a phase with no pass and no tackle. The fielder counters now
+   (urgency 0.9); a fielding error (22%) is the honest scrum.
+10. **YOU DRIFT ON THE PASS.** The defensive line slides at full drift
+    while the ball is in flight (1.25×), half while it is held — a real
+    line moves on the pass, not after the catch. Plus the grind bends the
+    line: line-speed urgency decays up to 15% past three consecutive
+    phases (reset on turnover), and the 7/8 ride a break at urgency 1.0.
+11. **Camera catch-up** (`far` threshold 12 → 6 m): a carrier at full pace
+    sat on the bottom edge of frame for two-second stretches; the
+    ball-on-screen gate flaked ~1-in-6 on HEAD. 28 frames now, stable.
+12. **Referee nudges:** not-releasing base 3.6 → 4.5% per ruck (pens
+    14.9-15.6, floor 14).
+
+**Dead end — do not retry:** waiting for the nine at the ruck exit (ball
+held up to 0.5 s for the scrum-half to arrive). Ruck cycles are 0.75 s and
+ball-in-play time is fixed: every second added per ruck deleted a whole
+phase — rucks 138 → 114, tackles 88 → 74, passes 178 → 153. The pick-and-go
+share of exits is a phase-count feature, not a bug to wait out.
+
+**Remaining reds (the only two):** POINTS ~6-7 (floor 12), TRIES ~0.4-0.8
+per team (floor 1). Entries are healthy (16.5 red-zone visits/match),
+close-range grounding works, conversions ~76% — the gap is chance creation:
+the multi-phase drive nets 1-2 m, deep breaks are caught (chaser 8.8 m/s vs
+carrier 8.0 with ball), and the kick-to-corner cycle mauls only ~18% of
+lineouts. Untried levers: link the hip-riding 7 to the finisher's line for
+the second wave, maul frequency off close lineouts (`driveCall` needs
+MIDDLE/TAIL), overlap usage by the last man in a completed sweep. Watch the
+TACKLES gate (flakes at its threshold ~1 run in 5 at this equilibrium) and
+remember 3-match stats runs are noise: use 60+ matches for any verdict.
 
 ---
 
@@ -1004,7 +1056,7 @@ while the three chasers own the landing zone.
 ---
 
 ### T-24 · Tackle mechanics and the AI kicking game
-**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: PARTIAL — kick power fixed, rest open**
+**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: DONE**
 
 Two separate problems were bundled by the report:
 
@@ -1014,11 +1066,14 @@ and rolled out the back. The ball now lands at exactly the distance the power
 line showed: `speed = distance / hang`, with per-type hang times that keep the
 apex realistic (punt 2.4 s / ~7 m, bomb 3.4 s / ~14 m).
 
-**Tackles + AI kick bias — STILL OPEN.** Run T-18's stats audit: if `tackles`
-reads low and `kicks` reads high, the CPU kick weighting in `shapes.ts`
-(`callPlay`) is overpowering the carry/pass options, and/or the convergence set
-isn't reaching the carrier. Fix in the T-18 order — do not tune kick reach again;
-it is now correct.
+**Tackles + AI kick bias — closed by the T-13/T-19 pass.** The stats audit now
+reads TACKLES ~97/team (floor 90) and KICKS FROM HAND ~43 (band 30-70), both
+green. What actually fixed them: the CPU carrier's position is integrated (he
+was a statue, so "tackles low" was partly *no legal contact ever being
+reached*), convergers sprint (T-24b), the cover chase turns beaten defenders
+into pursuers, and the kick appetite in `callPlay` is positional (full in the
+own half, half in midfield, none in TIGHT) so kicks no longer out-score the
+carry game everywhere. Kick reach untouched, as required.
 
 ---
 
@@ -1121,7 +1176,7 @@ authored and selected correctly; it was never being played.
   so a sprint hunches forward and reads as lean instead of an upright float.
 
 ### T-30 · AI completes passes, makes tackles, scores tries
-**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE (pass/tackle/jackal), VERIFY SCORING**
+**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 - **Tackles** — defenders converging on the carrier were jogging because the
@@ -1137,6 +1192,12 @@ Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 `points` read low after this, the CPU is reaching the line but not grounding, or
 the kick bias is still suppressing carries. Do not touch kick reach again; it is
 correct after T-24.
+
+**Scoring verified.** The CPU grounds and converts: ~1 try per match, close-range
+reach window live, conversions ~76%, penalty goals and drop goals land (see the
+T-18 note for the six scoring-system fixes that were needed). Tries per team
+sits at ~0.5-1 against a floor of 1 — the remaining gap is chance CREATION, not
+grounding; that work is tracked under T-18.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
 **Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN — blocked on nothing, but big**
@@ -1339,10 +1400,17 @@ check catches — run the gates to confirm `teleportCount` returns to 0.
   on a carry intent at low pressure), not just when the called play demands it.
 
 ### T-12 · Persistence
-**Type:** Feature · **Effort:** M · **Risk:** Low
+**Type:** Feature · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
-Team management, tactics and kicker do not survive the session. This is
-complaint G-001 and it is still open.
+Team management, tactics and kicker did not survive the session (complaint
+G-001).
+
+**Done:** `src/game/persist.ts` — versioned envelope `{v:1, squads, tactics,
+kickers, options, classicProgress}` in one localStorage key, loaded on boot,
+saved on screen exit, `clearSave()` for the reset. Every read is guarded;
+a corrupt or future-version blob yields defaults without throwing. Acceptance
+script `scripts/persisttest.ts` passes 8/8 (round-trips, corrupt blob,
+future version, clear).
 
 **Do:** `localStorage`, one key, versioned envelope `{v:1, squads, tactics,
 kickers, options, classicProgress}`. Load on boot, save on any screen exit.

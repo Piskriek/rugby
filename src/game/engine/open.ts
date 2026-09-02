@@ -65,7 +65,17 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * pass. Reset the carry clock for the new man. */
       s.heldT = 0;
       s.protect = 0.2;
-      s.aiTimer = 0.3 + R() * 0.5;
+      /* T-18. THE RELEASE. A receiver running a CALLED passing play has
+       * decided before the ball arrives — he draws and gives inside half a
+       * second. The old flat 0.3-0.8 s cadence meant the rushing defender
+       * met him before his first decision tick: 56 non-nine decisions a
+       * match, 23 of them already at 0.8+ pressure. A carry play keeps
+       * the honest beat. */
+      {
+        const c = (d.lastCall ?? 'POD_CARRY') as PlayCall;
+        const quick = ['WIDE_SWEEP', 'MISS_PASS', 'TUNNEL_PASS', 'LOOPL_PASS', 'POD_TIP', 'SWITCH'].includes(c);
+        s.aiTimer = quick ? 0.15 + R() * 0.22 : 0.3 + R() * 0.5;
+      }
       d.setCtrl(s.attacking, s.carrierNum);
       d.run(s.attacking, s.carrierNum).carries++;
       d.refreshPassOptions();
@@ -416,7 +426,7 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
      * it on in ~0.3 s, long before the converging defence (0.9+ pressure)
      * can force contact. The old 0.45-1.15 s cadence lost that race three
      * times in four and every called pass died as contact. */
-    const passingPlay = ['WIDE_SWEEP', 'MISS_PASS', 'TUNNEL_PASS', 'LOOPL_PASS', 'POD_TIP', 'SWITCH', 'CROSS_FIELD'].includes(call);
+    const passingPlay = ['WIDE_SWEEP', 'MISS_PASS', 'TUNNEL_PASS', 'LOOPL_PASS', 'POD_TIP', 'SWITCH'].includes(call);
     /* T-18. The phase clock runs at the compressed match rate: a backline
      * moves the ball on inside ~0.25 s and even a carry decides inside half
      * a second. The old one-second cadence made every phase three times the
@@ -494,6 +504,16 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
         && Math.abs(q.z - car.z) < 7 && Math.abs(q.x - car.x) < 4.5);
       if (roadOpen) intent = 'CARRY';
     }
+    /* T-18. THE MOVE IS THE MOVE. A called passing play — sweep, miss
+     * pass, loop, tunnel — EXECUTES down the line: each receiver draws his
+     * man and gives it, exactly as a real backline move does, until the
+     * move runs out of width (the widest man has no passOpts and carries)
+     * or the defence is on him (the pressure CONTACT conversions above)
+     * or the line is broken (the finisher rules above). One pass per
+     * phase was the single biggest gap between this sim's pass count and
+     * a real match's: the nine distributed, the ten took contact. */
+    if (passingPlay && intent === 'CARRY' && !s.lineBreak && s.carrierNum !== 9
+      && s.heldT > 0.25 && d.passOpts.length && s.pressure < 0.8 && R() < 0.75) intent = 'PASS';
     /* T-18/T-24. A kick is a territory decision, not a reflex. Kicks happen
      * from the own half (territory punt, box kick), from a developed phase
      * (bomb, cross-field) or in range (drop goal). Kicking inside the
