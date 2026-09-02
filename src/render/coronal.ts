@@ -254,19 +254,54 @@ export const C_CLIPS: Record<string, CClip> = {
   },
 
   tackle: {
+    /* T-31/T-28 — the tackle per PR-02 + R-06 + C-01 + C-03 + S-03/04/06:
+     * a back-in LOAD that drops the hips three frames out, a cubic-out
+     * DRIVE through the shoulder, a ONE-FRAME impact (squash 10%, one
+     * tight key, S-06), a six-frame recovery that spreads, the FOLD
+     * through the hip (rotation, not collapse — C-03), a bounce-out land
+     * with ~8% overshoot (S-03) and a settle back. Limbs are staggered
+     * (S-04): the near arm wraps two frames before the far one, the head
+     * lags the shoulders (headNod on the drive, headTilt — head to the
+     * side — on the fold). Ends in the low braced pose the jackal needs. */
     name: 'tackle', dur: 1.25, loop: false, keys: [
       { t: 0.00, p: P({ crouch: 0.2, lean: 20, aLout: 26, aRout: 27, aLbend: 44, aRbend: 43 }) },
-      { t: 0.13, p: P({ crouch: 0.50, lean: 36, lLbend: 70, lRbend: 68, lLout: 15, lRout: 15,
-        aLout: 34, aLfwd: 30, aLbend: 30, aRout: 35, aRfwd: 30, aRbend: 29,
-        squash: 0.93, width: 1.06 }), e: 'quadIn' },
-      { t: 0.24, p: P({ crouch: 0.44, lean: 52, aLout: 40, aLfwd: 46, aLbend: 20, aRout: 41, aRfwd: 46, aRbend: 19,
-        squash: 1.05, width: 1.10, rootY: 0.02, headNod: 8 }), e: 'expoOut' },
-      { t: 0.46, p: P({ crouch: 0.78, lean: 68, lLbend: 100, lRbend: 98, aLout: 44, aLbend: 44, aRout: 45, aRbend: 43,
-        squash: 0.86, width: 1.14, rootY: -0.34, headTilt: 7 }), e: 'quadIn' },
-      { t: 0.62, p: P({ crouch: 1.0, lean: 80, lLbend: 124, lRbend: 122, aLout: 46, aLbend: 58, aRout: 47, aRbend: 56,
-        squash: 0.74, width: 1.22, rootY: -0.62, headTilt: 11 }), e: 'bounceOut' },
+      { t: 0.09, p: P({ crouch: 0.55, lean: 32, squash: 0.90, width: 1.08, lLbend: 76, lRbend: 74,
+        aLout: 24, aLfwd: -18, aLbend: 58, aRout: 25, aRfwd: -16, aRbend: 56 }), e: 'backIn' },
+      { t: 0.12, p: P({}), e: 'hold' },
+      { t: 0.19, p: P({ crouch: 0.36, lean: 50, squash: 0.97, aLout: 34, aLfwd: 56, aLbend: 18,
+        aRout: 35, aRfwd: 46, aRbend: 24, headNod: 6 }), e: 'cubicOut' },
+      { t: 0.21, p: P({ aRfwd: 58, aRbend: 14 }), e: 'quadOut' },
+      { t: 0.235, p: P({ crouch: 0.46, lean: 58, squash: 0.90, width: 1.16, headTilt: 7,
+        aLout: 44, aLfwd: 58, aLbend: 16, aRout: 45, aRfwd: 58, aRbend: 15 }), e: 'hold' },
+      { t: 0.34, p: P({ crouch: 0.52, lean: 64, squash: 1.03, width: 1.12, headTilt: 6 }), e: 'cubicOut' },
+      { t: 0.52, p: P({ crouch: 0.82, lean: 74, lLbend: 104, lRbend: 100, rootY: -0.34, headTilt: 9,
+        aLout: 44, aLbend: 40, aRout: 45, aRbend: 38 }), e: 'quadIn' },
+      { t: 0.66, p: P({ crouch: 1.06, lean: 86, lLbend: 126, lRbend: 124, aLout: 48, aLbend: 54, aRout: 47, aRbend: 52,
+        squash: 0.72, width: 1.24, rootY: -0.68, headTilt: 12 }), e: 'bounceOut' },
+      { t: 0.80, p: P({ crouch: 1.0, lean: 79, lLbend: 122, lRbend: 120, aLout: 45, aLbend: 52, aRout: 45, aRbend: 50,
+        squash: 0.75, width: 1.20, rootY: -0.60, headTilt: 10 }), e: 'sineOut' },
       { t: 1.25, p: P({ crouch: 1.0, lean: 80, lLbend: 122, lRbend: 120, aLout: 44, aLbend: 56, aRout: 45, aRbend: 54,
         squash: 0.75, width: 1.21, rootY: -0.60, headTilt: 10, breath: 0.8 }), e: 'sineOut' },
+    ],
+  },
+
+  /* T-31 — THE DIVE for the line, per W-15 + R-07: the launch is horizontal
+   * through the centre of gravity (not upward), the body extends full length
+   * in flight, the landing slides on the forearms and chest, and the reach
+   * arm is the last thing to stop. One-shot; the scorer holds the slide
+   * through the fanfare ritual. */
+  dive: {
+    name: 'dive', dur: 1.1, loop: false, keys: [
+      { t: 0.00, p: P({ crouch: 0.45, lean: 55, aLfwd: 70, aLbend: 10, aRfwd: 30, aRbend: 18,
+        lLbend: 62, lRbend: 40, lLlift: 18, headNod: 5 }) },
+      { t: 0.14, p: P({ lean: 84, rootY: 0.22, squash: 1.08, aLfwd: 88, aLbend: 4, aRfwd: 55, aRbend: 10,
+        lLbend: 18, lRbend: 10, lLlift: -6, lRlift: -4, headTilt: 4 }), e: 'expoOut' },
+      { t: 0.30, p: P({ lean: 88, rootY: -0.55, squash: 0.78, width: 1.20, aLfwd: 90, aLbend: 38, aRfwd: 60, aRbend: 34,
+        lLbend: 14, lRbend: 8, headTilt: 6 }), e: 'bounceOut' },
+      { t: 0.62, p: P({ lean: 88, rootY: -0.58, aLfwd: 94, aLbend: 30, aRfwd: 52, aRbend: 30,
+        squash: 0.76, width: 1.22, lLbend: 10, headTilt: 5 }), e: 'sineOut' },
+      { t: 1.10, p: P({ lean: 86, rootY: -0.58, aLfwd: 92, aLbend: 34, aRfwd: 48, aRbend: 36,
+        squash: 0.75, width: 1.21, breath: 0.5, headTilt: 6 }), e: 'sineInOut' },
     ],
   },
 

@@ -491,7 +491,7 @@ refactor — the flake pre-exists, the refactor never degraded it.
 ---
 
 ### T-04 · Opposing-player collision
-**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: PARTIAL — separation done, contact tackle deferred**
+**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: DONE — separation + gates verified (tackles 10-13 per 45-60 s run, ≥ 8; teleports 0 at every difficulty, every run this session)**
 
 `separate()` skipped opposite teams, so players ran through each other.
 
@@ -1237,7 +1237,7 @@ the kick bias is still suppressing carries. Do not touch kick reach again; it is
 correct after T-24.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
-**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN — blocked on nothing, but big**
+**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: SLICE LANDED — tackle rebuilt from the recipe, dive is real; running pass still open**
 
 The pipeline is un-frozen (T-29). Now the clips themselves need to match the
 `animation.ts` dataset (1,100+ points). The user's explicit list:
@@ -1259,6 +1259,32 @@ the gates after each clip: `teleportCount` must stay 0.
 **Acceptance:** watch a full half hands-off. A sprint reads as a sprint, a
 tackle lands with weight, a dive reaches for the line, nothing glides, and no
 two players share a phase.
+
+**Slice landed (this session):**
+1. **The tackle is authored from the dataset now** — PR-02 (back-in load,
+   cubic-out drive, 1-frame impact, 6-frame recovery) + R-06 (shoulder
+   into the hip, arms wrap as the shoulder lands, fold through the hip) +
+   C-01 (10% squash on a single held impact key) + C-03 (rotation, not
+   collapse; head to the side) + S-03/S-04/S-06 (overshoot on the land,
+   near arm wraps two frames ahead of the far one, head lags the
+   shoulders, compress into the impact and spread out of it). Ends in the
+   low braced pose the jackal needs, so the hand-off to the contest
+   reads continuous.
+2. **The dive for the line is a real clip** — W-15/R-07: horizontal
+   launch through the centre of gravity, full-length extension in
+   flight, landing on the forearms with the reach arm last to stop.
+   `scoreTry` plays it on the open-play scorer (a maul try is shoved
+   over, not dived), and the conversion FANFARE holds the scorer where
+   he landed instead of steering him upright mid-slide. Added in all
+   four places: `C_CLIPS`, the `CLIP_MAP`, the selection in
+   `scoreTry`/prepping, no clipSpeed (one-shot).
+3. **Root motion** — already honest since T-29 (cadence locks feet to
+   turf); re-verified via the teleport gate at 0 across the sweeps.
+
+**Still open from the original list:** running (arm opposition, double hip
+bob, heel recovery — the leg foreshortening in the drawer is the weak
+read), and the fatigue pose drift (T-09's stamina model is not yet in the
+poses).
 
 ### T-32 · Conversion ritual after a try (fanfare → walk to tee → kick live)
 **Type:** Feature · **Effort:** M · **Risk:** Low · **STATUS: DONE**
@@ -1318,6 +1344,14 @@ is the spec for polishing them and adding the rest.
 **Do not** add a 3D model or break the flat-fill + dark-outline look. The paper
 is the style, per R-10. Verify against the gates: `teleportCount` stays 0, and a
 watched half keeps the ball readable at all times (R-04).
+
+**Slice landed (this session):** the TURN SNAP HYSTERESIS (dataset
+T-05/T-11) — `isSideOnCam` now flips edge-on past ~63° apparent and back
+to face-on only inside ~55°, with the dead zone between them. A single
+threshold let a swinging cable cam flicker the whole squad front/edge/front;
+the swap is still instant, it just cannot thrash. Remaining: the edge
+profile (E-01..E-15), four-direction paper (T-07), the lying polish
+(L-04..L-09) and edge set pieces (E-12..E-15).
 
 ### T-35 · Pass flight — the ball must fly, not teleport
 **Type:** Bug · **Effort:** M · **Risk:** Medium · **STATUS: DONE**

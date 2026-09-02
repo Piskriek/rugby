@@ -1191,6 +1191,9 @@ export class Director {
         }
         for (const p of this.live) {
           if (p === k || p.sinbin > 0) continue;
+          /* T-31. The man who just dived stays where he landed until the
+           * walk-up — steer() would stand him straight back up mid-slide. */
+          if (p.clip === 'dive') { p.clipT += dt; p.vx = 0; p.vz = 0; continue; }
           p.tx = p.x; p.tz = p.z;
           p.urgency = 0.15;
           p.job = 'WAIT FOR THE CONVERSION';
@@ -2328,6 +2331,13 @@ export class Director {
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
     const p = this.teams[team].players[num - 1];
+    /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
+     * that ends in a slide on the turf, not the grounded pose. Open play
+     * only: a maul try is shoved over the line by eight men, not dived. */
+    if (this.op) {
+      const scorer = this.live.find((q) => q.team === team && q.num === num);
+      if (scorer) { scorer.clip = 'dive'; scorer.clipT = 0; }
+    }
     const tryX = this.op?.carrierX ?? this.ml?.x ?? 0;
     this.teams[team].score += POINTS.TRY;
     this.run(team, num).metres += 20;

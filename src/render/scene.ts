@@ -24,6 +24,7 @@ const CLIP_MAP: Record<string, string> = {
   scrumStrike: 'scrumDrive', scrumCollapse: 'tackle',
   maulBind: 'maulBind', maulDrive: 'maulBind', maulHold: 'scrumBind',
   tackleHit: 'tackle', tackled: 'grounded', jackal: 'jackal',
+  dive: 'dive',
   cleanout: 'cleanout', ruckBind: 'maulBind', offload: 'pass',
   nineSquat: 'ready', nineFeed: 'pass', ninePass: 'pass',
   kickStep: 'kick', refReady: 'refReady', refSignal: 'refSignal',
