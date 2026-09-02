@@ -982,8 +982,8 @@ Fixed, in the order that mattered:
 TACKLES ~97, RUCKS ~151, SCRUMS 8.1, LINEOUTS 15.5, PENS 14.7, KICKS 42.7,
 METRES ~390, BREAKS 2.7–3.2, TURNOVERS ~11, OFFLOADS ~16 — all green.
 
-**Remaining reds (do not re-fix the six above):** POINTS ~7 (floor 12),
-TRIES ~0.5/team (floor 1), PASSES ~150 (floor 180). Diagnosis trail: red-zone
+**Remaining reds — RE-OPENED BY T-05, see below:** POINTS, TRIES,
+PASSES, and now the volume family (rucks/tackles/turnovers). Diagnosis trail: red-zone
 *entries* are healthy (16.5/match) and close-range tries work (the reach
 window is 2.4 m); what is missing is conversion — the multi-phase drive nets
 1–2 m against a defence that resets at full speed every ruck, deep line
@@ -995,6 +995,52 @@ maul frequency off close lineouts (`driveCall` fires only on MIDDLE/TAIL
 calls), and per-phase defensive fatigue so a 10-phase grind actually bends.
 Watch the TACKLES gate — it flakes at the 8 threshold on 3-match samples;
 use 20+ matches for any verdict.
+
+**SCORING PASS (this session) — the levers that moved, and the one that
+didn't.** The T-05 ruck contest spends real clock the timing bar never did,
+and every volume metric dropped with it (rucks ~152 to ~119, tackles ~197
+to ~148 across 20-match sweeps). What was tried, in order of effect:
+
+1. **Stamina now breathes.** The old rates drained every gait faster than
+   any recovery refilled: by midway all thirty sat at ~10% and played at
+   81% speed all match — a flat tax that made fatigue meaningless
+   (defensive stamina averaged 8.8/100 at the old rates). Cost is now
+   effort-weighted (sprint 4.4/s, jog 0.3/s, standing recovers up to
+   ~3.5/s scaled by `restT`), and `placeBound`'s pinned set-piece players
+   recover 2.6/s — a set piece is where a rugby player breathes. Match
+   average sits ~45 with red-zone defences at ~57: fresh defences hold,
+   tired ones bend, which is the differentiation the per-phase-fatigue
+   lever was asking for.
+2. **Restart dead time cut.** Nothing ever moved the receiving side back,
+   so every restart and drop-out sat in AIM until the ten-second backstop
+   (RESTART:AIM was ~20 s a match of dead clock). Receivers now back-pedal
+   to the ten-metre line — the law puts them there — and the whistle comes
+   when both sides are actually legal.
+3. **The exit needs a carry.** `TERRITORY_PUNT` used to fire on the catch:
+   receive, boot, receive, boot. The gate now wants `phase >= 2` or real
+   pressure (`exitEarned` in cpuCarrier), so a possession ends with two
+   carries in it. Phase-1 punts are gone from the trace.
+4. **The lineout drive is a weapon with an aim.** The CPU called lineouts
+   uniformly at random — half the five-metre lineouts ignored the drive.
+   Calls now lean to MIDDLE/TAIL inside the attacking 22 (72%), `nearLine`
+   reaches the full 22, and the drive punch is 1900 (from 1300). Mauls
+   that form from lineouts SCORE — both drives in the probe matches
+   reached the line. They are rare only because red-zone lineouts are
+   rare, which is the volume problem below.
+5. **Turnover bookkeeping is honest now.** A spilled pass and a
+   defence-won ruck penalty are turnovers in any box score; both count.
+
+**The binding constraint, measured: ruck volume is conserved against the
+match clock.** 600 engine seconds divided by (carry ~1.2 s + ruck ~1.7 s +
+kick cycle ~5 s) is ~120 rucks no matter how the possessions are arranged.
+The old 0.7 s timing bar bought volume by not being a contest. To clear
+the 120-ruck / 90-tackle / 180-pass floors with an honest ruck, the *kick
+cycle* is the remaining sink (~34 kicks x ~5 s = a third of the clock, in
+hang, bounce dead-air and chase). Candidate levers for the next pass:
+shorten post-landing dead air (a chased punt caught in flight should
+resume play at once), the drop-out cadence, and — only with the user's
+say-so — the `clockScale` default, which re-prices every calibration since
+T-18.
 
 ---
 
@@ -1059,7 +1105,11 @@ and rolled out the back. The ball now lands at exactly the distance the power
 line showed: `speed = distance / hang`, with per-type hang times that keep the
 apex realistic (punt 2.4 s / ~7 m, bomb 3.4 s / ~14 m).
 
-**Tackles + AI kick bias — STILL OPEN.** Run T-18's stats audit: if `tackles`
+**Tackles + AI kick bias — largely addressed by the scoring pass.** The
+kick appetite itself is in range (34-37/match) and now arrives after the
+carry game (`exitEarned`); the convergence set still reaches the carrier
+(tackles ~148 across 20-match sweeps). The remaining reds are
+volume-family — see the SCORING PASS note under T-18. Run T-18's stats audit: if `tackles`
 reads low and `kicks` reads high, the CPU kick weighting in `shapes.ts`
 (`callPlay`) is overpowering the carry/pass options, and/or the convergence set
 isn't reaching the carrier. Fix in the T-18 order — do not tune kick reach again;
