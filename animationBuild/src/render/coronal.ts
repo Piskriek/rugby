@@ -1,0 +1,630 @@
+/**
+ * PAPER PUPPET RENDERERS
+ * ----------------------
+ *  - drawCoronal   : front / back artwork of the flat cut-out (chest hoop, shirt
+ *                    number on the back, face or hair)
+ *  - drawSidePaper : a TRUE profile card — thin vertical paper strip, one lit arm,
+ *                    one lit leg, dark far-side paper layer behind, profile head
+ *                    with nose wedge, visible forward lean and stride, ball clamped
+ *                    in front of the chest. Not a squashed front puppet.
+ *  - drawLyingPaper: face-up / face-down artwork laid on the turf, foreshortened
+ *                    by the camera height and by the body axis vs the lens.
+ *  - drawPaperActor: dispatch + the fall rotation that tips the standing card
+ *                    over onto its lying artwork seamlessly (pivot at the hip).
+ *
+ * Everything is drawn in metres relative to a ground anchor, converted with
+ * X(m) = m*sc, Y(m) = -m*sc (screen y is down).
+ */
+
+import {
+  Ctx, Pt, Palette, Build, PaperView, OUT, DISPLAY, shade,
+  paperCard, poly, foldTab, crease, ballPaper,
+} from './paper';
+import { Pose } from './clips';
+
+export interface PaperDrawArgs {
+  ctx: Ctx;
+  sx: number; sy: number; sc: number;
+  view: PaperView;
+  pose: Pose;
+  pal: Palette; build: Build;
+  skin: string; hair: string;
+  num: number; seed: number;
+  /** 0 no ball .. 1 clamped */
+  carry: number;
+  /** 0 two-hand carry .. 1 one-hand clamp + fend */
+  carryStyle: number;
+  ballSide: number;
+  ballSpin: number;
+  cap: boolean; tape: boolean;
+  /** screen direction the actor faces (+1 right) — drives fall tipping */
+  spinDir: number;
+  /** ground squash for lying artwork (from camera tilt) */
+  gs: number;
+  /** 0..1 foreshorten of the lying body axis */
+  fore: number;
+  headDir: number;
+  depth: number;
+}
+
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const clampN = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
+
+/**
+ * Stride foot pitch (radians, + = toe up): heel-strike carries the toe up,
+ * mid-stance is flat, toe-off lifts the heel and the swinging foot hangs
+ * toe-down for ground clearance. Derived from the hip/knee channels so every
+ * clip gets correct ankle mechanics for free.
+ */
+export function footPitch(l: number, k: number): number {
+  return clampN(0.52 * l - 0.22 * k, -0.55, 0.5);
+}
+
+function rotPt(px: number, py: number, cx: number, cy: number, ang: number): [number, number] {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const dx = px - cx, dy = py - cy;
+  return [cx + dx * c - dy * s, cy + dx * s + dy * c];
+}
+
+/** apply carry overrides: clamp arm around the ball, fend with the far arm */
+function carryPose(p: Pose, carry: number, cs: number, ballSide: number): Pose {
+  if (carry <= 0.02) return p;
+  const q: Pose = { ...p };
+  const nearR = ballSide >= 0;
+  const twoHand = clamp01(1 - cs * 1.6) * carry;
+  const clampT = carry;
+  // near (carrying) arm wraps the ball
+  if (nearR) {
+    q.aR = lerp(q.aR, 1.32, clampT); q.eR = lerp(q.eR, 1.75, clampT); q.abR = lerp(q.abR, 0.26, clampT);
+  } else {
+    q.aL = lerp(q.aL, 1.32, clampT); q.eL = lerp(q.eL, 1.75, clampT); q.abL = lerp(q.abL, 0.26, clampT);
+  }
+  // far arm: two-hand cradle or stiff-arm fend
+  const farA = lerp(1.28, 1.55, cs);
+  const farE = lerp(1.55, 0.3, cs);
+  const farAb = lerp(0.26, 0.62, cs);
+  const wFar = Math.max(twoHand, cs * carry);
+  if (nearR) {
+    q.aL = lerp(q.aL, farA, wFar); q.eL = lerp(q.eL, farE, wFar); q.abL = lerp(q.abL, farAb, wFar);
+  } else {
+    q.aR = lerp(q.aR, farA, wFar); q.eR = lerp(q.eR, farE, wFar); q.abR = lerp(q.abR, farAb, wFar);
+  }
+  q.ball = Math.max(q.ball, carry);
+  return q;
+}
+
+interface Locals { ctx: Ctx; sc: number; lw: number; seed: number; X: (m: number) => number; Y: (m: number) => number }
+
+function makeLocals(ctx: Ctx, sc: number, seed: number): Locals {
+  return {
+    ctx, sc, seed,
+    lw: Math.min(3.2, Math.max(1.05, sc * 0.021)),
+    X: (m: number) => m * sc,
+    Y: (m: number) => -m * sc,
+  };
+}
+
+function limbCard(L: Locals, x0: number, y0: number, x1: number, y1: number, w: number, fill: string, out: string, lw: number, seed: number, back = 1.1) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const px = (-dy / len) * w * 0.5, py = (dx / len) * w * 0.5;
+  const pts: Pt[] = [
+    [L.X(x0 - px), L.Y(y0 - py)], [L.X(x0 + px), L.Y(y0 + py)],
+    [L.X(x1 + px * 0.82), L.Y(y1 + py * 0.82)], [L.X(x1 - px * 0.82), L.Y(y1 - py * 0.82)],
+  ];
+  paperCard(L.ctx, pts, fill, { lw, out, seed, back, jit: 0.4 });
+}
+
+function disc(L: Locals, x: number, y: number, r: number, fill: string, lw: number, seed: number) {
+  const c = L.ctx;
+  c.beginPath(); c.arc(L.X(x) + 1.1, L.Y(y) + 0.9, r * L.sc, 0, Math.PI * 2);
+  c.fillStyle = '#101018'; c.fill();
+  c.beginPath(); c.arc(L.X(x), L.Y(y), r * L.sc, 0, Math.PI * 2);
+  c.fillStyle = fill; c.fill();
+  c.lineWidth = lw; c.strokeStyle = OUT; c.stroke();
+  void seed;
+}
+
+/* ================================================================== */
+/* CORONAL — front / back                                              */
+/* ================================================================== */
+
+function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const skinD = shade(a.skin, 0.72);
+  const roll = p.roll, twist = p.twist;
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const R = (x: number, y: number): [number, number] => [x * cr - (y - p.hip) * sr * -1, y];
+  // roll applied as a screen rotation about the hip
+  const RP = (x: number, y: number): [number, number] => {
+    const dy = y - p.hip;
+    return [x * cr - dy * sr, p.hip + x * sr + dy * cr];
+  };
+  void R;
+  const shLen = b.torso * Math.cos(Math.min(1.25, Math.max(-0.6, p.lean)) * 0.92);
+  const shY = p.hip + shLen;
+  const tws = Math.sin(twist) * 0.12;
+  const shHalf = b.shW * 0.5 * (0.84 + 0.16 * Math.cos(twist));
+  const hipHalf = b.hipW * 0.5;
+  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
+
+  /* ---- legs ---- */
+  for (const s of [-1, 1] as const) {
+    const l = s < 0 ? p.lL : p.lR;
+    const k = s < 0 ? p.kL : p.kR;
+    const ad = s < 0 ? p.adL : p.adR;
+    const [hx, hy] = RP(s * hipHalf * 0.8, p.hip - 0.02);
+    const kneeX = hx + s * ad * thighLen * 0.9 + Math.sin(l) * 0.045 * s;
+    const kneeY = hy - Math.cos(l) * thighLen;
+    const footX = kneeX + s * ad * 0.05 - Math.sin(l) * 0.02;
+    const footY = kneeY - Math.cos(l - k) * shinLen + Math.sin(Math.max(0, k)) * shinLen * 0.22;
+    limbCard(L, hx, hy, kneeX, kneeY, 0.15 * b.bulk, pal.shorts, OUT, lw, a.seed + s * 3);
+    limbCard(L, kneeX, kneeY, footX, footY, 0.112 * b.bulk, pal.socks, OUT, lw, a.seed + s * 5);
+    // sock turnover band
+    const bx = lerp(kneeX, footX, 0.18), by = lerp(kneeY, footY, 0.18);
+    limbCard(L, bx, by, lerp(kneeX, footX, 0.34), lerp(kneeY, footY, 0.34), 0.12 * b.bulk, pal.trim, OUT, lw * 0.8, a.seed + s * 7, 0.6);
+    // boot: toe toward camera — stride pitch reads as sole flash / lifted heel
+    const bp2 = footPitch(l, k);
+    const lift = Math.max(0, -bp2) * 0.07;
+    const bh = 0.055 + 0.06 * Math.cos(bp2 * 0.9);
+    paperCard(ctx, [
+      [L.X(footX - 0.075), L.Y(footY + lift + bh)], [L.X(footX + 0.075), L.Y(footY + lift + bh)],
+      [L.X(footX + 0.062), L.Y(footY + lift - 0.015)], [L.X(footX - 0.062), L.Y(footY + lift - 0.015)],
+    ], '#1c1c24', { lw, seed: a.seed + s, jit: 0.35 });
+    if (bp2 > 0.12) {
+      ctx.save();
+      ctx.globalAlpha = clamp01(bp2 * 1.6);
+      poly(ctx, [
+        [L.X(footX - 0.06), L.Y(footY + lift + bh * 0.78)], [L.X(footX + 0.06), L.Y(footY + lift + bh * 0.78)],
+        [L.X(footX + 0.05), L.Y(footY + lift + bh * 0.16)], [L.X(footX - 0.05), L.Y(footY + lift + bh * 0.16)],
+      ], '#c9c2b0');
+      ctx.restore();
+    } else {
+      poly(ctx, [
+        [L.X(footX - 0.05), L.Y(footY + lift + 0.02)], [L.X(footX + 0.05), L.Y(footY + lift + 0.02)],
+        [L.X(footX + 0.045), L.Y(footY + lift - 0.005)], [L.X(footX - 0.045), L.Y(footY + lift - 0.005)],
+      ], shade('#1c1c24', 1.7));
+    }
+  }
+
+  /* ---- shorts ---- */
+  const sq: Pt[] = [[-hipHalf - 0.02, p.hip + 0.06], [hipHalf + 0.02, p.hip + 0.06], [hipHalf + 0.01, p.hip - 0.2], [-hipHalf - 0.01, p.hip - 0.2]]
+    .map(([x, y]) => { const q = RP(x, y); return [L.X(q[0]), L.Y(q[1])] as Pt; });
+  paperCard(ctx, sq, pal.shorts, { lw, seed: a.seed + 11, jit: 0.5 });
+  foldTab(ctx, L.X(RP(-hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(-hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
+  foldTab(ctx, L.X(RP(hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
+
+  /* ---- arms ----
+     Paper layering: seen from the FRONT the arm cards are pinned on top of the
+     torso card; seen from the BACK they sit BEHIND it, so the body occludes
+     them and only the outer silhouette of sleeve/forearm/hand shows. */
+  const drawArms = () => {
+    for (const s of [-1, 1] as const) {
+      const aa = s < 0 ? p.aL : p.aR;
+      const e = s < 0 ? p.eL : p.eR;
+      const ab = s < 0 ? p.abL : p.abR;
+      const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
+      const elX = sx0 + s * ab * upLen * 0.85 + Math.sin(aa) * 0.03 * s;
+      const elY = sy0 - Math.cos(aa) * upLen;
+      const hdX = elX - s * Math.sin(e) * foreLen * 0.5 + Math.sin(aa) * 0.02;
+      const hdY = elY - Math.cos(aa - e * 0.8) * foreLen * 0.8;
+      limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, pal.kit, OUT, lw, a.seed + s * 17);
+      limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, a.skin, OUT, lw, a.seed + s * 19);
+      disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? '#e8e2d0' : a.skin, lw * 0.9, a.seed + s);
+      foldTab(ctx, L.X(sx0), L.Y(sy0), 0.09 * sc, 0.045 * sc, pal.kitDark, lw);
+    }
+  };
+  if (!front) drawArms();
+
+  /* ---- torso ---- */
+  const t0 = RP(-hipHalf, p.hip - 0.02), t1 = RP(hipHalf, p.hip - 0.02);
+  const t2 = RP(shHalf + tws, shY), t3 = RP(-shHalf + tws, shY);
+  const torsoPts: Pt[] = [[L.X(t0[0]), L.Y(t0[1])], [L.X(t1[0]), L.Y(t1[1])], [L.X(t2[0]), L.Y(t2[1])], [L.X(t3[0]), L.Y(t3[1])]];
+  paperCard(ctx, torsoPts, pal.kit, { lw: lw * 1.05, seed: a.seed + 13, jit: 0.55, back: 1.6 });
+  // hoops
+  for (const hy of [0.62, 0.44]) {
+    const y = p.hip + shLen * hy;
+    const w = lerp(hipHalf, shHalf, hy) + 0.004;
+    const h0 = RP(-w + tws * hy, y), h1 = RP(w + tws * hy, y);
+    const h2 = RP(w + tws * (hy + 0.1), y + shLen * 0.09), h3 = RP(-w + tws * (hy + 0.1), y + shLen * 0.09);
+    poly(ctx, [[L.X(h0[0]), L.Y(h0[1])], [L.X(h1[0]), L.Y(h1[1])], [L.X(h2[0]), L.Y(h2[1])], [L.X(h3[0]), L.Y(h3[1])]], pal.trim);
+  }
+  crease(ctx, L.X(RP(tws * 0.5, p.hip)[0]), L.Y(RP(tws * 0.5, p.hip)[1]), L.X(RP(tws * 0.6, shY)[0]), L.Y(RP(tws * 0.6, shY)[1]), 0.08, Math.max(1, lw * 0.5));
+  // collar
+  const c0 = RP(-shHalf * 0.42 + tws, shY + 0.015), c1 = RP(shHalf * 0.42 + tws, shY + 0.015);
+  const c2 = RP(shHalf * 0.3 + tws, shY - 0.06), c3 = RP(-shHalf * 0.3 + tws, shY - 0.06);
+  poly(ctx, [[L.X(c0[0]), L.Y(c0[1])], [L.X(c1[0]), L.Y(c1[1])], [L.X(c2[0]), L.Y(c2[1])], [L.X(c3[0]), L.Y(c3[1])]], front ? pal.trim : pal.kitDark, OUT, lw * 0.8);
+
+  if (!front) {
+    // shirt number on the back card
+    const nc = RP(tws * 0.6, p.hip + shLen * 0.52);
+    ctx.save();
+    ctx.translate(L.X(nc[0]), L.Y(nc[1]));
+    ctx.rotate(-roll);
+    ctx.font = `${Math.max(6, 0.3 * sc)}px ${DISPLAY}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(2, lw * 1.4); ctx.strokeStyle = OUT;
+    ctx.strokeText(String(a.num), 0, 0);
+    ctx.fillStyle = pal.trim;
+    ctx.fillText(String(a.num), 0, 0);
+    ctx.restore();
+  }
+
+  if (front) drawArms();
+
+  /* ---- head ---- */
+  const [hdx, hdy] = RP(Math.sin(p.headY) * 0.045 + tws * 0.7, shY + 0.075 + b.headR * 0.98 * Math.cos(p.headP));
+  const hr = b.headR;
+  // neck
+  limbCard(L, tws * 0.6, shY - 0.02, hdx, hdy - hr * 0.55, 0.09, shade(a.skin, 0.85), OUT, lw * 0.9, a.seed + 23, 0.8);
+  disc(L, hdx, hdy, hr, a.skin, lw, a.seed + 29);
+  const hx = L.X(hdx), hy = L.Y(hdy);
+  if (front) {
+    // hair fringe
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = a.hair;
+    ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * (a.cap ? 1.15 : 0.52));
+    if (a.cap) { // scrum cap
+      ctx.fillStyle = shade(pal.kitDark, 0.7);
+      ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * 1.25);
+      ctx.fillStyle = a.skin;
+      ctx.beginPath(); ctx.arc(hx - hr * 0.62 * sc, hy + hr * 0.15 * sc, hr * 0.22 * sc, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hx + hr * 0.62 * sc, hy + hr * 0.15 * sc, hr * 0.22 * sc, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    // face
+    const ey = hy + hr * sc * 0.06;
+    const exo = Math.sin(p.headY) * hr * sc * 0.4;
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx - hr * sc * 0.38 + exo, ey, Math.max(1.4, hr * sc * 0.16), Math.max(1.4, hr * sc * 0.16));
+    ctx.fillRect(hx + hr * sc * 0.22 + exo, ey, Math.max(1.4, hr * sc * 0.16), Math.max(1.4, hr * sc * 0.16));
+    ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(hx - hr * sc * 0.42 + exo, ey - hr * sc * 0.2);
+    ctx.lineTo(hx - hr * sc * 0.14 + exo, ey - hr * sc * 0.16);
+    ctx.moveTo(hx + hr * sc * 0.16 + exo, ey - hr * sc * 0.16);
+    ctx.lineTo(hx + hr * sc * 0.44 + exo, ey - hr * sc * 0.2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hx - hr * sc * 0.16, hy + hr * sc * 0.45);
+    ctx.lineTo(hx + hr * sc * 0.2, hy + hr * sc * 0.45);
+    ctx.stroke();
+  } else {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.restore();
+    // nape
+    poly(ctx, [[hx - hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.34, hy + hr * sc * 1.05], [hx - hr * sc * 0.34, hy + hr * sc * 1.05]], a.cap ? shade(pal.kitDark, 0.7) : a.hair);
+  }
+  void skinD;
+}
+
+/* ================================================================== */
+/* SIDE PROFILE — a true thin paper card                               */
+/* ================================================================== */
+
+function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const kitF = shade(pal.kit, 0.58), skinF = shade(a.skin, 0.6), sockF = shade(pal.socks, 0.55);
+  const shortF = shade(pal.shorts, 0.62), bootF = '#14141b';
+  const lean = Math.min(1.1, Math.max(-0.5, p.lean));
+  const cl = Math.cos(lean), sl = Math.sin(lean);
+  const RL = (x: number, y: number): [number, number] => {
+    const dy = y - p.hip;
+    return [x * cl + dy * sl, p.hip + dy * cl - x * sl];
+  };
+  const shY = p.hip + b.torso * 0.98;
+  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
+  const aN = nearR ? p.aR : p.aL, eN = nearR ? p.eR : p.eL;
+  const aF = nearR ? p.aL : p.aR, eF = nearR ? p.eL : p.eR;
+  const lN = nearR ? p.lR : p.lL, kN = nearR ? p.kR : p.kL;
+  const lF = nearR ? p.lL : p.lR, kF = nearR ? p.kL : p.kR;
+
+  const legChain = (l: number, k: number, ox: number, wT: number, wS: number, cT: string, cS: string, cB: string, out: string | null, seed: number) => {
+    const hx = ox, hy = p.hip - 0.02;
+    const kx = hx + Math.sin(l) * thighLen, ky = hy - Math.cos(l) * thighLen;
+    const fx = kx + Math.sin(l - k) * shinLen, fy = ky - Math.cos(l - k) * shinLen;
+    // ankle mechanics: rotate the boot card through the stride
+    const pitch = footPitch(l, k);
+    const ax = fx, ay = fy + 0.075;
+    const R = (x: number, y: number) => rotPt(x, y, ax, ay, pitch);
+    const bq: [number, number][] = [R(fx - 0.06, fy + 0.1), R(fx + 0.205, fy + 0.1), R(fx + 0.235, fy + 0.005), R(fx - 0.062, fy - 0.01)];
+    const sole: [number, number][] = [R(fx - 0.062, fy - 0.01), R(fx + 0.235, fy + 0.005), R(fx + 0.222, fy + 0.032), R(fx - 0.06, fy + 0.016)];
+    if (out) {
+      limbCard(L, hx, hy, kx, ky, wT, cT, out, lw, seed);
+      limbCard(L, kx, ky, fx, fy, wS, cS, out, lw, seed + 1);
+      paperCard(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB, { lw, seed, jit: 0.35 });
+      poly(ctx, sole.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), shade(cB, 1.9));
+    } else {
+      limbCard(L, hx, hy, kx, ky, wT, cT, cT, lw * 0.7, seed, 0);
+      limbCard(L, kx, ky, fx, fy, wS, cS, cS, lw * 0.7, seed + 1, 0);
+      poly(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB);
+    }
+    return [fx, fy] as const;
+  };
+
+  const armChain = (aa: number, e: number, ox: number, w: number, cU: string, cF: string, out: string | null, seed: number, wrapBall: boolean) => {
+    const [sx0, sy0] = RL(ox, shY - 0.03);
+    const ex = sx0 + Math.sin(aa) * upLen * 0.92, ey = sy0 - Math.cos(aa) * upLen;
+    const fAng = aa + (aa < 1.7 ? e : -e * 0.9);
+    let hx2 = ex + Math.sin(fAng) * foreLen * 0.92, hy2 = ey - Math.cos(fAng) * foreLen;
+    if (wrapBall) {
+      const [bx, by] = RL(0.17, shY - 0.16);
+      hx2 = bx + 0.02; hy2 = by - 0.02;
+    }
+    if (out) {
+      limbCard(L, sx0, sy0, ex, ey, w, cU, out, lw, seed);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, out, lw, seed + 1);
+      disc(L, hx2, hy2, 0.052 * b.bulk, cF === a.skin ? a.skin : cF, lw * 0.9, seed);
+    } else {
+      limbCard(L, sx0, sy0, ex, ey, w, cU, cU, lw * 0.7, seed, 0);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, cF, lw * 0.7, seed + 1, 0);
+    }
+    return [ex, ey] as const;
+  };
+
+  // 1 — far paper layer (dark silhouettes behind the lit card)
+  armChain(aF + 0.12, eF, -0.05, 0.08, kitF, skinF, null, a.seed + 41, false);
+  legChain(lF - 0.1, kF, -0.045, 0.1, 0.068, shortF, sockF, bootF, null, a.seed + 43);
+
+  // 2 — torso strip (narrow paper card, chest bulge on the front edge)
+  const tq: [number, number][] = [
+    [-0.086, p.hip - 0.05], [0.07, p.hip - 0.05], [0.118, p.hip + b.torso * 0.52],
+    [0.074, shY], [-0.082, shY],
+  ].map(([x, y]) => RL(x, y));
+  paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6 });
+  // hoop band across the strip
+  for (const hy of [0.58, 0.42]) {
+    const y0 = p.hip + b.torso * hy;
+    const h: [number, number][] = [[-0.084, y0], [0.112, y0], [0.115, y0 + b.torso * 0.08], [-0.085, y0 + b.torso * 0.08]].map(([x, y]) => RL(x, y));
+    poly(ctx, h.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.trim);
+  }
+  crease(ctx, L.X(RL(0.078, p.hip)[0]), L.Y(RL(0.078, p.hip)[1]), L.X(RL(0.082, shY)[0]), L.Y(RL(0.082, shY)[1]), 0.1, Math.max(1, lw * 0.5));
+  // shorts strip
+  const sqp: [number, number][] = [[-0.095, p.hip + 0.05], [0.088, p.hip + 0.05], [0.098, p.hip - 0.22], [-0.1, p.hip - 0.22]].map(([x, y]) => RL(x, y));
+  paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45 });
+
+  // 3 — near leg (lit, full stride)
+  legChain(lN, kN, 0.012, 0.13 * b.bulk, 0.078 * b.bulk, pal.shorts, pal.socks, '#1c1c24', OUT, a.seed + 53);
+
+  // 4 — head in profile
+  const [hdx, hdy] = RL(0.015, shY + 0.08 + b.headR * 0.95);
+  const hr = b.headR;
+  limbCard(L, RL(0, shY - 0.02)[0], shY - 0.02, hdx - 0.01, hdy - hr * 0.5, 0.064, shade(a.skin, 0.85), OUT, lw * 0.9, a.seed + 57, 0.7);
+  disc(L, hdx, hdy, hr, a.skin, lw, a.seed + 59);
+  const hx = L.X(hdx), hy = L.Y(hdy);
+  // nose wedge
+  poly(ctx, [
+    [hx + hr * sc * 0.72, hy + hr * sc * 0.16],
+    [hx + hr * sc * 1.22, hy - hr * sc * 0.02],
+    [hx + hr * sc * 0.7, hy - hr * sc * 0.24],
+  ], a.skin, OUT, lw * 0.9);
+  // hair cap: back + crown
+  ctx.save();
+  ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.01) * sc, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair;
+  ctx.beginPath();
+  ctx.moveTo(hx - (hr + 0.02) * sc, hy - (hr + 0.02) * sc);
+  ctx.lineTo(hx + hr * sc * 0.42, hy - (hr + 0.02) * sc);
+  ctx.lineTo(hx + hr * sc * 0.18, hy - hr * sc * 0.42);
+  ctx.lineTo(hx - hr * sc * 0.28, hy - hr * sc * 0.3);
+  ctx.lineTo(hx - hr * sc * 0.34, hy + hr * sc * 0.9);
+  ctx.lineTo(hx - (hr + 0.02) * sc, hy + hr * sc * 0.9);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+  ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+  // ear + eye + brow
+  disc(L, hdx - hr * 0.12, hdy - hr * 0.05, hr * 0.24, shade(a.skin, 0.82), lw * 0.7, a.seed + 61);
+  ctx.fillStyle = '#191922';
+  ctx.fillRect(hx + hr * sc * 0.34, hy - hr * sc * 0.06, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+  ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
+  ctx.beginPath();
+  ctx.moveTo(hx + hr * sc * 0.26, hy - hr * sc * 0.28);
+  ctx.lineTo(hx + hr * sc * 0.56, hy - hr * sc * 0.2);
+  ctx.stroke();
+
+  // 5 — deltoid cap gives the profile card shoulder mass, then the near arm
+  const dl: [number, number][] = [[-0.02, shY + 0.03], [0.085, shY + 0.01], [0.098, shY - 0.17], [-0.015, shY - 0.15]].map(([x, y]) => RL(x, y));
+  paperCard(ctx, dl.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kitLight, { lw: lw * 0.9, seed: a.seed + 67, jit: 0.4, back: 1.2 });
+  const wrap = a.carry > 0.4;
+  if (wrap) {
+    const [bx, by] = RL(0.17, shY - 0.16);
+    ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
+  }
+  armChain(aN, eN, 0.02, 0.118 * b.bulk, pal.kit, a.skin, OUT, a.seed + 63, wrap);
+  if (!wrap && a.carry > 0.02) {
+    const [bx, by] = RL(0.15, shY - 0.14);
+    ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
+  }
+  // shoulder fold tab
+  const [tbx, tby] = RL(0.01, shY - 0.03);
+  foldTab(ctx, L.X(tbx), L.Y(tby), 0.1 * sc, 0.045 * sc, pal.kitDark, lw);
+}
+
+/* ================================================================== */
+/* LYING — face-up / face-down on the turf                             */
+/* ================================================================== */
+
+function drawLyingPaper(L: Locals, a: PaperDrawArgs, seeFront: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const gs = a.gs, f = a.fore, hd = a.headDir >= 0 ? 1 : -1;
+  const shHalf = b.shW * 0.5 * gs, hipHalf = b.hipW * 0.5 * gs;
+  const shX = hd * b.torso * 0.95 * f;
+  const headX = hd * (b.torso * 0.95 + b.headR * 1.05) * f;
+  const y = 0.16; // body centreline height off the turf
+
+  // legs
+  const legTo = (kx: number, ky: number, fx2: number, fy2: number, seed: number, soleUp: boolean) => {
+    limbCard(L, -hd * 0.05, y - 0.02, kx, ky, 0.14 * b.bulk * gs + 0.04, pal.shorts, OUT, lw, seed);
+    limbCard(L, kx, ky, fx2, fy2, 0.1 * b.bulk * gs + 0.03, pal.socks, OUT, lw, seed + 1);
+    if (soleUp) {
+      paperCard(ctx, [
+        [L.X(fx2 - 0.07), L.Y(fy2 + 0.05)], [L.X(fx2 + 0.07), L.Y(fy2 + 0.05)],
+        [L.X(fx2 + 0.09), L.Y(fy2 - 0.12)], [L.X(fx2 - 0.05), L.Y(fy2 - 0.12)],
+      ], '#1c1c24', { lw, seed, jit: 0.3 });
+      poly(ctx, [[L.X(fx2 - 0.05), L.Y(fy2 - 0.02)], [L.X(fx2 + 0.07), L.Y(fy2 - 0.02)], [L.X(fx2 + 0.08), L.Y(fy2 - 0.1)], [L.X(fx2 - 0.04), L.Y(fy2 - 0.1)]], '#c9c2b0');
+    } else {
+      paperCard(ctx, [
+        [L.X(fx2 - 0.06), L.Y(fy2 + 0.06)], [L.X(fx2 + 0.1 * hd + 0.06), L.Y(fy2 + 0.06)],
+        [L.X(fx2 + 0.1 * hd + 0.06), L.Y(fy2 - 0.06)], [L.X(fx2 - 0.06), L.Y(fy2 - 0.06)],
+      ], '#1c1c24', { lw, seed, jit: 0.3 });
+    }
+  };
+  if (seeFront) {
+    legTo(-hd * 0.34 * f, y - (hipHalf + 0.14), -hd * 0.66 * f, y - hipHalf * 0.55, a.seed + 71, false);
+    legTo(-hd * 0.42 * f, y + hipHalf * 0.85, -hd * 0.84 * f, y + hipHalf * 1.0, a.seed + 75, false);
+  } else {
+    legTo(-hd * 0.4 * f, y - hipHalf * 0.9, -hd * 0.82 * f, y - hipHalf * 1.05, a.seed + 71, true);
+    legTo(-hd * 0.42 * f, y + hipHalf * 0.8, -hd * 0.86 * f, y + hipHalf * 0.95, a.seed + 75, true);
+  }
+
+  // torso slab
+  const tq: Pt[] = [
+    [-hd * 0.08, y - hipHalf], [-hd * 0.08, y + hipHalf],
+    [shX, y + shHalf * 0.96], [shX, y - shHalf * 0.96],
+  ].map(([x, yy]) => [L.X(x), L.Y(yy)] as Pt);
+  paperCard(ctx, tq, pal.kit, { lw: lw * 1.05, seed: a.seed + 79, jit: 0.55, back: 1.6 });
+  // hoops / number
+  for (const t of [0.55, 0.72]) {
+    const x0 = lerp(-hd * 0.08, shX, t), x1 = lerp(-hd * 0.08, shX, t + 0.1);
+    const w0 = lerp(hipHalf, shHalf, t), w1 = lerp(hipHalf, shHalf, t + 0.1);
+    poly(ctx, [[L.X(x0), L.Y(y - w0)], [L.X(x0), L.Y(y + w0)], [L.X(x1), L.Y(y + w1)], [L.X(x1), L.Y(y - w1)]], pal.trim);
+  }
+  if (!seeFront) {
+    ctx.save();
+    ctx.translate(L.X(lerp(-hd * 0.08, shX, 0.42)), L.Y(y));
+    ctx.rotate(hd > 0 ? Math.PI / 2 : -Math.PI / 2);
+    ctx.font = `${Math.max(6, 0.26 * sc)}px ${DISPLAY}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(2, lw * 1.3); ctx.strokeStyle = OUT;
+    ctx.strokeText(String(a.num), 0, 0);
+    ctx.fillStyle = pal.trim; ctx.fillText(String(a.num), 0, 0);
+    ctx.restore();
+  }
+  // shorts
+  poly(ctx, [
+    [L.X(-hd * 0.08), L.Y(y - hipHalf - 0.02)], [L.X(-hd * 0.08), L.Y(y + hipHalf + 0.02)],
+    [L.X(-hd * 0.3), L.Y(y + hipHalf + 0.02)], [L.X(-hd * 0.3), L.Y(y - hipHalf - 0.02)],
+  ], pal.shorts, OUT, lw);
+
+  // arms
+  if (seeFront) {
+    for (const s of [-1, 1] as const) {
+      const ex = shX - hd * 0.1 * f, ey = y + s * (shHalf + 0.1);
+      const hx2 = shX - hd * 0.3 * f, hy2 = y + s * (shHalf + 0.32);
+      limbCard(L, shX, y + s * shHalf * 0.7, ex, ey, 0.1 * b.bulk, pal.kit, OUT, lw, a.seed + 81 + s);
+      limbCard(L, ex, ey, hx2, hy2, 0.08 * b.bulk, a.skin, OUT, lw, a.seed + 83 + s);
+      disc(L, hx2, hy2, 0.05, a.skin, lw * 0.9, a.seed + s);
+    }
+  } else {
+    for (const s of [-1, 1] as const) {
+      const hx2 = shX + hd * 0.14 * f, hy2 = y + s * 0.13;
+      limbCard(L, shX, y + s * shHalf * 0.6, shX - hd * 0.02, y + s * (shHalf * 0.75), 0.09 * b.bulk, pal.kit, OUT, lw, a.seed + 81 + s);
+      limbCard(L, shX - hd * 0.02, y + s * (shHalf * 0.75), hx2, hy2, 0.075 * b.bulk, a.skin, OUT, lw, a.seed + 83 + s);
+    }
+    if (a.carry > 0.4) ballPaper(ctx, L.X(shX + hd * 0.22 * f), L.Y(y - 0.02), 0.11 * sc, 0.4);
+  }
+
+  // head
+  const hr = b.headR;
+  disc(L, headX, y, hr, a.skin, lw, a.seed + 87);
+  const hx = L.X(headX), hy = L.Y(y);
+  if (seeFront) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair;
+    ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * 0.7);
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx - hr * sc * 0.34, hy - hr * sc * 0.05, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+    ctx.fillRect(hx + hr * sc * 0.2, hy - hr * sc * 0.05, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+    ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(hx - hr * sc * 0.2, hy + hr * sc * 0.42);
+    ctx.lineTo(hx + hr * sc * 0.24, hy + hr * sc * 0.36);
+    ctx.stroke();
+  } else {
+    // head turned sideways: hair crown + profile wedge of face
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.restore();
+    poly(ctx, [
+      [hx + hd * hr * sc * 0.25, hy - hr * sc * 0.72],
+      [hx + hd * hr * sc * 0.95, hy - hr * sc * 0.3],
+      [hx + hd * hr * sc * 0.8, hy + hr * sc * 0.5],
+      [hx + hd * hr * sc * 0.2, hy + hr * sc * 0.6],
+    ], a.skin, OUT, lw * 0.9);
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx + hd * hr * sc * 0.5, hy - hr * sc * 0.12, Math.max(1.3, hr * sc * 0.13), Math.max(1.2, hr * sc * 0.1));
+  }
+  void p;
+}
+
+/* ================================================================== */
+/* dispatch                                                            */
+/* ================================================================== */
+
+export function drawPaperActor(a: PaperDrawArgs) {
+  const { ctx, sc } = a;
+  const L = makeLocals(ctx, sc, a.seed);
+  const p = a.pose;
+  const q = carryPose(p, a.carry, a.carryStyle, a.ballSide);
+  const args: PaperDrawArgs = { ...a, pose: q };
+  ctx.save();
+  ctx.translate(a.sx, a.sy);
+  const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
+  if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
+  const falling = q.fall > 0.01 && q.fall < 0.985;
+  if (falling) {
+    // tip the standing card over about the hip — seamless into the lying art
+    const e = q.fall * q.fall * (3 - 2 * q.fall);
+    const dirSign = edge ? 1 : a.spinDir; // post-mirror local +x is the facing side
+    const spin = e * (Math.PI / 2) * q.fallD * dirSign + Math.sin(q.fall * Math.PI) * 0.06 * dirSign;
+    ctx.translate(0, -q.hip * sc);
+    ctx.rotate(spin);
+    ctx.translate(0, q.hip * sc);
+  }
+  switch (a.view) {
+    case 'front': drawCoronal(L, args, true); break;
+    case 'back': drawCoronal(L, args, false); break;
+    case 'rightEdge': drawSidePaper(L, args, true); break;
+    case 'leftEdge': drawSidePaper(L, args, false); break;
+    case 'lieFaceUp': drawLyingPaper(L, args, true); break;
+    case 'lieFaceDown': drawLyingPaper(L, args, false); break;
+  }
+  ctx.restore();
+}
+
+/** contact shadow: tighter and darker when planted, wide and soft when down */
+export function drawPaperShadow(a: PaperDrawArgs) {
+  const { ctx, sc } = a;
+  const p = a.pose;
+  const down = p.fall > 0.6;
+  const air = Math.max(0, p.hip - 0.94);
+  const rx = down ? 0.95 * sc : (0.3 + a.build.shW * 0.32) * sc * (1 + air * 0.9);
+  const ry = down ? 0.34 * sc : rx * 0.3;
+  const alpha = down ? 0.3 : Math.max(0.14, 0.36 - air * 0.5);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#081008';
+  ctx.beginPath();
+  ctx.ellipse(a.sx + sc * 0.06, a.sy + sc * 0.02, Math.max(2, rx), Math.max(1.5, ry), 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
