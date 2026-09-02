@@ -876,7 +876,7 @@ attacking side retains, "CONTESTED" while the jackal is live. Tied to
 ---
 
 ### T-26 · The scrum-half waiting at the base
-**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: OPEN**
+**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 The nine should be standing at the base of every ruck, hands on the ball, before
 it comes out — not arriving late from a shape mark. Currently his target comes
@@ -892,6 +892,14 @@ empty field.
 **Acceptance:** at every ruck the distributor is visibly at the base before the
 ball is available, and the narrative's ruck countdown reads against a real body.
 
+**Done:** `placeBound`'s BREAKDOWN branch steers the `ruckDistributor` result to
+the base (`contactX ± 1.8`, `contactZ − dir × 1.4`), pins him with the
+`nineSquat` clip and the job "HANDS ON THE BALL — WAIT FOR IT TO COME", and
+releases him only when the ball is out. Ownership is single: `think()` marks him
+bound and does not steer him (the double-move lesson). **Verified by probe**
+(scripts, since removed): 190/190 ruck exits in a hands-off match had the
+distributor within 2.4 m of the base at the moment the ball came out — 100%.
+
 ---
 
 ### T-27 · Five-second choice window at the ruck
@@ -901,8 +909,8 @@ The default ruck clock is now 5.0 s (`ruckLaw` default moved to 2), so the playe
 has a clear five-second window to pick pass, carry or kick before the scrum is
 awarded. The narrative already shows this countdown, colour-banded.
 
-**Open follow-up:** the window is only as legible as T-26 makes it. Land T-26
-before calling this fully polished.
+**Open follow-up:** closed — T-26 has landed and been verified (100% of ruck
+exits have the distributor at the base).
 
 ---
 
@@ -1116,8 +1124,9 @@ green → amber → red. When it hits **0**, the ball is auto-played to the **fl
 still chooses the window length (1.5 / 3 / 5 s); the first-receiver target is
 currently hardcoded to the 10, which is the natural default.
 
-**Follow-up:** make the auto-play target (fly-half) a named setting rather than a
-literal 10, if the player wants e.g. the 12 or a forward pod as first receiver.
+**Follow-up — DONE:** FIRST RECEIVER is now a RULES option (FLY-HALF 10 /
+CENTRE 12 / BACK ROW 8, default 10). The clock-zero release passes the chosen
+shirt to `startOpen`, with a fallback order if he is binned or down.
 
 ### T-39 · Sprint mechanic, per-player stats and size differences
 **Type:** Simulation/Render · **Effort:** M · **Risk:** Low · **STATUS: DONE**

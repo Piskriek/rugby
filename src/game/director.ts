@@ -2756,9 +2756,14 @@ export class Director {
        * "use it" timer, not a penalty: at 0 the nine releases to the 10. */
       if (elapsed > limit) {
         this.clearRuck();
-        this.say(`USE IT — BALL TO THE FLY-HALF`);
+        /* T-38 follow-up: the first receiver is a named option, not a literal
+         * 10 — a side whose autop is the 12 or a back-row pick is a real call.
+         * If the chosen shirt is binned or on the floor, fall back in order. */
+        const frOrder = [[10, 12, 8], [12, 10, 13], [8, 6, 7]][this.options.firstReceiver ?? 0];
+        const fr = frOrder.find((n) => { const q = this.L(atk, n); return q.sinbin <= 0 && !q.down; }) ?? 10;
+        this.say(`USE IT — BALL TO ${this.run(atk, fr).name.toUpperCase()}`);
         const dir = atk === 'A' ? 1 : -1;
-        this.startOpen(atk, s.contactX, s.contactZ - dir * 2.0, 10, s.phase + 1, s.gainLine, 0.75);
+        this.startOpen(atk, s.contactX, s.contactZ - dir * 2.0, fr, s.phase + 1, s.gainLine, 0.75);
         return;
       }
       s.stage = 'RECYCLE';

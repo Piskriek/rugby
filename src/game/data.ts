@@ -406,6 +406,9 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'fwdPass', label: 'FORWARD PASS', values: ['STRICT', 'NORMAL', 'LENIENT'], def: 1, note: 'Judged against the pass vector, not the receiver.', cat: 'RULES' },
   { id: 'advantage', label: 'ADVANTAGE', values: ['SHORT', 'NORMAL', 'LONG'], def: 1, note: 'How long play runs before the referee comes back.', cat: 'RULES' },
   { id: 'ruckLaw', label: 'RUCK CLOCK', values: ['1.5 S', '3.0 S', '5.0 S'], def: 2, note: 'Time to use it before the scrum is awarded. Defaults to 5 seconds so the player has a clear window to choose a pass, a carry or a kick.', cat: 'RULES' },
+  /* T-38 follow-up: who receives the auto-play when the ruck clock runs out.
+   * Was a hardcoded 10; the 12 or the back-row pick are real calls. */
+  { id: 'firstReceiver', label: 'FIRST RECEIVER', values: ['FLY-HALF 10', 'CENTRE 12', 'BACK ROW 8'], def: 0, note: 'When the ruck clock hits zero the nine releases to this man. The fly-half is the natural default.', cat: 'RULES' },
   { id: 'maulLaw', label: 'MAUL LAW', values: ['STOP ONCE', 'STOP TWICE', 'NO LIMIT'], def: 0, note: 'A stalled maul used once is a turnover; used twice is a penalty.', cat: 'RULES' },
   { id: 'fifty22', label: '50:22', values: ['OFF', 'ON'], def: 0, note: 'Anachronistic bonus law. Off for the authentic 1991 feel.', cat: 'RULES' },
   { id: 'sinbin', label: 'SIN BIN', values: ['OFF', 'ON'], def: 1, note: 'Yellow card, ten minutes. Original shipped with it on.', cat: 'RULES' },
