@@ -815,7 +815,7 @@ cause — read the log entry, it names the phase and the reason. Do **not** reac
 ---
 
 ### T-17 · Write the eight outstanding position files
-**Type:** Data · **Effort:** M · **Risk:** None
+**Type:** Data · **Effort:** M · **Risk:** None · **STATUS: DONE**
 
 Delivered and registered: 1, 6, 7, 8, 9, 10, 11 (700 points).
 Delivered but **not yet written to disk**: 2, 3, 4, 12, 13, 14, 15.
@@ -827,6 +827,18 @@ dataset with the openside/blindside roles swapped and the lineout jump moved
 from middle to tail — `lines-f1.ts` already distinguishes them correctly.
 
 **Acceptance:** `datasetReport().percentComplete` reads 100.
+
+**Done:** all eight files authored and registered — pos-02 (hooker: strikes,
+throws, leads the blind cover), pos-03 (tighthead, mirrored from the
+loosehead), pos-04 (blindside lock: MIDDLE jump, engine of the maul), pos-05
+(openside lock, authored from 4 with the swap the ticket prescribes: TAIL
+jump, scrum slot between 2 and 3, chase leaning openside), pos-12 (inside
+centre: the crash ball and the midfield defence's director), pos-13 (outside
+centre: strike runner, drift captain), pos-14 (right wing, mirrored from 11),
+pos-15 (full back: the last line, high ball, counter-attack). Every point
+carries a real instruction and a conflict fallback in the house voice.
+**Verified:** `datasetReport()` reads 100% (1500/1500), problems NONE, and
+every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 

@@ -20,12 +20,20 @@ import { BehaviourPoint, SITUATIONS, SituationId, Coverage, coverageFor, beatsFo
 import { RunLine, linesFor, LineSide } from './lines';
 
 import pos01 from './pos-01';
+import pos02 from './pos-02';
+import pos03 from './pos-03';
+import pos04 from './pos-04';
+import pos05 from './pos-05';
 import pos06 from './pos-06';
 import pos07 from './pos-07';
 import pos08 from './pos-08';
 import pos09 from './pos-09';
 import pos10 from './pos-10';
 import pos11 from './pos-11';
+import pos12 from './pos-12';
+import pos13 from './pos-13';
+import pos14 from './pos-14';
+import pos15 from './pos-15';
 
 import LINES_F1 from './lines-f1';
 import LINES_F2 from './lines-f2';
@@ -36,12 +44,20 @@ import LINES_BACKS from './lines-backs';
 /** Every shirt whose hundred points have been authored and delivered. */
 export const POSITION_FILES: Array<{ position: number; name: string; points: BehaviourPoint[] }> = [
   { position: 1, name: 'LOOSEHEAD PROP', points: pos01 },
+  { position: 2, name: 'HOOKER', points: pos02 },
+  { position: 3, name: 'TIGHTHEAD PROP', points: pos03 },
+  { position: 4, name: 'LOCK (BLINDSIDE)', points: pos04 },
+  { position: 5, name: 'LOCK (OPENSIDE)', points: pos05 },
   { position: 6, name: 'BLINDSIDE FLANKER', points: pos06 },
   { position: 7, name: 'OPENSIDE FLANKER', points: pos07 },
   { position: 8, name: 'NUMBER 8', points: pos08 },
   { position: 9, name: 'SCRUM-HALF', points: pos09 },
   { position: 10, name: 'FLY-HALF', points: pos10 },
   { position: 11, name: 'LEFT WING', points: pos11 },
+  { position: 12, name: 'INSIDE CENTRE', points: pos12 },
+  { position: 13, name: 'OUTSIDE CENTRE', points: pos13 },
+  { position: 14, name: 'RIGHT WING', points: pos14 },
+  { position: 15, name: 'FULL BACK', points: pos15 },
 ];
 
 export const BEHAVIOUR_POINTS: BehaviourPoint[] = POSITION_FILES.flatMap((f) => f.points);
