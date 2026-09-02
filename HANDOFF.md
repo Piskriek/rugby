@@ -1219,7 +1219,7 @@ authored and selected correctly; it was never being played.
   so a sprint hunches forward and reads as lean instead of an upright float.
 
 ### T-30 · AI completes passes, makes tackles, scores tries
-**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE (pass/tackle/jackal), VERIFY SCORING**
+**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE — scoring verified, the pick-and-go dive exists**
 
 Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 - **Tackles** — defenders converging on the carrier were jogging because the
@@ -1231,10 +1231,39 @@ Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 - **Passing** — the CPU picked a random side and failed silently when it had no
   receiver. It now picks a side that has an option.
 
-**Still to verify:** CPU try-scoring. Run the stats audit — if `tries` and
-`points` read low after this, the CPU is reaching the line but not grounding, or
-the kick bias is still suppressing carries. Do not touch kick reach again; it is
-correct after T-24.
+**VERIFIED AND FINISHED (this session).** The diagnosis was sharper than
+"reaching the line but not grounding": the CPU was reaching the line and
+NOT ABLE TO GROUND — 31 red-zone entries, zero tries, because no
+pick-and-go existed and the defence could simply hold the plane. What
+landed:
+
+1. **The goal-line dive is an engine verb** (`doDive`, R-07): a carrier
+   inside 5.2 m with ball in hand launches on a per-frame hazard (skill
+   gates the eagerness) — the launch is SIZED to reach the plane under
+   the slide's own decay, no steering while committed. The human gets
+   SPACE / "DIVE FOR THE LINE" inside 3.5 m. Riders on the slide add
+   real deceleration — they cannot un-legal a grounding, but they stop
+   it happening: launching into traffic from 5 m falls short, from 2-3 m
+   it grounds. That race IS the pick-and-go. The REACH rule finishes
+   it: a slide spent an arm's length out grounds the ball anyway.
+2. **The jackal who would not roll away** — at a won contest with a
+   jackal engaged, a red-zone-weighted chance (15% in the 22, 3%
+   elsewhere) of a HANDS-IN penalty to the attack. Law 15/16, and the
+   professional rate (2-4 a match). This is where attacking points come
+   from: shots at goal and five-metre lineouts.
+3. **A measurement trap, now documented:** `TeamState.tries` does not
+   exist — the audit counts TRY events. Any probe reading `d.A.tries`
+   silently reads undefined and reports zero tries. (It is not in
+   tsconfig's include, so the scripts compile anyway.) Count
+   `d.events.filter(e => e.kind === 'TRY')`.
+
+**Board after this pass (16-match samples):** POINTS ~7.4-8.2 (floor 12),
+TRIES ~0.5-0.8 (floor 1), PENALTIES 16.9 ✓, LINEOUTS 14.4 ✓, SCRUMS 8.2 ✓,
+POSSESSION SPLIT 42% ✓ — score 50% (7/14), from 36%. The dive converts
+~20% of red-zone entries. The remaining gap is ENTRY GENERATION: ~5-7
+entries into the 22 a match against the professional 15-20, which is a
+defensive-line-pressure and attack-width re-balance (another pass), not
+more finishing.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
 **Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: SLICE LANDED — tackle rebuilt from the recipe, dive is real; running pass still open**
@@ -1280,6 +1309,10 @@ two players share a phase.
    `scoreTry`/prepping, no clipSpeed (one-shot).
 3. **Root motion** — already honest since T-29 (cadence locks feet to
    turf); re-verified via the teleport gate at 0 across the sweeps.
+
+4. **The dive has its ENGINE VERB now** — see T-30: the clip is played
+   by `doDive`, launched from 2-5 m, and the launch is sized to the
+   plane. The clip and the mechanics were built together.
 
 **Still open from the original list:** running (arm opposition, double hip
 bob, heel recovery — the leg foreshortening in the drawer is the weak

@@ -175,6 +175,21 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * (axis at the threshold, defence still dragging) is slow ball. This is
      * what makes slow-ball responsive to `ruckCommit`. */
     if (s.axis >= 0.75) {
+      /* THE JACKAL WHO WOULD NOT ROLL AWAY. He had his hands on the ball,
+       * the clearout arrived, and the law gave him a moment to release —
+       * which he spent holding on. In the red zone the referee is watching
+       * for exactly this: it is where the attacking side's penalties come
+       * from, and with them the shot at goal and the five-metre lineout.
+       * The rate is honest to the professional count (2-4 a match, mostly
+       * in the 22), not a raffle on every ruck. */
+      if (s.jackalActive && jackal) {
+        const redZone = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 22;
+        if (R() < (redZone ? 0.15 : 0.03)) {
+          s.resultWhy = 'NOT ROLLING AWAY — THE JACKAL HELD ON TOO LONG';
+          d.beginPenalty(atk, REFEREE_CALLS.HANDS_IN, jackal.num);
+          return;
+        }
+      }
       const margin = s.axis - 0.75;                     // 0 .. 0.25
       s.window = clamp(0.15 + (0.25 - margin) * 1.4, 0.15, 0.35);
       s.ballOutAt = s.t + s.window;   // T-05: the presentation window starts when the ball is WON

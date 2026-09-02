@@ -46,7 +46,7 @@ import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown } from './engine/breakdown';
-import { upOpen, contextLabel, doStep, doFend, doDummy, doPass, cpuCarrier } from './engine/open';
+import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
 /* ============================ INPUT ============================ */
 
@@ -159,6 +159,10 @@ export interface OpenPlayState {
   gained: number; toLine: number; z: number; pressure: number; phase: number;
   lineBreak: boolean; current: { label: string };
   burst: number; burstCd: number; stepCd: number; fendCd: number;
+  /** T-31/T-30 — seconds of committed goal-line dive left (R-07: launch
+   * from 2-3 m out). While live, the launch was the commitment: no
+   * steering, momentum carries him the last metre. */
+  dive: number;
   originZ: number; originX: number;
   aiTimer: number; aiIntent: string; aiPlay: string; aiPhasePlan: number;
   /** T-18: defenders who have already had their one slip-roll this episode */
@@ -498,6 +502,7 @@ export class Director {
         if (mode === 'KICK') return { key: 'SPACE', label: 'KICK', act: 'kick' };
         if (mode === 'CONTACT') return { key: 'SPACE', label: 'TAKE THE TACKLE', act: 'contact' };
         if (mode === 'CARRY') return { key: 'SPACE', label: 'SPRINT', act: 'run' };
+        if (this.op.toLine < 3.5 && this.op.pressure < 0.97) return { key: 'SPACE', label: 'DIVE FOR THE LINE', act: 'dive' };
         if (this.op.pressure > 0.72) return { key: 'SPACE', label: 'TAKE THE TACKLE AND OFFLOAD', act: 'contact' };
         if (this.op.toLine < 28 && this.op.phase > 3) return { key: 'SPACE', label: 'GO FOR THE LINE', act: 'run' };
         if (this.op.pressure < 0.3 && this.passOpts.length) return { key: 'SPACE', label: `PASS TO ${this.passOpts[0].player.num}`, act: 'pass' };
@@ -517,6 +522,7 @@ export class Director {
         if (this.op) this.startKick(this.op.attacking, 'PUNT', { x: this.op.carrierX, z: this.op.carrierZ }, this.op.carrierNum);
         return;
       case 'contact': if (this.op) this.startBreakdown(); return;
+      case 'dive': if (this.op) doDive(this); return;
       case 'tackleDive':
         if (this.op) {
           const car = this.L(this.op.attacking, this.op.carrierNum);
@@ -1854,7 +1860,7 @@ export class Director {
       gained, toLine: Math.abs(dir * 50 - z), z, pressure: 0, phase,
       lineBreak: false,
       current: { label: '' },
-      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0,
+      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0, dive: 0,
       originZ: z, originX: x,
       /* T-18. The first decision comes after the carrier has actually taken the
        * ball to the line — not on the frame it arrived. `protect` is now opt-in
@@ -1951,6 +1957,7 @@ export class Director {
 
 
   doDummy() { /* T-03: engine/open */ return doDummy(this); }
+  doDive() { /* T-03: engine/open */ return doDive(this); }
 
 
   /**

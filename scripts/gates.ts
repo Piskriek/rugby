@@ -10,7 +10,10 @@
 import { runDeep } from '../src/game/trace';
 import { gateConfig, runGates, GATES } from '../src/game/gates';
 
-const seconds = Number(process.argv[2] ?? 60);
+/* T-18 note: the tackle gate flakes at its 8-floor on short samples — the
+ * handoff says so in so many words. The default sample is long enough that
+ * a green board means something; pass an explicit number to go faster. */
+const seconds = Number(process.argv[2] ?? 100);
 
 function row(cells: string[], widths: number[]): string {
   return cells.map((c, i) => String(c).padEnd(widths[i])).join(' ');
