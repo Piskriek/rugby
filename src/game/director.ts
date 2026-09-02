@@ -40,6 +40,8 @@ import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul } from './engine/setpieces';
+import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
+import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 
 /* ============================ INPUT ============================ */
 
@@ -675,7 +677,7 @@ export class Director {
    * (the bus itself and the sequencer state live here; the drain policy and
    * the commentary state machine live in engine/commentary.ts — T-03) */
   eventBus: BroadcastEvent[] = [];
-  private emitEv(e: BroadcastEvent) { if (this.eventBus.length < 24) this.eventBus.push(e); }
+  emitEv(e: BroadcastEvent) /* T-03: engine-internal */ { if (this.eventBus.length < 24) this.eventBus.push(e); }
   /** Everything that happened this frame, for presentation only. */
   frameEvents: BroadcastEvent[] = [];
   /* T-10 — the audio layer. Presentation only; reads the same frameEvents
@@ -702,18 +704,8 @@ export class Director {
   showHint(text: string, secs = 4) { this.hint = text; this.hintUntil = this.t + secs; }
 
   /** Every law is explained in one line the first time it is applied. */
-  lawCall(key: string, call: string, team: 'A' | 'B') {
-    this.refSignal = 1.8;
-    this.refSignalText = call;
-    /* T-10 — every law call has a whistle. */
-    this.audio.whistle('LONG');
-    this.teams[team].stats.penaltiesConceded++;
-    this.say(call);
-    if (!this.lawsExplained.has(key)) {
-      this.lawsExplained.add(key);
-      this.showHint(`LAW — ${call}`, 5);
-    }
-  }
+  lawCall(key: string, call: string, team: 'A' | 'B') { /* T-03: engine module */ return lawCall(this, key, call, team); }
+
 
   shake(a: number) { this.shakeT = Math.max(this.shakeT, a); }
 
@@ -3316,86 +3308,23 @@ export class Director {
 
   /** Advantage is played wherever possible. Rage knew: penalties are not fun. */
   /** T-07 — when a card is shown. A player is off the field for ten match-minutes. */
-  private card(team: 'A' | 'B', num: number, reason: string) {
-    const p = this.L(team, num);
-    if (!p || p.sinbin > 0) return;
-    p.sinbin = 600;
-    this.emitEv({ t: this.t, type: 'CARD', x: p.x, z: p.z });
-    const name = this.teams[team].players[num - 1]?.name ?? `SHIRT ${num}`;
-    this.banner_(`YELLOW CARD — ${num} ${name}`);
-    this.say(`YELLOW CARD — ${num} ${name} — ${reason}`);
-    this.showHint(`YELLOW CARD ${num} (${name}) — DOWN TO 14 FOR TEN MINUTES`, 5);
-  }
+  card(team: 'A' | 'B', num: number, reason: string) { /* T-03: engine module */ return card(this, team, num, reason); }
+
 
   /** Repeat-offence memory, keyed by side and shirt, stored in match seconds. */
-  private offenceLog = new Map<string, number>();
+  offenceLog = new Map<string, number>(); /* T-03: engine-internal */
 
-  beginPenalty(team: 'A' | 'B', call: string, offenderNum: number, free = false) {
-    const opp: 'A' | 'B' = team === 'A' ? 'B' : 'A';
-    /* T-08: a scrum penalty is a story beat — the bus records it even where
-     * no camera reaction is attached yet. */
-    if (this.phase === 'SCRUM') {
-      const fp = this.focusPoint();
-      this.emitEv({ t: this.t, type: 'SCRUM_PEN', x: fp.x, z: fp.z });
-    }
-    this.lawCall(call.replace(/[—-].*$/, '').trim(), call, opp);
-    /* THE FREEZE BUG.
-     * A penalty could be awarded from inside upBreakdown / upScrum / upMaul while
-     * players were still flagged `down` or `bound`. think() skips any player in
-     * that state, so those men never moved again — and if the new carrier was one
-     * of them the whole match locked up. Every penalty now fully releases the
-     * cast and tears down the phase it interrupted, before anything else.
-     *
-     * T-18: the MARK is captured first. Reading focusPoint() after releaseAll
-     * always returned {0,0} — every penalty in the match was taken from the
-     * centre spot, so nobody was ever in goal range and a kick to touch had
-     * 35 m of lateral ground to cover from midfield. */
-    const mark = this.focusPoint();
-    this.releaseAll();
+  beginPenalty(team: 'A' | 'B', call: string, offenderNum: number, free = false) { /* T-03: engine/laws */ return beginPenalty(this, team, call, offenderNum, free); }
 
-    /* T-07 — card logic.
-     * A high tackle is a card on its own. Anything else escalates when the same
-     * shirt offends again within ten match-minutes. Placeholder offender numbers
-     * (some call sites pass a rough shirt) make the repeat attribution approximate;
-     * the card itself is what matters. */
-    if (!free && offenderNum > 0) {
-      const now = (this.half - 1) * 40 * 60 + this.clock;
-      const key = `${opp}:${offenderNum}`;
-      const last = this.offenceLog.get(key);
-      const highTackle = call.includes('HIGH');
-      const repeat = last !== undefined && now - last < 600;
-      if (highTackle || (repeat && R() < 0.7)) {
-        this.card(opp, offenderNum, highTackle ? 'HIGH TACKLE' : 'REPEAT OFFENCE');
-      }
-      this.offenceLog.set(key, now);
-    }
-    const f = { x: Number.isFinite(mark.x) ? mark.x : 0, z: Number.isFinite(mark.z) ? mark.z : 0 };
-    this.pendingPenalty = { team, x: f.x, z: f.z, free };
-    this.advantage = free ? 0 : [1.2, 2.6, 4.2][this.options.advantage ?? 1];
-    this.advantageTeam = team;
-    if (this.advantage > 0) {
-      this.say('ADVANTAGE — PLAY ON');
-      this.showHint('ADVANTAGE — GAIN GROUND AND PLAY CONTINUES', 2.4);
-      this.possession = team;
-      this.startOpen(team, f.x, f.z, this.op?.carrierNum ?? 9, 1, 0, 0.6);
-      return;
-    }
-    this.resolvePenalty();
-  }
 
-  private resolvePenalty() {
-    const p = this.pendingPenalty;
-    this.pendingPenalty = null;
-    if (!p) return;
-    this.quickTap = true;
-    this.penaltyChoices(p.team, p.x, p.z, p.free);
-  }
+  resolvePenalty() { /* T-03: engine module */ return resolvePenalty(this); }
+
 
   quickTap = false;
   /** set just before a penalty kick to touch so the aim logic strikes for the line */
   penaltyTouchKick = false;
 
-  private penaltyChoices(team: 'A' | 'B', x: number, z: number, free: boolean) {
+  penaltyChoices(team: 'A' | 'B', x: number, z: number, free: boolean) {
     const goalCalls = this.slider(team, 'goalCalls') / 100;
     const dir = team === 'A' ? 1 : -1;
     const dist = Math.abs((dir > 0 ? 50 : -50) - z);
@@ -3428,37 +3357,14 @@ export class Director {
     this.startOpen(f.team, f.x, f.z, 9, 1);
   }
 
-  private endHalf() {
-    if (this.half === 1) {
-      this.say(`HALF TIME. ${this.teams.A.nation.short} ${this.teams.A.score} — ${this.teams.B.score} ${this.teams.B.nation.short}`);
-      this.banner_('HALF TIME');
-      this.paused = true;
-      this.half = 2;
-      this.clock = 0;
-      this.addedTime = 0;
-      /* T-18. In a CPU-v-CPU match nobody presses the "SECOND HALF" button —
-       * the half-time freeze lasted forever, and every simulated "match" was
-       * one half plus three-quarters of the engine's time budget spent
-       * frozen at the banner. That single dead span was why every box-score
-       * statistic read at half strength. Resume by itself after a beat. */
-      if (!this.isHuman('A') && !this.isHuman('B')) {
-        this.holdTimer = 2.5;
-      }
-      return;
-    }
-    this.endMatch();
-  }
+  endHalf() { /* T-03: engine module */ return endHalf(this); }
 
-  resumeSecondHalf() {
-    this.paused = false;
-    this.startKick(this.teams.A.score >= this.teams.B.score ? 'B' : 'A', 'RESTART', { x: 0, z: 0 });
-  }
 
-  private endMatch() {
-    this.over = true;
-    this.commentate('GENERAL', '— AND THAT IS FULL TIME');
-    this.banner_(`FULL TIME  ${this.teams.A.nation.short} ${this.teams.A.score} — ${this.teams.B.score} ${this.teams.B.nation.short}`);
-  }
+  resumeSecondHalf() { /* T-03: engine module */ return resumeSecondHalf(this); }
+
+
+  endMatch() { /* T-03: engine module */ return endMatch(this); }
+
 
   /* ============================ REPLAY ============================ */
 
