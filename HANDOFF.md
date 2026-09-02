@@ -447,7 +447,7 @@ warning within a second, alongside the encroachment the audit already flags.
 ---
 
 ### T-03 · Split director.ts into modules
-**Type:** Refactor · **Effort:** L · **Risk:** Medium
+**Type:** Refactor · **Effort:** L · **Risk:** Medium · **STATUS: IN PROGRESS (2 of 11 modules)**
 
 2600 lines. Do it behind T-01 and T-02 so regression is detectable.
 
@@ -470,6 +470,17 @@ director.ts                 state + update() orchestration only
 
 **Rule:** no behaviour change. Run the gates after each extraction. If a gate
 moves, stop and find out why before continuing.
+
+**Progress:** the pattern is established and two modules are out —
+`engine/camera.ts` (updateCamera, cableRig, the framing state; Director keeps
+a one-line delegate and the state fields) and `engine/commentary.ts`
+(commentate, the T-09 sequencer; the bus and sequencer state stay in
+Director), plus `engine/rng.ts` (the shared R). Engine modules take a
+Director reference (`import type` — no runtime cycle) and never a copy of
+state; the engine-internal members they touch are marked as such where the
+visibility had to open. Gates 9/9 after each extraction; stats and the vite
+build unchanged. Remaining: clock, kick, scrum, lineout, breakdown, maul,
+open, laws — same pattern, one module per commit, gates between each.
 
 ---
 

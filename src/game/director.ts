@@ -15,9 +15,9 @@
  */
 
 import {
-  Camera, View, FIELD, PitchConditions, pitchConditions,
+  Camera, FIELD, PitchConditions, pitchConditions,
 } from '../render/retro';
-import { CamMode, CamModeSpec, ZoomSetting, camModeSpec, resolveZoom, mapInputToWorld } from './camera';
+import { CamMode, ZoomSetting, mapInputToWorld } from './camera';
 import { TutorialState, newTutorial, stepAt, TUTORIAL } from './tutorial';
 import {
   shapeById, defenceById, DEFENCE_CHANNELS, ARCHETYPE_SHAPE,
@@ -29,7 +29,7 @@ import {
   REFEREE_CALLS, POINTS, SquadPlayer,
 } from './data';
 import {
-  COMMENTARY_PAIRS, contractFor, PhaseName, RoleContract,
+  contractFor, PhaseName, RoleContract,
 } from './jlr';
 import {
   Live, steer, separate, attackMark, defenceMark, ShapeInput, passOptions, PassOption,
@@ -37,6 +37,8 @@ import {
   widestGap, avoidTouch, maxSpeed, FORWARDS,
 } from './intelligence';
 import { MatchAudio } from './audio';
+import { updateCamera } from './engine/camera';
+import { commentate, commentarySequencer } from './engine/commentary';
 
 /* ============================ INPUT ============================ */
 
@@ -321,7 +323,7 @@ export class Director {
   advantageTeam: 'A' | 'B' = 'A';
   advantageShown = false;
   lawsExplained = new Set<string>();
-  private shakeT = 0;
+  shakeT = 0; /* T-03: engine-internal — engine/camera.ts writes the shake */
 
   constructor(public cfg: MatchConfig) {
     this.options = cfg.options;
@@ -408,7 +410,7 @@ export class Director {
     }
   }
 
-  private L(team: 'A' | 'B', num: number): Live {
+  L(team: 'A' | 'B', num: number): Live { /* T-03: engine-internal */
     return this.live.find((p) => p.team === team && p.num === num) ?? this.live[0];
   }
   private run(team: 'A' | 'B', num: number): PlayerRun {
@@ -669,79 +671,30 @@ export class Director {
   /* ---------------- feedback ---------------- */
 
   /* ==================== T-08 — THE EVENT BUS ====================
-   * Cuts and lines used to be pure functions of the phase, so the camera had
-   * no cause to react to and the commentary could not build. The bus is a
-   * simple array of what JUST HAPPENED, drained once per frame after the
-   * phase updaters have spoken: the camera, the commentary sequencer and the
-   * audio layer all read the same events, so a tackle and the line about it
-   * can never desynchronise. (Named eventBus — `events` is the match log.) */
+   * (the bus itself and the sequencer state live here; the drain policy and
+   * the commentary state machine live in engine/commentary.ts — T-03) */
   eventBus: BroadcastEvent[] = [];
-  /* T-10 — the audio layer. Presentation only; reads the same frameEvents
-   * bus as the camera and the commentary. Silent until a user gesture. */
-  audio = new MatchAudio();
   private emitEv(e: BroadcastEvent) { if (this.eventBus.length < 24) this.eventBus.push(e); }
   /** Everything that happened this frame, for presentation only. */
   frameEvents: BroadcastEvent[] = [];
-
-  commentate(key: string, extra?: string) {
-    const bank = COMMENTARY_PAIRS.find((c) => c.key === key);
-    if (!bank) return;
-    /* T-09: a 20-second cooldown per COLOUR bank (big hits, weather, colour
-     * lines). Event-critical banks — try, turnover, missed, line break —
-     * always speak: two tries in twenty seconds both deserve their line. */
-    const colour = ['BIG_HIT', 'GENERAL', 'WEATHER', 'BUILDUP', 'KICK', 'SCRUM', 'LINEOUT'].includes(key);
-    if (colour && this.t - (this.bankLastAt[key] ?? -99) < 20) return;
-    const last = this.feed[0]?.at ?? -99;
-    if (this.t - last < 0.35) return;
-    /* T-09: the no-repeat window is the last SIX spoken lines — nothing the
-     * commentator said in the last six lines is said again. */
-    let pick = bank.lines[Math.floor(R() * bank.lines.length)];
-    for (let i = 0; i < 6 && this.recentLines.includes(pick[0]); i++) {
-      pick = bank.lines[Math.floor(R() * bank.lines.length)];
-    }
-    if (this.recentLines.includes(pick[0])) return; // silence beats a parrot
-    this.bankLastAt[key] = this.t;
-    this.lastLineAt = this.t;
-    this.recentLines.unshift(pick[0]);
-    if (this.recentLines.length > 6) this.recentLines.pop();
-    this.feed.unshift({ text: pick[0], text2: pick[1], at: this.t });
-    if (extra) this.feed[0].text += ` ${extra}`;
-    if (this.feed.length > 30) this.feed.pop();
-  }
+  /* T-10 — the audio layer. Presentation only; reads the same frameEvents
+   * bus as the camera and the commentary. Silent until a user gesture. */
+  audio = new MatchAudio();
 
   /* ==================== T-09 — COMMENTARY SEQUENCING ====================
-   * IDLE → BUILDUP → CLIMAX → RESOLUTION. The state tracks consecutive phases
-   * won, metres in the last three phases, and whether a line break is live;
-   * a try after seven phases draws from a different pool than one from a
-   * snapshot, and five phases without a break produce a tension line. */
-  private seqState: 'IDLE' | 'BUILDUP' | 'CLIMAX' | 'RESOLUTION' = 'IDLE';
-  private phasesGained = 0;
-  private gainWindow: number[] = [];
-  private seqLastPoss: 'A' | 'B' | null = null;
-  private lastLineAt = -99;
-  private recentLines: string[] = [];
-  private bankLastAt: Record<string, number> = {};
+   * IDLE -> BUILDUP -> CLIMAX -> RESOLUTION (the machine itself is in
+   * engine/commentary.ts; this is its state). */
+  seqState: 'IDLE' | 'BUILDUP' | 'CLIMAX' | 'RESOLUTION' = 'IDLE';
+  phasesGained = 0;
+  gainWindow: number[] = [];
+  seqLastPoss: 'A' | 'B' | null = null;
+  lastLineAt = -99;
+  recentLines: string[] = [];
+  bankLastAt: Record<string, number> = {};
 
-  private commentarySequencer() {
-    for (const ev of this.frameEvents) {
-      if (ev.type === 'LINE_BREAK') this.seqState = 'CLIMAX';
-      else if (ev.type === 'TRY' || ev.type === 'TURNOVER' || ev.type === 'CARD') this.seqState = 'RESOLUTION';
-    }
-    /* A change of possession ends the build — the story is over either way. */
-    if (this.seqLastPoss !== null && this.possession !== this.seqLastPoss) {
-      this.phasesGained = 0;
-      this.gainWindow.length = 0;
-      if (this.seqState === 'BUILDUP') this.seqState = 'IDLE';
-    }
-    this.seqLastPoss = this.possession;
-    if (this.seqState === 'RESOLUTION' && this.t - this.lastLineAt > 5) this.seqState = 'IDLE';
-    /* The tension line: a sustained build with no break must be spoken about. */
-    if (this.seqState === 'BUILDUP' && this.phasesGained >= 4
-      && this.t - this.lastLineAt > 9 && this.t - (this.bankLastAt.BUILDUP ?? -99) > 20) {
-      const m3 = this.gainWindow.reduce((a, b) => a + b, 0);
-      this.commentate('BUILDUP', m3 > 3 ? '— AND THE GAIN LINE IS RETREATING' : '');
-    }
-  }
+  commentate(key: string, extra?: string) { commentate(this, key, extra); }
+
+  private commentarySequencer() { commentarySequencer(this); }
 
   say(text: string) { this.feed.unshift({ text, at: this.t }); if (this.feed.length > 30) this.feed.pop(); }
   banner_(text: string) { this.banner = text; this.bannerAt = this.t; }
@@ -1644,172 +1597,13 @@ export class Director {
    * a tackle punches the lens in for under a second, a try or a card holds
    * the subject while the moment is alive. Everything flows through the
    * eased target — no cut is instantaneous, the rig is still a rig. */
-  private breakawayT = 0;
-  private impactT = 0;
-  private holdP: { x: number; z: number; t: number } | null = null;
+  breakawayT = 0; /* T-03: engine-internal (T-08 framing state) */
+  impactT = 0; /* T-03: engine-internal (T-08 framing state) */
+  holdP: { x: number; z: number; t: number } | null = null; /* engine-internal */
 
   private updateCamera(dt: number) {
-    const f = this.focusPoint();
-    const dir = this.possession === 'A' ? 1 : -1;
-
-    for (const ev of this.frameEvents) {
-      if (ev.type === 'LINE_BREAK') this.breakawayT = 2.5;
-      else if (ev.type === 'TACKLE') this.impactT = Math.max(this.impactT, 0.35 + ev.force * 0.5);
-      else if (ev.type === 'TRY') this.holdP = { x: ev.x, z: ev.z, t: 2.6 };
-      else if (ev.type === 'CARD') this.holdP = { x: ev.x, z: ev.z, t: 2.2 };
-    }
-    this.breakawayT = Math.max(0, this.breakawayT - dt);
-    this.impactT = Math.max(0, this.impactT - dt);
-    if (this.holdP) { this.holdP.t -= dt; if (this.holdP.t <= 0) this.holdP = null; }
-
-    /* OVER THE SHOULDER ON EVERY KICK.
-     * While a kick is being set up the rig drops in behind the kicker at head
-     * height, so the aim line reads as his line of sight. It returns to the
-     * chosen mode the moment the ball is struck. */
-    // The cable cam handles kicks itself by backing off and climbing, so it must
-    // not be overridden. Every other mode drops to the shoulder view for a kick.
-    const kicking = !!this.kk && (this.kk.stage === 'AIM' || this.kk.stage === 'METER')
-      && this.camMode !== 'CABLE';
-    const spec = camModeSpec(kicking ? 'SHOULDER' : this.camMode);
-
-    const z = resolveZoom(this.camZoom, this.dynamicIntensity, {
-      phase: this.phase,
-      pressure: this.op?.pressure ?? 0,
-      toLine: this.op?.toLine ?? 50,
-      ballInAir: this.kk?.stage === 'FLIGHT',
-      lineBreak: this.op?.lineBreak === true,
-    });
-
-    // Subject: the ball, pulled slightly toward the first receiver in open play
-    // so the fly-half is always in shot, and toward the landing point on a kick.
-    let tx = f.x, tz = f.z;
-    if (this.op) {
-      const first = this.L(this.op.attacking, 10);
-      if (first) { tx = f.x * 0.72 + first.x * 0.28; tz = f.z * 0.82 + first.z * 0.18; }
-    }
-    if (this.kk && this.kk.stage === 'FLIGHT') { tx = this.kk.bx; tz = this.kk.bz; }
-
-    /* T-08 — the framing reacts to causes:
-     *  - a LIVE hold (try celebration, card) locks the subject on the moment;
-     *  - a breakaway pushes the aim ahead of the play and lifts the rig, so
-     *    the break AND the cover chase read in one shot for its whole length;
-     *  - a tackle punches the lens in a touch for under a second (non-cable
-     *    rigs only — the cable rig owns its own zoom through resolveZoom). */
-    if (this.holdP) { tx = this.holdP.x; tz = this.holdP.z; }
-    if (this.breakawayT > 0) {
-      tz += dir * Math.min(3.5, this.breakawayT * 1.5);
-      tx = tx * 0.9 + f.x * 0.1;
-    }
-
-    const view: View = { w: 960, h: 540 };
-    let height = spec.height * z.heightMul;
-    let px = spec.pxPerMetre * z.pxMul;
-    if (this.breakawayT > 0) height *= 1 + Math.min(0.14, this.breakawayT * 0.06);
-    if (this.impactT > 0 && spec.id !== 'CABLE') px *= 1 + Math.min(0.12, this.impactT * 0.14);
-    let target: Camera;
-
-    if (spec.id === 'CABLE') {
-      target = this.cableRig(view, spec, z, tx, tz, dir, dt);
-    } else if (spec.endOn) {
-      /* END-ON RIGS. The camera sits behind a point and looks down the pitch.
-       * Built by hand rather than through behindPostsCam so the shoulder view can
-       * sit right on the kicker instead of on the goal line. */
-      const isPosts = !kicking && this.camMode === 'POSTS';
-      const back = spec.standback * z.standbackMul;
-      const rigX = isPosts ? tx * 0.25 : tx - (tx - (this.kk?.landX ?? tx)) * 0.08;
-      const rigZ = isPosts
-        ? (dir > 0 ? FIELD.tryZ - 10 : FIELD.tryZFar + 10)
-        : tz - dir * back;
-      const aimX = kicking ? (this.kk?.landX ?? tx) : tx;
-      const aimZ = kicking ? (this.kk?.landZ ?? tz) : tz + dir * 14;
-      const dx = aimX - rigX;
-      const dz = aimZ - rigZ;
-      const ground = Math.max(4, Math.hypot(dx, dz));
-      const tilt = Math.atan2(height - 1.4, ground);
-      const slant = Math.hypot(ground, height - 1.4);
-      const focal = Math.max(1, px * slant);
-      target = {
-        x: rigX, z: rigZ, h: height,
-        yaw: Math.atan2(dx, dz),
-        tilt,
-        fov: clamp(2 * Math.atan((view.h * 0.5) / focal), 0.06, 1.2),
-        shake: 0, horizon: 0.46, roll: 0,
-      };
-    } else {
-      /* TOUCHLINE RIG, built directly.
-       *
-       * THE BUG THAT SENT THE CAMERA OFF THE RAILS: gantryCam computed the yaw
-       * from its own assumed rig position, and then this code moved the rig
-       * sideways to pan with the ball — leaving the camera looking in a
-       * direction that no longer pointed at anything. The further it panned the
-       * worse it got. Everything is now solved from one rig position.
-       */
-      const standback = spec.standback * z.standbackMul;
-      const subjectZ = tz + spec.lead * dir;
-
-      // Longitudinal tracking with a dead zone, so the rig does not jitter.
-      const dead = Math.max(0.4, spec.deadZone * (1.4 - z.track));
-      if (Math.abs(subjectZ - this.rigZ) > dead) {
-        this.rigZ += (subjectZ - this.rigZ) * clamp(Math.abs(subjectZ - this.rigZ) / 8, 0.2, 1);
-      }
-      // Lateral pan. At 4x the rig comes a long way onto the ball; at 1x it sits
-      // off the touchline and lets the lens do the work.
-      const rigX = (FIELD.minX - standback) + (tx - FIELD.minX) * z.track * 0.34;
-
-      const dx = tx - rigX;
-      const dz = subjectZ - this.rigZ;
-      const ground = Math.max(4, Math.hypot(dx, dz));
-      const tiltT = Math.atan2(height - 1.4, ground);
-      const slant = Math.hypot(ground, height - 1.4);
-      const focal = Math.max(1, px * slant);
-      target = {
-        x: rigX, z: this.rigZ, h: height,
-        // Yaw now genuinely points from the rig at the ball, plus a small
-        // down-field angle so players running away are seen from behind.
-        yaw: Math.atan2(dx, dz) + (14 * Math.PI) / 180 * (dir >= 0 ? 1 : -1),
-        tilt: tiltT,
-        fov: clamp(2 * Math.atan((view.h * 0.5) / focal), 0.06, 1.2),
-        shake: 0, horizon: 0.44, roll: 0,
-      };
-    }
-
-    // NaN guard. A single bad number here sent the rig off the field and took
-    // the whole frame with it. If anything is not finite, keep the last good rig.
-    if (![target.x, target.z, target.h, target.yaw, target.tilt, target.fov].every(Number.isFinite)) {
-      target = { ...this.cam, shake: 0 };
-    }
-
-    /* A heavy rig eases; it never snaps. This is what stops the whipping.
-     * T-18: but a phase cut (dead ball → 22 drop-out, score → restart) moves
-     * the subject up to 50 m. At rate 3 the rig took two seconds to arrive and
-     * the ball spent the whole transit out of frame. Position, height, tilt
-     * and zoom reposition quickly — none of them touch the picture angle —
-     * while YAW always eases slowly: the whip gate is about angular judder,
-     * and a phase cut barely changes the yaw anyway. */
-    const dist = Math.hypot(target.x - this.cam.x, target.z - this.cam.z);
-    const far = dist > 12;
-    /* Cap the per-frame travel at 5.5 m: the cut is fast but the rig is still
-     * a rig — it never moves more than a real gantry could survive. */
-    const kPos = Math.min(1 - Math.exp(-dt * (far ? 8 : 3.0)), dist > 0.01 ? 5.5 / dist : 1);
-    const kZoom = 1 - Math.exp(-dt * (far ? 7 : 2.2));
-    const kYaw = 1 - Math.exp(-dt * 3.0);
-    this.cam.x += (target.x - this.cam.x) * kPos;
-    this.cam.z += (target.z - this.cam.z) * kPos;
-    this.cam.h += (target.h - this.cam.h) * kZoom;
-    let dy = target.yaw - this.cam.yaw;
-    while (dy > Math.PI) dy -= Math.PI * 2;
-    while (dy < -Math.PI) dy += Math.PI * 2;
-    this.cam.yaw += dy * kYaw;
-    this.cam.tilt += (target.tilt - this.cam.tilt) * kZoom;
-    this.cam.fov += (target.fov - this.cam.fov) * kZoom;
-    this.cam.horizon = target.horizon;
-    this.cam.shake = this.shakeT;
-    this.zoomLabel = z.label;
-    /* T-20. A hard floor on every rig. No camera may sit lower than 5.5 m, which
-     * is above the advertising boards and the front terrace, so nothing can ever
-     * clip through the ground even mid-swing. */
-    this.cam.h = Math.max(5.5, this.cam.h);
-    if (!Number.isFinite(this.cam.h)) this.cam.h = 14;
+    /* T-03: the rig lives in engine/camera.ts — same state, same maths. */
+    updateCamera(this, dt);
   }
 
   zoomLabel = '2x — STANDARD';
@@ -1817,13 +1611,13 @@ export class Director {
   /* ---- cable cam state ----
    * The rig hangs on notional wires, so it has mass. It does not snap to the
    * ball; it is dragged toward a point behind the ball and swings in behind. */
-  private cableX = 0;
-  private cableZ = -18;
-  private cableH = 13;
-  private cableEase = 0;
+  cableX = 0; /* T-03: engine-internal cable-rig state */
+  cableZ = -18;
+  cableH = 13;
+  cableEase = 0;
   /** eased aim anchor for the cable rig — see cableRig (T-16/NO-WHIP) */
-  private cableAX = 0;
-  private cableAZ = 0;
+  cableAX = 0;
+  cableAZ = 0;
   /** T-21. When OFF (default) the cable cam keeps its end-on side when possession
    * changes, like a broadcast camera that does not cross the field on turnover.
    * When ON it swings to stay behind the new attacking side. */
@@ -1836,90 +1630,6 @@ export class Director {
    * high enough to read both defensive lines, tilted down, and always looking
    * end to end in the direction the controlled side is attacking. The rig is
    * eased on all three axes independently so it glides rather than jerks —
-   * lateral fastest, longitudinal slower, height slowest, which is exactly how
-   * a real cable rig behaves under its own weight.
-   */
-  private cableRig(
-    view: View, spec: CamModeSpec, z: { pxMul: number; heightMul: number; standbackMul: number; track: number },
-    tx: number, tz: number, dir: number, dt: number,
-  ): Camera {
-    const k = this.kk;
-    const inFlight = k?.stage === 'FLIGHT';
-    const aiming = k?.stage === 'AIM' || k?.stage === 'METER';
-
-    // Lock the end-on side unless the player asked it to swap on turnover.
-    const rigDir = this.cableSwapOnTurnover ? dir : 1;
-
-    /* On a kick the rig backs off and climbs so the flight and the chase are
-     * both in frame. `cableEase` ramps that in and out rather than snapping. */
-    const wantKickWide = inFlight || aiming ? 1 : 0;
-    this.cableEase += (wantKickWide - this.cableEase) * (1 - Math.exp(-dt * 1.8));
-    const wide = this.cableEase;
-
-    // Where the rig wants to be: behind the ball, along the attacking axis.
-    const trail = spec.standback * z.standbackMul * (1 + wide * 0.85);
-    const height = spec.height * z.heightMul * (1 + wide * 0.7);
-
-    /* While the ball is in the air, sit between the ball and where it will land
-     * so both are framed. Otherwise anchor on the ball itself.
-     *
-     * T-16/NO-WHIP: the anchor TARGET jumps twice — at the strike (ball to
-     * midpoint-with-landing) and at the first bounce (prediction vanishes,
-     * anchor returns to the ball). Aiming the rig at a jumping target swung
-     * the yaw several degrees in one frame. The anchor is now eased like every
-     * other axis, so the rig glides to the new subject instead of whipping. */
-    let anchorX = tx, anchorZ = tz;
-    if (inFlight) {
-      const lp = this.landingPrediction();
-      if (lp) { anchorX = (tx + lp.x) / 2; anchorZ = (tz + lp.z) / 2; }
-    }
-    this.cableAX += (anchorX - this.cableAX) * (1 - Math.exp(-dt * (inFlight ? 3.0 : 4.5)));
-    this.cableAZ += (anchorZ - this.cableAZ) * (1 - Math.exp(-dt * (inFlight ? 3.0 : 4.5)));
-    anchorX = this.cableAX;
-    anchorZ = this.cableAZ;
-
-    const wantX = anchorX * 0.82;                 // ease toward the middle laterally
-    const wantZ = anchorZ - rigDir * trail;
-
-    // Independent easing per axis. Lateral is quickest so the pan tracks the
-    // ball across the field; height is slowest so the rig never bobs.
-    // In flight the lateral rate is boosted by the wide factor: a full-range
-    // touch-finder moves at 20+ m/s and the rig must keep it framed.
-    this.cableX += (wantX - this.cableX) * (1 - Math.exp(-dt * (2.6 + wide * 2.4) * (0.6 + z.track * 0.8)));
-    this.cableZ += (wantZ - this.cableZ) * (1 - Math.exp(-dt * 2.0));
-    this.cableH += (height - this.cableH) * (1 - Math.exp(-dt * 1.4));
-
-    // T-20 CLIPPING. The rig used to drift 24 m past the dead-ball line into the
-    // rising terraces, where a 7 m camera sat BELOW the stand surface and clipped
-    // through the ground. Keep it inside the in-goal and above every surface.
-    this.cableX = clamp(this.cableX, -30, 30);
-    this.cableZ = clamp(this.cableZ, FIELD.tryZ - 8, FIELD.tryZFar + 8);
-    this.cableH = clamp(this.cableH, 9, 46);
-
-    /* Look at a point ahead of the ball, so the frame leads play instead of
-     * trailing it. The rig is always end-on: it looks the way you attack. */
-    const aimX = anchorX;
-    const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6);
-    const dx = aimX - this.cableX;
-    const dz = aimZ - this.cableZ;
-    const ground = Math.max(5, Math.hypot(dx, dz));
-
-    // Tilt down onto the play. Extra downward angle when wide, so a kick reads
-    // as an aerial view of the whole contest.
-    const tilt = Math.atan2(this.cableH - 1.2, ground) * (1 + wide * 0.10);
-    const slant = Math.hypot(ground, this.cableH - 1.2);
-    const px = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28);
-    const focal = Math.max(1, px * slant);
-
-    return {
-      x: this.cableX, z: this.cableZ, h: this.cableH,
-      yaw: Math.atan2(dx, dz),
-      tilt: clamp(tilt, 0.08, 1.15),
-      fov: clamp(2 * Math.atan((view.h * 0.5) / focal), 0.06, 1.2),
-      shake: 0, horizon: 0.42, roll: 0,
-    };
-  }
-
   /* ============================ TUTORIAL ============================ */
 
   tut: TutorialState = newTutorial();
