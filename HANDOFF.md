@@ -447,7 +447,7 @@ warning within a second, alongside the encroachment the audit already flags.
 ---
 
 ### T-03 · Split director.ts into modules
-**Type:** Refactor · **Effort:** L · **Risk:** Medium · **STATUS: IN PROGRESS (2 of 11 modules)**
+**Type:** Refactor · **Effort:** L · **Risk:** Medium · **STATUS: DONE**
 
 2600 lines. Do it behind T-01 and T-02 so regression is detectable.
 
@@ -471,20 +471,22 @@ director.ts                 state + update() orchestration only
 **Rule:** no behaviour change. Run the gates after each extraction. If a gate
 moves, stop and find out why before continuing.
 
-**Progress — 8 of the 11 target modules are out** (director.ts 4100 → 3423
-lines): `engine/camera.ts` (updateCamera, cableRig), `engine/commentary.ts`
+**DONE — all 11 target modules are out.** director.ts 4100 → 2500 lines:
+`engine/camera.ts` (updateCamera, cableRig), `engine/commentary.ts`
 (commentate, the T-09 sequencer), `engine/setpieces.ts` (upScrum, scrumSlots,
 upLineout, releaseThrow, upMaul), `engine/laws.ts` (beginPenalty,
-resolvePenalty, lawCall, card), `engine/clock.ts` (endHalf,
-resumeSecondHalf, endMatch), plus the shared `engine/rng.ts` / `clamp.ts` /
-`approach.ts`. Director keeps one-line delegates and owns all state. Engine
-modules take a Director reference and never a copy; engine-internal members
-are marked where visibility had to open. Gates 9/9 after each extraction,
-stats unchanged, vite build clean. The A/B on the one stochastic gate
-(TACKLES ≥ 8 in the first 60 s) showed the PRE-extraction tree flaking 2/6
-and the extracted tree 0/6 — the flake pre-exists, the refactor does not
-degrade it. **Remaining:** kick, breakdown, open — the three biggest
-updaters; same pattern, one module per commit, gates between each.
+resolvePenalty, lawCall, card), `engine/clock.ts` (endHalf, resumeSecondHalf,
+endMatch), `engine/kick.ts` (upKick, launch, kickLanded),
+`engine/breakdown.ts` (upBreakdown, startBreakdown), `engine/open.ts`
+(upOpen, contextLabel, doStep/doFend/doDummy/doPass, cpuCarrier), plus the
+shared `engine/rng.ts` / `clamp.ts` / `approach.ts` / `weather.ts`.
+Director keeps one-line delegates, owns all state, and remains the update()
+orchestrator. Engine modules take a Director reference and never a copy;
+engine-internal members are marked where visibility had to open. Gates 9/9
+after every extraction (x2 each), stats unchanged, vite build clean. The A/B
+on the one stochastic gate (TACKLES ≥ 8 in the first 60 s) showed the
+PRE-extraction tree flaking 2/6 and the extracted tree 0/6 across the whole
+refactor — the flake pre-exists, the refactor never degraded it.
 
 ---
 
