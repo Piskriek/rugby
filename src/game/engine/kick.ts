@@ -103,7 +103,12 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
           break;
         }
         case 'GRUBBER': aimTo = wide * (0.4 + R() * 0.4); break;
-        case 'RESTART': case 'DROP_OUT': aimTo = (R() - 0.5) * 0.5; powerTo = 0.78 + R() * 0.2; break;
+        /* T-31b — the restart lands IN PLAY. The old 0.78-0.98 of a 44 m
+         * reach put the ball at 36-44 m plus a 12-15 m roll: a third of
+         * restarts died over the dead-ball line (touch-down, drop-out, the
+         * camera chasing the ball to the fence). A real restart targets
+         * 25-35 m of travel and catches the chaser. */
+        case 'RESTART': case 'DROP_OUT': aimTo = (R() - 0.5) * 0.5; powerTo = 0.52 + R() * 0.18; break;
         default:
           // PUNT from hand. Roughly half of territory kicks hunt touch (that
           // is the point of the kick, and the only source of lineouts); the
@@ -176,8 +181,32 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
        * with three men still inside the line — legal assembly, unlawful
        * kick. Strike only when the nearest receiver is at least 9.5 m
        * back (8 s hard backstop — nobody walks that slowly). */
+      /* SCORING PASS — and the receiving side retreats to earn it. Nothing
+       * used to MOVE them back, so the nearest man loitered at 10.3 m,
+       * gapOk stayed false, and every restart sat in AIM until the ten
+       * second backstop — ten seconds of dead clock, two to four times a
+       * match. The law puts them behind the ten-metre line; they now walk
+       * there at a back-pedal (never teleported), and the whistle comes
+       * when both sides are actually legal. */
+      if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+        /* The receiving side RETREATS to their ten-metre line while the
+         * kicker sets. Nothing used to move them, so the nearest man sat at
+         * ~10.3 m — inside the strike gate — and every restart idled to the
+         * ten-second backstop. The law puts them behind the ten; they walk
+         * there (never teleported) and the whistle comes when both sides
+         * are actually legal. Retreat target 10.9 gives the 10.6 gate a
+         * margin so the strike is not riding the line. */
+        const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
+        for (const p of d.live) {
+          if (p.team === s.kicker || p.sinbin > 0) continue;
+          const gap = (p.z - s.bz) * s.dir;
+          if (gap < 10.9) p.z += Math.min(RETREAT, 10.9 - gap) * s.dir;
+        }
+      }
       let gapOk = true;
       if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+        /* gap is positive INTO the receiving half: the receivers stand
+         * behind their own ten-metre line, upfield of the mark. */
         const fwd = s.dir;
         let nearest = 99;
         for (const p of d.live) {
@@ -215,7 +244,14 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
       s.bounces++;
       const rest = s.type === 'GRUBBER' ? 0.46 : 0.52;
       s.vy = Math.abs(s.vy) * rest;
-      s.vx *= 0.78; s.vz *= 0.82;
+      /* T-31b — the roll belongs to the TRAJECTORY. A hang-time kick lands
+       * steeply and sits up near its mark; a flat punt skids on. The old
+       * flat retention (0.78/0.82) rolled every kick the same 12-15 m,
+       * which carried deep restarts and corner bombs over the dead-ball
+       * line. Steepness = impact vertical speed over horizontal speed. */
+      const steep = Math.abs(s.vy) / Math.max(4, Math.hypot(s.vx, s.vz));
+      const keep = clamp(0.75 - 0.35 * steep, 0.24, 0.75);
+      s.vx *= keep; s.vz *= keep;
       if (s.vy > 1.2) s.vx += (R() - 0.5) * 2.4;
       if (s.vy < 0.55) { s.vy = 0; s.by = 0.12; }
     }

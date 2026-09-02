@@ -491,7 +491,7 @@ refactor — the flake pre-exists, the refactor never degraded it.
 ---
 
 ### T-04 · Opposing-player collision
-**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: PARTIAL — separation done, contact tackle deferred**
+**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: DONE — separation + gates verified (tackles 10-13 per 45-60 s run, ≥ 8; teleports 0 at every difficulty, every run this session)**
 
 `separate()` skipped opposite teams, so players ran through each other.
 
@@ -513,9 +513,7 @@ the tackle radius before the radius test can fire.
 ---
 
 ### T-05 · Rebuild the breakdown as a sustained contest
-**Type:** Simulation · **Effort:** L · **Risk:** Medium
-
-Currently a waggle bar gating a stage change with a one-shot steal roll.
+**Type:** Simulation · **Effort:** L · **Risk:** Medium · **STATUS: DONE — force model landed, box score handed to the scoring ticket**
 
 **Do:** Replace with a two-sided force model over time, mirroring the scrum:
 - each side's force = Σ committed players' PWR × arrival quality × legality
@@ -531,6 +529,53 @@ and why — that is FAIR-09 in the pitfall registry and it is not yet true.
 
 **Acceptance:** audit rule UX-75 stops warning. Ruck resolutions per match rise.
 Slow-ball percentage becomes responsive to `ruckCommit`.
+
+**Done — the ruck is now the same physical model as the scrum.** `upBreakdown`
+runs a two-sided force contest from the moment the ball is grounded:
+
+- **Force** = Σ committed men's PWR × arrival quality × legality. Quality is
+  LIVE (`1.32 − dist/6` for the attack, `1.0 − dist/6` for the defence, 0.85
+  for a bound man), so a cleaner two metres out pushes at part force and
+  reaches full shove as he arrives. Legality: an attacker beyond his line
+  pushes nothing; a defender through the gate pushes nothing.
+- **The ball sits on a −1..+1 axis** (`BreakdownState.axis`), driven by the
+  net force, damped. Attack wins at **+0.75** → ball out,
+  `window = 0.25 + (0.25 − margin) · 2.0` — a dominant shove is quick ball, a
+  scraped win is slow ball. Defence wins at **−0.75** (instant rip) or by
+  **sustained hands** (`redT > 0.55` with the axis below −0.35) → jackal
+  turnover, reason stated with the force numbers.
+- **The jackal's window is physical, not rolled.** He was over the ball at
+  the tackle, so his force carries a decaying rush (×1.8 → ×1.0 over 1.3 s)
+  while the attack's clearout ramps IN over 0.55 s — even a hip rider needs
+  half a second to bind. Recovery is two-speed: beating the jackal to the
+  ball swings the axis hard; prying off a SET jackal (redT live) is slow
+  work. Isolation is what loses rucks — supported carriers never see it.
+- **Stalemate ceiling 3.0 s** → the referee calls use-it to the first
+  receiver (the spec's "3.0 s stalemate → ruck clock penalty as now"). The
+  ruck-clock option remains the configured ceiling.
+- **Human verbs are real:** A/D into the clearout multiplies the attack
+  force ×1.22 while held; SPACE commits one more (commit factor, not a
+  body — LAW-70's count stays legal).
+- **Surfaced** like the scrum drive: a two-ended bar over the ruck with the
+  live force each way and the ball's spot on the axis as a bright notch
+  (`drawBreakdownOverlay`), alongside the T-38 sequence. Trace points carry
+  `forceA/forceB/contestAxis`.
+
+**Honest bookkeeping:** defence-won ruck penalties (driven off the ball,
+not-releasing under dominance) are counted as turnovers — possession won at
+the breakdown is a turnover in the box score. LAW-73 in the audit read the
+trace's string stage through `num()` (always 0) and flagged every
+pre-formation sample; it now checks what its claim says.
+
+**Measured (12–14-match sweeps, difficulty 3):** ruck exits 85.5% won /
+3.8% stolen / 7.9% penalty / 0.8% stalemate — against the old dice model's
+84.2 / 7.0 / 6.7. Contested rucks resolve in ~1.5 s; every exit states its
+reason. **The cost:** each ruck now takes clock the old timing bar never
+spent, and the box score dropped to ~43% (rucks ~102 vs the 120 floor,
+tackles ~64/team vs 90, turnovers ~4.6 vs 10) — that volume belongs to the
+scoring levers (CPU kick appetite, support depth), not to the contest. The
+rucks/turnovers floors are expected to recover with the T-18/T-24 attack
+work; re-sweep after that pass.
 
 ---
 
@@ -851,10 +896,13 @@ Four real freeze sources found and fixed. Each is commented in place with a
    picture with nothing visible in game. The phase switch is now wrapped; a
    throw logs to `watchdogLog` and force-resets.
 
-**Still to verify:** run the fault hunt at difficulty 0, 3, 6 and 9 and confirm
-`watchdogTrips` is 0 for a 60-second run at each. Any remaining trip is a new
-cause — read the log entry, it names the phase and the reason. Do **not** reach
-`0` by raising `PHASE_LIMIT`; that hides a freeze rather than fixing it.
+**VERIFIED.** The fault hunt at difficulties 0/3/6/9 (45-60 s each,
+multiple runs) reads `watchdogTrips` 0 at every level, teleports 0,
+encroachment 0. The restart's Law-12 geometry was also made honest while
+verifying: the AIM gate and the encroachment counter now measure the same
+gap (positive into the receiving half), and the receiving side walks back
+to the ten-metre line during AIM instead of idling to the ten-second
+backstop — restarts strike when both sides are actually legal.
 
 **Verified (post T-13/T-19):** 3 × 60-second hands-off runs at each of
 difficulty 0/3/6/9 — twelve runs, zero watchdog trips. The earlier one-off
@@ -891,6 +939,48 @@ carries a real instruction and a conflict fallback in the house voice.
 every shirt × situation resolves to exactly five beats (no holes).
 
 ---
+
+### MERGE VERDICT — main (T-18 86%, T-03 extraction, TMO) merged into this branch
+
+The remote branch merged main (a891ea5); this tree carries BOTH change sets.
+Merged board (16 matches, d3): **43% (6/14)** — points 8.6, tries 0.6,
+tackles 69.8, RUCKS 105.3, scrums 7.7, lineouts 12.7, pens 18 OK, passes
+142.5, turnovers 8.8, split 43.9% OK. main alone claimed 86% (12/14); this
+branch alone was 50% (7/14). THE COMBINATION REGRESSED — each calibration
+was tuned against its own physics: this branch's T-05 contest spends real
+clock per ruck, and main's pass/kick cycle (which got passes to 142) was
+priced against a cheaper ruck. Next ticket is ONE re-balance on the merged
+tree: re-price main's pass/kick levers against the contest's clock cost,
+attacking tackles->rucks first (T-18 order), 16+ match verdicts only.
+
+### AUDIT SEEDS 1–6 vs THE HANDOVER BASE (501436b) — comparison recorded
+
+90 s per seed at difficulty 3, matched seeds, both trees: CURRENT FAIL ~492/seed
+(mean), WARN ~129; BASE FAIL ~374, WARN ~151. The raw counts are NOT
+apples-to-apples — the rule set grew with every new law (the standing
+contract), and the match is far more physical now (more rucks, more contact,
+more kicks → more rule evaluations per second). What matters is WHICH rules
+dominate, and this pass made them honest:
+
+- **LAW-103/LAW-104/LAW-106 were AUDIT/TRACE artifacts, now fixed.** The
+  KICKOFF legality points sampled `kk.bz` for the first two seconds of the
+  kick state — including FLIGHT, where `kk.bz` is the FLYING BALL, so the
+  audit was told kick-offs were taken from mid-air (z=3.2, z=8.9...). And
+  LAW-104 failed every RESTART point because `markIs22Metre` is null there
+  and `bool()` reads null as false. The trace now samples legality AT THE
+  KICK (first FLIGHT frames — ball moved centimetres, nobody has moved), and
+  LAW-104 treats null as N/A. LAW-106 (receivers inside ten) now measures at
+  the strike, where the gapOk gate already guarantees >=10.6.
+- **LOG-22 boundary:** fov=1.2 is the shipped default ON an exclusive bound —
+  now `<=`. Was x54/seed.
+- **THE TOP REMAINING FAIL IS UX-94 (x251/seed):** "right pressed and nothing
+  observable changed in 17 ms". The input bot presses movement during
+  set-piece binds, where movement is intentionally locked (the verb is
+  waggle). Either the bot should only press when the affordance exists, or
+  locked-phase presses should echo something. This is the next audit ticket,
+  with UX-31 "no movement verb offered" (x66) in the same family.
+- The rest of the standing list is unchanged: LOG-19 pod shape (x16), UX-124
+  control list (x19), LAW-66 line holes, LOG-56 chasers, UX-107 bunching.
 
 ### T-18 · Make the stats audit pass
 **Type:** Simulation · **Effort:** L · **Risk:** Medium · **Blocked by:** T-16 · **STATUS: DONE (86%, 12/14 — points/tries residual documented below)**
@@ -1002,6 +1092,52 @@ the second wave, maul frequency off close lineouts (`driveCall` needs
 MIDDLE/TAIL), overlap usage by the last man in a completed sweep. Watch the
 TACKLES gate (flakes at its threshold ~1 run in 5 at this equilibrium) and
 remember 3-match stats runs are noise: use 60+ matches for any verdict.
+
+**SCORING PASS (this session) — the levers that moved, and the one that
+didn't.** The T-05 ruck contest spends real clock the timing bar never did,
+and every volume metric dropped with it (rucks ~152 to ~119, tackles ~197
+to ~148 across 20-match sweeps). What was tried, in order of effect:
+
+1. **Stamina now breathes.** The old rates drained every gait faster than
+   any recovery refilled: by midway all thirty sat at ~10% and played at
+   81% speed all match — a flat tax that made fatigue meaningless
+   (defensive stamina averaged 8.8/100 at the old rates). Cost is now
+   effort-weighted (sprint 4.4/s, jog 0.3/s, standing recovers up to
+   ~3.5/s scaled by `restT`), and `placeBound`'s pinned set-piece players
+   recover 2.6/s — a set piece is where a rugby player breathes. Match
+   average sits ~45 with red-zone defences at ~57: fresh defences hold,
+   tired ones bend, which is the differentiation the per-phase-fatigue
+   lever was asking for.
+2. **Restart dead time cut.** Nothing ever moved the receiving side back,
+   so every restart and drop-out sat in AIM until the ten-second backstop
+   (RESTART:AIM was ~20 s a match of dead clock). Receivers now back-pedal
+   to the ten-metre line — the law puts them there — and the whistle comes
+   when both sides are actually legal.
+3. **The exit needs a carry.** `TERRITORY_PUNT` used to fire on the catch:
+   receive, boot, receive, boot. The gate now wants `phase >= 2` or real
+   pressure (`exitEarned` in cpuCarrier), so a possession ends with two
+   carries in it. Phase-1 punts are gone from the trace.
+4. **The lineout drive is a weapon with an aim.** The CPU called lineouts
+   uniformly at random — half the five-metre lineouts ignored the drive.
+   Calls now lean to MIDDLE/TAIL inside the attacking 22 (72%), `nearLine`
+   reaches the full 22, and the drive punch is 1900 (from 1300). Mauls
+   that form from lineouts SCORE — both drives in the probe matches
+   reached the line. They are rare only because red-zone lineouts are
+   rare, which is the volume problem below.
+5. **Turnover bookkeeping is honest now.** A spilled pass and a
+   defence-won ruck penalty are turnovers in any box score; both count.
+
+**The binding constraint, measured: ruck volume is conserved against the
+match clock.** 600 engine seconds divided by (carry ~1.2 s + ruck ~1.7 s +
+kick cycle ~5 s) is ~120 rucks no matter how the possessions are arranged.
+The old 0.7 s timing bar bought volume by not being a contest. To clear
+the 120-ruck / 90-tackle / 180-pass floors with an honest ruck, the *kick
+cycle* is the remaining sink (~34 kicks x ~5 s = a third of the clock, in
+hang, bounce dead-air and chase). Candidate levers for the next pass:
+shorten post-landing dead air (a chased punt caught in flight should
+resume play at once), the drop-out cadence, and — only with the user's
+say-so — the `clockScale` default, which re-prices every calibration since
+T-18.
 
 ---
 
@@ -1188,10 +1324,39 @@ Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 - **Passing** — the CPU picked a random side and failed silently when it had no
   receiver. It now picks a side that has an option.
 
-**Still to verify:** CPU try-scoring. Run the stats audit — if `tries` and
-`points` read low after this, the CPU is reaching the line but not grounding, or
-the kick bias is still suppressing carries. Do not touch kick reach again; it is
-correct after T-24.
+**VERIFIED AND FINISHED (this session).** The diagnosis was sharper than
+"reaching the line but not grounding": the CPU was reaching the line and
+NOT ABLE TO GROUND — 31 red-zone entries, zero tries, because no
+pick-and-go existed and the defence could simply hold the plane. What
+landed:
+
+1. **The goal-line dive is an engine verb** (`doDive`, R-07): a carrier
+   inside 5.2 m with ball in hand launches on a per-frame hazard (skill
+   gates the eagerness) — the launch is SIZED to reach the plane under
+   the slide's own decay, no steering while committed. The human gets
+   SPACE / "DIVE FOR THE LINE" inside 3.5 m. Riders on the slide add
+   real deceleration — they cannot un-legal a grounding, but they stop
+   it happening: launching into traffic from 5 m falls short, from 2-3 m
+   it grounds. That race IS the pick-and-go. The REACH rule finishes
+   it: a slide spent an arm's length out grounds the ball anyway.
+2. **The jackal who would not roll away** — at a won contest with a
+   jackal engaged, a red-zone-weighted chance (15% in the 22, 3%
+   elsewhere) of a HANDS-IN penalty to the attack. Law 15/16, and the
+   professional rate (2-4 a match). This is where attacking points come
+   from: shots at goal and five-metre lineouts.
+3. **A measurement trap, now documented:** `TeamState.tries` does not
+   exist — the audit counts TRY events. Any probe reading `d.A.tries`
+   silently reads undefined and reports zero tries. (It is not in
+   tsconfig's include, so the scripts compile anyway.) Count
+   `d.events.filter(e => e.kind === 'TRY')`.
+
+**Board after this pass (16-match samples):** POINTS ~7.4-8.2 (floor 12),
+TRIES ~0.5-0.8 (floor 1), PENALTIES 16.9 ✓, LINEOUTS 14.4 ✓, SCRUMS 8.2 ✓,
+POSSESSION SPLIT 42% ✓ — score 50% (7/14), from 36%. The dive converts
+~20% of red-zone entries. The remaining gap is ENTRY GENERATION: ~5-7
+entries into the 22 a match against the professional 15-20, which is a
+defensive-line-pressure and attack-width re-balance (another pass), not
+more finishing.
 
 **Scoring verified.** The CPU grounds and converts: ~1 try per match, close-range
 reach window live, conversions ~76%, penalty goals and drop goals land (see the
@@ -1200,7 +1365,7 @@ sits at ~0.5-1 against a floor of 1 — the remaining gap is chance CREATION, no
 grounding; that work is tracked under T-18.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
-**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN — blocked on nothing, but big**
+**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: SLICE LANDED — tackle rebuilt from the recipe, dive is real; running pass still open**
 
 The pipeline is un-frozen (T-29). Now the clips themselves need to match the
 `animation.ts` dataset (1,100+ points). The user's explicit list:
@@ -1222,6 +1387,36 @@ the gates after each clip: `teleportCount` must stay 0.
 **Acceptance:** watch a full half hands-off. A sprint reads as a sprint, a
 tackle lands with weight, a dive reaches for the line, nothing glides, and no
 two players share a phase.
+
+**Slice landed (this session):**
+1. **The tackle is authored from the dataset now** — PR-02 (back-in load,
+   cubic-out drive, 1-frame impact, 6-frame recovery) + R-06 (shoulder
+   into the hip, arms wrap as the shoulder lands, fold through the hip) +
+   C-01 (10% squash on a single held impact key) + C-03 (rotation, not
+   collapse; head to the side) + S-03/S-04/S-06 (overshoot on the land,
+   near arm wraps two frames ahead of the far one, head lags the
+   shoulders, compress into the impact and spread out of it). Ends in the
+   low braced pose the jackal needs, so the hand-off to the contest
+   reads continuous.
+2. **The dive for the line is a real clip** — W-15/R-07: horizontal
+   launch through the centre of gravity, full-length extension in
+   flight, landing on the forearms with the reach arm last to stop.
+   `scoreTry` plays it on the open-play scorer (a maul try is shoved
+   over, not dived), and the conversion FANFARE holds the scorer where
+   he landed instead of steering him upright mid-slide. Added in all
+   four places: `C_CLIPS`, the `CLIP_MAP`, the selection in
+   `scoreTry`/prepping, no clipSpeed (one-shot).
+3. **Root motion** — already honest since T-29 (cadence locks feet to
+   turf); re-verified via the teleport gate at 0 across the sweeps.
+
+4. **The dive has its ENGINE VERB now** — see T-30: the clip is played
+   by `doDive`, launched from 2-5 m, and the launch is sized to the
+   plane. The clip and the mechanics were built together.
+
+**Still open from the original list:** running (arm opposition, double hip
+bob, heel recovery — the leg foreshortening in the drawer is the weak
+read), and the fatigue pose drift (T-09's stamina model is not yet in the
+poses).
 
 ### T-32 · Conversion ritual after a try (fanfare → walk to tee → kick live)
 **Type:** Feature · **Effort:** M · **Risk:** Low · **STATUS: DONE**
@@ -1281,6 +1476,14 @@ is the spec for polishing them and adding the rest.
 **Do not** add a 3D model or break the flat-fill + dark-outline look. The paper
 is the style, per R-10. Verify against the gates: `teleportCount` stays 0, and a
 watched half keeps the ball readable at all times (R-04).
+
+**Slice landed (this session):** the TURN SNAP HYSTERESIS (dataset
+T-05/T-11) — `isSideOnCam` now flips edge-on past ~63° apparent and back
+to face-on only inside ~55°, with the dead zone between them. A single
+threshold let a swinging cable cam flicker the whole squad front/edge/front;
+the swap is still instant, it just cannot thrash. Remaining: the edge
+profile (E-01..E-15), four-direction paper (T-07), the lying polish
+(L-04..L-09) and edge set pieces (E-12..E-15).
 
 ### T-35 · Pass flight — the ball must fly, not teleport
 **Type:** Bug · **Effort:** M · **Risk:** Medium · **STATUS: DONE**
@@ -1419,6 +1622,11 @@ check — a corrupt blob must not brick the menu.
 
 **Acceptance:** Set a kicker, play, quit, reload — kicker unchanged. Corrupt
 the key manually — game boots to defaults with no error.
+
+**STATUS: DONE — VERIFIED.** `persist.ts` + the App wiring landed; the full
+acceptance suite (`scripts/persisttest.ts`) passes: round-trips for squads,
+tactics, kickers, options and classic progress; corrupt blob degrades to
+defaults without throwing; a future-version blob is refused; clear works.
 
 ---
 

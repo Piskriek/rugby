@@ -46,7 +46,7 @@ import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown } from './engine/breakdown';
-import { upOpen, contextLabel, doStep, doFend, doDummy, doPass, cpuCarrier } from './engine/open';
+import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
 /* ============================ INPUT ============================ */
 
@@ -159,6 +159,10 @@ export interface OpenPlayState {
   gained: number; toLine: number; z: number; pressure: number; phase: number;
   lineBreak: boolean; current: { label: string };
   burst: number; burstCd: number; stepCd: number; fendCd: number;
+  /** T-31/T-30 — seconds of committed goal-line dive left (R-07: launch
+   * from 2-3 m out). While live, the launch was the commitment: no
+   * steering, momentum carries him the last metre. */
+  dive: number;
   originZ: number; originX: number;
   aiTimer: number; aiIntent: string; aiPlay: string; aiPhasePlan: number;
   /** T-18: defenders who have already had their one slip-roll this episode */
@@ -203,6 +207,14 @@ export interface BreakdownState {
   power: { A: number; B: number }; window: number; result: string; resultWhy: string;
   contestMeter: number; meterDir: number; meterOn: boolean; waggle: number;
   commitA: number; commitB: number; advantageOf: number;
+  /* T-05 — the sustained contest. `axis` is the ball on a −1..+1 axis: +1 the
+   * attacking side has cleared everything, −1 the defence is over it. Driven
+   * by the net of the two sides' forces, damped, resolved at ±0.75.
+   * `contestT` is seconds since the shove began. */
+  axis: number; axisVel: number; contestT: number;
+  /** T-05 — seconds the defence has held the ball below −0.5. A jackal with
+   * sustained hands on it is the law's turnover, not a dice roll. */
+  redT: number;
 }
 
 /* ============================ CONFIG ============================ */
@@ -400,7 +412,7 @@ export class Director {
           z: t === 'A' ? -30 : 30,
           vx: 0, vz: 0, face: t === 'A' ? 1 : -1,
           clip: 'ready', clipT: R() * 2, jitter: R() * 1.7,
-          stamina: 100,
+          stamina: 100, restT: 0,
           size: PLAYER_SIZE[sp.num] ?? 1,
           assignment: 'OPEN_PLAY', job: '',
           tx: 0, tz: 0, urgency: 0.5, bound: false, down: false, carrier: false,
@@ -493,6 +505,7 @@ export class Director {
         if (mode === 'KICK') return { key: 'SPACE', label: 'KICK', act: 'kick' };
         if (mode === 'CONTACT') return { key: 'SPACE', label: 'TAKE THE TACKLE', act: 'contact' };
         if (mode === 'CARRY') return { key: 'SPACE', label: 'SPRINT', act: 'run' };
+        if (this.op.toLine < 3.5 && this.op.pressure < 0.97) return { key: 'SPACE', label: 'DIVE FOR THE LINE', act: 'dive' };
         if (this.op.pressure > 0.72) return { key: 'SPACE', label: 'TAKE THE TACKLE AND OFFLOAD', act: 'contact' };
         if (this.op.toLine < 28 && this.op.phase > 3) return { key: 'SPACE', label: 'GO FOR THE LINE', act: 'run' };
         if (this.op.pressure < 0.3 && this.passOpts.length) return { key: 'SPACE', label: `PASS TO ${this.passOpts[0].player.num}`, act: 'pass' };
@@ -512,6 +525,7 @@ export class Director {
         if (this.op) this.startKick(this.op.attacking, 'PUNT', { x: this.op.carrierX, z: this.op.carrierZ }, this.op.carrierNum);
         return;
       case 'contact': if (this.op) this.startBreakdown(); return;
+      case 'dive': if (this.op) doDive(this); return;
       case 'tackleDive':
         if (this.op) {
           const car = this.L(this.op.attacking, this.op.carrierNum);
@@ -779,7 +793,12 @@ export class Director {
         this.pendingPenalty = null;
         this.say('ADVANTAGE OVER — PLAY ON');
       } else if (this.advantage <= 0 && this.pendingPenalty) {
-        this.resolvePenalty();
+        /* A ball in the air finishes its flight. The whistle brings play
+         * back for the penalty, but the ball still comes down — killing a
+         * mid-air kick left a ball that vanished at 1.3 m and never
+         * bounced. This re-fires every frame, so the penalty resolves the
+         * instant the kick is done. */
+        if (!this.kk || this.kk.stage !== 'FLIGHT') this.resolvePenalty();
       }
     }
 
@@ -1003,6 +1022,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = slot.team === 'A' ? 1 : -1;
         }
         if (set) {
@@ -1028,6 +1048,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           clip(p, s.stage === 'FEED' || s.stage === 'STRIKE' ? 'ninePass' : 'nineSquat');
           p.job = n.team === s.feed ? 'FEED THE BALL IN STRAIGHT' : 'DEFEND THE CHANNEL OFF THE BASE';
         }
@@ -1054,6 +1075,7 @@ export class Director {
         }
         this.place(p, slot.x, slot.z, 'bound');
         p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         if (slot.role === 'THROWER') clip(p, s.stage === 'THROW' || s.stage === 'CONTEST' ? 'lineoutThrow' : 'idle');
         else if (slot.role === 'JUMPER' && contesting) clip(p, Math.abs(slot.x - s.ball.x) < 1.6 ? 'lineoutJump' : 'lineoutStand');
         else if (slot.role === 'LIFTER' && contesting) clip(p, 'lineoutLift');
@@ -1078,6 +1100,7 @@ export class Director {
         } else {
           this.place(p, wx, wz, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = face;
         }
       };
@@ -1118,8 +1141,15 @@ export class Director {
          * and his slot is offset past the carrier, so pinning him outright was a
          * 1.5 m jump. Only the tackled carrier himself is pinned exactly. */
         if (q.role === 'CARRIER') {
-          this.place(p, q.x, q.z, 'bound');
+          /* T-02. On the tackle frame the open-play physics already owned this
+           * man — cpuCarrier integrated him, then the radius test ended the
+           * episode — and the slot below was recorded FROM his position. The
+           * pin applies from the next frame; writing him again now would be
+           * the same-frame double-move the ownership contract exists to
+           * prevent. The velocity still dies: he is being brought to ground. */
+          if (!p.movedBy) this.place(p, q.x, q.z, 'bound');
           p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         } else {
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
@@ -1127,6 +1157,7 @@ export class Director {
           const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(q.x - p.x, q.z - p.z)));
           p.x += (q.x - p.x) * k;
           p.z += (q.z - p.z) * k;
+          p.movedBy = 'bound';   // T-02: the ease is a writer too — own it
           if (Math.hypot(q.x - p.x, q.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
         }
         p.face = q.team === s.attacking ? 1 : -1;
@@ -1192,6 +1223,9 @@ export class Director {
         }
         for (const p of this.live) {
           if (p === k || p.sinbin > 0) continue;
+          /* T-31. The man who just dived stays where he landed until the
+           * walk-up — steer() would stand him straight back up mid-slide. */
+          if (p.clip === 'dive') { p.clipT += dt; p.vx = 0; p.vz = 0; continue; }
           p.tx = p.x; p.tz = p.z;
           p.urgency = 0.15;
           p.job = 'WAIT FOR THE CONVERSION';
@@ -1229,6 +1263,7 @@ export class Director {
             } else {
               this.place(p, f.x, f.z, 'restart');
               p.vx = 0; p.vz = 0;
+          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
               p.face = p.team === s.kicker ? s.dir : -s.dir;
               arrived++;
             }
@@ -1374,9 +1409,16 @@ export class Director {
    * T-02 — the single sanctioned way for a system other than `steer()` to move a
    * player. Warns in dev when a player is moved twice in one frame by two
    * different systems, which is the root of the teleport bugs.
+   *
+   * The warn measures DISPLACEMENT, not authorship: a set piece handing a
+   * player back at the exact coordinates he already occupies — the breakdown
+   * pinning the tackled carrier where the tackle caught him — is the
+   * sanctioned phase hand-off, not a double move. 0.5 m is half the tackle
+   * radius; a real double-write shoves a man that far and reads on screen.
    */
   place(p: Live, x: number, z: number, who: string) {
-    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who) {
+    const ddx = x - p.x, ddz = z - p.z;
+    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
     }
     p.movedBy = who;
@@ -1416,6 +1458,7 @@ export class Director {
         ch.vz = approach(ch.vz, dep * sp * 0.94, 7, dt);
         ch.x = clamp(ch.x + ch.vx * dt, -34, 34);
         ch.z = clamp(ch.z + ch.vz * dt, -60, 60);
+        ch.movedBy = 'input';   // T-02: input is an integration writer
       }
       separate(this.live, dt);
       return;
@@ -1493,6 +1536,7 @@ export class Director {
         ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 7, dt);
       ctrlHuman.x = clamp(ctrlHuman.x + ctrlHuman.vx * dt, -34.2, 34.2);
       ctrlHuman.z = clamp(ctrlHuman.z + ctrlHuman.vz * dt, -60, 60);
+      ctrlHuman.movedBy = 'input';   // T-02: input is an integration writer
       if (Math.abs(ctrlHuman.vz) > 0.4) ctrlHuman.face = ctrlHuman.vz > 0 ? 1 : -1;
       const sp2 = Math.hypot(ctrlHuman.vx, ctrlHuman.vz);
       ctrlHuman.clipT += dt;
@@ -1864,7 +1908,7 @@ export class Director {
       gained, toLine: Math.abs(dir * 50 - z), z, pressure: 0, phase,
       lineBreak: false,
       current: { label: '' },
-      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0,
+      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0, dive: 0,
       originZ: z, originX: x,
       /* T-18. The first decision comes after the carrier has actually taken the
        * ball to the line — not on the frame it arrived. `protect` is now opt-in
@@ -1961,6 +2005,7 @@ export class Director {
 
 
   doDummy() { /* T-03: engine/open */ return doDummy(this); }
+  doDive() { /* T-03: engine/open */ return doDive(this); }
 
 
   /**
@@ -2341,6 +2386,13 @@ export class Director {
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
     const p = this.teams[team].players[num - 1];
+    /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
+     * that ends in a slide on the turf, not the grounded pose. Open play
+     * only: a maul try is shoved over the line by eight men, not dived. */
+    if (this.op) {
+      const scorer = this.live.find((q) => q.team === team && q.num === num);
+      if (scorer) { scorer.clip = 'dive'; scorer.clipT = 0; }
+    }
     const tryX = this.op?.carrierX ?? this.ml?.x ?? 0;
     this.teams[team].score += POINTS.TRY;
     this.run(team, num).metres += 20;

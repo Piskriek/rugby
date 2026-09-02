@@ -83,6 +83,41 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     return;
   }
 
+  /* T-31/T-30. The dive is committed: no steering while it lives, the
+   * slide decays the lateral, and when it expires he is back on his feet
+   * at the mark he slid to. The scoring test here runs BEFORE any tackle
+   * test, so a dive that crosses grounds even under the tackler's hand —
+   * which is the whole point of diving for the line. */
+  if (s.dive > 0) {
+    s.dive -= dt;
+    /* RIDERS DRAG HIM DOWN. A tackler on the slide adds real deceleration —
+     * he cannot un-legal a grounding that happens, but he can stop it
+     * happening. Launching into traffic from five metres falls short;
+     * launching at 2-3 m grounds. That race IS the pick-and-go. */
+    const ridden = d.live.some((q) => q.team !== s.attacking && q.sinbin <= 0 && !q.down
+      && Math.hypot(q.x - car.x, q.z - car.z) < 1.2);
+    car.vx *= Math.exp(-2.2 * dt);
+    car.vz *= Math.exp(-(ridden ? 1.1 : 0.5) * dt);
+    car.x = clamp(car.x + car.vx * dt, -34.5, 34.5);
+    car.z = clamp(car.z + car.vz * dt, -61, 61);
+    s.carrierX = car.x; s.carrierZ = car.z;
+    s.vx = car.vx; s.vz = car.vz;
+    s.z = car.z;
+    s.heldT += dt;
+    s.gained = (car.z - s.originZ) * s.dir;
+    s.toLine = Math.abs((s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ) - car.z);
+    const line = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
+    if ((s.dir > 0 && car.z >= line) || (s.dir < 0 && car.z <= line)) { d.scoreTry(); return; }
+    if (s.dive <= 0) {
+      /* THE REACH. The slide is spent an arm's length from the line: the
+       * ball is grounded by the reach, not the momentum. This is the last
+       * half metre of every diving try ever scored. */
+      if (s.toLine < 0.5) { d.scoreTry(); return; }
+      if (car.clip === 'dive' && !car.down) { car.clip = 'carry'; car.clipT = 0; }
+    }
+    return;
+  }
+
   // ---- carry the carrier from the live model (single source of truth) ----
   s.carrierX = car.x; s.carrierZ = car.z;
   s.vx = car.vx; s.vz = car.vz;
@@ -353,6 +388,31 @@ export function doFend(d: Director, ) {
   }
 }
 
+/* T-31/T-30 — THE GOAL-LINE DIVE. R-07: the launch comes from 2-3 m out,
+ * horizontal through the centre of gravity, and once launched it is a
+ * commitment — no steering, momentum and the slide carry him the last
+ * metre. Without this verb the CPU could reach the line and never ground
+ * the ball: the defence simply held him at the plane, and red-zone
+ * entries produced zero tries. Both sides use it; the human gets SPACE
+ * when he is close to the line. */
+export function doDive(d: Director) {
+
+  const s = d.op!;
+  const car = d.L(s.attacking, s.carrierNum);
+  if (s.dive > 0) return;
+  s.dive = 0.6;
+  const spd = maxSpeed(car, true, true, car.stamina);
+  car.vx *= 0.4;
+  /* The launch is sized to REACH THE PLANE under the slide's own decay —
+   * v0 = distance × k / (1 − e^(−k·T)) for the exponential slide (W-15: a
+   * lunge plus a 0.5-1.0 m slide, the reach arm last to stop). */
+  const K = 0.5, T = 0.6;
+  car.vz = s.dir * clamp((s.toLine + 0.8) * K / (1 - Math.exp(-K * T)), spd * 1.2, 11.5);
+  car.clip = 'dive';
+  car.clipT = 0;
+  d.say('DIVES FOR THE LINE');
+}
+
 export function doDummy(d: Director, ) {
 
   const s = d.op!;
@@ -390,6 +450,10 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * absolute rate is calibrated to the real thing. */
   const errorChance = clamp(opt.risk * 0.45 * (1 - d.assists.pass * 0.5), 0.008, 0.18);
   if (R() < errorChance) {
+    /* A spilled pass is a turnover in any box score — the ball changed
+     * hands through an error, which is exactly the "in the tackle and from
+     * errors" family the realism ranges measure alongside steals. */
+    d.teams[d.defending()].stats.turnovers++;
     const strict = d.options.fwdPass ?? 1;
     if (strict < 2 && R() < 0.5) {
       d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
@@ -416,6 +480,19 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
 }
 
 export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
+
+  /* T-31/T-30. AT THE LINE HE DIVES — a PER-FRAME hazard, not a decision:
+   * the pick-and-go is a reflex, and the tackle radius converges in the
+   * same third of a second. A carrier inside 3.2 m with ball in hand races
+   * the covering defence to the plane; skill sets how eager he is. The
+   * launch itself is the committed dive in upOpen (no steering, momentum
+   * carries him, and the scoring test there beats the tackle test). */
+  if (s.dive <= 0 && s.heldT > 0.12 && s.toLine < 5.2
+    && R() < dt * (3.0 + (d.L(s.attacking, s.carrierNum).attrs.SKL / 40))) {
+    doDive(d);
+    return;
+  }
+  if (s.dive > 0) return;
 
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
   const car = d.L(s.attacking, s.carrierNum);
@@ -522,8 +599,15 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
      * other match statistic was LOW. */
     if (intent === 'KICK') {
       const ownHalf = toLine > 50;
+      /* SCORING PASS — the exit needs a carry first. The old gate let a
+       * TERRITORY_PUNT fire on the catch: receive, boot, receive, boot — a
+       * carousel that ate the match clock and starved every volume metric
+       * (rucks, tackles, passes all read half of professional counts).
+       * Real sides take phases into contact before the territory kick,
+       * unless the line is about to swallow them. */
+      const exitEarned = s.phase >= 2 || s.pressure > 0.8;
       const legal =
-        (call === 'TERRITORY_PUNT' && ownHalf) ||
+        (call === 'TERRITORY_PUNT' && ownHalf && exitEarned) ||
         (call === 'BOX_KICK' && s.carrierNum === 9 && ownHalf && s.heldT > 0.5) ||
         (call === 'BOMB' && s.heldT > 1.1 && toLine > 26) ||
         (call === 'CROSS_FIELD' && s.heldT > 0.9 && toLine > 26);
@@ -540,6 +624,7 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
     if (intent === 'DROP' && (toLine > 38 || s.heldT < 0.5 || s.phase < 5)) intent = 'CARRY';
     // Nobody steps into a wall.
     if (s.pressure > 0.86 && intent === 'CARRY' && s.protect <= 0 && R() < 0.5) intent = 'CONTACT';
+
     if (s.pressure > 0.72 && intent === 'PASS' && s.protect <= 0 && R() < 0.3) intent = 'CONTACT';
     s.aiIntent = intent;
   }

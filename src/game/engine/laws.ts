@@ -67,6 +67,15 @@ export function resolvePenalty(d: Director, ) {
   const p = d.pendingPenalty;
   d.pendingPenalty = null;
   if (!p) return;
+  /* THE WHISTLE KILLS THE KICK. A penalty can be resolved while a ball is
+   * still in the air (advantage expired mid-flight, or a kick taken under
+   * advantage that never gained), and every route from here — the shot at
+   * goal, the touch kick, the scrum, the tap — ends that kick by law. The
+   * tap and the scrum did not clear the kick state, which then sat frozen
+   * mid-air forever: the phase machine had moved on, upKick never ticked
+   * again, and the camera anchored on a ball hanging at 1.3 m for ten
+   * seconds while play went on without it. */
+  d.kk = undefined;
   d.quickTap = true;
   d.penaltyChoices(p.team, p.x, p.z, p.free);
 }

@@ -27,42 +27,187 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       if (pressed.has('left') || pressed.has('right')) s.waggle += 1;
       if (pressed.has('action')) { s.commitA = clamp(s.commitA + 1, 1, 3); d.showHint(`COMMITTED ${s.commitA} TO THE RUCK`, 1.4); }
     } else {
-      s.waggle += dt * (7 + diff.reaction * 7);
+      /* T-05. The CPU does not stare at the breakdown: a quick, decisive
+       * place so the contest — the part worth watching — starts at once. */
+      s.waggle += dt * (16 + diff.reaction * 10);
     }
     const elapsed = s.t - s.groundAt;
     if (s.waggle > 4.2 || elapsed > 0.75) {
+      /* T-18. Real referees ping not-releasing two to four times a match,
+       * not eleven — the rate was ending a red-zone possession in every
+       * other phase. This baseline roll lives at the PLACE→RUCK transition
+       * (the tackle, not the contest); the contest adds its own hazard
+       * below when the defence is actually on top. */
+      if (R() < 0.036 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+        s.resultWhy = 'NOT RELEASING AT THE TACKLE';
+        d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
+        return;
+      }
       s.stage = 'RUCK';
       s.ruckFormed = true;
       s.ball.placed = true;
-      // numbers and quality decide it, and the reason is stated out loud
-      const atkCrew = s.crew.length;
-      const defCrew = s.defCrew.length;
-      const jackalSkill = d.L(dTeam, s.defCrew[0] ?? 7).attrs.AWA;
-      /* T-24c. The steal scales with how hard the attack competes. If the
-       * carrier's side barely cleared out (low waggle, one committed), the
-       * jackal wins it — the defence must be rewarded for committing when the
-       * attack does not. If the attack fought hard, the ball is secure. */
-      const uncontested = s.waggle < 5.5 && s.commitA <= 1;
-      /* T-18 — real matches turn over ~18-22 times INCLUDING errors; with a
-       * ruck every few seconds the old rates flipped possession constantly
-       * and no side could build phases. */
-      /* T-18. A contested steal against a committed attack is the rare
-       * exception (~5% in professional rugby), not one phase in five —
-       * the old range turned over four in ten red-zone drives. */
-      const steal = uncontested
-        ? clamp(0.28 + (defCrew - atkCrew) * 0.08 + jackalSkill / 800, 0.18, 0.4)
-        : clamp(0.03 + (defCrew - atkCrew) * 0.04 + jackalSkill / 900 - s.commitA * 0.03, 0.015, 0.12);
-      s.window = clamp(0.4 + (s.waggle - 4.2) * 0.12 + s.commitA * 0.14, 0.35, 1.8);
-      if (s.jackalActive && R() < steal) {
-        /* T-18 — only the side that WON it is credited. Both counters used
-         * to increment, so every steal read as two turnovers and the match
-         * total was double the real number. */
+      /* T-05. The contest begins. The clearout work done in PLACE is not a
+       * dice roll any more — it is the attack's head start on the axis: a
+       * body that arrived and shunted before the ruck formed has already
+       * moved the ball a fraction backwards. From here the ruck resolves
+       * the way a scrum does, continuously, from the forces on the ball. */
+      s.axis = clamp((s.waggle - 4.2) * 0.02, -0.05, 0.2);
+      s.axisVel = 0;
+      s.contestT = 0;
+      s.redT = 0;
+      s.resultWhy = '';
+    }
+  }
+
+  /* T-05 — THE SUSTAINED CONTEST. The ruck was a waggle bar gating a one-shot
+   * steal roll: the player could not see who was winning, the steal ignored
+   * everything that happened after the first 0.75 s, and FAIR-09 called it
+   * exactly for what it was. It is now the same physical model as the scrum:
+   *
+   *   each side's force = Σ committed men's PWR × arrival quality × legality
+   *   the ball sits on a −1..+1 axis, driven by the net force, damped
+   *   attack wins at +0.75 → ball out, window = 0.35 + how close it was
+   *   defence wins at −0.75 → jackal, turnover, reason stated
+   *   stalemate → the ruck clock (use it, as now) is the ceiling
+   *
+   * Quality is LIVE: a cleaner still two metres out pushes at part force and
+   * reaches full shove as he arrives, so committing men early — and the
+   * `ruckCommit` slider — genuinely decides rucks instead of re-rolling one.
+   * Legality is the gate: a man beyond his offside line pushes nothing. */
+  if (s.stage === 'RUCK' && s.groundAt >= 0) {
+    const fwd = s.attacking === 'A' ? 1 : -1;
+    const atkLine = s.contactZ - fwd * 1.0;
+
+    const sideForce = (nums: number[], team: 'A' | 'B') => {
+      let f = 0;
+      for (const n of nums) {
+        const p = d.L(team, n);
+        if (p.sinbin > 0) continue;
+        /* legality. The attack must be behind ITS line; the committed
+         * defence — the jackal who was over the ball at the tackle and the
+         * counters binding behind him — push from their own side of the
+         * ball, which is where placeBound holds their slots. The 3 m line
+         * governs the defensive LINE outside the ruck (the walk-back
+         * enforces it there); a man through the gate pushes nothing. */
+        if (team === s.attacking) {
+          if ((p.z - atkLine) * fwd > 0.4) continue;
+        } else if ((s.contactZ - p.z) * fwd > 0.3) continue;
+        const dist = Math.hypot(p.x - s.contactX, p.z - s.contactZ);
+        const quality = p.down ? 0.85
+          : clamp((team === s.attacking ? 1.32 : 1.0) - dist / 6, 0.2, 1);
+        f += p.attrs.PWR * quality;
+      }
+      return f;
+    };
+
+    /* attack: committed men × commit factor. The base is the clearout
+     * itself — driving a man backwards off the ball is easier than legally
+     * jackaling over it — so a ruck the attack actually commits to bends to
+     * the attack, while a one-man ruck is a coin the defence can steal. */
+    const humanAtk = d.isHuman(atk);
+    const clearout = humanAtk && (pressed.has('left') || pressed.has('right')) ? 1.22 : 1;
+    const commitF = (1.15 + s.commitA * 0.2) * clearout * (humanAtk ? 1 : 0.9 + diff.reaction * 0.2);
+    /* ENGAGEMENT RAMP. Even the man riding the carrier's hip needs the best
+     * part of half a second to bind and drive after the carrier lands. The
+     * clearout arrives; it is not there on the frame the ruck forms — which
+     * is exactly the jackal's window, and exactly why the fight exists. */
+    const atkRamp = Math.min(1, s.contestT / 0.4);
+    const atkF = sideForce(s.crew, atk) * commitF * atkRamp;
+
+    if (humanAtk && pressed.has('action')) {
+      s.commitA = clamp(s.commitA + 1, 1, 3);
+      d.showHint(`COMMITTED ${s.commitA} TO THE RUCK`, 1.4);
+    }
+
+    /* defence: three committed (T-39), the jackal's AWARENESS is the steal
+     * edge, the contest stiffens with the difficulty table. */
+    const jackal = s.defCrew.length ? d.L(dTeam, s.defCrew[0]) : null;
+    /* THE JACKAL'S WINDOW. He was over the ball before the ruck formed — he
+     * HAS it until he is cleared. His force is boosted for the first 0.7 s
+     * of the contest, decaying as the clearout lands on him. An isolated
+     * carrier — no hip rider within three metres — loses that race; a
+     * supported one never sees it. This is where breakdown turnovers are
+     * earned, not rolled. */
+    const jackalRush = 1 + 1.0 * Math.max(0, 1 - s.contestT / 1.0);
+    const defF = sideForce(s.defCrew, dTeam) * (0.78 + diff.reaction * 0.22)
+      * (1 + (jackal ? jackal.attrs.AWA : 40) / 350)
+      * (s.commitA <= 1 ? 1.22 : 1)    // a one-man ruck is a stealable ruck
+      * jackalRush;
+    s.contestT += dt;
+
+    s.power.A = atkF; s.power.B = defF;
+    const net = (atkF - defF) / Math.max(1, atkF + defF);
+    /* Driving a man backwards off the ball is easier work than prying it
+     * loose from a formed ruck — so the axis answers a clearout faster than
+     * it answers a poach. This asymmetry is what makes the jackal an
+     * early-window threat rather than a coin flip on every ruck. The rates
+     * are tuned so a contested ruck resolves in one to two seconds: the ruck
+     * is a read and a shove, not a wait. */
+    /* Recovery is two-speed. A clearout that beats the jackal to the ball
+     * swings the axis fast. A jackal who is ALREADY SET — hands on, weight
+     * past it — is pried off slowly, because that is what a set jackal is:
+     * the fight the defending side wanted. This is where sustained hands
+     * becomes a steal instead of a race the attack always wins. */
+    const recover = net > 0 ? (s.redT > 0.15 ? 10.5 : 20.0) : 3.6;
+    s.axisVel += net * recover * dt;
+    s.axisVel *= Math.exp(-0.8 * dt);
+    s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
+    s.contestMeter = (s.axis + 1) / 2;
+    /* SUSTAINED HANDS — the second steal path. A defence that holds the ball
+     * on its side of the axis for a full second is winning it in fact, rush
+     * or no rush; the law gives it to the jackal who had both hands on it
+     * and his weight past the ball. An instant dip to −0.75 is a rip; this
+     * is a grind-out, and both are steals. */
+    if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
+
+    /* defence on top → the not-releasing hazard rises with their dominance
+     * (the attack is the side holding the man off the ball). The old roll
+     * fired once per ruck regardless of the contest; this one is honest. */
+    if (s.axis < -0.45 && R() < dt * 0.05) {
+      d.teams[dTeam].stats.turnovers++;
+      s.resultWhy = `NOT RELEASING — THE DEFENCE HAD THE UPPER HAND (AXIS ${s.axis.toFixed(2)})`;
+      d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
+      return;
+    }
+
+    /* ATTACK WINS — the ball crosses +0.75. Quickness is the margin: a
+     * dominant shove (axis → 1) is inside half a second, a scraped win
+     * (axis at the threshold, defence still dragging) is slow ball. This is
+     * what makes slow-ball responsive to `ruckCommit`. */
+    if (s.axis >= 0.75) {
+      /* THE JACKAL WHO WOULD NOT ROLL AWAY. He had his hands on the ball,
+       * the clearout arrived, and the law gave him a moment to release —
+       * which he spent holding on. In the red zone the referee is watching
+       * for exactly this: it is where the attacking side's penalties come
+       * from, and with them the shot at goal and the five-metre lineout.
+       * The rate is honest to the professional count (2-4 a match, mostly
+       * in the 22), not a raffle on every ruck. */
+      if (s.jackalActive && jackal) {
+        const redZone = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 22;
+        if (R() < (redZone ? 0.15 : 0.03)) {
+          s.resultWhy = 'NOT ROLLING AWAY — THE JACKAL HELD ON TOO LONG';
+          d.beginPenalty(atk, REFEREE_CALLS.HANDS_IN, jackal.num);
+          return;
+        }
+      }
+      const margin = s.axis - 0.75;                     // 0 .. 0.25
+      s.window = clamp(0.15 + (0.25 - margin) * 1.4, 0.15, 0.35);
+      s.ballOutAt = s.t + s.window;   // T-05: the presentation window starts when the ball is WON
+      s.jackalActive = false;
+      s.resultWhy = `BALL WON — ${s.crew.length} v ${s.defCrew.length} CLEARED, FORCE ${(atkF / 100).toFixed(1)} v ${(defF / 100).toFixed(1)} kN`;
+      s.stage = 'RECYCLE';
+    }
+    /* DEFENCE WINS — the ball crosses −0.75. A jackal, not a dice: the
+     * reason names the numbers, as FAIR-09 asks. */
+    else if (s.axis <= -0.75 || (s.redT > 0.3 && s.axis < -0.35)) {
+      s.axis = Math.min(s.axis, -0.75);
+      if (s.jackalActive && jackal) {
         d.teams[dTeam].stats.turnovers++;
-        d.run(dTeam, s.defCrew[0] ?? 7).jackals++;
+        d.run(dTeam, jackal.num).jackals++;
         d.teams[dTeam].stats.jackals++;
         d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
         d.commentate('TURNOVER');
-        s.resultWhy = `JACKAL WON — ${d.teams[dTeam].nation.short} HAD ${defCrew} v ${atkCrew} AND THE BETTER ARRIVAL`;
+        s.resultWhy = `JACKAL WON — ${d.teams[dTeam].nation.short} SHOVED IT BACK, FORCE ${(defF / 100).toFixed(1)} v ${(atkF / 100).toFixed(1)} kN`;
         d.clearRuck();
         d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
         return;
@@ -103,10 +248,28 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
 
   if (s.stage === 'RUCK') {
     const elapsed = s.t - s.groundAt;
-    /* T-38. When the ruck clock runs out the ball is auto-played to the fly-half
-     * (first receiver) rather than a scrum being awarded. The window is a
-     * "use it" timer, not a penalty: at 0 the nine releases to the 10. */
+    /* T-05. A stalemate is not a spectator sport: if the contest has not
+     * settled the ball by three seconds the referee calls for it, exactly
+     * as the old ruck clock did. The five-second option window lives in
+     * OPEN PLAY (T-27), after the nine has the ball — not in the shove. */
+    if (elapsed > 3.0) {
+      s.resultWhy = `USE IT — THE CONTEST STALEMATED AT ${s.axis >= 0 ? '+' : ''}${s.axis.toFixed(2)}`;
+      d.clearRuck();
+      const frOrder0 = [[10, 12, 8], [12, 10, 13], [8, 6, 7]][d.options.firstReceiver ?? 0];
+      const fr0 = frOrder0.find((n) => { const q = d.L(atk, n); return q.sinbin <= 0 && !q.down; }) ?? 10;
+      d.say(`USE IT — BALL TO ${d.run(atk, fr0).name.toUpperCase()}`);
+      const dir0 = atk === 'A' ? 1 : -1;
+      d.startOpen(atk, s.contactX, s.contactZ - dir0 * 2.0, fr0, s.phase + 1, s.gainLine, 0.75);
+      return;
+    }
+    /* T-38/T-05. When the ruck clock runs out — a stalemate the contest could
+     * not settle inside the law window — the ball is auto-played to the
+     * fly-half (first receiver) rather than a scrum being awarded. The clock
+     * is the CEILING now, not the resolution: the contest above decides who
+     * won and how quick the ball is, and this path is what a stuck ruck ends
+     * in. */
     if (elapsed > limit) {
+      s.resultWhy = `USE IT — THE CONTEST STALEMATED AT ${s.axis >= 0 ? '+' : ''}${s.axis.toFixed(2)}`;
       d.clearRuck();
       /* T-38 follow-up: the first receiver is a named option, not a literal
        * 10 — a side whose autop is the 12 or a back-row pick is a real call.
@@ -118,13 +281,15 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       d.startOpen(atk, s.contactX, s.contactZ - dir * 2.0, fr, s.phase + 1, s.gainLine, 0.75);
       return;
     }
-    s.stage = 'RECYCLE';
   }
 
   if (s.stage === 'RECYCLE') {
-    const outAt = s.groundAt + s.window + 0.05;
+    const outAt = s.ballOutAt > 0 ? s.ballOutAt : s.groundAt + s.window + 0.05;
     if (s.t >= outAt) {
-      const slow = s.window > 2.0;
+      /* T-05. Window range moved with the contest: a scraped win (axis at
+       * the threshold) releases around 1.35 s, a dominant shove around 0.35.
+       * Slow ball is the bottom half of that spread. */
+      const slow = s.window > 0.9;
       d.teams[atk].stats.rucks++;
       if (slow) d.teams[atk].stats.slowBall++;
       /* T-09: the attack retained the ball — the build grows. */
@@ -262,6 +427,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     window: 0, result: '', resultWhy: '',
     contestMeter: 0.5, meterDir: 1, meterOn: false, waggle: 0,
     commitA, commitB: 2, advantageOf: 0,
+    axis: 0, axisVel: 0, contestT: 0, redT: 0,
   };
   d.phase = 'BREAKDOWN';
   d.op = undefined;

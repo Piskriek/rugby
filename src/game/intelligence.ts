@@ -25,6 +25,8 @@ export interface Live {
   face: number;              // +1 = running toward +z
   clip: string; clipT: number; jitter: number;
   stamina: number;           // 0..100
+  /** seconds since he last moved fast — the recovery window */
+  restT: number;
   /** T-39 per-player build: 0.92 (wing) .. 1.12 (lock) */
   size: number;
   /** the phase the contract is currently drawn from */
@@ -119,7 +121,13 @@ export function steer(p: Live, dt: number, sprint: boolean) {
 
   p.x = clamp(p.x + p.vx * dt, -34.5, 34.5);
   p.z = clamp(p.z + p.vz * dt, -61, 61);
-  if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer') {
+  /* T-02. Integration writers — the carrier physics, the human input — set a
+   * velocity; this exponential blend is designed to absorb an existing one, so
+   * following them within a frame is a retarget, not a fight. A PLACEMENT is
+   * different: it sets position outright, and steering on top of one is the
+   * same-frame double-move that used to read as teleporting. Warn on that. */
+  if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer'
+    && p.movedBy !== 'carrier' && p.movedBy !== 'input') {
     console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then steer() again in one frame`);
   }
   p.movedBy = 'steer';
@@ -154,10 +162,17 @@ export function steer(p: Live, dt: number, sprint: boolean) {
   if (p.clip !== clip) { p.clip = clip; p.clipT = 0; }   // one-shots start clean
   p.clipT += dt * (clipSpeed > 0 ? sp / clipSpeed : 1);
 
-  // sprinting costs; standing recovers
+  /* SCORING PASS — stamina that breathes. The old rates drained at every
+   * gait faster than any recovery could refill, so by midway EVERY player on
+   * the field sat at ~10% and played at 81% speed all match — a flat tax
+   * that made fatigue meaningless. Now the cost is effort-weighted (a sprint
+   * costs, a jog barely) and the still windows are worth real air: a set
+   * piece or a held shape mark is where a rugby player actually breathes.
+   * The point is DIFFERENTIATION — a defence that has defended twenty
+   * consecutive phases bends, a fresh one does not (see T-18/T-30). */
   if (sp > 7.0) p.stamina = clamp(p.stamina - dt * 4.4 * (1.4 - p.attrs.STA / 200), 0, 100);
-  else if (sp > 3.0) p.stamina = clamp(p.stamina - dt * 1.1, 0, 100);
-  else p.stamina = clamp(p.stamina + dt * 1.6, 0, 100);
+  else if (sp > 3.0) p.stamina = clamp(p.stamina - dt * 0.3, 0, 100);
+  else p.stamina = clamp(p.stamina + dt * (1.6 + p.restT * 0.9), 0, 100);
 }
 
 /** Teammates must never occupy the same metre of grass, and never block their own carrier. */

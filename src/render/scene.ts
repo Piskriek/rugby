@@ -24,6 +24,7 @@ const CLIP_MAP: Record<string, string> = {
   scrumStrike: 'scrumDrive', scrumCollapse: 'tackle',
   maulBind: 'maulBind', maulDrive: 'maulBind', maulHold: 'scrumBind',
   tackleHit: 'tackle', tackled: 'grounded', jackal: 'jackal',
+  dive: 'dive',
   cleanout: 'cleanout', ruckBind: 'maulBind', offload: 'pass',
   nineSquat: 'ready', nineFeed: 'pass', ninePass: 'pass',
   kickStep: 'kick', refReady: 'refReady', refSignal: 'refSignal',
@@ -328,6 +329,34 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
       ctx.strokeStyle = `rgba(255,90,70,${pulse})`; ctx.lineWidth = 4;
       ctx.beginPath(); ctx.ellipse(p.sx, p.sy, p.sc * 0.7, p.sc * 0.26, 0, 0, Math.PI * 2); ctx.stroke();
       label(ctx, 'COMMIT - SPACE', p.sx, p.sy - p.sc * 0.5, '#ff8a72');
+    }
+  }
+
+  /* T-05 — THE CONTEST BAR. The ruck is a physical contest now, so it is
+   * surfaced like the scrum's drive: the live force on each end of a bar and
+   * the ball's spot on the axis between them. FAIR-09: the player must be
+   * able to see who is winning the ruck and why, not wait for a whistle. */
+  if (s.stage === 'RUCK' || s.stage === 'PLACE') {
+    const share = s.power.A + s.power.B > 0 ? s.power.A / (s.power.A + s.power.B) : 0.5;
+    const cx0 = project(cam, v, s.contactX, 4.2, s.contactZ, jx, jy);
+    if (cx0) {
+      const w = Math.max(64, cx0.sc * 5.2), h = 7;
+      const x0 = cx0.sx - w / 2, y0 = cx0.sy;
+      // frame
+      ctx.fillStyle = 'rgba(14,14,20,0.72)';
+      ctx.fillRect(x0 - 3, y0 - 3, w + 6, h + 6);
+      // two ends: attack fills from the left, defence from the right
+      ctx.fillStyle = '#ff6a5a';
+      ctx.fillRect(x0, y0, w * share, h);
+      ctx.fillStyle = '#7fa3e6';
+      ctx.fillRect(x0 + w * share, y0, w * (1 - share), h);
+      // the ball's spot on the −1..+1 axis, as a bright notch
+      const ax = x0 + w * ((s.axis + 1) / 2);
+      ctx.fillStyle = '#f4efe2';
+      ctx.fillRect(ax - 2.5, y0 - 4, 5, h + 8);
+      const fA = (s.power.A / 100).toFixed(1), fB = (s.power.B / 100).toFixed(1);
+      label(ctx, `${fA} kN`, x0 + w * 0.5, y0 - 14, '#ff8a72');
+      label(ctx, `${fB} kN`, x0 + w * 0.5, y0 + h + 16, '#9db8ec');
     }
   }
 

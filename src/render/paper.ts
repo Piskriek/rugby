@@ -134,7 +134,25 @@ export function sideWidthMultiplier(sideOn: boolean): number {
 }
 
 /** True when the camera is looking mostly across the pitch, i.e. side-on to a
- * player who faces along the pitch. Computed from camera yaw. */
+ * player who faces along the pitch. Computed from camera yaw.
+ *
+ * T-34/T-05/T-11 (papercraft) — TURN SNAP WITH HYSTERESIS. A single
+ * threshold thrashes: the cable cam swings near the boundary and every
+ * player on the field flickers front/edge/front as cos(yaw) walks across
+ * the line. Now the swap is instant but GATED — edge-on once |cos yaw|
+ * passes ~63°, face-on again only inside ~55°, with a dead zone between
+ * the two. The dataset is explicit: hysteresis is what stops the
+ * boundary flicker. */
+const SIDE_ON_ENTER = 0.45;   // beyond ~63° apparent — go edge-on
+const SIDE_ON_EXIT = 0.575;   // inside ~55° apparent — back to face-on
+let sideOnState = false;
+
 export function isSideOnCam(camYaw: number): boolean {
-  return Math.abs(Math.cos(camYaw)) < 0.45;
+  const c = Math.abs(Math.cos(camYaw));
+  if (sideOnState) {
+    if (c > SIDE_ON_EXIT) sideOnState = false;
+  } else if (c < SIDE_ON_ENTER) {
+    sideOnState = true;
+  }
+  return sideOnState;
 }
