@@ -317,7 +317,7 @@ export const PLAYBOOK: PhasePlan[] = [
   { call: 'SWITCH', label: 'SWITCH', when: 3, risk: 0.32, reward: 0.7, zone: 'WIDE', instruction: 'Cross behind the carrier, take the ball going the other way.' },
   { call: 'WIDE_SWEEP', label: 'WIDE SWEEP', when: 3, risk: 0.3, reward: 0.85, zone: 'WIDE', instruction: 'Move it three passes wide before the drift can slide.' },
   { call: 'BLIND_SIDE', label: 'BLIND SIDE', when: 2, risk: 0.24, reward: 0.62, zone: 'TIGHT', instruction: 'Snipe the short side where they have left two men.' },
-  { call: 'BOX_KICK', label: 'BOX KICK', when: 2, risk: 0.22, reward: 0.4, zone: 'TIGHT', instruction: 'Nine boxes to touch, three chasers up.' },
+  { call: 'BOX_KICK', label: 'BOX KICK', when: 2, risk: 0.22, reward: 0.4, zone: 'ANY', instruction: 'Nine boxes to touch, three chasers up.' },
   { call: 'TERRITORY_PUNT', label: 'TERRITORY PUNT', when: 1, risk: 0.16, reward: 0.5, zone: 'ANY', instruction: 'Ten turns it around, find touch inside their 22.' },
   { call: 'BOMB', label: 'UP AND UNDER', when: 2, risk: 0.34, reward: 0.62, zone: 'MIDFIELD', instruction: 'Hang it up, four chasers, isolate their fullback.' },
   { call: 'CROSS_FIELD', label: 'CROSS FIELD', when: 3, risk: 0.42, reward: 0.9, zone: 'WIDE', instruction: 'Kick across to the wing one on one with his man.' },
@@ -334,10 +334,15 @@ export const ESCALATION: Record<PlayCall, PlayCall> = {
   LOOPL_PASS: 'WIDE_SWEEP',
   SWITCH: 'WIDE_SWEEP',
   BLIND_SIDE: 'POD_CARRY',
-  BOX_KICK: 'TERRITORY_PUNT',
-  TERRITORY_PUNT: 'BOMB',
-  BOMB: 'WIDE_SWEEP',
-  CROSS_FIELD: 'WIDE_SWEEP',
+  /* T-18. A failed kick falls back to the CARRY game — the chase regathers
+   * (or concedes the field) and the pods go to work. The old ladder ran
+   * punt → bomb → sweep → cross-field → punt…: four rungs of which three
+   * were kicks, and because a kick that got run back was judged "shut
+   * down", the whole match was an aerial exchange with no carrying. */
+  BOX_KICK: 'POD_CARRY',
+  TERRITORY_PUNT: 'POD_CARRY',
+  BOMB: 'POD_CARRY',
+  CROSS_FIELD: 'POD_CARRY',   // a broken wide move kicks the pressure away ONCE, then carries
   DROP_GOAL: 'DROP_GOAL',
   PICK_AND_GO: 'POD_CARRY',
 };

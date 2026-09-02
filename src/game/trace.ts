@@ -574,7 +574,7 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
   for (let i = 0; i < seconds * 60; i++) {
     const { inp, pressed } = botInput(d, dt, st);
     for (const p of d.live) prev.set(`${p.team}${p.num}`, { x: p.x, z: p.z });
-    const before = d.kk ? { y: d.kk.by, b: d.kk.bounces, stage: d.kk.stage } : null;
+    const before = d.kk ? { y: d.kk.by, b: d.kk.bounces, stage: d.kk.stage, goal: d.kk.profile.atGoal, t: d.kk.t } : null;
     const tb = d.A.stats.tackles + d.B.stats.tackles;
     d.update(dt, inp, pressed);
     total++;
@@ -597,7 +597,14 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
     // BALL PHYSICS
     if (d.kk) {
       if (d.kk.bounces > lastBounces) bounces++;
-      if (before && before.y > 0.5 && d.kk.by < 0.2 && d.kk.bounces === 0 && lastY !== null) {
+      // a kick that is caught, dragged into touch or kicked dead on the full
+      // ends in the air LEGALLY — only an unexplained airborne end is a fault
+      const caughtNow = /REGATHERED|TAKEN CLEANLY|INTO TOUCH|DEAD IN GOAL|TOUCH IS YOURS|50:22/
+        .test(d.feed.slice(0, 3).map((f) => f.text).join(' | '));
+      /* `before.t` guards the kick TRANSITION: a missed goal kick is followed
+       * instantly by the restart, and the new ball on the tee is not the old
+       * ball falling out of the sky. Within one kick the clock only grows. */
+      if (before && before.y > 0.5 && d.kk.by < 0.2 && d.kk.bounces === 0 && lastY !== null && !caughtNow && d.kk.t >= before.t) {
         neverBounced++;
         if (diags.length < 300) diags.push({ kind: 'BALL', t: Math.round(d.t * 100) / 100, severity: 'CRITICAL', detail: `BALL REACHED THE TURF AT ${before.y.toFixed(2)} m AND DID NOT BOUNCE` });
       }
@@ -605,7 +612,10 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
       lastY = d.kk.by;
     } else {
       // the kick phase ended — if it was airborne with no bounce, that is the reset
-      if (before && before.stage === 'FLIGHT' && before.y > 0.8 && before.b === 0) {
+      // (a catch in the air, touch, or dead-on-the-full are legal ends, not faults)
+      const caught = /REGATHERED|TAKEN CLEANLY|INTO TOUCH|DEAD IN GOAL|TOUCH IS YOURS|50:22/
+        .test(d.feed.slice(0, 3).map((f) => f.text).join(' | '));
+      if (before && before.stage === 'FLIGHT' && before.y > 0.8 && before.b === 0 && !caught && !before.goal) {
         neverBounced++;
         if (diags.length < 300) diags.push({ kind: 'PHASE', t: Math.round(d.t * 100) / 100, severity: 'CRITICAL', detail: `KICK PHASE ENDED WITH THE BALL AT ${before.y.toFixed(2)} m, NO BOUNCE, NO CATCH — THIS IS THE "RESET"` });
       }
@@ -656,8 +666,13 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
     lastCamZ = d.cam.z;
 
     const fp = d.focus();
+    /* Count framing faults only while the ball is LIVE or in open play. A
+     * dead ball on the tee during a set-piece walk-on is a broadcast cut —
+     * the camera is framing the formation, and holding it to the tee'd ball
+     * measured the edit, not the framing. */
+    const ballLive = !d.kk || d.kk.stage === 'FLIGHT';
     const pp = project({ ...d.cam, shake: 0 }, { w: 960, h: 540 }, fp.x, 1, fp.z);
-    if (!pp || pp.sx < 60 || pp.sx > 900 || pp.sy < 60 || pp.sy > 480) {
+    if (ballLive && (!pp || pp.sx < 60 || pp.sx > 900 || pp.sy < 60 || pp.sy > 480)) {
       offTargetFrames++;
       if (offTargetFrames % 30 === 1 && diags.length < 300) diags.push({
         kind: 'CAMERA', t: Math.round(d.t * 100) / 100, severity: 'CRITICAL',
@@ -666,13 +681,19 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
     }
 
     /* ---- KICK-OFF ENCROACHMENT ----
-     * Law 12: the receiving side must be behind the ten-metre line. */
-    if (d.kk && d.kk.t < 2.5 && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT')) {
+     * Law 12: the receiving side must be behind the ten-metre line AT THE
+     * STRIKE — so that is the moment measured: the first few frames of
+     * FLIGHT, nothing more. A man who was 10.6 m back at the strike is
+     * lawfully past 9.5 m a fifth of a second later, because he is allowed
+     * to run as soon as the ball is kicked; the old quarter-second window
+     * counted him as an encroacher. Men in the sin-bin are off the field
+     * and cannot encroach. */
+    if (d.kk && d.kk.stage === 'FLIGHT' && d.kk.t < 0.05 && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT')) {
       const opp: 'A' | 'B' = d.kk.kicker === 'A' ? 'B' : 'A';
       const fwd = d.kk.kicker === 'A' ? 1 : -1;
       let nearest = 99;
       for (const p of d.live) {
-        if (p.team !== opp) continue;
+        if (p.team !== opp || p.sinbin > 0) continue;
         const gap = (p.z - d.kk.bz) * fwd;
         if (gap < nearest) nearest = gap;
       }

@@ -44,6 +44,10 @@ export interface Live {
   controlled: boolean;
   /** yellow card timer in match seconds, 0 when fit */
   sinbin: number;
+  /** T-18: seconds left of being BEATEN — a slipped tackle. A beaten defender
+   *  recovers (steers back into the line) but cannot tackle while the timer
+   *  runs; this is where line breaks come from. */
+  beatenT: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:
@@ -277,12 +281,18 @@ export interface PassOption {
   time: number;
   /** 0..1 chance it arrives cleanly, shown before you commit */
   risk: number;
+  /** T-18: a defender is within tackling range of this receiver */
+  covered: boolean;
 }
+
+/** sort key: uncovered options before covered ones */
+function coveredRank(o: PassOption): number { return o.covered ? 1 : 0; }
 
 export function passOptions(
   carrier: Live, all: Live[], _open: number, cutOut: boolean, wet: number,
 ): PassOption[] {
   const mates = all.filter((p) => p.team === carrier.team && p !== carrier && p.sinbin <= 0 && !p.down);
+  const foes = all.filter((p) => p.team !== carrier.team && p.sinbin <= 0 && !p.down);
   const scored: PassOption[] = [];
   for (const m of mates) {
     // side is screen-relative so the button label always tells the truth
@@ -291,19 +301,36 @@ export function passOptions(
     const absRel = Math.abs(rel);
     if (absRel < 0.4) continue;
     // a pass is only offered to a man who is roughly level or ahead
-    if ((m.z - carrier.z) * (carrier.face >= 0 ? 1 : 1) < -6) continue;
+    // T-18: support legitimately trails the carrier by up to 10 m (that is
+    // what depth IS) — the old 6 m cutoff removed the receivers a moving
+    // attack actually has, and the CPU had nobody to pass to.
+    if ((m.z - carrier.z) < -10) continue;
     const dist = Math.hypot(m.x - carrier.x, m.z - carrier.z);
     // HARD CLAMP: a pass can never exceed the widest eligible receiver
     if (dist > 26) continue;
+    /* T-18. You pass to the man the defence is NOT on. A receiver with a
+     * defender inside ~2.2 m is covered — he catches and is tackled in the
+     * same frame, which is why pass chains never formed: every pass went to
+     * a marked man and died. Covered men are only offered when nobody open
+     * exists on that side.
+     * A defender who is BEATEN (slipped, or already carried past — behind
+     * the receiver in the direction of attack) is not coverage: drift
+     * defences concede those passes all match. */
+    const atkDir = carrier.team === 'A' ? 1 : -1;
+    const covered = foes.some((f) => (f.beatenT ?? 0) <= 0
+      && (f.z - m.z) * atkDir >= -1.2
+      && Math.hypot(f.x - m.x, f.z - m.z) < 2.2);
     const time = clamp(dist / 14, 0.18, 1.5);
     const skill = carrier.attrs.SKL / 100;
     const risk = clamp(
-      0.03 + (dist / 26) * 0.16 + wet * 0.14 + (1 - skill) * 0.12 + (cutOut ? 0.05 : 0),
+      0.03 + (dist / 26) * 0.16 + wet * 0.14 + (1 - skill) * 0.12 + (cutOut ? 0.05 : 0) + (covered ? 0.1 : 0),
       0.02, 0.5,
     );
-    scored.push({ player: m, rank: 0, side, cutOut, distance: dist, time, risk });
+    scored.push({ player: m, rank: 0, side, cutOut, distance: dist, time, risk, covered });
   }
-  scored.sort((a, b) => a.distance - b.distance);
+  // open men first, then nearest — the old pure-distance sort is what threw
+  // every pass straight into a waiting defender
+  scored.sort((a, b) => (coveredRank(a) - coveredRank(b)) || (a.distance - b.distance));
   // nearest on each side, skipping one if this is a cut-out pass
   const out: PassOption[] = [];
   for (const side of [1, -1] as const) {
