@@ -567,6 +567,29 @@ export const COMMENTARY_PAIRS: { key: string; lines: [string, string][] }[] = [
       ['He is limping, but he is staying on.', 'Brave, very brave.'],
     ],
   },
+  {
+    /* T-09 — the tension bank. A sustained build with no break must produce
+     * commentary about the pressure; the sequencer draws from here. */
+    key: 'BUILDUP',
+    lines: [
+      ['Phase after phase, and the defence is not folding.', 'Something has to give here.'],
+      ['They are building patiently, metre by metre.', 'This is pressure, real pressure.'],
+      ['The pack keeps coming around the corner.', 'Sooner or later that door comes off its hinges.'],
+      ['The forwards are knocking and knocking.', 'They are earning every inch of that ground.'],
+      ['The defence is stretched along its own line.', 'One more phase and the crack appears.'],
+    ],
+  },
+  {
+    /* T-09 — a try that a build or a break EARNED draws from a different pool
+     * than a snapshot try from nothing. Context, not randomness. */
+    key: 'TRY_BUILT',
+    lines: [
+      ['TRY! And the pressure finally tells.', 'They earned that the hard way, phase after phase.'],
+      ['Over they go, and it was coming.', 'The dam could only hold for so long.'],
+      ['TRY! The build-up deserved that finish.', 'Patience, and then the dagger.'],
+      ['He finishes what the pack started.', 'Eight phases of work, and the try is the receipt.'],
+    ],
+  },
 ];
 
 export const COMMENTARY_POINT_COUNT = COMMENTARY_PAIRS.reduce((n, p) => n + p.lines.length * 2, 0);

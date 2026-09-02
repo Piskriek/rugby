@@ -560,7 +560,7 @@ man returns.
 ---
 
 ### T-08 · Action-driven camera cutting
-**Type:** Presentation · **Effort:** M · **Risk:** Low
+**Type:** Presentation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 `shotIdFor` is a pure function of phase. Cuts have no cause.
 
@@ -576,10 +576,21 @@ position (already done on shot change). On a hold, ease the rig.
 match with no input, cuts land on tackles and breaks rather than on phase
 boundaries.
 
+**Done:** the event bus (`Director.eventBus`, drained once per frame into
+`frameEvents` after the phase updaters speak). Emitters: tackle (with force),
+line break, kick struck, try, card, scrum penalty, jackal turnover. Camera
+reactions, all through the eased target so the rig never snaps: a line break
+holds BREAKAWAY framing for 2.5 s (aim pushed ahead of the play, rig lifted —
+persists across phase changes), a tackle punches the lens in for <1 s
+(non-cable rigs; the cable cam owns its own zoom), a try holds the grounding
+spot 2.6 s and a card the offender 2.2 s. **Probe-verified:** 190 tackles,
+29 kicks, 2 breaks, 1 try, 10 turnovers emitted in one hands-off match; every
+LINE_BREAK was caught with the hold live; gates 9/9 with whipFrames 0.
+
 ---
 
 ### T-09 · Commentary sequencing
-**Type:** Presentation · **Effort:** M · **Risk:** Low
+**Type:** Presentation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Lines fire independently. No memory, no build.
 
@@ -595,6 +606,18 @@ about it cannot desynchronise.
 **Acceptance:** No line repeats within 6. Commentary never names a player who
 was not involved (FAIR-19). A sequence of 5 phases without a break produces at
 least one tension line.
+
+**Done:** the IDLE → BUILDUP → CLIMAX → RESOLUTION sequencer runs off the same
+`frameEvents` bus as the camera (T-08). It tracks consecutive phases retained,
+metres in the last three phases (fed at every startBreakdown), and possession
+flips; two new banks — BUILDUP (tension) and TRY_BUILT (a try earned by a
+6+ phase build or finished off a live line break draws differently from a
+snapshot try). The no-repeat window is the last SIX spoken lines; a 20 s
+cooldown per colour bank (BIG_HIT/GENERAL/WEATHER/BUILDUP/KICK/SCRUM/
+LINEOUT) while event-critical banks (TRY/TURNOVER/MISSED/LINE_BREAK) always
+speak. **Probe-verified:** 327 lines in a hands-off match with ZERO
+commentary-pair repeats within any six-line window (the only repeats were
+referee CALL announcements, which are not commentary) and 13 tension lines.
 
 ---
 

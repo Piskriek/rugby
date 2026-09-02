@@ -129,6 +129,16 @@ export interface KickState {
   fromPenalty?: boolean;
 }
 
+/** T-08 — one broadcast event: what happened, where, when. Presentation only. */
+export type BroadcastEvent =
+  | { t: number; type: 'TACKLE'; x: number; z: number; force: number }
+  | { t: number; type: 'LINE_BREAK'; x: number; z: number }
+  | { t: number; type: 'KICK'; x: number; z: number }
+  | { t: number; type: 'TRY'; x: number; z: number; num: number }
+  | { t: number; type: 'CARD'; x: number; z: number }
+  | { t: number; type: 'SCRUM_PEN'; x: number; z: number }
+  | { t: number; type: 'TURNOVER'; x: number; z: number };
+
 export interface OpenPlayState {
   t: number; attacking: 'A' | 'B'; dir: number;
   carrierX: number; carrierZ: number; carrierNum: number;
@@ -657,19 +667,76 @@ export class Director {
 
   /* ---------------- feedback ---------------- */
 
+  /* ==================== T-08 — THE EVENT BUS ====================
+   * Cuts and lines used to be pure functions of the phase, so the camera had
+   * no cause to react to and the commentary could not build. The bus is a
+   * simple array of what JUST HAPPENED, drained once per frame after the
+   * phase updaters have spoken: the camera, the commentary sequencer and the
+   * audio layer all read the same events, so a tackle and the line about it
+   * can never desynchronise. (Named eventBus — `events` is the match log.) */
+  eventBus: BroadcastEvent[] = [];
+  private emitEv(e: BroadcastEvent) { if (this.eventBus.length < 24) this.eventBus.push(e); }
+  /** Everything that happened this frame, for presentation only. */
+  frameEvents: BroadcastEvent[] = [];
+
   commentate(key: string, extra?: string) {
     const bank = COMMENTARY_PAIRS.find((c) => c.key === key);
     if (!bank) return;
-    // no-repeat window so the same pair never fires twice in a row
-    let pick = bank.lines[Math.floor(R() * bank.lines.length)];
-    for (let i = 0; i < 4 && this.feed[0]?.text === pick[0]; i++) {
-      pick = bank.lines[Math.floor(R() * bank.lines.length)];
-    }
+    /* T-09: a 20-second cooldown per COLOUR bank (big hits, weather, colour
+     * lines). Event-critical banks — try, turnover, missed, line break —
+     * always speak: two tries in twenty seconds both deserve their line. */
+    const colour = ['BIG_HIT', 'GENERAL', 'WEATHER', 'BUILDUP', 'KICK', 'SCRUM', 'LINEOUT'].includes(key);
+    if (colour && this.t - (this.bankLastAt[key] ?? -99) < 20) return;
     const last = this.feed[0]?.at ?? -99;
     if (this.t - last < 0.35) return;
+    /* T-09: the no-repeat window is the last SIX spoken lines — nothing the
+     * commentator said in the last six lines is said again. */
+    let pick = bank.lines[Math.floor(R() * bank.lines.length)];
+    for (let i = 0; i < 6 && this.recentLines.includes(pick[0]); i++) {
+      pick = bank.lines[Math.floor(R() * bank.lines.length)];
+    }
+    if (this.recentLines.includes(pick[0])) return; // silence beats a parrot
+    this.bankLastAt[key] = this.t;
+    this.lastLineAt = this.t;
+    this.recentLines.unshift(pick[0]);
+    if (this.recentLines.length > 6) this.recentLines.pop();
     this.feed.unshift({ text: pick[0], text2: pick[1], at: this.t });
     if (extra) this.feed[0].text += ` ${extra}`;
     if (this.feed.length > 30) this.feed.pop();
+  }
+
+  /* ==================== T-09 — COMMENTARY SEQUENCING ====================
+   * IDLE → BUILDUP → CLIMAX → RESOLUTION. The state tracks consecutive phases
+   * won, metres in the last three phases, and whether a line break is live;
+   * a try after seven phases draws from a different pool than one from a
+   * snapshot, and five phases without a break produce a tension line. */
+  private seqState: 'IDLE' | 'BUILDUP' | 'CLIMAX' | 'RESOLUTION' = 'IDLE';
+  private phasesGained = 0;
+  private gainWindow: number[] = [];
+  private seqLastPoss: 'A' | 'B' | null = null;
+  private lastLineAt = -99;
+  private recentLines: string[] = [];
+  private bankLastAt: Record<string, number> = {};
+
+  private commentarySequencer() {
+    for (const ev of this.frameEvents) {
+      if (ev.type === 'LINE_BREAK') this.seqState = 'CLIMAX';
+      else if (ev.type === 'TRY' || ev.type === 'TURNOVER' || ev.type === 'CARD') this.seqState = 'RESOLUTION';
+    }
+    /* A change of possession ends the build — the story is over either way. */
+    if (this.seqLastPoss !== null && this.possession !== this.seqLastPoss) {
+      this.phasesGained = 0;
+      this.gainWindow.length = 0;
+      if (this.seqState === 'BUILDUP') this.seqState = 'IDLE';
+    }
+    this.seqLastPoss = this.possession;
+    if (this.seqState === 'RESOLUTION' && this.t - this.lastLineAt > 5) this.seqState = 'IDLE';
+    /* The tension line: a sustained build with no break must be spoken about. */
+    if (this.seqState === 'BUILDUP' && this.phasesGained >= 4
+      && this.t - this.lastLineAt > 9 && this.t - (this.bankLastAt.BUILDUP ?? -99) > 20) {
+      const m3 = this.gainWindow.reduce((a, b) => a + b, 0);
+      this.commentate('BUILDUP', m3 > 3 ? '— AND THE GAIN LINE IS RETREATING' : '');
+    }
   }
 
   say(text: string) { this.feed.unshift({ text, at: this.t }); if (this.feed.length > 30) this.feed.pop(); }
@@ -764,7 +831,12 @@ export class Director {
     this.watchdog(dt);
     this.think(dt, input);
     this.placeBound(dt);
+    /* T-08/T-09: the bus is drained once per frame, after the phase updaters
+     * have spoken and before the presentation reacts. Camera, commentary and
+     * audio all read the same frameEvents. */
+    this.frameEvents = this.eventBus.splice(0);
     this.updateCamera(dt);
+    this.commentarySequencer();
     this.syncActors();
     this.t += dt;
 
@@ -1550,9 +1622,28 @@ export class Director {
   dynamicIntensity = 0.6;
   relativeControls = true;
 
+  /* T-08 — action-driven framing state. Causes, not phase ticks: a line
+   * break holds the breakaway framing for 2.5 s even if the phase changes,
+   * a tackle punches the lens in for under a second, a try or a card holds
+   * the subject while the moment is alive. Everything flows through the
+   * eased target — no cut is instantaneous, the rig is still a rig. */
+  private breakawayT = 0;
+  private impactT = 0;
+  private holdP: { x: number; z: number; t: number } | null = null;
+
   private updateCamera(dt: number) {
     const f = this.focusPoint();
     const dir = this.possession === 'A' ? 1 : -1;
+
+    for (const ev of this.frameEvents) {
+      if (ev.type === 'LINE_BREAK') this.breakawayT = 2.5;
+      else if (ev.type === 'TACKLE') this.impactT = Math.max(this.impactT, 0.35 + ev.force * 0.5);
+      else if (ev.type === 'TRY') this.holdP = { x: ev.x, z: ev.z, t: 2.6 };
+      else if (ev.type === 'CARD') this.holdP = { x: ev.x, z: ev.z, t: 2.2 };
+    }
+    this.breakawayT = Math.max(0, this.breakawayT - dt);
+    this.impactT = Math.max(0, this.impactT - dt);
+    if (this.holdP) { this.holdP.t -= dt; if (this.holdP.t <= 0) this.holdP = null; }
 
     /* OVER THE SHOULDER ON EVERY KICK.
      * While a kick is being set up the rig drops in behind the kicker at head
@@ -1581,9 +1672,23 @@ export class Director {
     }
     if (this.kk && this.kk.stage === 'FLIGHT') { tx = this.kk.bx; tz = this.kk.bz; }
 
+    /* T-08 — the framing reacts to causes:
+     *  - a LIVE hold (try celebration, card) locks the subject on the moment;
+     *  - a breakaway pushes the aim ahead of the play and lifts the rig, so
+     *    the break AND the cover chase read in one shot for its whole length;
+     *  - a tackle punches the lens in a touch for under a second (non-cable
+     *    rigs only — the cable rig owns its own zoom through resolveZoom). */
+    if (this.holdP) { tx = this.holdP.x; tz = this.holdP.z; }
+    if (this.breakawayT > 0) {
+      tz += dir * Math.min(3.5, this.breakawayT * 1.5);
+      tx = tx * 0.9 + f.x * 0.1;
+    }
+
     const view: View = { w: 960, h: 540 };
-    const height = spec.height * z.heightMul;
-    const px = spec.pxPerMetre * z.pxMul;
+    let height = spec.height * z.heightMul;
+    let px = spec.pxPerMetre * z.pxMul;
+    if (this.breakawayT > 0) height *= 1 + Math.min(0.14, this.breakawayT * 0.06);
+    if (this.impactT > 0 && spec.id !== 'CABLE') px *= 1 + Math.min(0.12, this.impactT * 0.14);
     let target: Camera;
 
     if (spec.id === 'CABLE') {
@@ -2167,6 +2272,7 @@ export class Director {
       s.lineBreak = true;
       this.teams[s.attacking].stats.lineBreaks++;
       this.run(s.attacking, s.carrierNum).breaks++;
+      this.emitEv({ t: this.t, type: 'LINE_BREAK', x: this.focusPoint().x, z: this.focusPoint().z });
       this.commentate('LINE_BREAK');
     }
 
@@ -2555,6 +2661,11 @@ export class Director {
     const s = this.op!;
     const atk = s.attacking, dir = s.dir;
     const car = this.L(atk, s.carrierNum);
+    /* T-08: a tackle is the event; T-09: the carry that just ended feeds the
+     * metres-in-last-three-phases window. */
+    this.emitEv({ t: this.t, type: 'TACKLE', x: car.x, z: car.z, force: clamp(s.pressure, 0, 1) });
+    this.gainWindow.push(clamp(s.gained, -6, 20));
+    if (this.gainWindow.length > 3) this.gainWindow.shift();
     /* T-18. FALL FORWARD: a carrier brought down at pace lands a stride
      * beyond the contact point, not dead on it. Without this the ruck formed
      * where he was first touched and every phase lost the metre the tackle
@@ -2709,6 +2820,7 @@ export class Director {
           this.teams[dTeam].stats.turnovers++;
           this.run(dTeam, s.defCrew[0] ?? 7).jackals++;
           this.teams[dTeam].stats.jackals++;
+          this.emitEv({ t: this.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
           this.commentate('TURNOVER');
           s.resultWhy = `JACKAL WON — ${this.teams[dTeam].nation.short} HAD ${defCrew} v ${atkCrew} AND THE BETTER ARRIVAL`;
           this.clearRuck();
@@ -2775,6 +2887,9 @@ export class Director {
         const slow = s.window > 2.0;
         this.teams[atk].stats.rucks++;
         if (slow) this.teams[atk].stats.slowBall++;
+        /* T-09: the attack retained the ball — the build grows. */
+        this.phasesGained++;
+        if (this.phasesGained >= 3) this.seqState = 'BUILDUP';
         // The nine, or the nearest eligible forward, plays it. Never a distant back.
         const dist = ruckDistributor(this.live, atk, s.contactX, s.contactZ);
         const fwd = atk === 'A' ? 1 : -1;
@@ -3342,6 +3457,9 @@ export class Director {
     const dir = team === 'A' ? 1 : -1;
     const x = at?.x ?? 0;
     const z = at?.z ?? 0;
+    /* T-08: the kick being struck is an event — the rig drops onto the
+     * kicker's shoulder for the strike and the chase reads in one shot. */
+    if (type !== 'GOAL') this.emitEv({ t: this.t, type: 'KICK', x, z });
     // the designated kicker, from the squad sheet, takes every goal kick
     const num = type === 'GOAL' ? this.teams[team].kicker : (carrierNum ?? this.teams[team].kicker);
     const atGoal = type === 'GOAL' || type === 'DROP_GOAL';
@@ -3821,7 +3939,14 @@ export class Director {
     this.lastScorer = { num, name: p.name, team, min: this.minute, kind: 'TRY' };
     this.events.push({ min: this.minute, team, kind: 'TRY', text: `TRY — ${p.name}` });
     this.momentum = clamp(this.momentum + (team === 'A' ? 1 : -1) * 0.3, -1, 1);
-    this.commentate('TRY', `— ${p.name}`);
+    /* T-08: the try is the loudest event of all. T-09: a try EARNED — seven
+     * phases of build, or finished off a live line break — draws from the
+     * TRY_BUILT bank, not the try-from-nothing pool. */
+    this.emitEv({ t: this.t, type: 'TRY', x: tryX, z: this.op?.carrierZ ?? 0, num });
+    const built = this.phasesGained >= 6 || this.op?.lineBreak === true;
+    this.commentate(built ? 'TRY_BUILT' : 'TRY', `— ${p.name}`);
+    this.phasesGained = 0;
+    this.gainWindow.length = 0;
     this.banner_(`TRY! ${this.teams[team].nation.short} — ${p.name}`);
     this.shake(0.7);
     this.clearRuck();
@@ -3862,6 +3987,7 @@ export class Director {
     const p = this.L(team, num);
     if (!p || p.sinbin > 0) return;
     p.sinbin = 600;
+    this.emitEv({ t: this.t, type: 'CARD', x: p.x, z: p.z });
     const name = this.teams[team].players[num - 1]?.name ?? `SHIRT ${num}`;
     this.banner_(`YELLOW CARD — ${num} ${name}`);
     this.say(`YELLOW CARD — ${num} ${name} — ${reason}`);
@@ -3873,6 +3999,12 @@ export class Director {
 
   beginPenalty(team: 'A' | 'B', call: string, offenderNum: number, free = false) {
     const opp: 'A' | 'B' = team === 'A' ? 'B' : 'A';
+    /* T-08: a scrum penalty is a story beat — the bus records it even where
+     * no camera reaction is attached yet. */
+    if (this.phase === 'SCRUM') {
+      const fp = this.focusPoint();
+      this.emitEv({ t: this.t, type: 'SCRUM_PEN', x: fp.x, z: fp.z });
+    }
     this.lawCall(call.replace(/[—-].*$/, '').trim(), call, opp);
     /* THE FREEZE BUG.
      * A penalty could be awarded from inside upBreakdown / upScrum / upMaul while
