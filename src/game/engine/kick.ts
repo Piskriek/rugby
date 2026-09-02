@@ -24,7 +24,10 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
   /* T-32. The conversion ritual: fanfare (celebrate), then the walk to the tee.
    * The kick button is dead until the kicker has actually set the ball. */
   if (s.stage === 'FANFARE') {
-    if (s.t > 2.2) { s.stage = 'WALKUP'; s.t = 0; d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`); }
+    /* W-011: a corner try's conversion waits for the TMO review — the
+     * celebration and the check share the fanfare window (4.2 s, still
+     * well inside the KICK phase limit). */
+    if (s.t > (d.tmo ? 4.2 : 2.2)) { s.stage = 'WALKUP'; s.t = 0; d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`); }
     return;
   }
   if (s.stage === 'WALKUP') {

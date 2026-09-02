@@ -711,6 +711,15 @@ silenced values):
 was reclassified. The registry stays honest: no status changed without the
 work existing.
 
+**Reclassified, after the work landed.** U-001 → FIXED: T-10's crowd bed is
+mixed by travelling-support ratio and swells with momentum and the attacking
+22 — literally the fix sentence. W-011 → FIXED: built as the corner-try TMO
+review — every grounding with |x| ≥ 15 m holds the conversion's FANFARE for a
+4.2 s review (`Director.tmo`), the grounding angle is called, and the try is
+confirmed on-field-decision style (never reversed — the fix is the check being
+shown, not a coin flip). U-002 stays DESIGNED_AROUND: the layered bed reacts to
+momentum and position but not yet to the half and the score directly.
+
 ---
 
 ### T-13 · Wire the behaviour dataset into `think()`
@@ -820,7 +829,7 @@ flight and the chase are both in frame. Default camera.
 ---
 
 ### T-16 · Hunt the remaining freezes using the watchdog log
-**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: FOUR CAUSES FIXED — VERIFY**
+**Type:** Bug · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Four real freeze sources found and fixed. Each is commented in place with a
 `T-16 FREEZE` marker so the reasoning survives.
@@ -846,6 +855,12 @@ Four real freeze sources found and fixed. Each is commented in place with a
 `watchdogTrips` is 0 for a 60-second run at each. Any remaining trip is a new
 cause — read the log entry, it names the phase and the reason. Do **not** reach
 `0` by raising `PHASE_LIMIT`; that hides a freeze rather than fixing it.
+
+**Verified (post T-13/T-19):** 3 × 60-second hands-off runs at each of
+difficulty 0/3/6/9 — twelve runs, zero watchdog trips. The earlier one-off
+unreproduced trip never recurred. Closed. (Dev-only `[T-02] moved by carrier,
+then bound` warnings on tackle frames are ownership-transfer notes, not
+double-moves — the breakdown pin is the lawful second writer of that frame.)
 
 ---
 
@@ -1004,7 +1019,7 @@ while the three chasers own the landing zone.
 ---
 
 ### T-24 · Tackle mechanics and the AI kicking game
-**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: PARTIAL — kick power fixed, rest open**
+**Type:** Simulation · **Effort:** M · **Risk:** Medium · **STATUS: DONE**
 
 Two separate problems were bundled by the report:
 
@@ -1014,11 +1029,14 @@ and rolled out the back. The ball now lands at exactly the distance the power
 line showed: `speed = distance / hang`, with per-type hang times that keep the
 apex realistic (punt 2.4 s / ~7 m, bomb 3.4 s / ~14 m).
 
-**Tackles + AI kick bias — STILL OPEN.** Run T-18's stats audit: if `tackles`
-reads low and `kicks` reads high, the CPU kick weighting in `shapes.ts`
-(`callPlay`) is overpowering the carry/pass options, and/or the convergence set
-isn't reaching the carrier. Fix in the T-18 order — do not tune kick reach again;
-it is now correct.
+**Tackles + AI kick bias — closed by the T-13/T-19 pass.** The stats audit now
+reads TACKLES ~97/team (floor 90) and KICKS FROM HAND ~43 (band 30-70), both
+green. What actually fixed them: the CPU carrier's position is integrated (he
+was a statue, so "tackles low" was partly *no legal contact ever being
+reached*), convergers sprint (T-24b), the cover chase turns beaten defenders
+into pursuers, and the kick appetite in `callPlay` is positional (full in the
+own half, half in midfield, none in TIGHT) so kicks no longer out-score the
+carry game everywhere. Kick reach untouched, as required.
 
 ---
 
@@ -1121,7 +1139,7 @@ authored and selected correctly; it was never being played.
   so a sprint hunches forward and reads as lean instead of an upright float.
 
 ### T-30 · AI completes passes, makes tackles, scores tries
-**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE (pass/tackle/jackal), VERIFY SCORING**
+**Type:** Simulation · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
 Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 - **Tackles** — defenders converging on the carrier were jogging because the
@@ -1137,6 +1155,12 @@ Three AI failures fixed in one pass, each commented `T-24b/c/d`:
 `points` read low after this, the CPU is reaching the line but not grounding, or
 the kick bias is still suppressing carries. Do not touch kick reach again; it is
 correct after T-24.
+
+**Scoring verified.** The CPU grounds and converts: ~1 try per match, close-range
+reach window live, conversions ~76%, penalty goals and drop goals land (see the
+T-18 note for the six scoring-system fixes that were needed). Tries per team
+sits at ~0.5-1 against a floor of 1 — the remaining gap is chance CREATION, not
+grounding; that work is tracked under T-18.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
 **Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN — blocked on nothing, but big**
@@ -1339,10 +1363,17 @@ check catches — run the gates to confirm `teleportCount` returns to 0.
   on a carry intent at low pressure), not just when the called play demands it.
 
 ### T-12 · Persistence
-**Type:** Feature · **Effort:** M · **Risk:** Low
+**Type:** Feature · **Effort:** M · **Risk:** Low · **STATUS: DONE**
 
-Team management, tactics and kicker do not survive the session. This is
-complaint G-001 and it is still open.
+Team management, tactics and kicker did not survive the session (complaint
+G-001).
+
+**Done:** `src/game/persist.ts` — versioned envelope `{v:1, squads, tactics,
+kickers, options, classicProgress}` in one localStorage key, loaded on boot,
+saved on screen exit, `clearSave()` for the reset. Every read is guarded;
+a corrupt or future-version blob yields defaults without throwing. Acceptance
+script `scripts/persisttest.ts` passes 8/8 (round-trips, corrupt blob,
+future version, clear).
 
 **Do:** `localStorage`, one key, versioned envelope `{v:1, squads, tactics,
 kickers, options, classicProgress}`. Load on boot, save on any screen exit.

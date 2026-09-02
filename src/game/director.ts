@@ -308,6 +308,9 @@ export class Director {
   lastScorer: { num: number; name: string; team: 'A' | 'B'; min: number; kind: string } | null = null;
   /** T-13: true only between a try and the conversion strike — see kickScored. */
   conversionPending = false;
+  /** W-011: a live TMO review of a corner grounding. Null unless a try is
+   * being checked; the conversion's FANFARE stage holds while it is live. */
+  tmo: { t: number; name: string; short: string; angle: number; said: boolean } | null = null;
   replayOf: Phase | null = null;
   replayTimer = 0;
   refSignal = 0;
@@ -745,6 +748,24 @@ export class Director {
 
     this.refSignal = Math.max(0, this.refSignal - dt);
     this.shakeT = Math.max(0, this.shakeT - dt * 2.4);
+    /* W-011 — the TMO review of a corner grounding runs on real seconds and
+     * always confirms or notes how close it was; it never reverses the
+     * on-field decision (the fix is the check being SHOWN, not a coin
+     * flip that takes tries off the board). The conversion waits for it. */
+    if (this.tmo) {
+      this.tmo.t += dt;
+      if (this.tmo.t > 1.8 && !this.tmo.said) {
+        this.tmo.said = true;
+        this.say(`TMO — ANGLE ${Math.round(this.tmo.angle)}°, DOWNWARD PRESSURE ON THE BALL`);
+      }
+      if (this.tmo.t >= 4.2) {
+        const close = this.tmo.angle < 30 ? 'CLOSE — ' : '';
+        this.banner_(`${close}TRY CONFIRMED — ${this.tmo.name}`);
+        this.say(`${close}TRY CONFIRMED BY THE GROUNDING`);
+        this.audio.whistle('DOUBLE');
+        this.tmo = null;
+      }
+    }
     if (this.replayTimer > 0) { this.replayTimer -= dt; if (this.replayTimer <= 0) this.exitReplay(); }
     if (this.t > this.hintUntil) this.hint = '';
 
@@ -2313,7 +2334,19 @@ export class Director {
     this.commentate(built ? 'TRY_BUILT' : 'TRY', `— ${p.name}`);
     this.phasesGained = 0;
     this.gainWindow.length = 0;
-    this.banner_(`TRY! ${this.teams[team].nation.short} — ${p.name}`);
+    /* W-011. Every grounding in the corner goes upstairs: the on-field
+     * decision is the try, the TMO shows the angle, and the conversion
+     * ritual (FANFARE) holds until the check completes. The |x| >= 15 m
+     * test is the corner channel — a try under the posts is never
+     * checked, exactly as a real referee plays on. */
+    const corner = Math.abs(tryX) >= 15;
+    if (corner) {
+      this.tmo = { t: 0, name: p.name, short: this.teams[team].nation.short, angle: 18 + R() * 34, said: false };
+      this.banner_(`ON-FIELD DECISION: TRY — TMO CHECKING THE GROUNDING`);
+      this.say('REFEREE GOES TO THE TMO — GROUNDING IN THE CORNER');
+    } else {
+      this.banner_(`TRY! ${this.teams[team].nation.short} — ${p.name}`);
+    }
     this.shake(0.7);
     this.clearRuck();
     this.op = undefined; this.ml = undefined; this.bd = undefined;
