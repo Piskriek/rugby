@@ -381,8 +381,9 @@ export function TacticsScreen({ teamId, sliders, setSliders, onBack, onConfirm, 
 
 /* ============================ OPTIONS ============================ */
 
-export function OptionsScreen({ options, setOptions, onBack }: {
+export function OptionsScreen({ options, setOptions, onBack, onReset }: {
   options: Record<string, number>; setOptions: (o: Record<string, number>) => void; onBack: () => void;
+  onReset?: () => void;
 }) {
   const cats = Array.from(new Set(OPTION_ITEMS.map((o) => o.cat)));
   const [open, setOpen] = useState<string>(cats[0]);
@@ -407,6 +408,15 @@ export function OptionsScreen({ options, setOptions, onBack }: {
           </div>
         ))}
       </div>
+      {onReset && (
+        <div className="mt-4 flex items-center justify-between gap-3 border border-[#3d2a2a] bg-[#160e10] px-3 py-2">
+          <div className="text-[9px] leading-snug text-[#a68484]">
+            T-12 · PERSISTENCE — squads, tactics, kicker and options are saved to this browser and
+            restored on load. RESET wipes the save and restores every factory default.
+          </div>
+          <Btn small onClick={onReset}>RESET TO DEFAULTS</Btn>
+        </div>
+      )}
     </div>
   );
 }
