@@ -1343,6 +1343,31 @@ export class Director {
   watchdogTrips = 0;
   watchdogLog: string[] = [];
 
+  /* ======================== SPEC_07 TRY LOCK (T-67 backstop) ========================
+   *
+   * scoreTry() is reachable from five engine sites in the same physics frame
+   * (open.ts x4, setpieces.ts x1). If two of them fire for one grounding —
+   * overlapping frame checks, or a watchdog reset landing inside the try
+   * fanfare — the old code incremented the score twice. The lock engages the
+   * frame a try is awarded and rejects every further trigger from the same
+   * play sequence. It clears ONLY on a play reset: the restart/drop-out
+   * kickoff being struck (startKick) or the watchdog tearing a stuck match
+   * down (trip). Every blocked trigger is counted here and surfaced in the
+   * pause panel — a silent guard-block is an unexplained score, which is
+   * worse than the bug it fixed.
+   */
+  tryLock: { at: number; team: 'A' | 'B'; num: number } | null = null;
+  tryGuardBlocks = 0;
+  tryGuardLog: string[] = [];
+
+  private noteTryGuardBlock() {
+    this.tryGuardBlocks++;
+    const line = `${this.clockText} — BLOCKED duplicate TRY trigger (${this.teams[this.tryLock!.team].nation.short} #${this.tryLock!.num})` +
+      ` — lock held since ${this.tryLock!.at.toFixed(1)}s, score stays ${this.teams.A.score}-${this.teams.B.score}`;
+    this.tryGuardLog.push(line);
+    if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
+  }
+
   /* ======================== SPEC_02 GATE SINK ========================
    *
    * Gate functions remain pure and return data. Director is the only place
@@ -1478,6 +1503,12 @@ export class Director {
     this.say(`PLAY RESET — ${why}`);
     this.phaseAge = 0;
     this.stillFor = 0;
+    /* SPEC_07: the watchdog reset is a play reset too — the try lock clears
+     * so a legitimately re-played try after the reset can score. T-67's
+     * structural suspect was exactly a trip near the goal line followed by
+     * an instant second score: if that fires again, the pause panel now
+     * shows the trip AND whether the guard was armed for it. */
+    this.tryLock = null;
     const f = this.focusPoint();
     this.releaseAll();
     this.kk = undefined;
@@ -3059,6 +3090,13 @@ export class Director {
   /* ============================ KICK ============================ */
 
   startKick(team: 'A' | 'B', type: KickType, at?: { x: number; z: number }, carrierNum?: number) {
+    /* SPEC_07: a restart-of-play kickoff (kick-off, restart after a score,
+     * 22-metre drop-out) is THE play reset — the try lock clears here and
+     * only here on the kick path. A GOAL kick does NOT clear it: the
+     * conversion belongs to the try sequence it follows, and a duplicate
+     * trigger anywhere inside the try-fanfare-conversion window must still
+     * be rejected. */
+    if (type === 'RESTART' || type === 'DROP_OUT') this.tryLock = null;
     this.possession = team;
     const dir = team === 'A' ? 1 : -1;
     const x = at?.x ?? 0;
@@ -3230,8 +3268,19 @@ export class Director {
   /* ============================ SCORES, PENALTIES, RESTARTS ============================ */
 
   scoreTry() { /* T-03: engine-internal */
+    /* SPEC_07 Phase 1 — the idempotence guard. First trigger through the
+     * gate locks scoring for this play sequence the millisecond the award
+     * lands; any subsequent trigger (second physics check in the same frame,
+     * a replay of the same grounding, an overlapping set-piece hand-off) is
+     * rejected before a single point of state is touched. scoreTry() is
+     * therefore mathematically idempotent per play. */
+    if (this.tryLock) {
+      this.noteTryGuardBlock();
+      return;
+    }
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
+    this.tryLock = { at: this.t, team, num };
     const p = this.teams[team].players[num - 1];
     /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
      * that ends in a slide on the turf, not the grounded pose. Open play
