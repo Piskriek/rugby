@@ -1,5 +1,15 @@
 # HANDOFF DOCUMENTATION — World Class Rugby
 
+> **SPEC_02 implemented and validated — 2026-09-03.** Human review approved the
+> 3 m guaranteed gain, 12 m wing spread, 1 m concession cap, and the labelled
+> snapshot-before-write gates now wired through `passOptions`, `cpuCallPlay`, CPU
+> pass dispatch, and `think()`. The first gate correctly stopped on
+> `think:separate:kick:B6-B10` with B#10 `urgency: 1.15`; audit traced it to the
+> KICK WALKUP kicker write in `placeBound()`, which now clamps at the write site.
+> The rerun of `npx vite-node scripts/chain.ts 3` was silent and green. This Arena
+> session remains on `arena/01a06671-rugby`: commit and push only that branch,
+> never the historical `arena/01a0662a-rugby` branch.
+
 **For the next engineer.** Read this before touching `director.ts`.
 
 ---
