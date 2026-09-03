@@ -195,6 +195,55 @@ by-design? (2) Which have user-visible symptoms worth a playtest probe?
 
 ---
 
+## T-69 · DYNAMIC FACING (render/AI) — logged by SPEC_11, deferred
+
+**Observed:** a player's facing is his velocity vector and nothing else, so a
+man stopped dead keeps whatever heading he arrived with, and a man shunted
+sideways by `separate()` snaps to face the shunt. There is no turn rate and no
+hysteresis: the heading is a pure function of the current frame's velocity.
+**Known:** `steer()` writes `p.face` straight from velocity in
+`Director.think()` (`director.ts`, the `a.rf` field); the only consumer is the
+renderer, `src/render/scene.ts` (`face: a.rf > 0 ? 0 : Math.PI`) — the
+papercraft puppet flips between two poses on the sign of that one number. The
+game therefore has NO facing model at all: no `lastFace`, no `turnT`, no
+maximum angular rate. Tackle and contact reads use position and velocity, not
+facing, so nothing in the law or physics layer depends on it yet.
+**Not known:** what a realistic turn rate is for a forward carrying vs a back
+braking at speed; whether facing should lead or lag the velocity vector during
+a step or a fend; how a grounded or tackled man should hold his heading.
+**Questions:** (1) Should facing be a rate-limited follower of velocity (with
+a faster rate when sprinting, slower when braked), or an independent intent
+channel the AI writes? (2) Does the two-pose papercraft renderer need more
+poses before a real turn rate is visible, or is a sampled heading enough?
+(3) What is the measurement — mean angular velocity per clip, or "frames where
+the heading changed more than X degrees in one frame"?
+
+## T-70 · THE PASS-DRIFT TERM IS IDENTICALLY ZERO (AI) — logged by SPEC_11, deferred
+
+**Observed:** the defensive line never drifts on the pass. T-18's drift term
+exists in the code, is computed every frame, and can only ever evaluate to
+zero, so the behaviour it describes has never happened in a match.
+**Known:** the line-drift write in `Director.think()` is
+`tx += (this.op.carrierX - f.x) * dw`, where `dw` is the system's drift weight
+scaled by whether the ball is in flight. `f` is `focusPoint()`, and
+`focusPoint()` returns `{ x: op.carrierX, z: op.carrierZ }` when `op` exists —
+which is exactly the branch this code is in. So `op.carrierX - f.x === 0` and
+the term vanishes. The intent (T-18) was for the line to slide WHILE THE BALL
+IS IN FLIGHT, i.e. toward where the ball is going, not toward where the
+carrier is. The live ball during flight is a separate object: `op.ball.x/z`.
+**Not known:** whether the line should track the flying ball, the receiver, or
+the projected catch point; what drift weight is right once the term is live
+(the old weights were priced against a term that was always zero, so they are
+not evidence); how this interacts with the converger and cover-chase branches,
+which pull individual defenders out of the line on other terms.
+**Questions:** (1) Is the drift target the ball, the receiver's current
+position, or the predicted catch? (2) Once live, does the line over-slide and
+open the very holes LAW-66 measures — i.e. does this need a spacing clamp?
+(3) What is the measurement that proves the drift is happening at the right
+rate (sliding metres per pass, or line-lane error at the catch)?
+
+---
+
 ## PRIORITY ORDER (my read — challenge it)
 1. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
 2. T-49 backward pods (the on-pitch feel of attack)
