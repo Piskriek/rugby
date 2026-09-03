@@ -368,12 +368,15 @@ export interface ClipChoice { name: string; rate: number }
  */
 export function actionClip(action: string, speed: number, lat?: number): ClipChoice {
   switch (action) {
-    case 'shuffle': {
-      // square-to-target lateral movement reads as a strafe, not a turn
-      if (lat !== undefined && Math.abs(lat) > 0.9) {
-        return { name: lat > 0 ? 'strafe' : 'strafeL', rate: Math.max(0.5, Math.abs(lat) / 1.7) };
-      }
+    /* SPEC_06: scene.ts resolves shuffle-vs-strafe via the reviewed hysteresis
+     * dead bands (0.85-1.15 for strafe), so these are explicit states. The
+     * strafe cadence still tracks the lateral rate so feet lock to the ground. */
+    case 'shuffle':
       return { name: 'shuffle', rate: 1.0 };
+    case 'strafe': case 'strafeL': {
+      const r = lat !== undefined ? Math.max(0.5, Math.abs(lat) / 1.7)
+        : Math.max(0.5, speed / 1.7);
+      return { name: action === 'strafe' ? 'strafe' : 'strafeL', rate: r };
     }
     case 'sprint': return { name: 'sprint', rate: Math.max(0.6, speed / 3.6) };
     case 'run': return { name: 'run', rate: Math.max(0.5, speed / 2.9) };

@@ -68,18 +68,33 @@ const END_ON = 35;
 const EDGE_IN = 55;
 const EDGE_OUT = 125;
 const BACK_IN = 145;
+/* SPEC_06 — Machine 2 hardening. The edge-side mirror flip used a single-frame
+ * |cross| > 0.25 check, so an actor side-on to the camera mirrored (leftEdge ↔
+ * rightEdge) as the camera tracked across their right/left hand. The threshold
+ * is widened AND the flip is debounced: the opposing side must persist for
+ * EDGE_FLIP_DEBOUNCE (0.08 s) before it commits. */
+const EDGE_SIDE_GATE = 0.45;
+const EDGE_FLIP_DEBOUNCE = 0.08;
 
-const viewStore = new Map<string, PaperView>();
+interface ViewState { view: PaperView; sideCandidate: PaperView | null; sideT: number; }
+const viewStore = new Map<string, ViewState>();
 export function resetPaperViews() { viewStore.clear(); }
 export function paperViewKey(team: string, num: number) { return `${team}${num}`; }
+
+/** Clear any pending side-flip candidate (used when we change view zone). */
+function clearSideFlip(st: ViewState): void {
+  st.sideCandidate = null;
+  st.sideT = 0;
+}
 
 /**
  * Actor-relative paper view selection.
  * @param fx,fz  actor facing unit vector (world xz). Falls back to a.rf upstream.
  * @param ax,az  actor world position
  * @param camX,camZ camera world position
+ * @param dt     frame delta (s) for the edge-side flip debounce, 0 disables it.
  */
-export function updatePaperView(key: string, fx: number, fz: number, ax: number, az: number, camX: number, camZ: number): PaperView {
+export function updatePaperView(key: string, fx: number, fz: number, ax: number, az: number, camX: number, camZ: number, dt = 0): PaperView {
   let tx = camX - ax, tz = camZ - az;
   const tl = Math.hypot(tx, tz);
   if (tl < 1e-4) { tx = 0; tz = 1; } else { tx /= tl; tz /= tl; }
@@ -88,20 +103,42 @@ export function updatePaperView(key: string, fx: number, fz: number, ax: number,
   // signed side: negative => camera sits on the actor's right hand side
   const cross = fx * tz - fz * tx;
   const side: PaperView = cross < 0 ? 'rightEdge' : 'leftEdge';
-  const cur = viewStore.get(key) ?? 'front';
+  const st = viewStore.get(key) ?? { view: 'front', sideCandidate: null, sideT: 0 };
+  const cur = st.view;
   let next = cur;
-  if (isLying(cur)) next = cur; // lying is driven by the sim, not by angles
-  else if (cur === 'front') {
+  if (isLying(cur)) {
+    next = cur; // lying is driven by the sim, not by angles
+  } else if (cur === 'front') {
+    clearSideFlip(st);
     if (ang > EDGE_IN) next = side;
   } else if (cur === 'back') {
+    clearSideFlip(st);
     if (ang < EDGE_OUT) next = side;
   } else {
     // currently showing an edge
-    if (ang < END_ON) next = 'front';
-    else if (ang > BACK_IN) next = 'back';
-    else if (Math.abs(cross) > 0.25) next = side; // side flip only out of the dead band
+    if (ang < END_ON) {
+      clearSideFlip(st); next = 'front';
+    } else if (ang > BACK_IN) {
+      clearSideFlip(st); next = 'back';
+    } else {
+      // edge-side mirror flip: raised |cross| gate + time retention
+      if (Math.abs(cross) > EDGE_SIDE_GATE) {
+        if (side === cur) {
+          clearSideFlip(st);         // already showing the correct side
+        } else if (st.sideCandidate === side) {
+          st.sideT += dt;            // the opposing side persists — accumulate
+          if (st.sideT >= EDGE_FLIP_DEBOUNCE) { next = side; clearSideFlip(st); }
+        } else {
+          st.sideCandidate = side;   // first frame of the opposing side
+          st.sideT = dt;
+        }
+      } else {
+        clearSideFlip(st);           // in the side dead band — hold current edge
+      }
+    }
   }
-  viewStore.set(key, next);
+  st.view = next;
+  viewStore.set(key, st);
   return next;
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Director, Input, NO_INPUT, MatchConfig } from '../game/director';
 import { drawMatch, drawWipe } from '../render/scene';
+import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
 import { Btn, Panel, Kbd } from './kit';
@@ -25,6 +26,8 @@ export const KEYMAP: Record<string, string> = {
   x: 'tackleDive', c: 'tackleSmother',
   e: 'dummy', q: 'switchPlayer',
   r: 'replay', tab: 'stats', escape: 'pause',
+  /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
+  b: 'animDebug',
 };
 
 export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }: {
@@ -42,6 +45,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [showStats, setShowStats] = useState(false);
   const [tick, setTick] = useState(0);
   const [slow, setSlow] = useState(1);
+  /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
+  const [showAnimDebug, setShowAnimDebug] = useState(false);
 
   if (!dirRef.current) {
     dirRef.current = new Director(cfg);
@@ -127,6 +132,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       if (pressed.has('pause')) { d.paused = !d.paused; force((n) => n + 1); }
       if (pressed.has('stats')) setShowStats((v) => !v);
       if (pressed.has('replay')) { if (!d.phase.includes('REPLAY')) d.enterReplay('REPLAY'); }
+      /* SPEC_06 — B toggles the facing/strafe debug overlay. */
+      if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
 
       d.gameSpeed = slow;
       d.update(dt, inp, pressed, released);
@@ -143,6 +150,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         const view = { w, h };
         drawMatch(ctx, d, view);
         drawIndicators(ctx, d, view);
+        /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
+        if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
         if ((d.options.radar ?? 1) === 1) drawMinimap(ctx, d, view);
         const crt = d.options.crt ?? 1;
         if (crt > 0) drawCRT(ctx, view, crt === 2 ? 1.6 : 1);
@@ -167,7 +176,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     raf = requestAnimationFrame(loop);
     const ui = setInterval(() => setTick((t) => t + 1), 110);
     return () => { cancelAnimationFrame(raf); clearInterval(ui); };
-  }, [slow]);
+  }, [slow, showAnimDebug]);
 
   const d = dirRef.current!;
   const A = d.A, B = d.B;
@@ -437,6 +446,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
+        {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
       </div>
 
       {/* STATS */}

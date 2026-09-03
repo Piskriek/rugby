@@ -18,6 +18,7 @@ import {
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
 } from './paper';
+import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
 /** Screen-right vector of the camera in world terms (handoff section 5). */
 function camRightOf(cam: Camera): [number, number] {
@@ -39,11 +40,82 @@ interface Puppet {
   holdT: number;
   lie: boolean;                 // sequenced into the lying hold
   ch: Character; seed: number;
+  /* SPEC_06 — facing/strafe debug readouts (read-only, for the overlay). */
+  lat: number;                  // lateral velocity relative to facing (m/s)
+  view: PaperView;              // paper side currently shown this frame
+  /* SPEC_06 — gait hysteresis state (which locomotion state is being held). */
+  gait: string;
 }
 const puppets = new Map<string, Puppet>();
 let lastDirector: Director | null = null;
 
 const clamp01p = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/* ---- SPEC_06 — GAIT HYSTERESIS (Machine 1) ----
+ * The reviewed dead bands from SPEC_06_HYSTERESIS_TABLE.md. Entry is the outer
+ * bound (a state only leaves when the signal crosses OUT); leave is the inner
+ * bound (a signal on the line does not re-enter). Applied to the two gate
+ * families that triggered the jarring: the forward speed ladder (idle/walk/jog/
+ * run/sprint) and the lateral shuffle/strafe split. */
+const GAIT_DEAD = {
+  walkEnter: 0.7, walkLeave: 0.45,
+  jogEnter: 1.6, jogLeave: 1.25,
+  runEnter: 3.6, runLeave: 3.25,
+  sprintEnter: 6.2, sprintLeave: 5.85,
+  /* lateral: shuffle occupies the band 0.75-1.05; strafe 0.85-1.15 inside it */
+  shuffleEnter: 1.05, shuffleLeave: 0.75,
+  strafeEnter: 1.15, strafeLeave: 0.85,
+  /* shuffle/strafe only while sub-sprint; above this a lateral read is just a run */
+  shuffleSpeedMax: 3.3,
+} as const;
+
+/** One-rung forward speed ladder with entry/hold/leave dead bands. */
+function ladderStep(prev: string, spd: number): string {
+  const D = GAIT_DEAD;
+  switch (prev) {
+    case 'idle':   return spd >= D.walkEnter ? 'walk' : 'idle';
+    case 'walk':   return spd < D.walkLeave ? 'idle' : spd >= D.jogEnter ? 'jog' : 'walk';
+    case 'jog':    return spd < D.jogLeave ? 'walk' : spd >= D.runEnter ? 'run' : 'jog';
+    case 'run':    return spd < D.runLeave ? 'jog' : spd >= D.sprintEnter ? 'sprint' : 'run';
+    case 'sprint': return spd < D.sprintLeave ? 'run' : 'sprint';
+    default:       return spd < D.walkEnter ? 'idle' : spd < D.jogEnter ? 'walk' : spd < D.runEnter ? 'jog' : spd < D.sprintEnter ? 'run' : 'sprint';
+  }
+}
+
+/** Fresh (no prior state) speed mapping — used on the one-shot exit from shuffle. */
+function freshLadder(spd: number): string {
+  const D = GAIT_DEAD;
+  return spd < D.walkEnter ? 'idle' : spd < D.jogEnter ? 'walk' : spd < D.runEnter ? 'jog' : spd < D.sprintEnter ? 'run' : 'sprint';
+}
+
+/** Resolve the locomotion action with SPEC_06 hysteresis. (Exported for the
+ * SPEC_06 unit check; a pure function, no side effects.) */
+export function resolveGait(prev: string, spd: number, latRaw: number): { action: string; lat: number | undefined } {
+  const D = GAIT_DEAD;
+  const latMag = Math.abs(latRaw);
+  const prevLateral = prev === 'shuffle' || prev === 'strafe' || prev === 'strafeL';
+
+  if (prevLateral) {
+    /* Hold the lateral state until |lat| collapses below the leave band. The
+     * 0.75-1.05 band is shared by jog↔shuffle and strafe, so an actor does not
+     * hop jog → shuffle → jog around a single frame of |lat| ≈ 0.9. */
+    if (latMag < D.shuffleLeave) {
+      return { action: freshLadder(spd), lat: undefined };
+    }
+    /* Inside shuffle, pick strafe vs shuffle with its own 0.85-1.15 band. */
+    if (latMag >= D.strafeEnter) return { action: latRaw > 0 ? 'strafe' : 'strafeL', lat: latRaw };
+    if (latMag <= D.strafeLeave && (prev === 'strafe' || prev === 'strafeL')) return { action: 'shuffle', lat: latRaw };
+    /* dead band: keep the current side, do not drift the mirror */
+    return { action: prev === 'shuffle' ? 'shuffle' : (latRaw > 0 ? 'strafe' : 'strafeL'), lat: latRaw };
+  }
+
+  /* Not lateral: forward speed ladder (hysteretic), then the shuffle entry. */
+  const action = ladderStep(prev, spd);
+  if (spd < D.shuffleSpeedMax && latMag >= D.shuffleEnter && (action === 'walk' || action === 'jog')) {
+    return { action: latMag >= D.strafeEnter ? (latRaw > 0 ? 'strafe' : 'strafeL') : 'shuffle', lat: latRaw };
+  }
+  return { action, lat: undefined };
+}
 
 /** Engine clip vocabulary -> the system's action strings. */
 function mapAction(clip: string): string {
@@ -82,6 +154,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       hold: null, holdT: 0, lie: false,
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
       seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
+      lat: 0, view: 'front', gait: 'idle',   // SPEC_06 — facing/strafe debug + hysteresis
     };
     puppets.set(key, pg);
   }
@@ -127,16 +200,21 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
 
   /* Gait normalisation by REAL speed — and the STRAFE ROUTE: movement at an
    * angle to the facing at low speed is a side-shuffle, NOT a walk. This is
-   * what kills the long-strides-at-crawling-pace read the user flagged. */
+   * what kills the long-strides-at-crawling-pace read the user flagged.
+   * SPEC_06: the bare thresholds are replaced with the reviewed hysteresis dead
+   * bands so an actor holds its gait until the signal crosses the outer bound
+   * (no more jog ↔ shuffle ↔ strafe flapping on a hovering |lat|/spd). */
   let lat: number | undefined;
   if (action === 'jog' || action === 'sprint' || action === 'run') {
     const cf = Math.cos(pg.face), sf = Math.sin(pg.face);
-    lat = vx * cf - vz * sf;
-    if (pg.spd < 3.6 && Math.abs(lat) > 0.9) action = 'shuffle';
-    else {
-      action = pg.spd < 0.7 ? 'idle' : pg.spd < 1.6 ? 'walk' : pg.spd < 3.6 ? 'jog' : pg.spd < 6.2 ? 'run' : 'sprint';
-      lat = undefined;
-    }
+    const latRaw = vx * cf - vz * sf;
+    const resolved = resolveGait(pg.gait, pg.spd, latRaw);
+    action = resolved.action;
+    lat = resolved.lat;
+    pg.gait = action;   // hold the resolved locomotion state across frames
+    pg.lat = latRaw;    // debug: the raw lateral stream, not the resolved one
+  } else {
+    pg.lat = 0;         // not a moving gait — no lateral carry
   }
   const choice = actionClip(action, pg.spd, lat);
   if (choice.name !== pg.clipName) {
@@ -161,6 +239,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
 
 export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   const ddt = 1 / 60;   // the puppet pipeline only needs a stable beat for velocity
+  resetFacingDebug();   // SPEC_06 — fresh per-actor readout each frame
   const cam = d.cam;
   const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
   const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
@@ -234,12 +313,21 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     if (pg.lie) {
       view = 'lieFaceDown';
     } else {
-      view = updatePaperView(paperViewKey(a.team, a.num), fx, fz, a.rx, a.rz, cam.x, cam.z);
+      view = updatePaperView(paperViewKey(a.team, a.num), fx, fz, a.rx, a.rz, cam.x, cam.z, ddt);
     }
+    pg.view = view;   // SPEC_06 — the paper side shown this frame
     const dot = fx * cr[0] + fz * cr[1];
     const sdir = dot >= 0 ? 1 : -1;
     const perp = Math.abs(dot);
     const carried = !!d.op && !d.op.ball.live && a.team === d.op.attacking && a.num === d.op.carrierNum;
+
+    /* SPEC_06 — feed the facing/strafe debug HUD (view, gait, lat). */
+    recordFacingDebug({
+      key: paperViewKey(a.team, a.num),
+      team: a.team, num: a.num,
+      view, gait: pg.clipName || (pg.lie ? 'lieF' : mapAction(a.renderClip)),
+      spd: pg.spd, lat: pg.lat,
+    });
 
     /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
     let pose = pg.pose;

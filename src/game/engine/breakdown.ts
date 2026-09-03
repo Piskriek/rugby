@@ -390,8 +390,17 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   /* T-18. FALL FORWARD: a carrier brought down at pace lands a stride
    * beyond the contact point, not dead on it. Without this the ruck formed
    * where he was first touched and every phase lost the metre the tackle
-   * radius already cost. */
-  const fall = clamp(car.vz * dir * 0.13, 0, 1.3);
+   * radius already cost.
+   * SPEC_05 / T-68 (tighten): this write put the carrier up to 1.3 m past
+   * the contact point in ONE 16 ms frame — the last remaining snap over the
+   * 1.15 m tighten line in the gate harness (measured 1.37 m on B8). The
+   * carrier still lands a stride beyond contact, but the distance is now
+   * bounded to a per-frame-legal fall so the transition is a hard hit about
+   * to go to ground, not a teleport. The ruck reference (cx, cz) below is
+   * taken from this bounded position, so the whole breakdown settles where
+   * the carrier actually lands. */
+  const FALL_FORWARD_MAX = 0.9;   // per-frame-legal landing; keeps maxDisp < 1.15 m
+  const fall = clamp(car.vz * dir * 0.13, 0, FALL_FORWARD_MAX);
   car.z += dir * fall;
   const cx = car.x, cz = car.z;
   const dTeam: 'A' | 'B' = d.defending();

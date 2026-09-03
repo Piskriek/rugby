@@ -9,14 +9,14 @@
 import { runDeep, runTrace } from '../src/game/trace';
 import { audit } from '../src/game/audit';
 import { gateConfig } from '../src/game/gates';
+import { seedRng } from '../src/game/seed';
 
 const seconds = Number(process.argv[2] ?? 90);
 const diff = Number(process.argv[3] ?? 3);
 const seed = Number(process.argv[4] ?? 1);
 
-// deterministic runs: one LCG behind Math.random for this process
-let s = seed >>> 0 || 1;
-Math.random = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+// deterministic runs: the ambient seed seam pins Math.random for this process
+seedRng(seed);
 
 const deep = runDeep(gateConfig(diff), seconds);
 const run = runTrace(gateConfig(diff), seconds);

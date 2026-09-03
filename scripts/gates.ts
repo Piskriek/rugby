@@ -8,12 +8,18 @@
  * gate fails, so CI can fail a build on a regression.
  */
 import { runDeep } from '../src/game/trace';
-import { gateConfig, runGates, GATES } from '../src/game/gates';
+import { gateConfig, runGates } from '../src/game/gates';
+import { seedRng } from '../src/game/seed';
 
 /* T-18 note: the tackle gate flakes at its 8-floor on short samples — the
  * handoff says so in so many words. The default sample is long enough that
  * a green board means something; pass an explicit number to go faster. */
 const seconds = Number(process.argv[2] ?? 100);
+/* SPEC_05 / T-68: the gate harness must be deterministic. The whole flicker
+ * (NO-TELEPORTS / BALL-ON-SCREEN / CHASE-ARRIVALS) was unseeded runs; pin the
+ * ambient seed so the same build gives the same gate board every time. */
+const seed = Number(process.argv[3] ?? 1);
+seedRng(seed);
 
 function row(cells: string[], widths: number[]): string {
   return cells.map((c, i) => String(c).padEnd(widths[i])).join(' ');
