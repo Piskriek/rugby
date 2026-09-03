@@ -343,6 +343,7 @@ function emit(d: Director, rec: Recorder) {
 
   /* the shape both sides are playing */
   rec.push(d, 'SHAPE', 'ATTACKING SHAPE AND DEFENSIVE SYSTEM', {
+    attackPhase: d.op?.phase ?? null,   // SPEC_10 B3b: a call is owed off a set piece, not mid-flow
     attackShape: d.shapeOf(atk).name,
     attackReading: d.shapeOf(atk).reading,
     defenceSystem: d.defenceOf(def).name,
@@ -462,6 +463,7 @@ function emit(d: Director, rec: Recorder) {
      * (SPEC_09 A2 proved ≥ 1.5 m of margin); judge it there and only there. */
     const atStrike = k.t < 0.1;    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
       playersMoving: movers,
+      flightT: Math.round(k.t * 100) / 100,   // SPEC_10 B3b: the release frame is legitimately still
       chasersMovingTowardLanding: chasing,
       chasersClosingVelocity: closingV,
       chasersAssigned: chaserNums.length,
@@ -492,7 +494,9 @@ function emit(d: Director, rec: Recorder) {
     });
     rec.push(d, 'DEFENSIVE_LINE', 'DEFENSIVE LINE INTEGRITY', {
       maxGapMetres: Math.round(maxLineGap(d, def) * 10) / 10,
-      defenders: d.live.filter((p) => p.team === def && p.beatenT <= 0).length,
+      /* LAW-67 reads this as the Law-3 HEADCOUNT — keep it the full side;
+       * the line-integrity population lives in maxGapMetres (B2b). */
+      defenders: d.live.filter((p) => p.team === def).length,
       lineConnected: maxGap(d, def) <= 4.0,
       pressure: Math.round(d.op.pressure * 100) / 100,
       phase: d.op.phase,
@@ -566,7 +570,7 @@ function emit(d: Director, rec: Recorder) {
        * and the SCRUMMY — 7 in the line + 2 = '9 in the throwing line'. Law
        * 18 counts the line itself. */
       inLineThrowing: s.players.filter((p) => p.team === s.thrower && p.role !== 'THROWER' && p.role !== 'SCRUMMY').length,
-      inLineDefending: s.players.filter((p) => p.team !== s.thrower).length,
+      inLineDefending: s.players.filter((p) => p.team !== s.thrower && p.role !== 'SCRUMMY').length,
       throwerOutsideLine: Math.abs(s.players.find((p) => p.role === 'THROWER')?.x ?? 0) > 32,
       meter: Math.round(s.meter * 100) / 100,
       meterVisible: s.stage === 'THROW',

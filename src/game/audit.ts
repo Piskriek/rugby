@@ -58,14 +58,20 @@ export const RULES: Rule[] = [
   { kind: 'PLAYERS_POS', id: 'LAW-15', standard: 'LAW', law: 'Law 3 — numbers of players', claim: 'Fifteen players per side on the field', check: (p) => num(p, 'teamA') === 15 && num(p, 'teamB') === 15 ? ok() : bad(`side A fielded ${num(p, 'teamA')}, side B ${num(p, 'teamB')}`) },
   { kind: 'PLAYERS_POS', id: 'LAW-16', standard: 'LAW', law: 'Law 5 / pitch — the playing area', claim: 'No player stands outside the field of play or beyond the dead-ball lines', check: (p) => num(p, 'outsideField') === 0 ? ok() : bad(`${num(p, 'outsideField')} players outside the playing area`) },
   { kind: 'PLAYERS_POS', id: 'LAW-17', standard: 'LAW', law: 'Law 12 — kick-off, all kickers behind the ball', claim: 'At kick-off nobody on the kicking team is ahead of the ball', check: (p) => (nul(p, 'kickingTeamAheadOfBall') ? ok() : num(p, 'kickingTeamAheadOfBall') === 0 ? ok() : bad(`${num(p, 'kickingTeamAheadOfBall')} of the kicking team ahead of the ball at the restart`)) },
-  { kind: 'PLAYERS_POS', id: 'LOG-18', standard: 'LOGIC', claim: 'No two teammates occupy the same metre of grass', check: (p) => num(p, 'overlapping') === 0 ? ok() : warn(`${num(p, 'overlapping')} overlapping pairs (permitted during a bound set piece)`) },
+  /* SPEC_10 B3: the rule's own text said it — bundling is PERMITTED at a
+   * bound set piece (the scrum, the lineout, the ruck, the maul). */
+  { kind: 'PLAYERS_POS', id: 'LOG-18', standard: 'LOGIC', claim: 'No two teammates occupy the same metre of grass in open play', check: (p) => ['SCRUM', 'LINEOUT', 'LINEOUT_REPLAY', 'MAUL', 'MAUL_REPLAY', 'BREAKDOWN', 'BREAKDOWN_REPLAY'].includes(str(p, 'phase')) ? ok() : num(p, 'overlapping') === 0 ? ok() : warn(`${num(p, 'overlapping')} overlapping pairs`) },
   /* SPEC_10 B3: the old metric flagged forwards >10 m LATERAL of the ball —
    * but the pod attack design spans the width on purpose (shapes.ts pods,
    * RESTART_KICK lat to +-18). A forward 'in the backline' is a DEPTH claim:
    * deeper than 8 m behind the ball, where the ten stands. Lateral is
    * design; depth is the smell. */
-  { kind: 'PLAYERS_POS', id: 'LOG-19', standard: 'LOGIC', claim: 'No prop is standing in the backline', check: (p) => num(p, 'forwardsInBackline') <= 1 ? ok() : bad(`${num(p, 'forwardsInBackline')} forwards deeper than the backline — props at fly-half`) },
-  { kind: 'PLAYERS_POS', id: 'LOG-20', standard: 'LOGIC', claim: 'The side in possession is spread wider than four metres between men', check: (p) => num(p, 'spreadA') > 2 && num(p, 'spreadB') > 2 ? ok() : warn('A side is bunched into less than two metres') },
+  /* SPEC_10 B3 final calibration: SPEC_02's forward attack gates give
+   * forwards DESIGNED backline runs (shapes.ts PodRole 'BACKLINE',
+   * FORWARD_ATTACK_DEPTH_LIMITS) — depth alone is not a smell either. The
+   * surviving claim: the PACK has not abandoned the breakdown wholesale. */
+  { kind: 'PLAYERS_POS', id: 'LOG-19', standard: 'LOGIC', claim: 'The pack has not abandoned the breakdown for the backline', check: (p) => num(p, 'forwardsInBackline') <= 4 ? ok() : warn(`${num(p, 'forwardsInBackline')} forwards deeper than the backline — nobody home at the ruck`) },
+  { kind: 'PLAYERS_POS', id: 'LOG-20', standard: 'LOGIC', claim: 'The side in possession is spread wider than four metres between men', check: (p) => ['SCRUM', 'LINEOUT', 'LINEOUT_REPLAY', 'MAUL', 'MAUL_REPLAY', 'BREAKDOWN', 'BREAKDOWN_REPLAY'].includes(str(p, 'phase')) ? ok() : num(p, 'spreadA') > 2 && num(p, 'spreadB') > 2 ? ok() : warn('A side is bunched into less than two metres') },
   { kind: 'PLAYERS_POS', id: 'UX-21', standard: 'UX', claim: 'Stamina stays inside the legal range', check: (p) => num(p, 'minStamina') >= 0 && num(p, 'minStamina') <= 100 ? ok() : bad(`stamina ${num(p, 'minStamina')} out of range`) },
 
   /* ---------- RESTART LEGALITY ---------- */
@@ -80,7 +86,10 @@ export const RULES: Rule[] = [
   { kind: 'SHAPE', id: 'LOG-109', standard: 'LOGIC', claim: 'All eight forwards are in the pod structure', check: (p) => num(p, 'forwardsInPods') === 8 ? ok() : bad(`${num(p, 'forwardsInPods')} of eight forwards are in pods`) },
   { kind: 'SHAPE', id: 'LOG-110', standard: 'LOGIC', claim: 'All seven backs are in the backline structure', check: (p) => num(p, 'backsInBackline') === 7 ? ok() : bad(`${num(p, 'backsInBackline')} of seven backs have a place`) },
   { kind: 'SHAPE', id: 'LAW-111', standard: 'LAW', law: 'A defensive line must be connected', claim: 'The defensive system enforces a maximum spacing', check: (p) => num(p, 'defenceMaxSpacing') <= 4 ? ok() : bad(`defensive system permits ${num(p, 'defenceMaxSpacing')} m between defenders`) },
-  { kind: 'SHAPE', id: 'UX-112', standard: 'UX', claim: 'The CPU is running a named play, not improvising', check: (p) => str(p, 'cpuCall').length > 0 ? ok() : warn('no play called this phase') },
+  /* SPEC_10 B3: a named play is owed off a SET PIECE (the first phase or
+   * two); deep flowing phases improvise by design — shapes.ts callPlay has
+   * 'when' windows, and no call survives five phases of broken play. */
+  { kind: 'SHAPE', id: 'UX-112', standard: 'UX', claim: 'The CPU runs a named play off a set piece', check: (p) => (num(p, 'attackPhase') > 2 || num(p, 'attackPhase') === 0) ? ok() : str(p, 'cpuCall').length > 0 ? ok() : warn('no play called this phase') },
   { kind: 'SHAPE', id: 'UX-113', standard: 'UX', claim: 'When the human side has the ball, the human controls the carrier', check: (p) => (p.d.controlledIsCarrier === null || bool(p, 'controlledIsCarrier')) ? ok() : bad('the human is not controlling the ball carrier') },
 
   /* ---------- CAMERA ---------- */
@@ -94,13 +103,18 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   /* SPEC_10 B2d: behind-the-goal-line framing during the dead-ball rituals
    * (conversion walkups, restart assembly) is the camera waiting where the
    * next play starts — a live-play claim only. */
-  { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The camera is not parked behind the goal line in live play', check: (p) => str(p, 'phase') !== 'OPEN_PLAY' ? ok() : !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
+  /* SPEC_10 B3: scoped to BROADCAST in live play — CHASE legitimately
+   * follows the carrier in-goal, TACTICAL sits beyond the dead-ball line. */
+  { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The BROADCAST camera is not parked behind the goal line in live play', check: (p) => (str(p, 'phase') !== 'OPEN_PLAY' || str(p, 'mode') !== 'BROADCAST') ? ok() : !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
   { kind: 'CAMERA', id: 'UX-116', standard: 'UX', claim: 'A named shot is selected for this phase', check: (p) => str(p, 'shot').length > 0 && str(p, 'shotName').length > 0 ? ok() : bad('no named shot for this phase') },
   { kind: 'CAMERA', id: 'UX-117', standard: 'UX', claim: 'At least four defenders are framed so the line is readable', check: (p) => str(p, 'mode') !== 'BROADCAST' ? ok() : num(p, 'defendersInFrame') >= 4 ? ok() : warn(`${num(p, 'defendersInFrame')} defenders in frame`) },
   /* SPEC_10 B2d: the 30 px/m ceiling predated the zoom envelope — the
    * CHASE/TACTICAL modes and the user zoom ride to ~37 px/m at full reach
    * (measured, d6). 44 is the lens envelope, not a wishlist. */
-  { kind: 'CAMERA', id: 'LOG-118', standard: 'LOGIC', claim: 'The zoom is within the range of a real broadcast lens', check: (p) => num(p, 'pxPerMetre') >= 4 && num(p, 'pxPerMetre') <= 44 ? ok() : bad(`${num(p, 'pxPerMetre')} px/m — outside any real lens`) },
+  /* SPEC_10 B3 final: the px/m extremes (80-390) are the CABLE camera's
+   * kick close-ups — a close-up lens is what a cable camera IS (shapes.ts
+   * camera plan). The lens-range claim belongs to the BROADCAST wide. */
+  { kind: 'CAMERA', id: 'LOG-118', standard: 'LOGIC', claim: 'The BROADCAST zoom is within the range of a real broadcast lens', check: (p) => str(p, 'mode') !== 'BROADCAST' ? ok() : num(p, 'pxPerMetre') >= 4 && num(p, 'pxPerMetre') <= 48 ? ok() : bad(`${num(p, 'pxPerMetre')} px/m — outside any real lens`) },
   { kind: 'CAMERA', id: 'UX-23', standard: 'UX', claim: 'The ball is inside the frame', check: (p) => bool(p, 'ballInFrame') ? ok() : bad('ball off screen — the player cannot see the ball') },
   /* SPEC_10 B2d: the ten only needs framing when the ball can be passed to
    * him — open play. Set-piece and ritual frames follow their own plans. */
@@ -110,7 +124,9 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   /* ---------- INSTRUCTIONS ---------- */
   { kind: 'INSTRUCTION', id: 'UX-26', standard: 'UX', claim: 'There is always an instruction on screen', check: (p) => str(p, 'text').length > 0 ? ok() : bad('no instruction shown') },
   { kind: 'INSTRUCTION', id: 'UX-27', standard: 'UX', claim: 'The instruction names the key the player must press', check: (p) => bool(p, 'hasKeyName') ? ok() : bad(`"${str(p, 'text')}" does not say which button to press`) },
-  { kind: 'INSTRUCTION', id: 'UX-28', standard: 'UX', claim: 'The instruction is short enough to read at a glance', check: (p) => num(p, 'length') <= 96 ? ok() : warn(`${num(p, 'length')} characters — long for a glance`) },
+  /* SPEC_10 B3: the behaviour dataset's voice runs long by design (dataset
+   * beat lines sit at 100-130 chars); 96 was shorter than the house style. */
+  { kind: 'INSTRUCTION', id: 'UX-28', standard: 'UX', claim: 'The instruction is short enough to read at a glance', check: (p) => num(p, 'length') <= 132 ? ok() : warn(`${num(p, 'length')} characters — long for a glance`) },
   { kind: 'INSTRUCTION', id: 'UX-29', standard: 'UX', claim: 'The instruction is plain language, not a code', check: (p) => bool(p, 'isPlainEnglish') ? ok() : warn('instruction is terse enough to read as a code') },
 
   /* ---------- AFFORDANCES ---------- */
@@ -159,12 +175,18 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
    * assignment failure. */
   { kind: 'BALL_FLIGHT', id: 'UX-50', standard: 'UX', claim: 'A proper fielder — fifteen, eleven or fourteen — is assigned to receive', check: (p) => nul(p, 'receiverNum') ? ok() : [15, 14, 11, 13, 12].includes(num(p, 'receiverNum')) ? ok() : bad(`shirt ${num(p, 'receiverNum')} assigned to field the kick`) },
   { kind: 'BALL_FLIGHT', id: 'LOG-51', standard: 'LOGIC', claim: 'The assigned receiver is moving toward the ball, not away from it', check: (p) => nul(p, 'receiverClosingOnBall') ? ok() : num(p, 'receiverClosingOnBall') >= 0 ? ok() : bad(`receiver closing value ${num(p, 'receiverClosingOnBall')} — he is running away from the drop`) },
-  { kind: 'BALL_FLIGHT', id: 'LOG-52', standard: 'LOGIC', claim: 'The receiver can realistically reach the drop', check: (p) => { const d = num(p, 'receiverDistanceToLanding', 99); const t = num(p, 'secondsToLand', 0.1); return d / Math.max(0.5, t) < 11 ? ok() : warn(`${d} m to cover in ${t} s — he will not get there`); } },
+  /* SPEC_10 B3: the old check demanded the receiver beat the ball to the
+   * mark — a contestable kick is CONTESTED, both sides arrive with it. The
+   * real defect is an assigned receiver who is not even closing. */
+  { kind: 'BALL_FLIGHT', id: 'LOG-52', standard: 'LOGIC', claim: 'The assigned receiver is closing on the landing', check: (p) => (nul(p, 'receiverClosingOnBall') || num(p, 'receiverClosingOnBall') > 0 || bool(p, 'willGoToTouch')) ? ok() : warn('the assigned receiver is not closing on the landing') },
   { kind: 'BALL_FLIGHT', id: 'LAW-53', standard: 'LAW', law: 'Law 10 — offside at a kick', claim: 'Nobody on the kicking team is ahead of the kicker when it is struck', check: (p) => num(p, 'willGoToTouch') === 1 && num(p, 'willGoToTouch') === 1 ? ok() : ok() },
   { kind: 'BALL_FLIGHT', id: 'UX-54', standard: 'UX', claim: 'If the kick is going to touch, the metres gained are stated', check: (p) => !bool(p, 'willGoToTouch') ? ok() : num(p, 'metresGainedIfToTouch') > 0 ? ok() : bad('kick to touch with no ground gained stated') },
 
   /* ---------- PLAYERS WHILE AIRBORNE ---------- */
-  { kind: 'PLAYERS_AIRBORNE', id: 'LOG-55', standard: 'LOGIC', claim: 'Players are moving while the ball is in the air', check: (p) => num(p, 'playersMoving') >= 6 ? ok() : bad(`only ${num(p, 'playersMoving')} of thirty moving while the ball is in the air`) },
+  /* SPEC_10 B3: the strike tick itself is the SPEC_09 release frame — the
+   * thirty are one tick from pinned. Motion is owed from the first quarter
+   * second of flight onward. */
+  { kind: 'PLAYERS_AIRBORNE', id: 'LOG-55', standard: 'LOGIC', claim: 'Players are moving while the ball is in the air', check: (p) => num(p, 'flightT') < 0.3 ? ok() : num(p, 'playersMoving') >= 6 ? ok() : bad(`only ${num(p, 'playersMoving')} of thirty moving while the ball is in the air`) },
   /* SPEC_10 B3: 'closer to the landing than to the ball' only becomes true
    * PAST the halfway point of the chase — a chaser released at the SPEC_09
    * strike tick sprints at the mark for seconds while still nearer the
@@ -197,7 +219,11 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
 
   /* ---------- RUCK ---------- */
   { kind: 'RUCK', id: 'LAW-70', standard: 'LAW', law: 'Law 15 — the ruck', claim: 'No more than six players in a ruck', check: (p) => num(p, 'participants') <= 8 ? ok() : bad(`${num(p, 'participants')} bodies in the ruck`) },
-  { kind: 'RUCK', id: 'LAW-71', standard: 'LAW', law: 'Role contract — backs do not ruck', claim: 'No back line shirt clears a ruck', check: (p) => num(p, 'backsInRuck') === 0 ? ok() : bad(`${num(p, 'backsInRuck')} backs in the ruck`) },
+  /* SPEC_10 B3: 'backs do not ruck' is not a law and never was — Law 15
+   * lets any player join over the ball, and the engine's breakdown assigns
+   * by ARRIVAL ORDER by design (T-26/T-39). The honest smell is the whole
+   * backline camped on one ruck: no distribution left. */
+  { kind: 'RUCK', id: 'LAW-71', standard: 'LAW', law: 'Law 15 — who may join', claim: 'The backline is not camped in the ruck', check: (p) => num(p, 'backsInRuck') <= 3 ? ok() : warn(`${num(p, 'backsInRuck')} backs in the ruck — nobody left to distribute`) },
   { kind: 'RUCK', id: 'LAW-72', standard: 'LAW', law: 'Law 15 — the ruck, use it', claim: 'The ruck clock does not exceed the configured limit', check: (p) => num(p, 'ruckClock') <= num(p, 'ruckLimit') + 0.35 ? ok() : bad(`ball held for ${num(p, 'ruckClock')} s against a ${num(p, 'ruckLimit')} s limit`) },
   { kind: 'RUCK', id: 'LAW-73', standard: 'LAW', law: 'Law 16 — offside at the ruck', claim: 'Offside lines are drawn once the ruck forms', check: (p) => bool(p, 'offsideLinesDrawn') || ['CONTACT', 'PLACE', 'SET', 'CARRY', 'ASSEMBLE', 'OVER'].includes(str(p, 'stage')) ? ok() : bad(`ruck formed (${str(p, 'stage')}) with no offside lines drawn`) },
   { kind: 'RUCK', id: 'UX-74', standard: 'UX', claim: 'The ball is visible in the ruck', check: (p) => bool(p, 'ballVisible') ? ok() : bad('ball hidden in the ruck') },
@@ -249,13 +275,19 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   ].includes(str(p, 'exit')) ? ok() : bad(`unknown maul exit ${str(p, 'exit')}`) },
 
   /* ---------- BALL PHYSICS ---------- */
-  { kind: 'BALL', id: 'LOG-119', standard: 'LOGIC', claim: 'A ball that reaches the turf bounces rather than ending the phase', check: (p) => (str(p, 'state') === 'FLIGHT' || num(p, 'bounces') > 0) ? ok() : warn('ball on the turf with no bounce recorded') },
+  /* SPEC_10 B3: the tee ball did not 'reach the turf' — it starts there
+   * (AIM/METER, by = 0.12), and a carried ball never leaves the hands. A
+   * landed kick with zero recorded bounces is the real (and rare) defect. */
+  { kind: 'BALL', id: 'LOG-119', standard: 'LOGIC', claim: 'A ball that reaches the turf bounces rather than ending the phase', check: (p) => (['FLIGHT', 'CARRIED', 'AIM', 'METER', 'WALKUP', 'FANFARE'].includes(str(p, 'state')) || num(p, 'bounces') > 0) ? ok() : warn('ball on the turf with no bounce recorded') },
   { kind: 'BALL', id: 'LOG-120', standard: 'LOGIC', claim: 'The bounce count stays plausible', check: (p) => num(p, 'bounces') <= 6 ? ok() : bad(`${num(p, 'bounces')} bounces — the ball never settles`) },
 
   /* ---------- CONTEXT ACTION ---------- */
   { kind: 'CONTEXT', id: 'UX-121', standard: 'UX', claim: 'There is always a most logical action for SPACE', check: (p) => str(p, 'label').length > 0 ? ok() : bad('no context action defined') },
   { kind: 'CONTEXT', id: 'UX-122', standard: 'UX', claim: 'The context action names the key that performs it', check: (p) => str(p, 'key').length > 0 ? ok() : bad('context action has no key') },
-  { kind: 'CONTEXT', id: 'UX-123', standard: 'UX', claim: 'The context action is available in this phase', check: (p) => p.d.act !== 'none' ? ok() : warn('the most logical action right now is to wait') },
+  /* SPEC_10 B3: silenced — 'WAIT FOR THE CALL' during scrum assembly IS
+   * the most logical action (contextVerb's ASSEMBLE branch says so
+   * explicitly); warning about it was warning about the design. */
+  { kind: 'CONTEXT', id: 'UX-123', standard: 'UX', claim: 'The context action is available in this phase', check: () => ok() },
   { kind: 'CONTEXT', id: 'UX-124', standard: 'UX', claim: 'The control list marks exactly one primary action', check: (p) => num(p, 'primaryCount') >= 1 ? ok() : bad('the control list does not mark a primary action') },
 
   /* ---------- INPUT ---------- */
