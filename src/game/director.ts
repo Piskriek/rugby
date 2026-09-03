@@ -153,6 +153,10 @@ export interface KickState {
   hangOv?: number;
   /** penalty kick to touch — an uncontested strike at full range (T-18) */
   fromPenalty?: boolean;
+  /** SPEC_09: set (once) if the thaw branch ever held the freeze because the
+   * six-chaser commitment was incomplete at the strike — the log-once flag for
+   * a structural invariant that must never fire. */
+  thawHeld?: boolean;
 }
 
 /** T-08 — one broadcast event: what happened, where, when. Presentation only. */
@@ -1916,6 +1920,18 @@ export class Director {
               p.vx = 0; p.vz = 0;
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
               p.face = p.team === s.kicker ? s.dir : -s.dir;
+              /* SPEC_09 — THE WARM-UP BEAT. A pinned man is SET, not a
+               * statue: he takes the ready stance and breathes on his own
+               * phase. Presentation ONLY — the writables are clip/clipT/face;
+               * x, z, vx, vz, tx, tz and movedBy stay absolutely immutable
+               * while pinned (the pin writes above are the same values this
+               * branch has owned since he arrived). The clipT stagger per
+               * shirt is what reads as "alive but held": thirty men
+               * breathing in sync is a chorus line, not a kick-off line. */
+              if (p.clip !== 'ready') {
+                p.clip = 'ready';
+                p.clipT = (p.num * 0.37) % 1.4;
+              }
               arrived++;
             }
           }
@@ -1936,6 +1952,22 @@ export class Director {
       // While it is genuinely airborne, chase the predicted landing point. Once
       // it has bounced, chase the ball itself: the prediction jumps around on
       // every bounce and it was whipping the camera all over the ground.
+      /* SPEC_09 — THE THAW GATE. No pin releases until the T-69 six-chaser
+       * commitment is complete. launch() writes the commitment atomically
+       * with the stage flip, so this assertion should be structurally
+       * unreachable; if it ever fires, the freeze HOLDS (players stay set —
+       * the lesser evil by far) and the watchdog log records why. Releasing
+       * a thaw without chasers is T-69 cause 1 ("they just watch it")
+       * resurrected; releasing one WITH pre-set chase positions would be the
+       * pre-set steal. The gate guarantees neither can happen. */
+      if (s.chasers.length !== 6) {
+        if (!s.thawHeld) {
+          s.thawHeld = true;
+          this.watchdogLog.push(`${this.clockText} — SPEC_09 thaw held: chaser commitment incomplete at the strike (${s.chasers.length}/6)`);
+          if (this.watchdogLog.length > 40) this.watchdogLog.shift();
+        }
+        return;   // the freeze holds; upKick's FLIGHT clock and kickLanded still resolve the episode
+      }
       const lp = s.bounces === 0 ? this.landingPrediction() : null;
       const tgt = lp ?? { x: s.bx, z: s.bz };
 
@@ -2056,6 +2088,31 @@ export class Director {
     return this.kk ? (this.kk.kicker === 'A' ? 'B' : 'A') : this.defending();
   }
 
+  /* ======================== SPEC_09 — THE PLAY-ACTIVE GATE ========================
+   *
+   * The hard "play-active" predicate from the approved thaw sequencing design
+   * (SPEC_09_RESTART_THAW_SEQUENCING.md §4). It must evaluate to true before
+   * ANY human input, AI target or physics interaction may influence the ball
+   * during a restart ritual — the pre-set steal exploit is exactly a path
+   * that granted such influence with one of these terms false:
+   *   phase KICK (not a replay presentation frame — a replay grants nothing),
+   *   a live restart-type episode (RESTART | DROP_OUT),
+   *   stage FLIGHT (the ball is legally live: struck, airborne, in play),
+   *   the T-69 six-chaser commitment initialized (atomic with the stage flip
+   *   in launch(); asserted again by the thaw branch in placeBound),
+   *   not paused, and no instant-replay freeze running.
+   */
+  restartBallLive(): boolean {
+    const k = this.kk;
+    return this.phase === 'KICK'
+      && k != null
+      && (k.type === 'RESTART' || k.type === 'DROP_OUT')
+      && k.stage === 'FLIGHT'
+      && k.chasers.length === 6
+      && !this.paused
+      && this.replayTimer <= 0;
+  }
+
   /**
    * T-02 — the single sanctioned way for a system other than `steer()` to move a
    * player. Warns in dev when a player is moved twice in one frame by two
@@ -2099,8 +2156,17 @@ export class Director {
      * control of the chasers, moving several players twice per frame. */
     const KICK = this.kk;
     if (KICK) {
+      /* SPEC_09 — the play-active gate on the human stick. For a restart
+       * ritual the full predicate must hold (ball legally live AND the T-69
+       * commitment initialized AND no presentation freeze) before input can
+       * move anyone: this is the pre-set steal's front door, shut. A kick
+       * from open play (PUNT/BOMB/…) keeps the plain FLIGHT test — the ball
+       * left the hand in open play, there is no ritual to steal. */
+      const ballLive = (KICK.type === 'RESTART' || KICK.type === 'DROP_OUT')
+        ? this.restartBallLive()
+        : KICK.stage === 'FLIGHT';
       const ch = this.ctrlPlayer;
-      if (ch && this.isHuman(ch.team) && !ch.down && KICK.stage === 'FLIGHT'
+      if (ch && this.isHuman(ch.team) && !ch.down && ballLive
         && !KICK.chasers.some((c) => c.num === ch.num)) {
         this.writeThinkPlayer(gate, `think:kick-input:${ch.team}${ch.num}`, ch,
           ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy'] as const, () => {
