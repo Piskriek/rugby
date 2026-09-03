@@ -260,6 +260,16 @@ function emit(d: Director, rec: Recorder) {
   // The contract is that forwards stay within the pod channel of the ball,
   // not that they stay near the halfway line. Measure it properly.
   const fwdWide = all.filter((p) => p.num <= 8 && Math.abs(p.x - focus.x) > 10).length;
+  /* SPEC_10 B3 (LOG-19): lateral width is the pod design (RESTART_KICK spans
+   * lat to +-18). A forward 'in the backline' is a DEPTH claim — the
+   * ATTACKING side's forwards deeper than 8 m behind the CARRIED ball, where
+   * the first receiver stands. Open play only: during a kick the focus IS
+   * the flying ball, 40 m ahead of everyone, and every forward would read
+   * as deep; at set pieces the forwards are legally in the piece. */
+  const atkT = d.op?.attacking ?? d.possession;
+  const fwdBackline = d.phase === 'OPEN_PLAY' && d.op
+    ? all.filter((p) => p.team === atkT && p.num <= 8 && (focus.z - p.z) * (atkT === 'A' ? 1 : -1) > 8).length
+    : null;
   rec.push(d, 'PLAYERS_POS', 'POSITION OF ALL THIRTY PLAYERS', {
     count: all.length,
     teamA: all.filter((p) => p.team === 'A').length,
@@ -269,6 +279,8 @@ function emit(d: Director, rec: Recorder) {
     kickingTeamAheadOfBall: kickTeam ? kickerAhead : null,
     kickType: d.kk?.type ?? null,
     forwardsWideOfPods: fwdWide,
+    forwardsInBackline: fwdBackline,
+    phase: d.phase,   // SPEC_10 B3: bundling is legal at bound set pieces
     spreadA: Math.round(maxGap(d, 'A') * 10) / 10,
     spreadB: Math.round(maxGap(d, 'B') * 10) / 10,
     minStamina: Math.round(Math.min(...all.map((p) => p.stamina))),
@@ -379,6 +391,7 @@ function emit(d: Director, rec: Recorder) {
       power: Math.round(k.power * 100) / 100,
       accuracy: Math.round(k.accuracy * 100) / 100,
       aim: Math.round(k.aim * 100) / 100,
+      bounces: k.bounces,   // SPEC_10 B3: LOG-119 judged a tee ball it never saw bounce
       kickerNum: k.kickerNum, kickerName: k.kickerName,
       designatedKicker: d.teams[k.kicker].kicker === k.kickerNum,
       goalProb: Math.round(k.goalProb * 100) / 100,
@@ -433,6 +446,11 @@ function emit(d: Director, rec: Recorder) {
     const chaserNums = k.chasers.map((c) => c.num);
     const chasing = d.live.filter((p) => p.team === k.kicker && chaserNums.includes(p.num)
       && lp && Math.hypot(p.x - lp.x, p.z - lp.z) < Math.hypot(p.x - k.bx, p.z - k.bz)).length;
+    /* SPEC_10 B3 (LOG-56): a chaser released at the strike spends seconds
+     * nearer the strike than the mark — measure his INTENT, the velocity
+     * component toward the predicted landing. */
+    const closingV = d.live.filter((p) => p.team === k.kicker && chaserNums.includes(p.num)
+      && lp && ((lp.x - p.x) * p.vx + (lp.z - p.z) * p.vz) > 0).length;
     const kw = k.kicker;
     // Offside at a kick is judged against where the ball was STRUCK, not where it
     // is now, and only in the instant before the chasers are put onside.
@@ -445,6 +463,7 @@ function emit(d: Director, rec: Recorder) {
     const atStrike = k.t < 0.1;    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
       playersMoving: movers,
       chasersMovingTowardLanding: chasing,
+      chasersClosingVelocity: closingV,
       chasersAssigned: chaserNums.length,
       /* SPEC_10 B2c (UX-58): territory kicks (PUNT / FIFTY_22) are DESIGNED
        * to land in space — the T-18 touch-hunt finder. "Receivers near the
@@ -543,7 +562,10 @@ function emit(d: Director, rec: Recorder) {
     rec.push(d, 'LINEOUT', 'LINEOUT STATE', {
       stage: s.stage, call: s.call.label, jumpers: s.call.jumpers,
       throwerTeam: s.thrower,
-      inLineThrowing: s.players.filter((p) => p.team === s.thrower).length,
+      /* SPEC_10 B3 (LAW-84): the throwing population included the THROWER
+       * and the SCRUMMY — 7 in the line + 2 = '9 in the throwing line'. Law
+       * 18 counts the line itself. */
+      inLineThrowing: s.players.filter((p) => p.team === s.thrower && p.role !== 'THROWER' && p.role !== 'SCRUMMY').length,
       inLineDefending: s.players.filter((p) => p.team !== s.thrower).length,
       throwerOutsideLine: Math.abs(s.players.find((p) => p.role === 'THROWER')?.x ?? 0) > 32,
       meter: Math.round(s.meter * 100) / 100,

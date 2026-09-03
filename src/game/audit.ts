@@ -59,7 +59,12 @@ export const RULES: Rule[] = [
   { kind: 'PLAYERS_POS', id: 'LAW-16', standard: 'LAW', law: 'Law 5 / pitch — the playing area', claim: 'No player stands outside the field of play or beyond the dead-ball lines', check: (p) => num(p, 'outsideField') === 0 ? ok() : bad(`${num(p, 'outsideField')} players outside the playing area`) },
   { kind: 'PLAYERS_POS', id: 'LAW-17', standard: 'LAW', law: 'Law 12 — kick-off, all kickers behind the ball', claim: 'At kick-off nobody on the kicking team is ahead of the ball', check: (p) => (nul(p, 'kickingTeamAheadOfBall') ? ok() : num(p, 'kickingTeamAheadOfBall') === 0 ? ok() : bad(`${num(p, 'kickingTeamAheadOfBall')} of the kicking team ahead of the ball at the restart`)) },
   { kind: 'PLAYERS_POS', id: 'LOG-18', standard: 'LOGIC', claim: 'No two teammates occupy the same metre of grass', check: (p) => num(p, 'overlapping') === 0 ? ok() : warn(`${num(p, 'overlapping')} overlapping pairs (permitted during a bound set piece)`) },
-  { kind: 'PLAYERS_POS', id: 'LOG-19', standard: 'LOGIC', claim: 'No prop is standing in the backline', check: (p) => num(p, 'forwardsWideOfPods') <= 2 ? ok() : bad(`${num(p, 'forwardsWideOfPods')} forwards wider than the pod channel — props at fly-half`) },
+  /* SPEC_10 B3: the old metric flagged forwards >10 m LATERAL of the ball —
+   * but the pod attack design spans the width on purpose (shapes.ts pods,
+   * RESTART_KICK lat to +-18). A forward 'in the backline' is a DEPTH claim:
+   * deeper than 8 m behind the ball, where the ten stands. Lateral is
+   * design; depth is the smell. */
+  { kind: 'PLAYERS_POS', id: 'LOG-19', standard: 'LOGIC', claim: 'No prop is standing in the backline', check: (p) => num(p, 'forwardsInBackline') <= 1 ? ok() : bad(`${num(p, 'forwardsInBackline')} forwards deeper than the backline — props at fly-half`) },
   { kind: 'PLAYERS_POS', id: 'LOG-20', standard: 'LOGIC', claim: 'The side in possession is spread wider than four metres between men', check: (p) => num(p, 'spreadA') > 2 && num(p, 'spreadB') > 2 ? ok() : warn('A side is bunched into less than two metres') },
   { kind: 'PLAYERS_POS', id: 'UX-21', standard: 'UX', claim: 'Stamina stays inside the legal range', check: (p) => num(p, 'minStamina') >= 0 && num(p, 'minStamina') <= 100 ? ok() : bad(`stamina ${num(p, 'minStamina')} out of range`) },
 
@@ -82,13 +87,16 @@ export const RULES: Rule[] = [
   { kind: 'CAMERA', id: 'LOG-22', standard: 'LOGIC', claim: 'Camera is above the ground and looking down at a sane angle', /* fov <= 1.2: 1.2 is the shipped default lens and sits ON the bound — an
  * exclusive < flagged the game's own factory setting 54 times a run. */
 check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.4 && num(p, 'fov') > 0.04 && num(p, 'fov') <= 1.2) ? ok() : bad(`bad rig: h=${num(p, 'height')} tilt=${num(p, 'tilt')} fov=${num(p, 'fov')}`) },
-  { kind: 'CAMERA', id: 'UX-114', standard: 'UX', claim: 'The camera is on the touchline gantry, framing across the pitch', check: (p) => bool(p, 'cameraTracksLaterally') ? ok() : bad(`camera only ${num(p, 'standbackMetres')} m off the touchline — it is standing on the pitch`) },
+  /* SPEC_10 B3: the gantry claim is the BROADCAST contract. CHASE follows
+   * the ball from behind it and TACTICAL sits high-and-wide by design
+   * (shapes.ts camera plans) — both stand closer than a gantry on purpose. */
+  { kind: 'CAMERA', id: 'UX-114', standard: 'UX', claim: 'The BROADCAST camera is on the touchline gantry, framing across the pitch', check: (p) => str(p, 'mode') !== 'BROADCAST' ? ok() : bool(p, 'cameraTracksLaterally') ? ok() : bad(`camera only ${num(p, 'standbackMetres')} m off the touchline — it is standing on the pitch`) },
   /* SPEC_10 B2d: behind-the-goal-line framing during the dead-ball rituals
    * (conversion walkups, restart assembly) is the camera waiting where the
    * next play starts — a live-play claim only. */
   { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The camera is not parked behind the goal line in live play', check: (p) => str(p, 'phase') !== 'OPEN_PLAY' ? ok() : !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
   { kind: 'CAMERA', id: 'UX-116', standard: 'UX', claim: 'A named shot is selected for this phase', check: (p) => str(p, 'shot').length > 0 && str(p, 'shotName').length > 0 ? ok() : bad('no named shot for this phase') },
-  { kind: 'CAMERA', id: 'UX-117', standard: 'UX', claim: 'At least four defenders are framed so the line is readable', check: (p) => num(p, 'defendersInFrame') >= 4 ? ok() : warn(`${num(p, 'defendersInFrame')} defenders in frame`) },
+  { kind: 'CAMERA', id: 'UX-117', standard: 'UX', claim: 'At least four defenders are framed so the line is readable', check: (p) => str(p, 'mode') !== 'BROADCAST' ? ok() : num(p, 'defendersInFrame') >= 4 ? ok() : warn(`${num(p, 'defendersInFrame')} defenders in frame`) },
   /* SPEC_10 B2d: the 30 px/m ceiling predated the zoom envelope — the
    * CHASE/TACTICAL modes and the user zoom ride to ~37 px/m at full reach
    * (measured, d6). 44 is the lens envelope, not a wishlist. */
@@ -121,8 +129,14 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   { kind: 'BALL', id: 'LOG-38', standard: 'LOGIC', claim: 'The ball never goes underground', check: (p) => num(p, 'y') >= 0 ? ok() : bad(`ball at ${num(p, 'y')} m — below the turf`) },
   { kind: 'BALL', id: 'LOG-39', standard: 'LOGIC', claim: 'The ball never exceeds physically possible speed', check: (p) => num(p, 'speed') <= 30 ? ok() : bad(`ball moving at ${num(p, 'speed')} m/s`) },
   { kind: 'BALL', id: 'LOG-40', standard: 'LOGIC', claim: 'A kick does not travel further than a human can strike it', check: (p) => num(p, 'distanceTravelled') <= 70 ? ok() : bad(`${num(p, 'distanceTravelled')} m of travel — beyond any real kick`) },
-  { kind: 'BALL', id: 'LAW-41', standard: 'LAW', law: 'Law 12 — the kick', claim: 'The ball travels toward the opposition dead-ball line, not backwards', check: (p) => nul(p, 'forwardRelativeKick') ? ok() : bool(p, 'forwardRelativeKick') ? ok() : bad('ball travelling backwards relative to the kick') },
-  { kind: 'BALL', id: 'LAW-42', standard: 'LAW', law: 'Law 8 — the goal kicker', claim: 'The designated kicker takes the kick', check: (p) => nul(p, 'designatedKicker') ? ok() : bool(p, 'designatedKicker') ? ok() : bad(`${str(p, 'kickerName')} is kicking, not the designated goal kicker`) },
+  /* SPEC_10 B3: Law 12's direction claim is about the KICK. A carried ball
+   * (state CARRIED) may legally retreat — a carrier going backwards to stay
+   * in field is rugby, not a breach. */
+  { kind: 'BALL', id: 'LAW-41', standard: 'LAW', law: 'Law 12 — the kick', claim: 'A kicked ball travels toward the opposition dead-ball line, not backwards', check: (p) => str(p, 'state') !== 'FLIGHT' ? ok() : nul(p, 'forwardRelativeKick') ? ok() : bool(p, 'forwardRelativeKick') ? ok() : bad('ball travelling backwards relative to the kick') },
+  /* SPEC_10 B3: the designated-kicker contract is for KICKS AT GOAL —
+   * startKick() selects the squad-sheet kicker ONLY for type GOAL; every
+   * kick from hand is taken by the carrier, as the law allows. */
+  { kind: 'BALL', id: 'LAW-42', standard: 'LAW', law: 'Law 8 — the goal kicker', claim: 'The designated kicker takes the kick at goal', check: (p) => str(p, 'type') !== 'GOAL' ? ok() : nul(p, 'designatedKicker') ? ok() : bool(p, 'designatedKicker') ? ok() : bad(`${str(p, 'kickerName')} is kicking, not the designated goal kicker`) },
   { kind: 'BALL', id: 'LOG-43', standard: 'LOGIC', claim: 'Apex height is physically plausible', check: (p) => num(p, 'apex') <= 35 ? ok() : bad(`${num(p, 'apex')} m apex`) },
   { kind: 'BALL', id: 'UX-44', standard: 'UX', claim: 'When shooting at goal, the line of the ball is knowable', check: (p) => nul(p, 'inGoalMouth') ? ok() : (num(p, 'goalProb') > 0 && num(p, 'goalDistance') > 0) ? ok() : bad('goal attempt shown without probability or distance') },
 
@@ -130,9 +144,20 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   { kind: 'BALL_FLIGHT', id: 'UX-45', standard: 'UX', claim: 'The predicted landing point is computed and shown', check: (p) => bool(p, 'markerShown') && !nul(p, 'predictedLandX') ? ok() : bad('no landing marker — the player cannot know where to run') },
   { kind: 'BALL_FLIGHT', id: 'UX-46', standard: 'UX', claim: 'Time remaining before the ball lands is shown', check: (p) => num(p, 'secondsToLand') > 0 ? ok() : bad('no time-to-land') },
   { kind: 'BALL_FLIGHT', id: 'UX-47', standard: 'UX', claim: 'The player is told how far he is from where it will drop', check: (p) => !nul(p, 'distanceFromControlled') ? ok() : bad('distance from the controlled player to the landing point not shown') },
-  { kind: 'BALL_FLIGHT', id: 'LOG-48', standard: 'LOGIC', claim: 'The predicted landing point is on or near the pitch', check: (p) => Math.abs(num(p, 'predictedLandX')) <= 36 ? ok() : bad(`landing predicted at x=${num(p, 'predictedLandX')}`) },
-  { kind: 'BALL_FLIGHT', id: 'UX-49', standard: 'UX', claim: 'Three chasers are assigned and their lanes are named', check: (p) => num(p, 'chasersAssigned') === 3 && bool(p, 'lanesNamed') ? ok() : bad(`${num(p, 'chasersAssigned')} chasers, lanes named: ${bool(p, 'lanesNamed')}`) },
-  { kind: 'BALL_FLIGHT', id: 'UX-50', standard: 'UX', claim: 'A proper fielder — fifteen, eleven or fourteen — is assigned to receive', check: (p) => [15, 14, 11, 13, 12].includes(num(p, 'receiverNum')) ? ok() : bad(`shirt ${num(p, 'receiverNum')} assigned to field the kick`) },
+  /* SPEC_10 B3: half the kicking game hunts touch ON PURPOSE (engine/kick.ts
+   * T-18: 'that is the entire point of the kick — and the only way a lineout
+   * ever happens'). A predicted landing across the touchline is a finder. */
+  { kind: 'BALL_FLIGHT', id: 'LOG-48', standard: 'LOGIC', claim: 'The predicted landing point is on the pitch or deliberately hunting touch', check: (p) => Math.abs(num(p, 'predictedLandX')) <= 36 || bool(p, 'willGoToTouch') ? ok() : bad(`landing predicted at x=${num(p, 'predictedLandX')}`) },
+  /* SPEC_10 B3 (T-69, engine/kick.ts launch(): 'SIX CHASERS, NOT THREE —
+   * the measured three-man chase stalled 5 m short of every kick'): the rule
+   * predates the fix it was written to guard. Six chasers, lanes named. */
+  { kind: 'BALL_FLIGHT', id: 'UX-49', standard: 'UX', claim: 'Six chasers are assigned and their lanes are named', check: (p) => num(p, 'chasersAssigned') === 6 && bool(p, 'lanesNamed') ? ok() : bad(`${num(p, 'chasersAssigned')} chasers, lanes named: ${bool(p, 'lanesNamed')}`) },
+  /* SPEC_10 B3: 'shirt 0' was never a shirt — the trace's fielder search
+   * returns null when no back is within 22 m of the predicted landing, and
+   * num()'s default turned that into a phantom number 0. No fielder near a
+   * kick that lands in space is the T-18 territory design, not an
+   * assignment failure. */
+  { kind: 'BALL_FLIGHT', id: 'UX-50', standard: 'UX', claim: 'A proper fielder — fifteen, eleven or fourteen — is assigned to receive', check: (p) => nul(p, 'receiverNum') ? ok() : [15, 14, 11, 13, 12].includes(num(p, 'receiverNum')) ? ok() : bad(`shirt ${num(p, 'receiverNum')} assigned to field the kick`) },
   { kind: 'BALL_FLIGHT', id: 'LOG-51', standard: 'LOGIC', claim: 'The assigned receiver is moving toward the ball, not away from it', check: (p) => nul(p, 'receiverClosingOnBall') ? ok() : num(p, 'receiverClosingOnBall') >= 0 ? ok() : bad(`receiver closing value ${num(p, 'receiverClosingOnBall')} — he is running away from the drop`) },
   { kind: 'BALL_FLIGHT', id: 'LOG-52', standard: 'LOGIC', claim: 'The receiver can realistically reach the drop', check: (p) => { const d = num(p, 'receiverDistanceToLanding', 99); const t = num(p, 'secondsToLand', 0.1); return d / Math.max(0.5, t) < 11 ? ok() : warn(`${d} m to cover in ${t} s — he will not get there`); } },
   { kind: 'BALL_FLIGHT', id: 'LAW-53', standard: 'LAW', law: 'Law 10 — offside at a kick', claim: 'Nobody on the kicking team is ahead of the kicker when it is struck', check: (p) => num(p, 'willGoToTouch') === 1 && num(p, 'willGoToTouch') === 1 ? ok() : ok() },
@@ -140,7 +165,11 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
 
   /* ---------- PLAYERS WHILE AIRBORNE ---------- */
   { kind: 'PLAYERS_AIRBORNE', id: 'LOG-55', standard: 'LOGIC', claim: 'Players are moving while the ball is in the air', check: (p) => num(p, 'playersMoving') >= 6 ? ok() : bad(`only ${num(p, 'playersMoving')} of thirty moving while the ball is in the air`) },
-  { kind: 'PLAYERS_AIRBORNE', id: 'LOG-56', standard: 'LOGIC', claim: 'The assigned chasers are running toward where it will land', check: (p) => num(p, 'chasersMovingTowardLanding') >= 2 ? ok() : bad(`${num(p, 'chasersMovingTowardLanding')} of ${num(p, 'chasersAssigned')} chasers closing on the landing point`) },
+  /* SPEC_10 B3: 'closer to the landing than to the ball' only becomes true
+   * PAST the halfway point of the chase — a chaser released at the SPEC_09
+   * strike tick sprints at the mark for seconds while still nearer the
+   * strike. Intent is the velocity component toward the landing. */
+  { kind: 'PLAYERS_AIRBORNE', id: 'LOG-56', standard: 'LOGIC', claim: 'The assigned chasers are running toward where it will land', check: (p) => Math.max(num(p, 'chasersMovingTowardLanding'), num(p, 'chasersClosingVelocity')) >= 2 ? ok() : bad(`${num(p, 'chasersMovingTowardLanding')} of ${num(p, 'chasersAssigned')} chasers closing on the landing point`) },
   { kind: 'PLAYERS_AIRBORNE', id: 'LAW-57', standard: 'LAW', law: 'Law 10 — offside at a kick', claim: 'At the strike the whole kicking team is behind the kicker', check: (p) => nul(p, 'kickingTeamOnside') ? ok() : num(p, 'kickingTeamOnside') >= num(p, 'totalKickingTeam') - 1 ? ok() : bad(`${num(p, 'totalKickingTeam') - num(p, 'kickingTeamOnside')} of the kicking team ahead of the kicker at the strike`) },
   { kind: 'PLAYERS_AIRBORNE', id: 'UX-58', standard: 'UX', claim: 'A contestable kick has men in position to field it', check: (p) => ['PUNT', 'FIFTY_22'].includes(str(p, 'kickType')) ? ok() : num(p, 'receiverTeamSet') >= 2 ? ok() : bad('the receiving side has nobody near the drop') },
   { kind: 'PLAYERS_AIRBORNE', id: 'LOG-59', standard: 'LOGIC', claim: 'Not every player on the pitch is standing still', check: (p) => num(p, 'anyPlayerStandingStill') <= 20 ? ok() : bad('more than twenty players frozen') },
@@ -179,7 +208,9 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   { kind: 'SCRUM', id: 'LAW-77', standard: 'LAW', law: 'Law 19 — the scrum', claim: 'Eight players per side bind', check: (p) => num(p, 'perSide') === 8 ? ok() : bad(`${num(p, 'perSide')} per side in the scrum`) },
   { kind: 'SCRUM', id: 'LAW-78', standard: 'LAW', law: 'Law 19 — front row, second row, back row', claim: 'Three in the front row, three in the second, two in the back', check: (p) => (num(p, 'frontRow') === 3 && num(p, 'secondRow') === 3 && num(p, 'backRow') === 2) ? ok() : bad(`rows ${num(p, 'frontRow')}/${num(p, 'secondRow')}/${num(p, 'backRow')}`) },
   { kind: 'SCRUM', id: 'LAW-79', standard: 'LAW', law: 'Law 19 — the feed', claim: 'The side awarded the scrum puts the ball in', check: (p) => str(p, 'feed').length === 1 ? ok() : bad('no feeding side recorded') },
-  { kind: 'SCRUM', id: 'UX-80', standard: 'UX', claim: 'The referee cadence is spoken at every stage', check: (p) => bool(p, 'cadenceMatchesStage') ? ok() : bad(`stage ${str(p, 'stage')} with no referee call`) },
+  /* SPEC_10 B3: ASSEMBLE is the pack jogging in — the cadence begins at
+   * CROUCH (the director's own fallback reads 'FORMING THE SCRUM'). */
+  { kind: 'SCRUM', id: 'UX-80', standard: 'UX', claim: 'The referee cadence is spoken at every stage from the call', check: (p) => str(p, 'stage') === 'ASSEMBLE' ? ok() : bool(p, 'cadenceMatchesStage') ? ok() : bad(`stage ${str(p, 'stage')} with no referee call`) },
   { kind: 'SCRUM', id: 'UX-81', standard: 'UX', claim: 'The scrum assembles rather than appearing', check: (p) => num(p, 'assemblyPercent') >= 0 ? ok() : bad('no assembly phase') },
   { kind: 'SCRUM', id: 'LOG-82', standard: 'LOGIC', claim: 'Net drive stays within a metre and a half', check: (p) => Math.abs(num(p, 'netDriveMetres')) <= 1.5 ? ok() : bad(`${num(p, 'netDriveMetres')} m of scrum travel`) },
   { kind: 'SCRUM', id: 'LAW-83', standard: 'LAW', law: 'Law 19 — collapsing', claim: 'Collapse risk is displayed before it can happen', check: (p) => num(p, 'collapseRisk') <= 1 ? ok() : bad('collapse risk out of range') },
