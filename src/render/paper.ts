@@ -1,3 +1,5 @@
+import { Pose } from './clips';
+
 /**
  * PAPERCRAFT MATERIAL LIBRARY + CHARACTER DATASET
  * ------------------------------------------------
@@ -314,4 +316,90 @@ export function makeCharacter(team: 'A' | 'B', num: number): Character {
 
 export function makeRef(): Character {
   return { num: 0, name: 'WAYNE', pos: 'REF', build: BUILDS.REF, skin: SKINS[1], hair: HAIRS[3], cap: false, tape: false };
+}
+
+/* ================================================================== */
+/* XL ANIMATION RECONCILIATION — effect helpers (SPEC_01)               */
+/* ------------------------------------------------------------------ */
+/* These are the four dataset demands ported onto the papercraft        */
+/* pipeline. Core logic lives here (the permitted file); the frozen     */
+/* drawer in coronal.ts only consumes the optional PaperDrawArgs fields  */
+/* (squash, legScale) and the Pose returned by pinPlantedFoot /         */
+/* upperLowerRun. See IMPLEMENT_XL_ANIMATION.md.                        */
+/* ================================================================== */
+
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const clampN = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
+
+/* ---- 1. IMPACT SQUASH (P-01 / C-01 / W-06 / T-04 / S-06 / PR-02) ----
+ * A 2D paper sheet: the impact frame compresses vertically and bulges
+ * horizontally (volume conserved), applied about the foot anchor in the
+ * drawer. `kind` bands the magnitude; `impactU` is the clip's impact frame
+ * in normalised clip time (see CLIPS table: tackleHit drive ~0.45,
+ * diveFront landing ~0.92, ruckCommit/scrumShove shove ~0.5–0.7). */
+const SQUASH_MAG: Record<string, number> = { tackle: 0.09, dive: 0.08, cleanout: 0.06, scrum: 0.10 };
+const SQUASH_IMPACT: Record<string, [string, number]> = {
+  tackleHit: ['tackle', 0.45],
+  diveFront: ['dive', 0.92],
+  ruckCommit: ['cleanout', 0.5],
+  scrumShove: ['scrum', 0.5],
+  scrumBind: ['scrum', 0.72],
+};
+
+export function impactSquash(kind: string, u: number, impactU = 0.5): { sx: number; sy: number } {
+  const uu = clamp01(u);
+  const d = Math.abs(uu - impactU);
+  const w = 0.12;                       // ~5–6 frames of contact at 60 fps
+  if (d >= w) return { sx: 1, sy: 1 };
+  const t = 1 - d / w;
+  const env = t * t * (3 - 2 * t);      // smoothstep: spike then recover
+  const k = (SQUASH_MAG[kind] ?? 0.08) * env;
+  return { sx: 1 + k * 0.6, sy: 1 - k };
+}
+
+/** Map an engine clip name + its progress to a squash transform, or undefined. */
+export function squashForClip(clipName: string, u: number): { sx: number; sy: number } | undefined {
+  const m = SQUASH_IMPACT[clipName];
+  if (!m) return undefined;
+  return impactSquash(m[0], u, m[1]);
+}
+
+/* ---- 4. EDGE LEG FORESHORTENING (B-14 / D-04 / E-04) ----
+ * Standing legs shorten toward the viewport edges (perp → 1) and under a
+ * steep camera tilt, simulating depth. Clamped so a figure never "lies
+ * down" — the lying artwork stays the only true 0-height state. */
+export function edgeLegForeshorten(perp: number, camTiltDeg: number): number {
+  const edge = 1 - 0.38 * clamp01(perp);
+  const tilt = clampN(camTiltDeg, 0, 80) * Math.PI / 180;
+  const tiltF = 0.78 + 0.22 * Math.cos(tilt);
+  return clampN(edge * tiltF, 0.6, 1);
+}
+
+/* ---- 2. NO-FOOT-SLIDE (SM-02 / W-07 / B-04) ----
+ * Pose-level correction (zero drawer change): pin the planted foot to the
+ * ground by nudging the hip so the lower (stance) foot meets y = 0. The
+ * cadence lock (T-29 / S-06) already keeps feet tracking turf; this just
+ * guarantees the contact foot does not float as the hip bobs. */
+export function pinPlantedFoot(pose: Pose, build: Build, speed = 1): Pose {
+  if (speed < 0.7) return pose;
+  const thigh = build.leg * 0.52, shin = build.leg * 0.48;
+  const hy = pose.hip - 0.02;
+  const fyL = hy - Math.cos(pose.lL) * thigh - Math.cos(pose.lL - pose.kL) * shin;
+  const fyR = hy - Math.cos(pose.lR) * thigh - Math.cos(pose.lR - pose.kR) * shin;
+  const stance = Math.min(fyL, fyR);
+  if (stance >= -0.005) return pose;          // already grounded
+  const corr = Math.min(0.06, -stance);        // raise hip so the foot meets the turf
+  return { ...pose, hip: pose.hip + corr };
+}
+
+/* ---- 3. RUNNING PASS upper/lower separation (R-03 / SM-13 / PR-04) ----
+ * Keep the LOWER body on the run cycle (legs drive) while the UPPER body
+ * plays the pass clip (arms sweep, hips open, head leads). Returns a Pose
+ * the frozen drawer already renders — no drawer change required. */
+const UPPER_CH: (keyof Pose)[] = ['aL', 'aR', 'abL', 'abR', 'eL', 'eR', 'headP', 'headY', 'twist'];
+
+export function upperLowerRun(lower: Pose, upper: Pose): Pose {
+  const o: Pose = { ...lower };
+  for (const ch of UPPER_CH) o[ch] = upper[ch];
+  return o;
 }

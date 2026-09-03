@@ -45,6 +45,12 @@ export interface PaperDrawArgs {
   fore: number;
   headDir: number;
   depth: number;
+  /** 2D impact deformation: vertical squash + horizontal bulge about the foot
+   *  anchor (SPEC_01 — Impact Squash, P-01/C-01/W-06). Applied in drawPaperActor. */
+  squash?: { sx: number; sy: number };
+  /** perspective foreshortening of the standing leg length, 0.6..1
+   *  (SPEC_01 — Edge Leg Foreshortening, B-14/D-04). */
+  legScale?: number;
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -148,7 +154,8 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const tws = Math.sin(twist) * 0.12;
   const shHalf = b.shW * 0.5 * (0.84 + 0.16 * Math.cos(twist));
   const hipHalf = b.hipW * 0.5;
-  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const legScale = a.legScale ?? 1;
+  const thighLen = b.leg * 0.52 * legScale, shinLen = b.leg * 0.48 * legScale;
   const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
 
   /* ---- legs ---- */
@@ -323,7 +330,8 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     return [x * cl + dy * sl, p.hip + dy * cl - x * sl];
   };
   const shY = p.hip + b.torso * 0.98;
-  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const legScale = a.legScale ?? 1;
+  const thighLen = b.leg * 0.52 * legScale, shinLen = b.leg * 0.48 * legScale;
   const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
   const aN = nearR ? p.aR : p.aL, eN = nearR ? p.eR : p.eL;
   const aF = nearR ? p.aL : p.aR, eF = nearR ? p.eL : p.eR;
@@ -588,6 +596,7 @@ export function drawPaperActor(a: PaperDrawArgs) {
   const args: PaperDrawArgs = { ...a, pose: q };
   ctx.save();
   ctx.translate(a.sx, a.sy);
+  if (a.squash) ctx.scale(a.squash.sx, a.squash.sy);   // SPEC_01 impact squash about the foot anchor
   const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
   if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
   const falling = q.fall > 0.01 && q.fall < 0.985;
