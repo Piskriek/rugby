@@ -2636,7 +2636,15 @@ export class Director {
      * and more, so the old guard (measured on the raw mark) passed while the
      * place itself jumped. */
     const gx = clamp(x, -33, 33), gz = clamp(z, -58, 58);
-    if (Math.hypot(car.x - gx, car.z - gz) < 1.2) {
+    /* SPEC_05 / T-68 (tighten): the close-place guard was 1.2 m, so a carrier
+     * / kick-catcher up to 1.2 m off the mark could be snapped onto the ball in
+     * one frame (measured 1.184 m on a fullback catch). Dropped to 1.0 m so a
+     * close-place write can never ride over the 1.15 m tighten line; a runner
+     * further off takes the no-snap path and plays from where he actually
+     * stands (the systems that feed startOpen walk their carrier to the spot
+     * first, so this path only handles the genuinely-off runners). */
+    const CLOSE_PLACE_MAX = 1.0;
+    if (Math.hypot(car.x - gx, car.z - gz) < CLOSE_PLACE_MAX) {
       cx = gx; cz = gz;
       this.place(car, cx, cz, 'carrier');
     } else {

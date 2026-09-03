@@ -368,8 +368,10 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
      * hunt died that way; there were no lineouts. */
     if (!s.profile.atGoal && s.bounces <= 2 && Math.abs(s.bx) < 32.5 && s.vy < 0) {
       /* NO-TELEPORT: the catch radius matches startOpen's close-place guard
-       * (1.2 m). Catching at 1.5 m meant the catcher was then PLACED on the
-       * ball — a 1.3-1.5 m single-frame jump the audit rightly flags. */
+       * (SPEC_05: 1.0 m). Catching at 1.5 m meant the catcher was then PLACED
+       * on the ball — a 1.3-1.5 m single-frame jump the audit rightly flags.
+       * The radius is now bounded to the same close-place write so a catch can
+       * never result in a placement over the 1.15 m tighten line. */
       /* PLAYTEST 4 / T-69: CLOSEST PLAYER WINS. The old find() took the
        * first player in shirt order inside the radius, which handed the
        * tie (and the kick) to one side systematically. Now every candidate
@@ -377,7 +379,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
        * receiver the rig has been steering at the landing mark for 2.9 s
        * finally plays his contest. */
       let catcher: Live | null = null;
-      let cd = 1.2;
+      let cd = 1.0;
       for (const p of d.live) {
         if (p.sinbin > 0 || p.down) continue;
         const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
