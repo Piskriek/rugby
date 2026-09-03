@@ -5,6 +5,7 @@
  */
 
 import { Director, KickState, Input } from '../director';
+import type { Live } from '../intelligence';
 import { FIELD } from '../../render/retro';
 import { R } from './rng';
 import { wetnessOf, windOf, WEATHERS } from './weather';
@@ -166,18 +167,24 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
           const left = Math.max(0, d.halfLength + d.addedTime - d.clock);
           const late = left < (d.halfLength + d.addedTime) * 0.28;
           const r = R();
+          /* SQUIB re-priced (T-69): hang 2.7 at p 0.42-0.50 (≈ 24-27 m,
+           * ~9 m/s off the boot) — chipped UP and short, like a real one.
+           * The old flat 1.9 s rocket (27-32 m at 14-17 m/s) outran every
+           * chase by metres per second. */
+          const SQUIB_H = 2.7;
+          const SQUIB_P = 0.42 + R() * 0.08;
           if (diff2 < 0 && late) {
-            // need the ball back: chase hard
-            if (r < 0.55) { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
-            else { powerTo = 0.58 + R() * 0.14; }   // 2.9 s default hang — the chasers' 2.9 s
+            // need the ball back: contest hard
+            if (r < 0.55) { s.hangOv = SQUIB_H; powerTo = SQUIB_P; }
+            else { powerTo = 0.58 + R() * 0.14; }   // deep at the 2.9 s type hang
           } else if (diff2 > 0) {
             // protecting a lead: mostly deep, some messy
             if (r < 0.65) { powerTo = 0.58 + R() * 0.14; }
-            else { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
+            else { s.hangOv = SQUIB_H; powerTo = SQUIB_P; }
           } else {
             // level: deep with squib seasoning
             if (r < 0.7) { powerTo = 0.58 + R() * 0.14; }
-            else { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
+            else { s.hangOv = SQUIB_H; powerTo = SQUIB_P; }
           }
           break;
         }
@@ -363,9 +370,20 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       /* NO-TELEPORT: the catch radius matches startOpen's close-place guard
        * (1.2 m). Catching at 1.5 m meant the catcher was then PLACED on the
        * ball — a 1.3-1.5 m single-frame jump the audit rightly flags. */
-      const catcher = d.live.find((p) => p.sinbin <= 0 && !p.down
-        && Math.hypot(p.x - s.bx, p.z - s.bz) < 1.2 && s.by < 2.55);
-      if (catcher && R() < (catcher.team === s.kicker ? 0.55 + (d.slider(s.kicker, 'chase') / 100) * 0.25 : 0.82)) {
+      /* PLAYTEST 4 / T-69: CLOSEST PLAYER WINS. The old find() took the
+       * first player in shirt order inside the radius, which handed the
+       * tie (and the kick) to one side systematically. Now every candidate
+       * is measured and the nearest to the ball takes the roll — the
+       * receiver the rig has been steering at the landing mark for 2.9 s
+       * finally plays his contest. */
+      let catcher: Live | null = null;
+      let cd = 1.2;
+      for (const p of d.live) {
+        if (p.sinbin > 0 || p.down) continue;
+        const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
+        if (dd < cd && s.by < 2.55) { cd = dd; catcher = p; }
+      }
+      if (catcher && R() < (catcher.team === s.kicker ? 0.55 + (d.slider(s.kicker, 'chase') / 100) * 0.2 : 0.9)) {
         d.say(catcher.team === s.kicker ? 'REGATHERED BY THE CHASE!' : 'TAKEN CLEANLY IN THE AIR');
         const num = catcher.num, bx = s.bx, bz = s.bz, tm = catcher.team;
         d.kk = undefined;
@@ -445,33 +463,60 @@ export function launch(d: Director, power: number, accuracy: number, wind: numbe
   const vy = 0.5 * 9.81 * hang;
   s.vx = vx; s.vz = vz; s.vy = vy;
   s.stage = 'FLIGHT'; s.t = 0;
-  s.chasers = CHASE_ORDER.slice(0, 3).map((num, i) => ({ num, lane: CHASE_LANES[i].label }));
+  /* PLAYTEST 4 / T-69: SIX CHASERS, NOT THREE. The measured chase stalled
+   * 5 m short of every kick — three men sprinting ~30 m cannot beat a 2-3 s
+   * flight plus roll, so the fielder returned untouched ("I just score off
+   * my own kickoff"). A real kick-off chases with a third of the team. */
+  s.chasers = CHASE_ORDER.slice(0, 6).map((num, i) => ({ num, lane: CHASE_LANES[i % CHASE_LANES.length].label }));
   d.shake(0.15);
 }
 
 export function kickLanded(d: Director, s: KickState) {
 
   s.stage = 'RESULT'; s.result = 'LANDED';
-  const chase = d.slider(s.kicker, 'chase') / 100;
-  const regather = R() < 0.22 + chase * 0.4;
   const rec = assignReceiver(d.live, d.defending(), s.bx, s.bz);
   d.kk = undefined;
-  if (regather && s.type !== 'GOAL') {
+  /* PLAYTEST 4 / T-69 — THE SETTLED BALL IS WON, NOT ROLLED FOR. The old
+   * `R() < 0.22 + chase*0.4` gifted the kicking side possession wherever
+   * the ball died — one of the two RNGs behind "my opponents just watch
+   * my kickoff". Now the ball belongs to whoever actually reached it:
+   * a chaser inside 2.5 m regathers, otherwise the fielder takes it (a
+   * contested gather may still spill — that is a knock-on and a scrum). */
+  let nearestKicker: { p: Live; d: number } | null = null;
+  for (const p of d.live) {
+    if (p.team !== s.kicker || p.sinbin > 0 || p.down) continue;
+    const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
+    if (!nearestKicker || dd < nearestKicker.d) nearestKicker = { p, d: dd };
+  }
+  if (nearestKicker && nearestKicker.d < 3.5) {
     d.commentate('GENERAL', '— REGATHERED BY THE CHASE');
-    d.startOpen(s.kicker, s.bx, s.bz, s.chasers[0]?.num ?? 14, 1);
+    d.startOpen(s.kicker, s.bx, s.bz, nearestKicker.p.num, 1);
     return;
   }
   const dTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
+  /* PLAYTEST 4 / T-69 — THE AWARD GOES TO A MAN WHO IS THERE. The old call
+   * handed possession to assignReceiver's pick (the fullback, often 25-30 m
+   * from a ball that rolled) and startOpen snapped the ball to the mark
+   * with nobody in reach — the "suddenly has it" teleport family. The
+   * carrier is the nearest RECEIVER to the settled ball; the fullback jogs
+   * in and takes the distribution if he wants it. */
+  let fielder: { p: Live; d: number } | null = null;
+  for (const p of d.live) {
+    if (p.team !== dTeam || p.sinbin > 0 || p.down) continue;
+    const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
+    if (!fielder || dd < fielder.d) fielder = { p, d: dd };
+  }
+  const carrier = fielder && fielder.d < 6.0 ? fielder.p : rec;
   /* T-18. YOU CATCH A KICK, YOU RUN IT BACK. Half of all fielded kicks used
    * to become a scrum for the catching side — a law that does not exist and
    * a phase that produces no pass and no tackle. The fielder counters (with
    * the chase arriving, which is where kick-chase tackles come from); a
    * knock in the fielding is the honest minority that does give the scrum.
    * Scrums stay green off the lineout/maul error stream alone. */
-  if (R() < 0.22) {
+  if (nearestKicker && nearestKicker.d < 4.5 && R() < 0.15) {
     d.say('KNOCKED ON FIELDING THE KICK');
     d.startScrum(dTeam, s.bx, s.bz);
   } else {
-    d.startOpen(dTeam, s.bx, s.bz, rec.num, 1, 0, 0.9);
+    d.startOpen(dTeam, s.bx, s.bz, carrier.num, 1, 0, 0.9);
   }
 }

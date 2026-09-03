@@ -940,6 +940,44 @@ every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 
+### SEVENTH BATCH (user: kickoff receiving) — T-69 RESOLVED
+
+- **T-69 "I kickoff, they just watch, I score off my own kickoff"** —
+  three stacked causes, all fixed; probes in scripts/t69probe{,2}.ts:
+  1. THE CHASE COULD NOT ARRIVE. 3 chasers from 30-40 m against a 2-3 s
+     flight + roll stall ~5 m short — measured, not guessed. Chasers are
+     now SIX (CHASE_ORDER.slice(0,6); real kickoffs chase with a third of
+     the team). Chasers now arrive at/just past the catch -> the return
+     gets tackled.
+  2. THE SETTLED BALL WAS ROLLED FOR. kickLanded had R()<0.22+chase*0.4
+     gifting the kicker possession wherever the ball died (plus an
+     unconditional 22% knock-scrum). Both deleted: the ball belongs to
+     whoever REACHED it — nearest kicker within 3.5 m regathers; knock
+     only when a chaser is actually inside 4.5 m (15%).
+  3. THE CATCH TIE WAS ARRAY-ORDERED. The descent-catch find() took the
+     first shirt in live[] order inside 1.2 m — systematic to one side.
+     Now every candidate is measured; CLOSEST takes the roll (defender
+     0.90, chaser 0.55+chase*0.20).
+  4. SQUIB RE-PRICED. The T-50 "messy" profile was a flat 1.9 s rocket
+     (27-32 m at 14-17 m/s) no chase on earth beats. It is now chipped:
+     hang 2.7, p 0.42-0.50 (~24-27 m, ~9 m/s) — contestable by design.
+  5. THE AWARD GOES TO A MAN WHO IS THERE. The dead-ball award used to
+     hand the ball to assignReceiver's fullback (often far from a rolled
+     ball) and snap it to the mark — the "suddenly has it" teleport
+     family. Carrier = nearest receiver within 6 m of the settled ball;
+     the fullback jogs in.
+  MEASURED AFTER: receiving side fields ~100% of kickoffs (probe; the
+  fielder SHOULD win the kick — chasers win the tackle), in-air catches
+  at the landing mark, gates 9/9. Probe gotcha for the record: v1's
+  "distance from the mark" measured from the LAUNCH point — shirt 15 at
+  "~29 m" was standing ON the landing; do not re-derive from that line.
+  STATS: 20-match d3 = 50% this batch (kicks 29, possession 37.2 newly
+  LOW alongside the standing cluster) — within the known batch-to-batch
+  swing (same tree family has read 43/57/64/71); the whole LOW set is the
+  stage-2 re-price ticket. If the next batch confirms kicks<30, suspect
+  the contest eating kick-phase economy and re-price THERE, not in the
+  kickoff profiles.
+
 ### HISTORY NOTE (rebase, done before the seventh batch)
 
 The user asked for a rebase. Local main = `74696aa` "Add files via upload"
