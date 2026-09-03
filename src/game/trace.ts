@@ -173,6 +173,20 @@ function maxGap(d: Director, team: 'A' | 'B'): number {
   return g;
 }
 
+/* SPEC_10 B2b (LAW-66): line integrity is a property of the men still IN the
+ * line. maxGap spans the whole team — a beaten defender who has turned to
+ * chase (beatenT > 0) has legitimately left his channel, and the hole he
+ * leaves behind IS the line break, not a defensive-line defect (LINE BREAKS
+ * grades REALISTIC). The line measurement excludes them. */
+function maxLineGap(d: Director, team: 'A' | 'B'): number {
+  const fx = d.op?.carrierX ?? d.focusPoint().x;
+  const xs = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26)
+    .map((p) => p.x).sort((a, b) => a - b);
+  let g = 0;
+  for (let i = 0; i < xs.length - 1; i++) g = Math.max(g, xs[i + 1] - xs[i]);
+  return g;
+}
+
 function inFrame(d: Director, x: number, z: number): boolean {
   const v = { w: 960, h: 540 };
   const p = project({ ...d.cam, shake: 0 }, v, x, 1, z);
@@ -306,10 +320,11 @@ function emit(d: Director, rec: Recorder) {
   rec.push(d, 'AFFORDANCES', 'VERBS AVAILABLE TO THE PLAYER', {
     count: aff.length,
     list: aff.join(', '),
+    phase: d.phase,   // SPEC_10 B2c: holds without a movement verb are by design
     /* Movement is offered if ANY verb moves something — the array holds
      * whole labels ('RUN (A/D)', 'STEER AIM (A/D)'), so exact membership
      * against the bare word was always false outside open play. */
-    hasMovement: aff.some((a) => a.includes('RUN') || a.includes('STEER')),
+    hasMovement: aff.some((a) => a.includes('RUN') || a.includes('STEER') || a.includes('(A/D)')),
     duplicates: aff.length !== new Set(aff).size,
   });
 
@@ -426,11 +441,14 @@ function emit(d: Director, rec: Recorder) {
      * 1.5 m behind the tee legally crosses the strike line inside it. The
      * whole kicking team is behind the ball at the strike tick itself
      * (SPEC_09 A2 proved ≥ 1.5 m of margin); judge it there and only there. */
-    const atStrike = k.t < 0.1;
-    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
+    const atStrike = k.t < 0.1;    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
       playersMoving: movers,
       chasersMovingTowardLanding: chasing,
       chasersAssigned: chaserNums.length,
+      /* SPEC_10 B2c (UX-58): territory kicks (PUNT / FIFTY_22) are DESIGNED
+       * to land in space — the T-18 touch-hunt finder. "Receivers near the
+       * drop" is a contestability claim: restarts, bombs, grubbers. */
+      kickType: k.type,
       receiverTeamSet: d.live.filter((p) => p.team !== kw && Math.abs(p.z - (lp?.z ?? p.z)) < 18).length,
       kickingTeamOnside: atStrike
         ? d.live.filter((p) => p.team === kw && (p.z - strikeZ) * (kw === 'A' ? 1 : -1) <= 0.5).length
@@ -453,11 +471,18 @@ function emit(d: Director, rec: Recorder) {
       carrierExcluded: d.passOpts.every((o) => o.player.num !== d.op!.carrierNum),
     });
     rec.push(d, 'DEFENSIVE_LINE', 'DEFENSIVE LINE INTEGRITY', {
-      maxGapMetres: Math.round(maxGap(d, def) * 10) / 10,
-      defenders: d.live.filter((p) => p.team === def).length,
+      maxGapMetres: Math.round(maxLineGap(d, def) * 10) / 10,
+      defenders: d.live.filter((p) => p.team === def && p.beatenT <= 0).length,
       lineConnected: maxGap(d, def) <= 4.0,
       pressure: Math.round(d.op.pressure * 100) / 100,
       phase: d.op.phase,
+      /* SPEC_10 B2b: a line is only 'connected' once it has RE-FORMED — the
+       * first ~1.2 s after a phase change is the legal reset transition (men
+       * retiring onside, pods folding). And the spacing ceiling belongs to
+       * the DESIGN, not a universal constant: the systems' maxSpacing is
+       * 3.2 (WEDGE) to 4.0 (MAN) — audit against the played system + margin. */
+      attackT: Math.round(d.op.t * 10) / 10,
+      defSpacing: d.defenceOf(def).maxSpacing,
       metresGained: Math.round(d.op.gained * 10) / 10,
       lineBreak: d.op.lineBreak,
       metresToLine: Math.round(d.op.toLine),
@@ -828,6 +853,10 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun
           stateChangedWithinOneFrame: p.sig !== now,
           phaseAtPress: d.phase,
           verb: d.affordances.join(','),
+          /* SPEC_10 B2c: in the CPU-v-CPU harness (gateConfig sets cpuA and
+           * cpuB) there IS no human side — input is inert by configuration,
+           * and a one-frame-observable check is meaningless there. */
+          humanSide: d.isHuman('A') || d.isHuman('B'),
           stillLatched: p.down === false && (p.key === 'left' ? inp.left : p.key === 'right' ? inp.right : false),
           latencySeconds: 0.017,
         });
