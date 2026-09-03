@@ -16,4 +16,7 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  /* The Arena preview proxies the dev server under an e2b.app host —
+   * Vite 7 blocks unknown Host headers by default. */
+  server: { allowedHosts: true },
 });

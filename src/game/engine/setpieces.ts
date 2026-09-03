@@ -154,7 +154,10 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
           d.teams[feed].stats.scrumsWon++;
         }
         d.scrim = undefined;
-        d.startOpen(winner, ax.x + 2, ax.z + (winner === 'A' ? -3.4 : 3.4), 9, 1, 0, 0.55);
+        /* PLAYTEST 4: the mark is the nine's own base slot (2.95) — he has
+         * stood there through the drive, so the hand-off reads as a pick-up
+         * at the back of the scrum, not a teleport to the tunnel. */
+        d.startOpen(winner, ax.x + (winner === 'A' ? -0.3 : 0.3), ax.z + (winner === 'A' ? -2.95 : 2.95), 9, 1, 0, 0.55);
       }
       break;
     default: break;

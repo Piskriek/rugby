@@ -16,6 +16,36 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
   const s = d.bd!;
   s.t += dt;
   const atk = s.attacking, dTeam = d.defending();
+
+  /* Playtest 2: "I press the pass button and it doesn't pass." A pass
+   * pressed during the fight is the nine's call: it plays the moment the
+   * ball is out. Spent only on a won ruck. */
+  if (d.isHuman(atk)) {
+    if (pressed.has('passL')) { s.bufferedPass = -1; d.showHint('NINE WILL PASS LEFT ON THE OUT', 1.2); }
+    if (pressed.has('passR')) { s.bufferedPass = 1; d.showHint('NINE WILL PASS RIGHT ON THE OUT', 1.2); }
+  }
+  /* PLAYTEST 3 — THE DEFENDING SIDE'S VERB: SPACE = GO FOR THE STEAL,
+   * exactly the user's rule. With numbers the ball is ripped at once and
+   * the use-it window starts; without numbers the referee WARNS him, and
+   * going in again is hands-in — a penalty to the attack. */
+  if (d.isHuman(dTeam) && s.stage === 'RUCK' && pressed.has('action')) {
+    if (s.defCrew.length > s.crew.length) {
+      d.teams[dTeam].stats.turnovers++;
+      d.say('STOLEN — THE DEFENCE HAD THE NUMBERS');
+      d.clearRuck();
+      const dirR = dTeam === 'A' ? 1 : -1;
+      d.startOpen(dTeam, s.contactX, s.contactZ - dirR * 1.5, s.defCrew[0], 1, 0, 1.1);
+      d.releaseBeat = { z: s.contactZ, dir: -dirR, until: d.t + 0.9 };
+      return;
+    }
+    if (s.stealWarned) {
+      s.resultWhy = 'HANDS IN THE RUCK — THE JACKAL WENT IN ALONE, TWICE';
+      d.beginPenalty(atk, 'HANDS_IN', s.defCrew[0] ?? 7);
+      return;
+    }
+    s.stealWarned = true;
+    d.showHint('OUTNUMBERED AT THE BREAKDOWN — NO STEAL. GO AGAIN AND IT IS A PENALTY', 2.2);
+  }
   const limit = [1.5, 3, 5][d.options.ruckLaw ?? 1];
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
 
@@ -93,8 +123,13 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
           if ((p.z - atkLine) * fwd > 0.4) continue;
         } else if ((s.contactZ - p.z) * fwd > 0.3) continue;
         const dist = Math.hypot(p.x - s.contactX, p.z - s.contactZ);
+        /* Playtest P2.6/P2.8: the human ruck won itself — the 1.32 attack
+         * quality is a CPU-model constant (it prices the committed CPU
+         * clearout), not a law of nature. A human side that presses nothing
+         * gets the base 1.0 and LOSES the race to a set jackal; the waggle
+         * is what buys the shove back. CPU-vs-CPU numbers are untouched. */
         const quality = p.down ? 0.85
-          : clamp((team === s.attacking ? 1.32 : 1.0) - dist / 6, 0.2, 1);
+          : clamp((team === s.attacking ? (d.isHuman(atk) ? 1.08 : 1.32) : 1.0) - dist / 6, 0.2, 1);
         f += p.attrs.PWR * quality;
       }
       return f;
@@ -111,7 +146,11 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * part of half a second to bind and drive after the carrier lands. The
      * clearout arrives; it is not there on the frame the ruck forms — which
      * is exactly the jackal's window, and exactly why the fight exists. */
-    const atkRamp = Math.min(1, s.contestT / 0.4);
+    /* STAGE-1 RE-BALANCE (signed off: compress first, re-price later). The
+     * ramp was 0.4 s; the clearout is pre-running off the carrier's hip,
+     * and the bdanat probe showed the RUCK stage eating 1.22 s of a 1.7 s
+     * breakdown with the ramp as a fixed floor on every one. */
+    const atkRamp = Math.min(1, s.contestT / 0.3);
     const atkF = sideForce(s.crew, atk) * commitF * atkRamp;
 
     if (humanAtk && pressed.has('action')) {
@@ -148,7 +187,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * past it — is pried off slowly, because that is what a set jackal is:
      * the fight the defending side wanted. This is where sustained hands
      * becomes a steal instead of a race the attack always wins. */
-    const recover = net > 0 ? (s.redT > 0.15 ? 10.5 : 20.0) : 3.6;
+    const recover = net > 0 ? (s.redT > 0.15 ? 12.0 : 24.0) : 3.6;
     s.axisVel += net * recover * dt;
     s.axisVel *= Math.exp(-0.8 * dt);
     s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
@@ -191,7 +230,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
         }
       }
       const margin = s.axis - 0.75;                     // 0 .. 0.25
-      s.window = clamp(0.15 + (0.25 - margin) * 1.4, 0.15, 0.35);
+      s.window = clamp(0.12 + (0.25 - margin) * 1.12, 0.12, 0.28);
       s.ballOutAt = s.t + s.window;   // T-05: the presentation window starts when the ball is WON
       s.jackalActive = false;
       s.resultWhy = `BALL WON — ${s.crew.length} v ${s.defCrew.length} CLEARED, FORCE ${(atkF / 100).toFixed(1)} v ${(defF / 100).toFixed(1)} kN`;
@@ -199,7 +238,12 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
     }
     /* DEFENCE WINS — the ball crosses −0.75. A jackal, not a dice: the
      * reason names the numbers, as FAIR-09 asks. */
-    else if (s.axis <= -0.75 || (s.redT > 0.3 && s.axis < -0.35)) {
+    /* PLAYTEST 3 — THE JACKAL IS A NUMBERS CALL (user's spec, both sides):
+     * a jackal with MORE men at the breakdown than the attack rips it; a
+     * lone jackal cannot steal, he can only slow the ball — and holding on
+     * alone is how hands-in penalties happen. The old gate was force-only,
+     * so the CPU stole automatically and the rule was invisible. */
+    else if (s.axis <= -0.75 && s.defCrew.length > s.crew.length) {
       s.axis = Math.min(s.axis, -0.75);
       if (s.jackalActive && jackal) {
         d.teams[dTeam].stats.turnovers++;
@@ -308,7 +352,18 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       // which is where he actually stands — not on top of the contact point.
       const side = s.contactX > 0 ? -1.8 : 1.8;
       const nearLine = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 20;
-      d.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * (nearLine ? 0.5 : 1.4), dist.num, s.phase + 1, s.gainLine, 0.75);
+      /* Playtest 3: the countdown said 3 but the tackle came in under a
+       * second — the use-it window now BELONGS to the nine, and the losing
+       * side must actually RELEASE AND RETREAT before they may race back. */
+      d.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * (nearLine ? 0.5 : 1.4), dist.num, s.phase + 1, s.gainLine,
+        Math.max(1.0, limit - (s.t - s.groundAt)));
+      d.releaseBeat = { z: s.contactZ, dir: fwd, until: d.t + 0.9 };
+      /* The buffered distribution fires the instant the ball is out. */
+      if (s.bufferedPass && d.isHuman(atk)) {
+        const side0 = s.bufferedPass;
+        s.bufferedPass = 0;
+        d.doPass(side0, false);
+      }
     }
   }
   /* T-11 void audit: `_input`/`dTeam` are frozen-interface params — the
@@ -337,26 +392,51 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   const cx = car.x, cz = car.z;
   const dTeam: 'A' | 'B' = d.defending();
 
-  if (tacklerNum !== undefined) {
+  /* T-18 + playtest P1.1. A tackle won by pressure had NO named tackler:
+   * credited statistically, but no TACKLER role existed, so nobody wore the
+   * tackle clip — the carrier went down next to a man standing there. The
+   * nearest defender made the tackle; he IS the tackler, whatever route the
+   * whistle took. */
+  let tacklerLive = tacklerNum !== undefined ? d.L(dTeam, tacklerNum) : null;
+  if (tacklerLive) {
     d.teams[dTeam].stats.tackles++;
-    d.run(dTeam, tacklerNum).tackles++;
+    d.run(dTeam, tacklerLive.num).tackles++;
   } else {
-    /* T-18. A tackle made without a named tackler is still a tackle — the
-     * CPU carrier taking contact under pressure was resolved as a breakdown
-     * with nobody credited, and TACKLES PER MATCH read a quarter of the
-     * truth. The nearest defender is the man who made it. */
     let near: { num: number; d: number } | null = null;
     for (const p of d.live) {
-      if (p.team !== dTeam || p.sinbin > 0) continue;
+      if (p.team !== dTeam || p.sinbin > 0 || p.down) continue;
       const dd = Math.hypot(p.x - cx, p.z - cz);
       if (!near || dd < near.d) near = { num: p.num, d: dd };
     }
     if (near) {
+      tacklerLive = d.L(dTeam, near.num);
+      tacklerLive.down = true; tacklerLive.vx = 0; tacklerLive.vz = 0;
       d.teams[dTeam].stats.tackles++;
       d.run(dTeam, near.num).tackles++;
     }
   }
+  const tackler = tacklerLive;
   d.run(atk, s.carrierNum).carries++;
+
+  /* PLAYTEST 4 — THE TACKLE IS A DIVE AT THE MAN. The tackler launches his
+   * body through the hit: the papercraft dive one-shot rotates him off his
+   * feet and into the turf, and the lens takes a slight knock on impact,
+   * scaled by how hard the shot arrived (launch thuds 0.15; a try shakes
+   * 0.7 — this lives well under both). A tackler already on the deck (the
+   * no-name fallback above set him down) is skipped — never animate a man
+   * INTO the ground. His role clip (TACKLER -> tackle) takes over next
+   * frame, so the dive blends out into the ruck, not through it. */
+  if (tackler && !tackler.down && tackler.sinbin <= 0) {
+    tackler.clip = 'dive';
+    tackler.clipT = 0;
+    /* and he travels INTO the hit — a lunge along the carrier line, not a
+     * rotation in place. The ruck ease takes over his position next frame. */
+    const lx = car.x - tackler.x, lz = car.z - tackler.z;
+    const ld = Math.max(0.4, Math.hypot(lx, lz));
+    tackler.vx = (lx / ld) * 4.2;
+    tackler.vz = (lz / ld) * 4.2;
+    d.shake(0.09 + 0.13 * clamp(s.pressure, 0, 1));
+  }
 
   /* T-18. An offload goes to a support RUNNING ONTO THE BALL — level with
    * the carrier or ahead of him. The old code took ANY team-mate within
@@ -382,7 +462,6 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
 
   car.down = true;
   car.vx = 0; car.vz = 0;
-  const tackler = tacklerNum !== undefined ? d.L(dTeam, tacklerNum) : null;
   if (tackler) { tackler.down = true; tackler.vx = 0; tackler.vz = 0; }
 
   // three named attackers, in arrival order, assigned before the whistle

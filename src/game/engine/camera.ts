@@ -255,6 +255,10 @@ export function cableRig(
   d.cableX = clamp(d.cableX, -30, 30);
   d.cableZ = clamp(d.cableZ, FIELD.tryZ - 8, FIELD.tryZFar + 8);
   d.cableH = clamp(d.cableH, 9, 46);
+  /* Playtest P1.4: near the dead-ball ends the rig's ground rises into the
+   * terraces — a 9 m camera at z -60 sat BELOW the stand surface and clipped
+   * through it. The floor climbs with the distance past the goal line. */
+  d.cableH = Math.max(d.cableH, 9 + Math.max(0, Math.abs(d.cableZ) - 47) * 0.85);
 
   /* Look at a point ahead of the ball, so the frame leads play instead of
    * trailing it. The rig is always end-on: it looks the way you attack.

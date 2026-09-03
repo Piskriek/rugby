@@ -1,635 +1,630 @@
 /**
- * CORONAL RIG — front/back-facing skeletal animation for a fixed behind-the-posts
- * camera. Players are 2D billboards that always face the lens, so the rig works in
- * the CORONAL plane (left/right + up/down) rather than the sagittal plane.
+ * PAPER PUPPET RENDERERS
+ * ----------------------
+ *  - drawCoronal   : front / back artwork of the flat cut-out (chest hoop, shirt
+ *                    number on the back, face or hair)
+ *  - drawSidePaper : a TRUE profile card — thin vertical paper strip, one lit arm,
+ *                    one lit leg, dark far-side paper layer behind, profile head
+ *                    with nose wedge, visible forward lean and stride, ball clamped
+ *                    in front of the chest. Not a squashed front puppet.
+ *  - drawLyingPaper: face-up / face-down artwork laid on the turf, foreshortened
+ *                    by the camera height and by the body axis vs the lens.
+ *  - drawPaperActor: dispatch + the fall rotation that tips the standing card
+ *                    over onto its lying artwork seamlessly (pivot at the hip).
  *
- * Animation quality checklist applied to every clip:
- *  1. Contralateral rotation   2. Double bob          3. Lateral sway
- *  4. Heel recovery            5. Gaze stabilisation  6. Arm opposition
- *  7. Asymmetry                8. Anticipation        9. Follow-through/overshoot
- * 10. Impact compression      11. Breathing          12. Weight shift
- * 13. Foot planting           14. Per-actor phase    15. Fatigue drift
- * 16. Secondary motion        17. Head tracking      18. Settle frames
+ * Everything is drawn in metres relative to a ground anchor, converted with
+ * X(m) = m*sc, Y(m) = -m*sc (screen y is down).
  */
 
-import { Ease, ease } from './rig';
+import {
+  Ctx, Pt, Palette, Build, PaperView, OUT, DISPLAY, shade,
+  paperCard, poly, foldTab, crease, ballPaper,
+} from './paper';
+import { Pose } from './clips';
 
-export interface CPose {
-  rootY: number; rootX: number; lean: number; twist: number; hipTwist: number;
-  headTurn: number; headTilt: number; headNod: number;
-  aLout: number; aLfwd: number; aLbend: number;
-  aRout: number; aRfwd: number; aRbend: number;
-  lLout: number; lLfwd: number; lLbend: number; lLlift: number;
-  lRout: number; lRfwd: number; lRbend: number; lRlift: number;
-  crouch: number; squash: number; width: number; breath: number;
+export interface PaperDrawArgs {
+  ctx: Ctx;
+  sx: number; sy: number; sc: number;
+  view: PaperView;
+  pose: Pose;
+  pal: Palette; build: Build;
+  skin: string; hair: string;
+  num: number; seed: number;
+  /** 0 no ball .. 1 clamped */
+  carry: number;
+  /** 0 two-hand carry .. 1 one-hand clamp + fend */
+  carryStyle: number;
+  ballSide: number;
+  ballSpin: number;
+  cap: boolean; tape: boolean;
+  /** screen direction the actor faces (+1 right) — drives fall tipping */
+  spinDir: number;
+  /** ground squash for lying artwork (from camera tilt) */
+  gs: number;
+  /** 0..1 foreshorten of the lying body axis */
+  fore: number;
+  headDir: number;
+  depth: number;
 }
 
-export const C_BASE: CPose = {
-  rootY: 0, rootX: 0, lean: 0, twist: 0, hipTwist: 0,
-  headTurn: 0, headTilt: 0, headNod: 0,
-  aLout: 8, aLfwd: 0, aLbend: 14, aRout: 8, aRfwd: 0, aRbend: 14,
-  lLout: 6, lLfwd: 0, lLbend: 4, lLlift: 0,
-  lRout: 6, lRfwd: 0, lRbend: 4, lRlift: 0,
-  crouch: 0, squash: 1, width: 1, breath: 0,
-};
+const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const clampN = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
-const CH = Object.keys(C_BASE) as (keyof CPose)[];
+/**
+ * Stride foot pitch (radians, + = toe up): heel-strike carries the toe up,
+ * mid-stance is flat, toe-off lifts the heel and the swinging foot hangs
+ * toe-down for ground clearance. Derived from the hip/knee channels so every
+ * clip gets correct ankle mechanics for free.
+ */
+export function footPitch(l: number, k: number): number {
+  return clampN(0.52 * l - 0.22 * k, -0.55, 0.5);
+}
 
-export interface CKey { t: number; p: Partial<CPose>; e?: Ease }
-export interface CClip { name: string; dur: number; loop: boolean; keys: CKey[] }
+function rotPt(px: number, py: number, cx: number, cy: number, ang: number): [number, number] {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const dx = px - cx, dy = py - cy;
+  return [cx + dx * c - dy * s, cy + dx * s + dy * c];
+}
 
-export function sampleC(clip: CClip, time: number): CPose {
-  const t = clip.loop ? ((time % clip.dur) + clip.dur) % clip.dur : Math.min(Math.max(time, 0), clip.dur);
-  const out: CPose = { ...C_BASE };
-  const last: Partial<CPose> = {};
-  let lastT = 0;
-  for (const k of clip.keys) {
-    const u = k.t <= lastT ? 1 : Math.min(1, Math.max(0, (t - lastT) / (k.t - lastT)));
-    const e = ease(k.e ?? 'sineInOut', u);
-    for (const c of CH) {
-      const v = (k.p as Record<string, number | undefined>)[c];
-      if (v === undefined) continue;
-      const base = C_BASE as unknown as Record<string, number>;
-      const o = out as unknown as Record<string, number>;
-      const from = (last[c] ?? base[c]) as number;
-      o[c] = from + (v - from) * e;
-      last[c] = o[c] as never;
+/** apply carry overrides: clamp arm around the ball, fend with the far arm */
+function carryPose(p: Pose, carry: number, cs: number, ballSide: number): Pose {
+  if (carry <= 0.02) return p;
+  const q: Pose = { ...p };
+  const nearR = ballSide >= 0;
+  const twoHand = clamp01(1 - cs * 1.6) * carry;
+  const clampT = carry;
+  // near (carrying) arm wraps the ball
+  if (nearR) {
+    q.aR = lerp(q.aR, 1.32, clampT); q.eR = lerp(q.eR, 1.75, clampT); q.abR = lerp(q.abR, 0.26, clampT);
+  } else {
+    q.aL = lerp(q.aL, 1.32, clampT); q.eL = lerp(q.eL, 1.75, clampT); q.abL = lerp(q.abL, 0.26, clampT);
+  }
+  // far arm: two-hand cradle or stiff-arm fend
+  const farA = lerp(1.28, 1.55, cs);
+  const farE = lerp(1.55, 0.3, cs);
+  const farAb = lerp(0.26, 0.62, cs);
+  const wFar = Math.max(twoHand, cs * carry);
+  if (nearR) {
+    q.aL = lerp(q.aL, farA, wFar); q.eL = lerp(q.eL, farE, wFar); q.abL = lerp(q.abL, farAb, wFar);
+  } else {
+    q.aR = lerp(q.aR, farA, wFar); q.eR = lerp(q.eR, farE, wFar); q.abR = lerp(q.abR, farAb, wFar);
+  }
+  q.ball = Math.max(q.ball, carry);
+  return q;
+}
+
+interface Locals { ctx: Ctx; sc: number; lw: number; seed: number; X: (m: number) => number; Y: (m: number) => number }
+
+function makeLocals(ctx: Ctx, sc: number, seed: number): Locals {
+  return {
+    ctx, sc, seed,
+    lw: Math.min(3.2, Math.max(1.05, sc * 0.021)),
+    X: (m: number) => m * sc,
+    Y: (m: number) => -m * sc,
+  };
+}
+
+function limbCard(L: Locals, x0: number, y0: number, x1: number, y1: number, w: number, fill: string, out: string, lw: number, seed: number, back = 1.1) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const len = Math.hypot(dx, dy) || 1;
+  const px = (-dy / len) * w * 0.5, py = (dx / len) * w * 0.5;
+  const pts: Pt[] = [
+    [L.X(x0 - px), L.Y(y0 - py)], [L.X(x0 + px), L.Y(y0 + py)],
+    [L.X(x1 + px * 0.82), L.Y(y1 + py * 0.82)], [L.X(x1 - px * 0.82), L.Y(y1 - py * 0.82)],
+  ];
+  paperCard(L.ctx, pts, fill, { lw, out, seed, back, jit: 0.4 });
+}
+
+function disc(L: Locals, x: number, y: number, r: number, fill: string, lw: number, seed: number) {
+  const c = L.ctx;
+  c.beginPath(); c.arc(L.X(x) + 1.1, L.Y(y) + 0.9, r * L.sc, 0, Math.PI * 2);
+  c.fillStyle = '#101018'; c.fill();
+  c.beginPath(); c.arc(L.X(x), L.Y(y), r * L.sc, 0, Math.PI * 2);
+  c.fillStyle = fill; c.fill();
+  c.lineWidth = lw; c.strokeStyle = OUT; c.stroke();
+  void seed;
+}
+
+/* ================================================================== */
+/* CORONAL — front / back                                              */
+/* ================================================================== */
+
+function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const skinD = shade(a.skin, 0.72);
+  const roll = p.roll, twist = p.twist;
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const R = (x: number, y: number): [number, number] => [x * cr - (y - p.hip) * sr * -1, y];
+  // roll applied as a screen rotation about the hip
+  const RP = (x: number, y: number): [number, number] => {
+    const dy = y - p.hip;
+    return [x * cr - dy * sr, p.hip + x * sr + dy * cr];
+  };
+  void R;
+  const shLen = b.torso * Math.cos(Math.min(1.25, Math.max(-0.6, p.lean)) * 0.92);
+  const shY = p.hip + shLen;
+  const tws = Math.sin(twist) * 0.12;
+  const shHalf = b.shW * 0.5 * (0.84 + 0.16 * Math.cos(twist));
+  const hipHalf = b.hipW * 0.5;
+  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
+
+  /* ---- legs ---- */
+  for (const s of [-1, 1] as const) {
+    const l = s < 0 ? p.lL : p.lR;
+    const k = s < 0 ? p.kL : p.kR;
+    const ad = s < 0 ? p.adL : p.adR;
+    const [hx, hy] = RP(s * hipHalf * 0.8, p.hip - 0.02);
+    const kneeX = hx + s * ad * thighLen * 0.9 + Math.sin(l) * 0.045 * s;
+    const kneeY = hy - Math.cos(l) * thighLen;
+    const footX = kneeX + s * ad * 0.05 - Math.sin(l) * 0.02;
+    const footY = kneeY - Math.cos(l - k) * shinLen + Math.sin(Math.max(0, k)) * shinLen * 0.22;
+    limbCard(L, hx, hy, kneeX, kneeY, 0.15 * b.bulk, pal.shorts, OUT, lw, a.seed + s * 3);
+    limbCard(L, kneeX, kneeY, footX, footY, 0.112 * b.bulk, pal.socks, OUT, lw, a.seed + s * 5);
+    // sock turnover band
+    const bx = lerp(kneeX, footX, 0.18), by = lerp(kneeY, footY, 0.18);
+    limbCard(L, bx, by, lerp(kneeX, footX, 0.34), lerp(kneeY, footY, 0.34), 0.12 * b.bulk, pal.trim, OUT, lw * 0.8, a.seed + s * 7, 0.6);
+    // boot: toe toward camera — stride pitch reads as sole flash / lifted heel
+    const bp2 = footPitch(l, k);
+    const lift = Math.max(0, -bp2) * 0.07;
+    const bh = 0.055 + 0.06 * Math.cos(bp2 * 0.9);
+    paperCard(ctx, [
+      [L.X(footX - 0.075), L.Y(footY + lift + bh)], [L.X(footX + 0.075), L.Y(footY + lift + bh)],
+      [L.X(footX + 0.062), L.Y(footY + lift - 0.015)], [L.X(footX - 0.062), L.Y(footY + lift - 0.015)],
+    ], '#1c1c24', { lw, seed: a.seed + s, jit: 0.35 });
+    if (bp2 > 0.12) {
+      ctx.save();
+      ctx.globalAlpha = clamp01(bp2 * 1.6);
+      poly(ctx, [
+        [L.X(footX - 0.06), L.Y(footY + lift + bh * 0.78)], [L.X(footX + 0.06), L.Y(footY + lift + bh * 0.78)],
+        [L.X(footX + 0.05), L.Y(footY + lift + bh * 0.16)], [L.X(footX - 0.05), L.Y(footY + lift + bh * 0.16)],
+      ], '#c9c2b0');
+      ctx.restore();
+    } else {
+      poly(ctx, [
+        [L.X(footX - 0.05), L.Y(footY + lift + 0.02)], [L.X(footX + 0.05), L.Y(footY + lift + 0.02)],
+        [L.X(footX + 0.045), L.Y(footY + lift - 0.005)], [L.X(footX - 0.045), L.Y(footY + lift - 0.005)],
+      ], shade('#1c1c24', 1.7));
     }
-    lastT = k.t;
-    if (t <= k.t) break;
   }
-  return out;
-}
 
-const P = (o: Partial<CPose>) => o;
+  /* ---- shorts ---- */
+  const sq: Pt[] = [[-hipHalf - 0.02, p.hip + 0.06], [hipHalf + 0.02, p.hip + 0.06], [hipHalf + 0.01, p.hip - 0.2], [-hipHalf - 0.01, p.hip - 0.2]]
+    .map(([x, y]) => { const q = RP(x, y); return [L.X(q[0]), L.Y(q[1])] as Pt; });
+  paperCard(ctx, sq, pal.shorts, { lw, seed: a.seed + 11, jit: 0.5 });
+  foldTab(ctx, L.X(RP(-hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(-hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
+  foldTab(ctx, L.X(RP(hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
 
-export const C_CLIPS: Record<string, CClip> = {
+  /* ---- arms ----
+     Paper layering: seen from the FRONT the arm cards are pinned on top of the
+     torso card; seen from the BACK they sit BEHIND it, so the body occludes
+     them and only the outer silhouette of sleeve/forearm/hand shows. */
+  const drawArms = () => {
+    for (const s of [-1, 1] as const) {
+      const aa = s < 0 ? p.aL : p.aR;
+      const e = s < 0 ? p.eL : p.eR;
+      const ab = s < 0 ? p.abL : p.abR;
+      const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
+      const elX = sx0 + s * ab * upLen * 0.85 + Math.sin(aa) * 0.03 * s;
+      const elY = sy0 - Math.cos(aa) * upLen;
+      const hdX = elX - s * Math.sin(e) * foreLen * 0.5 + Math.sin(aa) * 0.02;
+      const hdY = elY - Math.cos(aa - e * 0.8) * foreLen * 0.8;
+      limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, pal.kit, OUT, lw, a.seed + s * 17);
+      limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, a.skin, OUT, lw, a.seed + s * 19);
+      disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? '#e8e2d0' : a.skin, lw * 0.9, a.seed + s);
+      foldTab(ctx, L.X(sx0), L.Y(sy0), 0.09 * sc, 0.045 * sc, pal.kitDark, lw);
+    }
+  };
+  if (!front) drawArms();
 
-  idle: {
-    name: 'idle', dur: 4.6, loop: true, keys: [
-      { t: 0.0, p: P({ rootX: -0.015, lLout: 6, lRout: 7, aLout: 8, aRout: 9, breath: 0, headTurn: -2, squash: 1 }) },
-      { t: 1.15, p: P({ rootX: 0.0, breath: 0.7, aLout: 10, aRout: 10.5, headTurn: 0, squash: 1.004 }), e: 'sineInOut' },
-      { t: 2.3, p: P({ rootX: 0.018, breath: 0, lLout: 7, lRout: 6, aLout: 8.5, aRout: 8, headTurn: 3, squash: 1 }), e: 'sineInOut' },
-      { t: 3.45, p: P({ rootX: 0.0, breath: 0.7, aLout: 10, aRout: 10.5, headTurn: 1, squash: 1.004 }), e: 'sineInOut' },
-      { t: 4.6, p: P({ rootX: -0.015, breath: 0, lLout: 6, lRout: 7, aLout: 8, aRout: 9, headTurn: -2, squash: 1 }), e: 'sineInOut' },
-    ],
-  },
+  /* ---- torso ---- */
+  const t0 = RP(-hipHalf, p.hip - 0.02), t1 = RP(hipHalf, p.hip - 0.02);
+  const t2 = RP(shHalf + tws, shY), t3 = RP(-shHalf + tws, shY);
+  const torsoPts: Pt[] = [[L.X(t0[0]), L.Y(t0[1])], [L.X(t1[0]), L.Y(t1[1])], [L.X(t2[0]), L.Y(t2[1])], [L.X(t3[0]), L.Y(t3[1])]];
+  paperCard(ctx, torsoPts, pal.kit, { lw: lw * 1.05, seed: a.seed + 13, jit: 0.55, back: 1.6 });
+  // hoops
+  for (const hy of [0.62, 0.44]) {
+    const y = p.hip + shLen * hy;
+    const w = lerp(hipHalf, shHalf, hy) + 0.004;
+    const h0 = RP(-w + tws * hy, y), h1 = RP(w + tws * hy, y);
+    const h2 = RP(w + tws * (hy + 0.1), y + shLen * 0.09), h3 = RP(-w + tws * (hy + 0.1), y + shLen * 0.09);
+    poly(ctx, [[L.X(h0[0]), L.Y(h0[1])], [L.X(h1[0]), L.Y(h1[1])], [L.X(h2[0]), L.Y(h2[1])], [L.X(h3[0]), L.Y(h3[1])]], pal.trim);
+  }
+  crease(ctx, L.X(RP(tws * 0.5, p.hip)[0]), L.Y(RP(tws * 0.5, p.hip)[1]), L.X(RP(tws * 0.6, shY)[0]), L.Y(RP(tws * 0.6, shY)[1]), 0.08, Math.max(1, lw * 0.5));
+  // collar
+  const c0 = RP(-shHalf * 0.42 + tws, shY + 0.015), c1 = RP(shHalf * 0.42 + tws, shY + 0.015);
+  const c2 = RP(shHalf * 0.3 + tws, shY - 0.06), c3 = RP(-shHalf * 0.3 + tws, shY - 0.06);
+  poly(ctx, [[L.X(c0[0]), L.Y(c0[1])], [L.X(c1[0]), L.Y(c1[1])], [L.X(c2[0]), L.Y(c2[1])], [L.X(c3[0]), L.Y(c3[1])]], front ? pal.trim : pal.kitDark, OUT, lw * 0.8);
 
-  ready: {
-    name: 'ready', dur: 1.15, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 0.20, lean: 7, lLout: 11, lRout: 11, lLbend: 20, lRbend: 21, aLout: 20, aRout: 21, aLbend: 40, aRbend: 39, rootY: 0 }) },
-      { t: 0.58, p: P({ crouch: 0.27, lean: 9, lLbend: 27, lRbend: 26, aLout: 23, aRout: 22, rootY: -0.035, squash: 0.99 }), e: 'sineInOut' },
-      { t: 1.15, p: P({ crouch: 0.20, lean: 7, lLbend: 20, lRbend: 21, aLout: 20, aRout: 21, rootY: 0, squash: 1 }), e: 'sineInOut' },
-    ],
-  },
+  if (!front) {
+    // shirt number on the back card
+    const nc = RP(tws * 0.6, p.hip + shLen * 0.52);
+    ctx.save();
+    ctx.translate(L.X(nc[0]), L.Y(nc[1]));
+    ctx.rotate(-roll);
+    ctx.font = `${Math.max(6, 0.3 * sc)}px ${DISPLAY}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(2, lw * 1.4); ctx.strokeStyle = OUT;
+    ctx.strokeText(String(a.num), 0, 0);
+    ctx.fillStyle = pal.trim;
+    ctx.fillText(String(a.num), 0, 0);
+    ctx.restore();
+  }
 
-  jog: {
-    name: 'jog', dur: 0.72, loop: true, keys: [
-      { t: 0.00, p: P({ rootY: 0.00, rootX: -0.05, lean: 11, twist: -9, hipTwist: 7, headTurn: 2, headTilt: -1.5,
-        lLfwd: 34, lLbend: 16, lLlift: 0.05, lRfwd: -22, lRbend: 62, lRlift: 0.22,
-        aLout: 15, aLfwd: -20, aLbend: 68, aRout: 16, aRfwd: 26, aRbend: 52, squash: 1.0 }) },
-      { t: 0.09, p: P({ rootY: 0.055, rootX: -0.02, lean: 12, twist: -5, hipTwist: 4,
-        lLfwd: 14, lLbend: 30, lLlift: 0, lRfwd: -6, lRbend: 44, lRlift: 0.30,
-        aLout: 13, aLfwd: -8, aLbend: 52, aRout: 14, aRfwd: 12, aRbend: 40, squash: 1.012 }), e: 'sineOut' },
-      { t: 0.18, p: P({ rootY: 0.018, rootX: 0.0, lean: 11, twist: 0, hipTwist: 0, headTilt: 0,
-        lLfwd: -8, lLbend: 44, lLlift: 0.06, lRfwd: 12, lRbend: 26, lRlift: 0.04,
-        aLout: 14, aLfwd: 4, aLbend: 44, aRout: 15, aRfwd: -4, aRbend: 46, squash: 0.996 }), e: 'sineInOut' },
-      { t: 0.28, p: P({ rootY: 0.0, rootX: 0.05, lean: 11, twist: 9, hipTwist: -7, headTurn: -2, headTilt: 1.5,
-        lLfwd: -22, lLbend: 62, lLlift: 0.22, lRfwd: 35, lRbend: 16, lRlift: 0.05,
-        aLout: 16, aLfwd: 27, aLbend: 52, aRout: 15, aRfwd: -21, aRbend: 68, squash: 1.0 }), e: 'sineInOut' },
-      { t: 0.46, p: P({ rootY: 0.058, rootX: 0.02, lean: 12, twist: 5, hipTwist: -4,
-        lLfwd: -6, lLbend: 44, lLlift: 0.31, lRfwd: 15, lRbend: 30, lRlift: 0,
-        aLout: 14, aLfwd: 13, aLbend: 40, aRout: 13, aRfwd: -8, aRbend: 52, squash: 1.012 }), e: 'sineOut' },
-      { t: 0.58, p: P({ rootY: 0.018, rootX: 0.0, lean: 11, twist: 0, hipTwist: 0, headTilt: 0,
-        lLfwd: 12, lLbend: 26, lLlift: 0.04, lRfwd: -8, lRbend: 44, lRlift: 0.06,
-        aLout: 15, aLfwd: -4, aLbend: 46, aRout: 14, aRfwd: 4, aRbend: 44, squash: 0.996 }), e: 'sineInOut' },
-      { t: 0.72, p: P({ rootY: 0.0, rootX: -0.05, lean: 11, twist: -9, hipTwist: 7, headTurn: 2, headTilt: -1.5,
-        lLfwd: 34, lLbend: 16, lLlift: 0.05, lRfwd: -22, lRbend: 62, lRlift: 0.22,
-        aLout: 15, aLfwd: -20, aLbend: 68, aRout: 16, aRfwd: 26, aRbend: 52, squash: 1.0 }), e: 'sineInOut' },
-    ],
-  },
+  if (front) drawArms();
 
-  sprint: {
-    name: 'sprint', dur: 0.50, loop: true, keys: [
-      { t: 0.00, p: P({ rootY: 0.02, rootX: -0.055, lean: 22, twist: -14, hipTwist: 11, headTilt: -2, headNod: 3,
-        lLfwd: 52, lLbend: 18, lLlift: 0.10, lRfwd: -30, lRbend: 96, lRlift: 0.42,
-        aLout: 12, aLfwd: -34, aLbend: 88, aRout: 13, aRfwd: 42, aRbend: 66, squash: 1.0, width: 1 }) },
-      { t: 0.07, p: P({ rootY: 0.095, rootX: -0.02, lean: 23, twist: -8, hipTwist: 6,
-        lLfwd: 22, lLbend: 40, lLlift: 0.02, lRfwd: -6, lRbend: 70, lRlift: 0.50,
-        aLout: 11, aLfwd: -14, aLbend: 70, aRout: 12, aRfwd: 20, aRbend: 50, squash: 1.02, width: 0.99 }), e: 'sineOut' },
-      { t: 0.125, p: P({ rootY: 0.045, rootX: 0.0, lean: 22, twist: 0, hipTwist: 0, headTilt: 0,
-        lLfwd: -10, lLbend: 66, lLlift: 0.12, lRfwd: 20, lRbend: 34, lRlift: 0.06,
-        aLout: 12, aLfwd: 6, aLbend: 58, aRout: 12, aRfwd: -6, aRbend: 60, squash: 0.99 }), e: 'sineInOut' },
-      { t: 0.20, p: P({ rootY: 0.02, rootX: 0.055, lean: 22, twist: 14, hipTwist: -11, headTilt: 2, headNod: 3,
-        lLfwd: -30, lLbend: 96, lLlift: 0.42, lRfwd: 54, lRbend: 18, lRlift: 0.10,
-        aLout: 13, aLfwd: 43, aLbend: 66, aRout: 12, aRfwd: -34, aRbend: 88, squash: 1.0 }), e: 'sineInOut' },
-      { t: 0.32, p: P({ rootY: 0.098, rootX: 0.02, lean: 23, twist: 8, hipTwist: -6,
-        lLfwd: -6, lLbend: 70, lLlift: 0.51, lRfwd: 23, lRbend: 40, lRlift: 0.02,
-        aLout: 12, aLfwd: 21, aLbend: 50, aRout: 11, aRfwd: -14, aRbend: 70, squash: 1.02, width: 0.99 }), e: 'sineOut' },
-      { t: 0.40, p: P({ rootY: 0.045, rootX: 0.0, lean: 22, twist: 0, hipTwist: 0, headTilt: 0,
-        lLfwd: 20, lLbend: 34, lLlift: 0.06, lRfwd: -10, lRbend: 66, lRlift: 0.12,
-        aLout: 12, aLfwd: -6, aLbend: 60, aRout: 12, aRfwd: 6, aRbend: 58, squash: 0.99 }), e: 'sineInOut' },
-      { t: 0.50, p: P({ rootY: 0.02, rootX: -0.055, lean: 22, twist: -14, hipTwist: 11, headTilt: -2, headNod: 3,
-        lLfwd: 52, lLbend: 18, lLlift: 0.10, lRfwd: -30, lRbend: 96, lRlift: 0.42,
-        aLout: 12, aLfwd: -34, aLbend: 88, aRout: 13, aRfwd: 42, aRbend: 66, squash: 1.0, width: 1 }), e: 'sineInOut' },
-    ],
-  },
-
-  scrumCrouch: {
-    name: 'scrumCrouch', dur: 1.1, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 0.60, lean: 50, lLout: 16, lRout: 17, lLbend: 72, lRbend: 70,
-        headNod: -14, aLout: 46, aLfwd: 30, aLbend: 60, aRout: 47, aRfwd: 30, aRbend: 58,
-        squash: 0.88, width: 1.12, breath: 0.4 }) },
-      { t: 0.55, p: P({ crouch: 0.63, lean: 52, lLbend: 76, lRbend: 74, headNod: -16,
-        aLbend: 64, aRbend: 62, squash: 0.875, breath: 0.9, rootY: -0.015 }), e: 'sineInOut' },
-      { t: 1.1, p: P({ crouch: 0.60, lean: 50, lLbend: 72, lRbend: 70, headNod: -14,
-        aLbend: 60, aRbend: 58, squash: 0.88, breath: 0.4, rootY: 0 }), e: 'sineInOut' },
-    ],
-  },
-
-  scrumBind: {
-    name: 'scrumBind', dur: 1.7, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 0.56, lean: 46, lLout: 17, lRout: 18, lLbend: 60, lRbend: 58,
-        aLout: 44, aRout: 45, aLbend: 88, aRbend: 87, squash: 0.90, width: 1.10, breath: 0.3 }) },
-      { t: 0.55, p: P({ crouch: 0.585, lean: 47, lLbend: 63, lRbend: 61, aLout: 45, aRout: 46,
-        squash: 0.893, width: 1.105, breath: 0.9, rootY: -0.012 }), e: 'sineInOut' },
-      { t: 1.05, p: P({ crouch: 0.555, lean: 46, lLbend: 59, lRbend: 58, aLout: 44, aRout: 45,
-        squash: 0.902, width: 1.098, breath: 0.2, rootY: 0.004 }), e: 'sineInOut' },
-      { t: 1.7, p: P({ crouch: 0.56, lean: 46, lLbend: 60, lRbend: 58, aLout: 44, aRout: 45,
-        squash: 0.90, width: 1.10, breath: 0.3, rootY: 0 }), e: 'sineInOut' },
-    ],
-  },
-
-  scrumDrive: {
-    name: 'scrumDrive', dur: 0.68, loop: true, keys: [
-      { t: 0.00, p: P({ crouch: 0.55, lean: 48, lLfwd: 20, lLbend: 66, lRfwd: -12, lRbend: 52, lRlift: 0.05,
-        aLout: 45, aRout: 46, aLbend: 88, aRbend: 87, squash: 0.90, width: 1.10, rootX: -0.012 }) },
-      { t: 0.17, p: P({ crouch: 0.52, lean: 49, lLfwd: 4, lLbend: 50, lRfwd: 6, lRbend: 62, lRlift: 0,
-        squash: 0.912, rootX: 0, rootY: 0.012 }), e: 'sineOut' },
-      { t: 0.34, p: P({ crouch: 0.55, lean: 48, lLfwd: -12, lLbend: 52, lLlift: 0.05, lRfwd: 21, lRbend: 66, lRlift: 0,
-        squash: 0.90, rootX: 0.012, rootY: 0 }), e: 'sineInOut' },
-      { t: 0.51, p: P({ crouch: 0.52, lean: 49, lLfwd: 6, lLbend: 62, lLlift: 0, lRfwd: 4, lRbend: 50,
-        squash: 0.912, rootX: 0, rootY: 0.012 }), e: 'sineOut' },
-      { t: 0.68, p: P({ crouch: 0.55, lean: 48, lLfwd: 20, lLbend: 66, lLlift: 0, lRfwd: -12, lRbend: 52, lRlift: 0.05,
-        squash: 0.90, rootX: -0.012, rootY: 0 }), e: 'sineInOut' },
-    ],
-  },
-
-  lineoutJump: {
-    name: 'lineoutJump', dur: 1.85, loop: false, keys: [
-      { t: 0.00, p: P({ crouch: 0.12, lLout: 9, lRout: 9, aLout: 24, aRout: 25, aLbend: 30, aRbend: 29 }) },
-      { t: 0.20, p: P({ crouch: 0.52, lean: 14, lLbend: 74, lRbend: 72, lLout: 13, lRout: 13,
-        aLout: 16, aLfwd: -22, aLbend: 52, aRout: 17, aRfwd: -21, aRbend: 50,
-        squash: 0.93, width: 1.05, rootY: -0.17 }), e: 'quadIn' },
-      { t: 0.31, p: P({ crouch: 0.0, lean: 2, lLbend: 8, lRbend: 8,
-        aLout: 6, aLfwd: 6, aLbend: 8, aRout: 6, aRfwd: 6, aRbend: 8,
-        squash: 1.07, width: 0.95, rootY: 0.30 }), e: 'expoOut' },
-      { t: 0.52, p: P({ crouch: 0, lean: -3, lLout: 4, lRout: 5, lLbend: 22, lRbend: 20, lLfwd: -10, lRfwd: -8,
-        aLout: 2, aLbend: 2, aRout: 2, aRbend: 2, headNod: -8, squash: 1.06, width: 0.94, rootY: 0.62 }), e: 'sineOut' },
-      { t: 0.80, p: P({ rootY: 0.66, aLout: 4, aRout: 3, headNod: -6, squash: 1.05 }), e: 'sineInOut' },
-      { t: 1.08, p: P({ rootY: 0.34, lean: 4, aLout: 14, aLbend: 42, aRout: 15, aRbend: 40,
-        lLbend: 34, lRbend: 32, headNod: 0, squash: 1.01 }), e: 'quadIn' },
-      { t: 1.22, p: P({ rootY: 0.0, crouch: 0.50, lean: 13, lLbend: 76, lRbend: 74, lLout: 14, lRout: 14,
-        aLout: 20, aLbend: 56, aRout: 21, aRbend: 54, squash: 0.91, width: 1.06 }), e: 'quadIn' },
-      { t: 1.42, p: P({ crouch: 0.16, lean: 6, lLbend: 22, lRbend: 21, squash: 1.02, width: 0.99 }), e: 'backOut' },
-      { t: 1.85, p: P({ crouch: 0.12, lean: 4, lLbend: 10, lRbend: 10, lLout: 9, lRout: 9,
-        aLout: 22, aRout: 23, aLbend: 32, aRbend: 31, squash: 1, width: 1 }), e: 'sineOut' },
-    ],
-  },
-
-  lineoutLift: {
-    name: 'lineoutLift', dur: 1.85, loop: false, keys: [
-      { t: 0.00, p: P({ crouch: 0.34, lean: 18, lLout: 15, lRout: 15, lLbend: 48, lRbend: 47,
-        aLout: 26, aLfwd: 18, aLbend: 74, aRout: 27, aRfwd: 18, aRbend: 72 }) },
-      { t: 0.20, p: P({ crouch: 0.60, lean: 24, lLbend: 84, lRbend: 82, lLout: 17, lRout: 17,
-        aLout: 22, aLbend: 92, aRout: 23, aRbend: 90, squash: 0.90, width: 1.07, rootY: -0.20 }), e: 'quadIn' },
-      { t: 0.34, p: P({ crouch: 0.16, lean: 8, lLbend: 24, lRbend: 23,
-        aLout: 10, aLbend: 26, aRout: 10, aRbend: 25, squash: 1.03, rootY: 0.02 }), e: 'expoOut' },
-      { t: 0.50, p: P({ crouch: 0.0, lean: 2, lLbend: 6, lRbend: 6, lLout: 12, lRout: 12,
-        aLout: 4, aLbend: 3, aRout: 4, aRbend: 3, squash: 1.05, width: 0.96, rootY: 0.09 }), e: 'backOut' },
-      { t: 0.62, p: P({ aLout: 5, aLbend: 5, aRout: 5, aRbend: 5, squash: 1.04, rootY: 0.075 }), e: 'sineOut' },
-      { t: 1.00, p: P({ crouch: 0.02, aLout: 5, aRout: 5, squash: 1.04, rootY: 0.08, breath: 0.6 }), e: 'sineInOut' },
-      { t: 1.30, p: P({ crouch: 0.22, lean: 12, lLbend: 34, lRbend: 33,
-        aLout: 14, aLbend: 40, aRout: 15, aRbend: 39, squash: 0.99, rootY: 0 }), e: 'sineInOut' },
-      { t: 1.85, p: P({ crouch: 0.30, lean: 16, lLbend: 44, lRbend: 43, lLout: 14, lRout: 14,
-        aLout: 24, aLbend: 66, aRout: 25, aRbend: 64, squash: 1, width: 1 }), e: 'sineOut' },
-    ],
-  },
-
-  lineoutThrow: {
-    name: 'lineoutThrow', dur: 1.6, loop: false, keys: [
-      { t: 0.00, p: P({ aLout: 18, aLfwd: 26, aLbend: 62, aRout: 19, aRfwd: 26, aRbend: 60, lean: 2, crouch: 0.08 }) },
-      { t: 0.26, p: P({ aLout: 10, aLfwd: 4, aLbend: 122, aRout: 11, aRfwd: 4, aRbend: 120,
-        lean: -12, twist: -6, headNod: -10, crouch: 0.14, squash: 1.02, rootY: 0.02 }), e: 'quadOut' },
-      { t: 0.40, p: P({ aLout: 8, aLbend: 138, aRout: 9, aRbend: 136, lean: -16, twist: -9,
-        crouch: 0.18, squash: 1.03, rootY: 0.03 }), e: 'sineInOut' },
-      { t: 0.52, p: P({ aLout: 6, aLfwd: 40, aLbend: 22, aRout: 7, aRfwd: 40, aRbend: 20,
-        lean: 16, twist: 8, hipTwist: -6, headNod: 4, crouch: 0.10, squash: 0.98, width: 1.02 }), e: 'expoOut' },
-      { t: 0.70, p: P({ aLout: 14, aLfwd: 28, aLbend: 34, aRout: 15, aRfwd: 28, aRbend: 32,
-        lean: 20, twist: 5, squash: 0.99 }), e: 'sineOut' },
-      { t: 1.05, p: P({ aLout: 16, aLfwd: 14, aLbend: 48, aRout: 17, aRfwd: 14, aRbend: 46,
-        lean: 10, twist: 0, hipTwist: 0, headNod: 0, squash: 1 }), e: 'sineInOut' },
-      { t: 1.60, p: P({ aLout: 18, aLfwd: 24, aLbend: 60, aRout: 19, aRfwd: 24, aRbend: 58, lean: 2, crouch: 0.08 }), e: 'sineInOut' },
-    ],
-  },
-
-  carry: {
-    name: 'carry', dur: 0.58, loop: true, keys: [
-      { t: 0.00, p: P({ lean: 18, twist: -7, hipTwist: 6, rootY: 0.01, rootX: -0.04,
-        lLfwd: 42, lLbend: 18, lRfwd: -24, lRbend: 76, lRlift: 0.30,
-        aLout: 30, aLfwd: 30, aLbend: 96, aRout: 11, aRfwd: -26, aRbend: 74 }) },
-      { t: 0.145, p: P({ rootY: 0.07, rootX: -0.015, twist: -3,
-        lLfwd: 16, lLbend: 36, lRfwd: -4, lRbend: 54, lRlift: 0.36,
-        aLout: 31, aLbend: 98, aRout: 10, aRfwd: -10, aRbend: 56, squash: 1.014 }), e: 'sineOut' },
-      { t: 0.29, p: P({ lean: 18, twist: 7, hipTwist: -6, rootY: 0.01, rootX: 0.04,
-        lLfwd: -24, lLbend: 76, lLlift: 0.30, lRfwd: 43, lRbend: 18, lRlift: 0.02,
-        aLout: 30, aLbend: 96, aRout: 12, aRfwd: 32, aRbend: 60 }), e: 'sineInOut' },
-      { t: 0.435, p: P({ rootY: 0.07, rootX: 0.015, twist: 3,
-        lLfwd: -4, lLbend: 54, lLlift: 0.36, lRfwd: 17, lRbend: 36, lRlift: 0,
-        aLout: 31, aLbend: 98, aRout: 11, aRfwd: 12, aRbend: 52, squash: 1.014 }), e: 'sineOut' },
-      { t: 0.58, p: P({ lean: 18, twist: -7, hipTwist: 6, rootY: 0.01, rootX: -0.04,
-        lLfwd: 42, lLbend: 18, lLlift: 0, lRfwd: -24, lRbend: 76, lRlift: 0.30,
-        aLout: 30, aLfwd: 30, aLbend: 96, aRout: 11, aRfwd: -26, aRbend: 74 }), e: 'sineInOut' },
-    ],
-  },
-
-  tackle: {
-    /* T-31/T-28 — the tackle per PR-02 + R-06 + C-01 + C-03 + S-03/04/06:
-     * a back-in LOAD that drops the hips three frames out, a cubic-out
-     * DRIVE through the shoulder, a ONE-FRAME impact (squash 10%, one
-     * tight key, S-06), a six-frame recovery that spreads, the FOLD
-     * through the hip (rotation, not collapse — C-03), a bounce-out land
-     * with ~8% overshoot (S-03) and a settle back. Limbs are staggered
-     * (S-04): the near arm wraps two frames before the far one, the head
-     * lags the shoulders (headNod on the drive, headTilt — head to the
-     * side — on the fold). Ends in the low braced pose the jackal needs. */
-    name: 'tackle', dur: 1.25, loop: false, keys: [
-      { t: 0.00, p: P({ crouch: 0.2, lean: 20, aLout: 26, aRout: 27, aLbend: 44, aRbend: 43 }) },
-      { t: 0.09, p: P({ crouch: 0.55, lean: 32, squash: 0.90, width: 1.08, lLbend: 76, lRbend: 74,
-        aLout: 24, aLfwd: -18, aLbend: 58, aRout: 25, aRfwd: -16, aRbend: 56 }), e: 'backIn' },
-      { t: 0.12, p: P({}), e: 'hold' },
-      { t: 0.19, p: P({ crouch: 0.36, lean: 50, squash: 0.97, aLout: 34, aLfwd: 56, aLbend: 18,
-        aRout: 35, aRfwd: 46, aRbend: 24, headNod: 6 }), e: 'cubicOut' },
-      { t: 0.21, p: P({ aRfwd: 58, aRbend: 14 }), e: 'quadOut' },
-      { t: 0.235, p: P({ crouch: 0.46, lean: 58, squash: 0.90, width: 1.16, headTilt: 7,
-        aLout: 44, aLfwd: 58, aLbend: 16, aRout: 45, aRfwd: 58, aRbend: 15 }), e: 'hold' },
-      { t: 0.34, p: P({ crouch: 0.52, lean: 64, squash: 1.03, width: 1.12, headTilt: 6 }), e: 'cubicOut' },
-      { t: 0.52, p: P({ crouch: 0.82, lean: 74, lLbend: 104, lRbend: 100, rootY: -0.34, headTilt: 9,
-        aLout: 44, aLbend: 40, aRout: 45, aRbend: 38 }), e: 'quadIn' },
-      { t: 0.66, p: P({ crouch: 1.06, lean: 86, lLbend: 126, lRbend: 124, aLout: 48, aLbend: 54, aRout: 47, aRbend: 52,
-        squash: 0.72, width: 1.24, rootY: -0.68, headTilt: 12 }), e: 'bounceOut' },
-      { t: 0.80, p: P({ crouch: 1.0, lean: 79, lLbend: 122, lRbend: 120, aLout: 45, aLbend: 52, aRout: 45, aRbend: 50,
-        squash: 0.75, width: 1.20, rootY: -0.60, headTilt: 10 }), e: 'sineOut' },
-      { t: 1.25, p: P({ crouch: 1.0, lean: 80, lLbend: 122, lRbend: 120, aLout: 44, aLbend: 56, aRout: 45, aRbend: 54,
-        squash: 0.75, width: 1.21, rootY: -0.60, headTilt: 10, breath: 0.8 }), e: 'sineOut' },
-    ],
-  },
-
-  /* T-31 — THE DIVE for the line, per W-15 + R-07: the launch is horizontal
-   * through the centre of gravity (not upward), the body extends full length
-   * in flight, the landing slides on the forearms and chest, and the reach
-   * arm is the last thing to stop. One-shot; the scorer holds the slide
-   * through the fanfare ritual. */
-  dive: {
-    name: 'dive', dur: 1.1, loop: false, keys: [
-      { t: 0.00, p: P({ crouch: 0.45, lean: 55, aLfwd: 70, aLbend: 10, aRfwd: 30, aRbend: 18,
-        lLbend: 62, lRbend: 40, lLlift: 18, headNod: 5 }) },
-      { t: 0.14, p: P({ lean: 84, rootY: 0.22, squash: 1.08, aLfwd: 88, aLbend: 4, aRfwd: 55, aRbend: 10,
-        lLbend: 18, lRbend: 10, lLlift: -6, lRlift: -4, headTilt: 4 }), e: 'expoOut' },
-      { t: 0.30, p: P({ lean: 88, rootY: -0.55, squash: 0.78, width: 1.20, aLfwd: 90, aLbend: 38, aRfwd: 60, aRbend: 34,
-        lLbend: 14, lRbend: 8, headTilt: 6 }), e: 'bounceOut' },
-      { t: 0.62, p: P({ lean: 88, rootY: -0.58, aLfwd: 94, aLbend: 30, aRfwd: 52, aRbend: 30,
-        squash: 0.76, width: 1.22, lLbend: 10, headTilt: 5 }), e: 'sineOut' },
-      { t: 1.10, p: P({ lean: 86, rootY: -0.58, aLfwd: 92, aLbend: 34, aRfwd: 48, aRbend: 36,
-        squash: 0.75, width: 1.21, breath: 0.5, headTilt: 6 }), e: 'sineInOut' },
-    ],
-  },
-
-  grounded: {
-    name: 'grounded', dur: 1.9, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 1.0, lean: 80, squash: 0.74, width: 1.22, rootY: -0.62,
-        aLout: 54, aLfwd: -34, aLbend: 22, aRout: 40, aRbend: 62, lLbend: 118, lRbend: 124, breath: 0 }) },
-      { t: 0.55, p: P({ aLout: 60, aLfwd: -44, aLbend: 12, squash: 0.72, breath: 1, rootY: -0.645, headTilt: 8 }), e: 'expoOut' },
-      { t: 1.2, p: P({ aLout: 58, aLfwd: -42, aLbend: 14, squash: 0.755, breath: 0.2, rootY: -0.60, lLbend: 124, lRbend: 118 }), e: 'sineInOut' },
-      { t: 1.9, p: P({ aLout: 54, aLfwd: -34, aLbend: 22, squash: 0.74, breath: 0, rootY: -0.62, lLbend: 118, lRbend: 124 }), e: 'sineInOut' },
-    ],
-  },
-
-  jackal: {
-    name: 'jackal', dur: 1.35, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 0.62, lean: 66, lLout: 21, lRout: 22, lLbend: 74, lRbend: 72,
-        aLout: 30, aLfwd: 40, aLbend: 106, aRout: 31, aRfwd: 40, aRbend: 104,
-        squash: 0.88, width: 1.12, headNod: 12 }) },
-      { t: 0.28, p: P({ crouch: 0.70, lean: 71, aLbend: 116, aRbend: 114, rootY: -0.05,
-        squash: 0.865, width: 1.13, breath: 0.8 }), e: 'quadIn' },
-      { t: 0.50, p: P({ crouch: 0.58, lean: 63, aLbend: 98, aRbend: 96, rootY: 0.03,
-        squash: 0.895, width: 1.115, breath: 0.1 }), e: 'backOut' },
-      { t: 0.92, p: P({ crouch: 0.65, lean: 68, aLbend: 110, aRbend: 108, rootY: -0.02, squash: 0.878 }), e: 'sineInOut' },
-      { t: 1.35, p: P({ crouch: 0.62, lean: 66, aLbend: 106, aRbend: 104, rootY: 0, squash: 0.88, width: 1.12 }), e: 'sineInOut' },
-    ],
-  },
-
-  cleanout: {
-    name: 'cleanout', dur: 1.0, loop: false, keys: [
-      { t: 0.00, p: P({ crouch: 0.22, lean: 22, aLout: 24, aRout: 25, aLbend: 46, aRbend: 45 }) },
-      { t: 0.16, p: P({ crouch: 0.58, lean: 44, lLbend: 78, lRbend: 76, lLout: 16, lRout: 16,
-        aLout: 30, aLfwd: 22, aLbend: 34, aRout: 31, aRfwd: 22, aRbend: 33,
-        squash: 0.91, width: 1.07, rootY: -0.10 }), e: 'quadIn' },
-      { t: 0.30, p: P({ crouch: 0.40, lean: 56, aLout: 38, aLfwd: 48, aLbend: 16, aRout: 39, aRfwd: 48, aRbend: 15,
-        squash: 1.06, width: 1.09, rootX: 0.22, rootY: 0.02, headNod: 6 }), e: 'expoOut' },
-      { t: 0.52, p: P({ crouch: 0.44, lean: 50, aLout: 40, aLbend: 26, aRout: 41, aRbend: 25,
-        rootX: 0.44, squash: 1.01, width: 1.06 }), e: 'sineOut' },
-      { t: 1.00, p: P({ crouch: 0.46, lean: 46, aLout: 36, aLbend: 40, aRout: 37, aRbend: 39,
-        rootX: 0.52, squash: 0.98, width: 1.05, breath: 0.7 }), e: 'sineInOut' },
-    ],
-  },
-
-  maulBind: {
-    name: 'maulBind', dur: 0.64, loop: true, keys: [
-      { t: 0.00, p: P({ crouch: 0.50, lean: 44, lLout: 16, lRout: 17, lLfwd: 16, lLbend: 58, lRfwd: -10, lRbend: 48,
-        aLout: 42, aLfwd: 34, aLbend: 96, aRout: 43, aRfwd: 34, aRbend: 94, squash: 0.91, width: 1.11 }) },
-      { t: 0.16, p: P({ crouch: 0.47, lean: 45, lLfwd: 2, lLbend: 46, lRfwd: 6, lRbend: 56, rootY: 0.014, squash: 0.92 }), e: 'sineOut' },
-      { t: 0.32, p: P({ crouch: 0.50, lean: 44, lLfwd: -10, lLbend: 48, lRfwd: 17, lRbend: 58, rootY: 0, squash: 0.91 }), e: 'sineInOut' },
-      { t: 0.48, p: P({ crouch: 0.47, lean: 45, lLfwd: 6, lLbend: 56, lRfwd: 2, lRbend: 46, rootY: 0.014, squash: 0.92 }), e: 'sineOut' },
-      { t: 0.64, p: P({ crouch: 0.50, lean: 44, lLfwd: 16, lLbend: 58, lRfwd: -10, lRbend: 48, rootY: 0, squash: 0.91 }), e: 'sineInOut' },
-    ],
-  },
-
-  pass: {
-    name: 'pass', dur: 0.72, loop: false, keys: [
-      { t: 0.00, p: P({ lean: 12, crouch: 0.16, aLout: 24, aLfwd: 26, aLbend: 52, aRout: 25, aRfwd: 26, aRbend: 50 }) },
-      { t: 0.11, p: P({ headTurn: 22, twist: -10, hipTwist: 5, lean: 14,
-        aLout: 34, aLfwd: 14, aLbend: 62, aRout: 20, aRfwd: 34, aRbend: 44, squash: 0.99 }), e: 'quadOut' },
-      { t: 0.26, p: P({ headTurn: 26, twist: 12, hipTwist: -8, lean: 10,
-        aLout: 12, aLfwd: 44, aLbend: 20, aRout: 44, aRfwd: 8, aRbend: 26,
-        squash: 1.02, width: 1.03, rootX: 0.06 }), e: 'expoOut' },
-      { t: 0.42, p: P({ headTurn: 20, twist: 8, aLout: 10, aLfwd: 40, aLbend: 14, aRout: 48, aRbend: 18,
-        squash: 1.0, rootX: 0.04 }), e: 'sineOut' },
-      { t: 0.72, p: P({ headTurn: 6, twist: 0, hipTwist: 0, lean: 12, crouch: 0.16,
-        aLout: 22, aLfwd: 24, aLbend: 48, aRout: 26, aRfwd: 24, aRbend: 46, rootX: 0, squash: 1 }), e: 'sineInOut' },
-    ],
-  },
-
-  kick: {
-    name: 'kick', dur: 1.35, loop: false, keys: [
-      { t: 0.00, p: P({ lean: 6, crouch: 0.08, aLout: 18, aRout: 19, aLbend: 30, aRbend: 29 }) },
-      { t: 0.20, p: P({ lean: 10, crouch: 0.14, lLfwd: 22, lLbend: 26, aLout: 30, aRout: 24, headNod: 10 }), e: 'sineOut' },
-      { t: 0.38, p: P({ lean: -6, crouch: 0.26, twist: -12, hipTwist: 8,
-        lLout: 16, lLfwd: 8, lLbend: 34, lRfwd: -44, lRbend: 92, lRlift: 0.16,
-        aLout: 48, aLfwd: -20, aLbend: 28, aRout: 34, aRfwd: 22, aRbend: 44,
-        squash: 0.97, width: 1.05 }), e: 'quadIn' },
-      { t: 0.50, p: P({ lean: 8, twist: 10, hipTwist: -8, crouch: 0.10,
-        lRfwd: 62, lRbend: 6, lRlift: 0.30, lLbend: 12,
-        aLout: 54, aLfwd: -8, aLbend: 20, aRout: 26, aRfwd: 10, aRbend: 34,
-        squash: 1.05, width: 0.97, rootY: 0.05 }), e: 'expoOut' },
-      { t: 0.68, p: P({ lean: 2, twist: 6, lRfwd: 88, lRbend: 4, lRlift: 0.66,
-        aLout: 50, aRout: 30, squash: 1.06, rootY: 0.12, headNod: -4 }), e: 'sineOut' },
-      { t: 0.92, p: P({ lean: 6, twist: 2, lRfwd: 46, lRbend: 26, lRlift: 0.24,
-        aLout: 34, aRout: 24, squash: 1.01, rootY: 0.03 }), e: 'sineInOut' },
-      { t: 1.35, p: P({ lean: 6, twist: 0, hipTwist: 0, lRfwd: 0, lRbend: 6, lRlift: 0,
-        lLout: 7, lLfwd: 0, lLbend: 6, aLout: 18, aRout: 19, aLbend: 30, aRbend: 29,
-        crouch: 0.06, squash: 1, width: 1, headNod: 0 }), e: 'sineOut' },
-    ],
-  },
-
-  catchHigh: {
-    name: 'catchHigh', dur: 1.3, loop: false, keys: [
-      { t: 0.00, p: P({ headNod: -18, aLout: 20, aRout: 21, aLbend: 40, aRbend: 39, crouch: 0.14, lean: -4 }) },
-      { t: 0.22, p: P({ headNod: -24, aLout: 8, aLbend: 8, aRout: 8, aRbend: 8, crouch: 0.04,
-        squash: 1.05, width: 0.95, rootY: 0.13, lean: -8 }), e: 'quadOut' },
-      { t: 0.36, p: P({ aLout: 5, aLbend: 4, aRout: 5, aRbend: 4, rootY: 0.20, squash: 1.07 }), e: 'expoOut' },
-      { t: 0.52, p: P({ headNod: -8, aLout: 12, aLbend: 40, aRout: 13, aRbend: 38,
-        rootY: 0.04, crouch: 0.20, squash: 0.98, lean: 6 }), e: 'quadIn' },
-      { t: 0.70, p: P({ aLout: 22, aLfwd: 34, aLbend: 78, aRout: 23, aRfwd: 34, aRbend: 76,
-        crouch: 0.26, lean: 14, rootY: 0, squash: 0.97, width: 1.03, headNod: 4 }), e: 'backOut' },
-      { t: 1.30, p: P({ aLout: 24, aLfwd: 30, aLbend: 72, aRout: 25, aRfwd: 30, aRbend: 70,
-        crouch: 0.20, lean: 12, squash: 1, width: 1, headNod: 0, breath: 0.6 }), e: 'sineInOut' },
-    ],
-  },
-
-  refSignal: {
-    name: 'refSignal', dur: 1.9, loop: false, keys: [
-      { t: 0.00, p: P({ aLout: 10, aRout: 11, aLbend: 20, aRbend: 19 }) },
-      { t: 0.14, p: P({ aRout: 22, aRfwd: 40, aRbend: 110, headNod: -4, squash: 1.01 }), e: 'quadOut' },
-      { t: 0.30, p: P({ aRout: 26, aRfwd: 44, aRbend: 118, headNod: -6 }), e: 'sineInOut' },
-      { t: 0.46, p: P({ aRout: 62, aRfwd: 10, aRbend: 6, aLout: 8, lean: -4, squash: 1.03, headNod: 0 }), e: 'expoOut' },
-      { t: 1.40, p: P({ aRout: 60, aRbend: 5, squash: 1.02, breath: 0.5 }), e: 'sineInOut' },
-      { t: 1.90, p: P({ aRout: 11, aRfwd: 0, aRbend: 19, aLout: 10, lean: 0, squash: 1 }), e: 'sineInOut' },
-    ],
-  },
-
-  refReady: {
-    name: 'refReady', dur: 3.3, loop: true, keys: [
-      { t: 0.0, p: P({ crouch: 0.10, lean: 6, headTurn: -16, aLout: 14, aRout: 15, aLbend: 34, aRbend: 33 }) },
-      { t: 0.9, p: P({ headTurn: 14, breath: 0.7, rootX: 0.02, squash: 1.003 }), e: 'sineInOut' },
-      { t: 1.7, p: P({ headTurn: -8, crouch: 0.13, breath: 0, rootX: -0.02 }), e: 'sineInOut' },
-      { t: 2.5, p: P({ headTurn: 18, breath: 0.7, rootX: 0.015 }), e: 'sineInOut' },
-      { t: 3.3, p: P({ headTurn: -16, crouch: 0.10, breath: 0, rootX: 0 }), e: 'sineInOut' },
-    ],
-  },
-};
-
-/* ================================================================== */
-/* BILLBOARD RENDERER                                                 */
-/* ================================================================== */
-
-export interface CDraw {
-  sx: number; sy: number; scale: number;
-  pose: CPose;
-  kit: string; kitDark: string; kitLight: string; trim: string;
-  shorts: string; socks: string; skin: string; hair: string;
-  number: number;
-  fromBehind: boolean;
-  cap: boolean;
-  clarity: number;
-  /** papercraft: true when the camera sees the player edge-on — squashes the figure */
-  sideOn?: boolean;
-}
-
-const OUTLINE = '#20202b';
-const D = Math.PI / 180;
-
-function fore(deg: number): number { return Math.cos(Math.min(85, Math.abs(deg)) * D); }
-
-function cap(ctx: CanvasRenderingContext2D, ax: number, ay: number, bx: number, by: number, w1: number, w2: number, fill: string, dark?: string) {
-  const ang = Math.atan2(by - ay, bx - ax);
-  const nx = Math.cos(ang + Math.PI / 2), ny = Math.sin(ang + Math.PI / 2);
-  ctx.beginPath();
-  ctx.moveTo(ax + nx * w1, ay + ny * w1);
-  ctx.lineTo(bx + nx * w2, by + ny * w2);
-  ctx.lineTo(bx - nx * w2, by - ny * w2);
-  ctx.lineTo(ax - nx * w1, ay - ny * w1);
-  ctx.closePath();
-  ctx.fillStyle = fill; ctx.fill();
-  ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1, w1 * 0.42); ctx.lineJoin = 'round'; ctx.stroke();
-  if (dark) {
+  /* ---- head ---- */
+  const [hdx, hdy] = RP(Math.sin(p.headY) * 0.045 + tws * 0.7, shY + 0.075 + b.headR * 0.98 * Math.cos(p.headP));
+  const hr = b.headR;
+  // neck
+  limbCard(L, tws * 0.6, shY - 0.02, hdx, hdy - hr * 0.55, 0.09, shade(a.skin, 0.85), OUT, lw * 0.9, a.seed + 23, 0.8);
+  disc(L, hdx, hdy, hr, a.skin, lw, a.seed + 29);
+  const hx = L.X(hdx), hy = L.Y(hdy);
+  if (front) {
+    // hair fringe
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = a.hair;
+    ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * (a.cap ? 1.15 : 0.52));
+    if (a.cap) { // scrum cap
+      ctx.fillStyle = shade(pal.kitDark, 0.7);
+      ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * 1.25);
+      ctx.fillStyle = a.skin;
+      ctx.beginPath(); ctx.arc(hx - hr * 0.62 * sc, hy + hr * 0.15 * sc, hr * 0.22 * sc, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(hx + hr * 0.62 * sc, hy + hr * 0.15 * sc, hr * 0.22 * sc, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    // face
+    const ey = hy + hr * sc * 0.06;
+    const exo = Math.sin(p.headY) * hr * sc * 0.4;
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx - hr * sc * 0.38 + exo, ey, Math.max(1.4, hr * sc * 0.16), Math.max(1.4, hr * sc * 0.16));
+    ctx.fillRect(hx + hr * sc * 0.22 + exo, ey, Math.max(1.4, hr * sc * 0.16), Math.max(1.4, hr * sc * 0.16));
+    ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
     ctx.beginPath();
-    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
-    ctx.lineTo(bx - nx * w2, by - ny * w2); ctx.lineTo(ax - nx * w1, ay - ny * w1);
-    ctx.closePath(); ctx.fillStyle = dark; ctx.fill();
+    ctx.moveTo(hx - hr * sc * 0.42 + exo, ey - hr * sc * 0.2);
+    ctx.lineTo(hx - hr * sc * 0.14 + exo, ey - hr * sc * 0.16);
+    ctx.moveTo(hx + hr * sc * 0.16 + exo, ey - hr * sc * 0.16);
+    ctx.lineTo(hx + hr * sc * 0.44 + exo, ey - hr * sc * 0.2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hx - hr * sc * 0.16, hy + hr * sc * 0.45);
+    ctx.lineTo(hx + hr * sc * 0.2, hy + hr * sc * 0.45);
+    ctx.stroke();
+  } else {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.restore();
+    // nape
+    poly(ctx, [[hx - hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.34, hy + hr * sc * 1.05], [hx - hr * sc * 0.34, hy + hr * sc * 1.05]], a.cap ? shade(pal.kitDark, 0.7) : a.hair);
   }
+  void skinD;
 }
 
-export function drawCoronal(ctx: CanvasRenderingContext2D, a: CDraw) {
-  const S = a.scale;
-  if (S < 1.2) return;
+/* ================================================================== */
+/* SIDE PROFILE — a true thin paper card                               */
+/* ================================================================== */
+
+function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const kitF = shade(pal.kit, 0.58), skinF = shade(a.skin, 0.6), sockF = shade(pal.socks, 0.55);
+  const shortF = shade(pal.shorts, 0.62), bootF = '#14141b';
+  const lean = Math.min(1.1, Math.max(-0.5, p.lean));
+  const cl = Math.cos(lean), sl = Math.sin(lean);
+  const RL = (x: number, y: number): [number, number] => {
+    const dy = y - p.hip;
+    return [x * cl + dy * sl, p.hip + dy * cl - x * sl];
+  };
+  const shY = p.hip + b.torso * 0.98;
+  const thighLen = b.leg * 0.52, shinLen = b.leg * 0.48;
+  const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
+  const aN = nearR ? p.aR : p.aL, eN = nearR ? p.eR : p.eL;
+  const aF = nearR ? p.aL : p.aR, eF = nearR ? p.eL : p.eR;
+  const lN = nearR ? p.lR : p.lL, kN = nearR ? p.kR : p.kL;
+  const lF = nearR ? p.lL : p.lR, kF = nearR ? p.kL : p.kR;
+
+  const legChain = (l: number, k: number, ox: number, wT: number, wS: number, cT: string, cS: string, cB: string, out: string | null, seed: number) => {
+    const hx = ox, hy = p.hip - 0.02;
+    const kx = hx + Math.sin(l) * thighLen, ky = hy - Math.cos(l) * thighLen;
+    const fx = kx + Math.sin(l - k) * shinLen, fy = ky - Math.cos(l - k) * shinLen;
+    // ankle mechanics: rotate the boot card through the stride
+    const pitch = footPitch(l, k);
+    const ax = fx, ay = fy + 0.075;
+    const R = (x: number, y: number) => rotPt(x, y, ax, ay, pitch);
+    const bq: [number, number][] = [R(fx - 0.06, fy + 0.1), R(fx + 0.205, fy + 0.1), R(fx + 0.235, fy + 0.005), R(fx - 0.062, fy - 0.01)];
+    const sole: [number, number][] = [R(fx - 0.062, fy - 0.01), R(fx + 0.235, fy + 0.005), R(fx + 0.222, fy + 0.032), R(fx - 0.06, fy + 0.016)];
+    if (out) {
+      limbCard(L, hx, hy, kx, ky, wT, cT, out, lw, seed);
+      limbCard(L, kx, ky, fx, fy, wS, cS, out, lw, seed + 1);
+      paperCard(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB, { lw, seed, jit: 0.35 });
+      poly(ctx, sole.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), shade(cB, 1.9));
+    } else {
+      limbCard(L, hx, hy, kx, ky, wT, cT, cT, lw * 0.7, seed, 0);
+      limbCard(L, kx, ky, fx, fy, wS, cS, cS, lw * 0.7, seed + 1, 0);
+      poly(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB);
+    }
+    return [fx, fy] as const;
+  };
+
+  const armChain = (aa: number, e: number, ox: number, w: number, cU: string, cF: string, out: string | null, seed: number, wrapBall: boolean) => {
+    const [sx0, sy0] = RL(ox, shY - 0.03);
+    const ex = sx0 + Math.sin(aa) * upLen * 0.92, ey = sy0 - Math.cos(aa) * upLen;
+    const fAng = aa + (aa < 1.7 ? e : -e * 0.9);
+    let hx2 = ex + Math.sin(fAng) * foreLen * 0.92, hy2 = ey - Math.cos(fAng) * foreLen;
+    if (wrapBall) {
+      const [bx, by] = RL(0.17, shY - 0.16);
+      hx2 = bx + 0.02; hy2 = by - 0.02;
+    }
+    if (out) {
+      limbCard(L, sx0, sy0, ex, ey, w, cU, out, lw, seed);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, out, lw, seed + 1);
+      disc(L, hx2, hy2, 0.052 * b.bulk, cF === a.skin ? a.skin : cF, lw * 0.9, seed);
+    } else {
+      limbCard(L, sx0, sy0, ex, ey, w, cU, cU, lw * 0.7, seed, 0);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, cF, lw * 0.7, seed + 1, 0);
+    }
+    return [ex, ey] as const;
+  };
+
+  // 1 — far paper layer (dark silhouettes behind the lit card)
+  armChain(aF + 0.12, eF, -0.05, 0.08, kitF, skinF, null, a.seed + 41, false);
+  legChain(lF - 0.1, kF, -0.045, 0.1, 0.068, shortF, sockF, bootF, null, a.seed + 43);
+
+  // 2 — torso strip (narrow paper card, chest bulge on the front edge)
+  const tq: [number, number][] = [
+    [-0.086, p.hip - 0.05], [0.07, p.hip - 0.05], [0.118, p.hip + b.torso * 0.52],
+    [0.074, shY], [-0.082, shY],
+  ].map(([x, y]) => RL(x, y));
+  paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6 });
+  // hoop band across the strip
+  for (const hy of [0.58, 0.42]) {
+    const y0 = p.hip + b.torso * hy;
+    const h: [number, number][] = [[-0.084, y0], [0.112, y0], [0.115, y0 + b.torso * 0.08], [-0.085, y0 + b.torso * 0.08]].map(([x, y]) => RL(x, y));
+    poly(ctx, h.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.trim);
+  }
+  crease(ctx, L.X(RL(0.078, p.hip)[0]), L.Y(RL(0.078, p.hip)[1]), L.X(RL(0.082, shY)[0]), L.Y(RL(0.082, shY)[1]), 0.1, Math.max(1, lw * 0.5));
+  // shorts strip
+  const sqp: [number, number][] = [[-0.095, p.hip + 0.05], [0.088, p.hip + 0.05], [0.098, p.hip - 0.22], [-0.1, p.hip - 0.22]].map(([x, y]) => RL(x, y));
+  paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45 });
+
+  // 3 — near leg (lit, full stride)
+  legChain(lN, kN, 0.012, 0.13 * b.bulk, 0.078 * b.bulk, pal.shorts, pal.socks, '#1c1c24', OUT, a.seed + 53);
+
+  // 4 — head in profile
+  const [hdx, hdy] = RL(0.015, shY + 0.08 + b.headR * 0.95);
+  const hr = b.headR;
+  limbCard(L, RL(0, shY - 0.02)[0], shY - 0.02, hdx - 0.01, hdy - hr * 0.5, 0.064, shade(a.skin, 0.85), OUT, lw * 0.9, a.seed + 57, 0.7);
+  disc(L, hdx, hdy, hr, a.skin, lw, a.seed + 59);
+  const hx = L.X(hdx), hy = L.Y(hdy);
+  // nose wedge
+  poly(ctx, [
+    [hx + hr * sc * 0.72, hy + hr * sc * 0.16],
+    [hx + hr * sc * 1.22, hy - hr * sc * 0.02],
+    [hx + hr * sc * 0.7, hy - hr * sc * 0.24],
+  ], a.skin, OUT, lw * 0.9);
+  // hair cap: back + crown
+  ctx.save();
+  ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.01) * sc, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair;
+  ctx.beginPath();
+  ctx.moveTo(hx - (hr + 0.02) * sc, hy - (hr + 0.02) * sc);
+  ctx.lineTo(hx + hr * sc * 0.42, hy - (hr + 0.02) * sc);
+  ctx.lineTo(hx + hr * sc * 0.18, hy - hr * sc * 0.42);
+  ctx.lineTo(hx - hr * sc * 0.28, hy - hr * sc * 0.3);
+  ctx.lineTo(hx - hr * sc * 0.34, hy + hr * sc * 0.9);
+  ctx.lineTo(hx - (hr + 0.02) * sc, hy + hr * sc * 0.9);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+  ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+  // ear + eye + brow
+  disc(L, hdx - hr * 0.12, hdy - hr * 0.05, hr * 0.24, shade(a.skin, 0.82), lw * 0.7, a.seed + 61);
+  ctx.fillStyle = '#191922';
+  ctx.fillRect(hx + hr * sc * 0.34, hy - hr * sc * 0.06, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+  ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
+  ctx.beginPath();
+  ctx.moveTo(hx + hr * sc * 0.26, hy - hr * sc * 0.28);
+  ctx.lineTo(hx + hr * sc * 0.56, hy - hr * sc * 0.2);
+  ctx.stroke();
+
+  // 5 — deltoid cap gives the profile card shoulder mass, then the near arm
+  const dl: [number, number][] = [[-0.02, shY + 0.03], [0.085, shY + 0.01], [0.098, shY - 0.17], [-0.015, shY - 0.15]].map(([x, y]) => RL(x, y));
+  paperCard(ctx, dl.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kitLight, { lw: lw * 0.9, seed: a.seed + 67, jit: 0.4, back: 1.2 });
+  const wrap = a.carry > 0.4;
+  if (wrap) {
+    const [bx, by] = RL(0.17, shY - 0.16);
+    ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
+  }
+  armChain(aN, eN, 0.02, 0.118 * b.bulk, pal.kit, a.skin, OUT, a.seed + 63, wrap);
+  if (!wrap && a.carry > 0.02) {
+    const [bx, by] = RL(0.15, shY - 0.14);
+    ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
+  }
+  // shoulder fold tab
+  const [tbx, tby] = RL(0.01, shY - 0.03);
+  foldTab(ctx, L.X(tbx), L.Y(tby), 0.1 * sc, 0.045 * sc, pal.kitDark, lw);
+}
+
+/* ================================================================== */
+/* LYING — face-up / face-down on the turf                             */
+/* ================================================================== */
+
+function drawLyingPaper(L: Locals, a: PaperDrawArgs, seeFront: boolean) {
+  const { ctx, sc, lw } = L;
+  const p = a.pose, b = a.build, pal = a.pal;
+  const gs = a.gs, f = a.fore, hd = a.headDir >= 0 ? 1 : -1;
+  const shHalf = b.shW * 0.5 * gs, hipHalf = b.hipW * 0.5 * gs;
+  const shX = hd * b.torso * 0.95 * f;
+  const headX = hd * (b.torso * 0.95 + b.headR * 1.05) * f;
+  const y = 0.16; // body centreline height off the turf
+
+  // legs
+  const legTo = (kx: number, ky: number, fx2: number, fy2: number, seed: number, soleUp: boolean) => {
+    limbCard(L, -hd * 0.05, y - 0.02, kx, ky, 0.14 * b.bulk * gs + 0.04, pal.shorts, OUT, lw, seed);
+    limbCard(L, kx, ky, fx2, fy2, 0.1 * b.bulk * gs + 0.03, pal.socks, OUT, lw, seed + 1);
+    if (soleUp) {
+      paperCard(ctx, [
+        [L.X(fx2 - 0.07), L.Y(fy2 + 0.05)], [L.X(fx2 + 0.07), L.Y(fy2 + 0.05)],
+        [L.X(fx2 + 0.09), L.Y(fy2 - 0.12)], [L.X(fx2 - 0.05), L.Y(fy2 - 0.12)],
+      ], '#1c1c24', { lw, seed, jit: 0.3 });
+      poly(ctx, [[L.X(fx2 - 0.05), L.Y(fy2 - 0.02)], [L.X(fx2 + 0.07), L.Y(fy2 - 0.02)], [L.X(fx2 + 0.08), L.Y(fy2 - 0.1)], [L.X(fx2 - 0.04), L.Y(fy2 - 0.1)]], '#c9c2b0');
+    } else {
+      paperCard(ctx, [
+        [L.X(fx2 - 0.06), L.Y(fy2 + 0.06)], [L.X(fx2 + 0.1 * hd + 0.06), L.Y(fy2 + 0.06)],
+        [L.X(fx2 + 0.1 * hd + 0.06), L.Y(fy2 - 0.06)], [L.X(fx2 - 0.06), L.Y(fy2 - 0.06)],
+      ], '#1c1c24', { lw, seed, jit: 0.3 });
+    }
+  };
+  if (seeFront) {
+    legTo(-hd * 0.34 * f, y - (hipHalf + 0.14), -hd * 0.66 * f, y - hipHalf * 0.55, a.seed + 71, false);
+    legTo(-hd * 0.42 * f, y + hipHalf * 0.85, -hd * 0.84 * f, y + hipHalf * 1.0, a.seed + 75, false);
+  } else {
+    legTo(-hd * 0.4 * f, y - hipHalf * 0.9, -hd * 0.82 * f, y - hipHalf * 1.05, a.seed + 71, true);
+    legTo(-hd * 0.42 * f, y + hipHalf * 0.8, -hd * 0.86 * f, y + hipHalf * 0.95, a.seed + 75, true);
+  }
+
+  // torso slab
+  const tq: Pt[] = [
+    [-hd * 0.08, y - hipHalf], [-hd * 0.08, y + hipHalf],
+    [shX, y + shHalf * 0.96], [shX, y - shHalf * 0.96],
+  ].map(([x, yy]) => [L.X(x), L.Y(yy)] as Pt);
+  paperCard(ctx, tq, pal.kit, { lw: lw * 1.05, seed: a.seed + 79, jit: 0.55, back: 1.6 });
+  // hoops / number
+  for (const t of [0.55, 0.72]) {
+    const x0 = lerp(-hd * 0.08, shX, t), x1 = lerp(-hd * 0.08, shX, t + 0.1);
+    const w0 = lerp(hipHalf, shHalf, t), w1 = lerp(hipHalf, shHalf, t + 0.1);
+    poly(ctx, [[L.X(x0), L.Y(y - w0)], [L.X(x0), L.Y(y + w0)], [L.X(x1), L.Y(y + w1)], [L.X(x1), L.Y(y - w1)]], pal.trim);
+  }
+  if (!seeFront) {
+    ctx.save();
+    ctx.translate(L.X(lerp(-hd * 0.08, shX, 0.42)), L.Y(y));
+    ctx.rotate(hd > 0 ? Math.PI / 2 : -Math.PI / 2);
+    ctx.font = `${Math.max(6, 0.26 * sc)}px ${DISPLAY}`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = Math.max(2, lw * 1.3); ctx.strokeStyle = OUT;
+    ctx.strokeText(String(a.num), 0, 0);
+    ctx.fillStyle = pal.trim; ctx.fillText(String(a.num), 0, 0);
+    ctx.restore();
+  }
+  // shorts
+  poly(ctx, [
+    [L.X(-hd * 0.08), L.Y(y - hipHalf - 0.02)], [L.X(-hd * 0.08), L.Y(y + hipHalf + 0.02)],
+    [L.X(-hd * 0.3), L.Y(y + hipHalf + 0.02)], [L.X(-hd * 0.3), L.Y(y - hipHalf - 0.02)],
+  ], pal.shorts, OUT, lw);
+
+  // arms
+  if (seeFront) {
+    for (const s of [-1, 1] as const) {
+      const ex = shX - hd * 0.1 * f, ey = y + s * (shHalf + 0.1);
+      const hx2 = shX - hd * 0.3 * f, hy2 = y + s * (shHalf + 0.32);
+      limbCard(L, shX, y + s * shHalf * 0.7, ex, ey, 0.1 * b.bulk, pal.kit, OUT, lw, a.seed + 81 + s);
+      limbCard(L, ex, ey, hx2, hy2, 0.08 * b.bulk, a.skin, OUT, lw, a.seed + 83 + s);
+      disc(L, hx2, hy2, 0.05, a.skin, lw * 0.9, a.seed + s);
+    }
+  } else {
+    for (const s of [-1, 1] as const) {
+      const hx2 = shX + hd * 0.14 * f, hy2 = y + s * 0.13;
+      limbCard(L, shX, y + s * shHalf * 0.6, shX - hd * 0.02, y + s * (shHalf * 0.75), 0.09 * b.bulk, pal.kit, OUT, lw, a.seed + 81 + s);
+      limbCard(L, shX - hd * 0.02, y + s * (shHalf * 0.75), hx2, hy2, 0.075 * b.bulk, a.skin, OUT, lw, a.seed + 83 + s);
+    }
+    if (a.carry > 0.4) ballPaper(ctx, L.X(shX + hd * 0.22 * f), L.Y(y - 0.02), 0.11 * sc, 0.4);
+  }
+
+  // head
+  const hr = b.headR;
+  disc(L, headX, y, hr, a.skin, lw, a.seed + 87);
+  const hx = L.X(headX), hy = L.Y(y);
+  if (seeFront) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair;
+    ctx.fillRect(hx - hr * sc, hy - hr * sc, hr * 2 * sc, hr * sc * 0.7);
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx - hr * sc * 0.34, hy - hr * sc * 0.05, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+    ctx.fillRect(hx + hr * sc * 0.2, hy - hr * sc * 0.05, Math.max(1.3, hr * sc * 0.14), Math.max(1.3, hr * sc * 0.14));
+    ctx.strokeStyle = '#191922'; ctx.lineWidth = Math.max(1, lw * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(hx - hr * sc * 0.2, hy + hr * sc * 0.42);
+    ctx.lineTo(hx + hr * sc * 0.24, hy + hr * sc * 0.36);
+    ctx.stroke();
+  } else {
+    // head turned sideways: hair crown + profile wedge of face
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
+    ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
+    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
+    ctx.restore();
+    poly(ctx, [
+      [hx + hd * hr * sc * 0.25, hy - hr * sc * 0.72],
+      [hx + hd * hr * sc * 0.95, hy - hr * sc * 0.3],
+      [hx + hd * hr * sc * 0.8, hy + hr * sc * 0.5],
+      [hx + hd * hr * sc * 0.2, hy + hr * sc * 0.6],
+    ], a.skin, OUT, lw * 0.9);
+    ctx.fillStyle = '#191922';
+    ctx.fillRect(hx + hd * hr * sc * 0.5, hy - hr * sc * 0.12, Math.max(1.3, hr * sc * 0.13), Math.max(1.2, hr * sc * 0.1));
+  }
+  void p;
+}
+
+/* ================================================================== */
+/* dispatch                                                            */
+/* ================================================================== */
+
+export function drawPaperActor(a: PaperDrawArgs) {
+  const { ctx, sc } = a;
+  const L = makeLocals(ctx, sc, a.seed);
   const p = a.pose;
-  const cl = Math.max(0.25, Math.min(1, a.clarity));
-  ctx.globalAlpha = 0.35 + cl * 0.65;
-
-  const gx = a.sx + p.rootX * S;
-  const gy = a.sy;
-
-  const legLen = 0.86 * (1 - p.crouch * 0.40) * p.squash;
-  /* LEAN INTO THE RUN. The clips author `lean` (0° idle, 11° jog, 22° sprint) but
-   * the old render only shifted the shoulder by sin(lean)·2%, which was invisible.
-   * In a front/back billboard, leaning forward reads as the trunk compressing:
-   * the shoulders and head drop toward the hips. Foreshortening the torso by up
-   * to a third sells the sprint without needing a side profile. */
-  const leanR = Math.abs(Math.sin(p.lean * D));
-  const torso = 0.56 * p.squash * (1 - leanR * 0.34);
-  // Papercraft: seen edge-on, the paper is a sliver — the figure squashes to a
-  // thin profile so a turn reads as "a different side of the paper".
-  const paperWidth = a.sideOn ? 0.34 : 1.0;
-  const shoulderHalf = 0.31 * p.width * paperWidth;
-  const hipHalf = 0.22 * p.width * paperWidth;
-  const headR = 0.135;
-
-  const hipY = gy - (legLen + p.rootY) * S;
-  const shY = hipY - torso * S;
-
-  const tw = Math.sin(p.twist * D);
-  const shSpanL = shoulderHalf * (1 - tw * 0.30) * S;
-  const shSpanR = shoulderHalf * (1 + tw * 0.30) * S;
-  const shOff = tw * 0.05 * S;
-  const hw = Math.sin(p.hipTwist * D);
-  const hipL = hipHalf * (1 - hw * 0.25) * S;
-  const hipR = hipHalf * (1 + hw * 0.25) * S;
-
-  const airborne = Math.max(0, p.rootY);
+  const q = carryPose(p, a.carry, a.carryStyle, a.ballSide);
+  const args: PaperDrawArgs = { ...a, pose: q };
   ctx.save();
-  ctx.globalAlpha = (0.34 - airborne * 0.20) * (0.35 + cl * 0.65);
-  ctx.beginPath();
-  ctx.ellipse(gx, gy, S * (0.34 + airborne * 0.20), S * (0.11 + airborne * 0.05), 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#0c1207'; ctx.fill();
-  ctx.restore();
-
-  const leg = (out: number, fwd: number, bend: number, lift: number, side: number, hipX: number) => {
-    const f = fore(fwd);
-    const hx = gx + hipX * side;
-    const hy = hipY;
-    const thigh = 0.44 * S * (1 - p.crouch * 0.28);
-    const shin = 0.42 * S * (1 - p.crouch * 0.28);
-    const kx = hx + Math.sin(out * D) * thigh * side * 0.55 + Math.sin(fwd * D) * thigh * 0.22 * side;
-    const ky = hy + Math.cos(out * D) * thigh * f * (1 - bend * 0.0016);
-    const ax2 = kx + Math.sin(out * D) * shin * side * 0.18 - Math.sin(bend * D) * shin * 0.28 * side;
-    const ay2 = ky + Math.cos(bend * D * 0.55) * shin - lift * S;
-    cap(ctx, hx, hy, kx, ky, S * 0.095, S * 0.082, a.shorts, '#d9d5c7');
-    cap(ctx, kx, ky, ax2, ay2, S * 0.078, S * 0.058, a.socks, a.kitDark);
-    ctx.beginPath();
-    ctx.ellipse(ax2, ay2 + S * 0.02, S * 0.085, S * 0.045, 0, 0, Math.PI * 2);
-    ctx.fillStyle = '#2b2b35'; ctx.fill();
-    ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1, S * 0.016); ctx.stroke();
-  };
-  if (p.lLfwd >= p.lRfwd) {
-    leg(p.lRout, p.lRfwd, p.lRbend, p.lRlift, 1, hipR);
-    leg(p.lLout, p.lLfwd, p.lLbend, p.lLlift, -1, hipL);
-  } else {
-    leg(p.lLout, p.lLfwd, p.lLbend, p.lLlift, -1, hipL);
-    leg(p.lRout, p.lRfwd, p.lRbend, p.lRlift, 1, hipR);
+  ctx.translate(a.sx, a.sy);
+  const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
+  if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
+  const falling = q.fall > 0.01 && q.fall < 0.985;
+  if (falling) {
+    // tip the standing card over about the hip — seamless into the lying art
+    const e = q.fall * q.fall * (3 - 2 * q.fall);
+    const dirSign = edge ? 1 : a.spinDir; // post-mirror local +x is the facing side
+    const spin = e * (Math.PI / 2) * q.fallD * dirSign + Math.sin(q.fall * Math.PI) * 0.06 * dirSign;
+    ctx.translate(0, -q.hip * sc);
+    ctx.rotate(spin);
+    ctx.translate(0, q.hip * sc);
   }
+  switch (a.view) {
+    case 'front': drawCoronal(L, args, true); break;
+    case 'back': drawCoronal(L, args, false); break;
+    case 'rightEdge': drawSidePaper(L, args, true); break;
+    case 'leftEdge': drawSidePaper(L, args, false); break;
+    case 'lieFaceUp': drawLyingPaper(L, args, true); break;
+    case 'lieFaceDown': drawLyingPaper(L, args, false); break;
+  }
+  ctx.restore();
+}
 
-  const arm = (out: number, fwd: number, bend: number, side: number, span: number, front: boolean) => {
-    const f = fore(fwd);
-    const sxp = gx + span * side + shOff;
-    const syp = shY + Math.sin(p.lean * D) * 0.02 * S;
-    const upper = 0.30 * S, lower = 0.28 * S;
-    const ex = sxp + Math.sin(out * D) * upper * side + Math.sin(fwd * D) * upper * 0.30 * side;
-    const ey = syp + Math.cos(out * D) * upper * f;
-    const hx = ex + Math.sin((out - bend * 0.5) * D) * lower * side;
-    const hy = ey + Math.cos(Math.min(88, bend * 0.9) * D) * lower * f;
-    const col = front ? a.kit : a.kitDark;
-    cap(ctx, sxp, syp, ex, ey, S * 0.088, S * 0.066, col, front ? a.kitDark : undefined);
-    cap(ctx, ex, ey, hx, hy, S * 0.062, S * 0.05, a.skin);
-    ctx.beginPath(); ctx.arc(hx, hy, S * 0.055, 0, Math.PI * 2);
-    ctx.fillStyle = a.skin; ctx.fill();
-    ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1, S * 0.016); ctx.stroke();
-  };
-  arm(p.aRout, p.aRfwd, p.aRbend, 1, shSpanR, false);
-
-  const breathe = 1 + p.breath * 0.018;
-  ctx.beginPath();
-  ctx.moveTo(gx - shSpanL * breathe + shOff, shY);
-  ctx.lineTo(gx + shSpanR * breathe + shOff, shY);
-  ctx.lineTo(gx + hipR, hipY);
-  ctx.lineTo(gx - hipL, hipY);
-  ctx.closePath();
-  ctx.fillStyle = a.kit; ctx.fill();
-  ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1.2, S * 0.026); ctx.lineJoin = 'round'; ctx.stroke();
-
-  ctx.beginPath();
-  const shadeSide = tw >= 0 ? 1 : -1;
-  ctx.moveTo(gx + shOff, shY);
-  ctx.lineTo(gx + shadeSide * (shadeSide > 0 ? shSpanR : shSpanL) * breathe + shOff, shY);
-  ctx.lineTo(gx + shadeSide * (shadeSide > 0 ? hipR : hipL), hipY);
-  ctx.lineTo(gx, hipY);
-  ctx.closePath();
-  ctx.fillStyle = a.kitDark; ctx.fill();
-
-  ctx.beginPath();
-  ctx.ellipse(gx + shOff, shY + S * 0.012, shoulderHalf * S * 0.42, S * 0.035, 0, 0, Math.PI * 2);
-  ctx.fillStyle = a.trim; ctx.fill();
-  ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1, S * 0.014); ctx.stroke();
-
+/** contact shadow: tighter and darker when planted, wide and soft when down */
+export function drawPaperShadow(a: PaperDrawArgs) {
+  const { ctx, sc } = a;
+  const p = a.pose;
+  const down = p.fall > 0.6;
+  const air = Math.max(0, p.hip - 0.94);
+  const rx = down ? 0.95 * sc : (0.3 + a.build.shW * 0.32) * sc * (1 + air * 0.9);
+  const ry = down ? 0.34 * sc : rx * 0.3;
+  const alpha = down ? 0.3 : Math.max(0.14, 0.36 - air * 0.5);
   ctx.save();
-  ctx.globalAlpha *= 0.92;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#081008';
   ctx.beginPath();
-  const hoopY = shY + (hipY - shY) * 0.44;
-  const hoopH = (hipY - shY) * 0.17;
-  ctx.moveTo(gx - shSpanL * 0.94 + shOff, hoopY);
-  ctx.lineTo(gx + shSpanR * 0.94 + shOff, hoopY);
-  ctx.lineTo(gx + hipR * 1.04, hoopY + hoopH);
-  ctx.lineTo(gx - hipL * 1.04, hoopY + hoopH);
-  ctx.closePath();
-  ctx.fillStyle = a.trim; ctx.fill();
+  ctx.ellipse(a.sx + sc * 0.06, a.sy + sc * 0.02, Math.max(2, rx), Math.max(1.5, ry), 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
-
-  const hx2 = gx + shOff + Math.sin(p.headTurn * D) * 0.03 * S + Math.sin(p.headTilt * D) * 0.04 * S;
-  const hy2 = shY - (0.11 + headR) * S * p.squash + Math.sin(p.headNod * D) * 0.05 * S;
-  cap(ctx, gx + shOff, shY, hx2, hy2 + headR * S * 0.6, S * 0.055, S * 0.05, a.skin);
-  ctx.beginPath(); ctx.arc(hx2, hy2, headR * S, 0, Math.PI * 2);
-  ctx.fillStyle = a.skin; ctx.fill();
-  ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1.2, S * 0.022); ctx.stroke();
-
-  if (a.cap) {
-    ctx.beginPath(); ctx.arc(hx2, hy2, headR * S * 1.03, 0, Math.PI * 2);
-    ctx.strokeStyle = a.trim; ctx.lineWidth = Math.max(1.6, S * 0.05); ctx.stroke();
-    ctx.beginPath(); ctx.arc(hx2, hy2 - headR * S * 0.2, headR * S * 0.95, Math.PI, Math.PI * 2);
-    ctx.closePath(); ctx.fillStyle = a.trim; ctx.fill();
-    ctx.strokeStyle = OUTLINE; ctx.lineWidth = Math.max(1, S * 0.016); ctx.stroke();
-  } else {
-    ctx.beginPath();
-    ctx.arc(hx2, hy2 - headR * S * 0.16, headR * S * 0.94, Math.PI * 1.02, Math.PI * 1.98);
-    ctx.closePath(); ctx.fillStyle = a.hair; ctx.fill();
-  }
-  if (!a.fromBehind && S > 14) {
-    const ex = headR * S * 0.34;
-    ctx.fillStyle = '#2a2a33';
-    ctx.beginPath(); ctx.arc(hx2 - ex, hy2 - headR * S * 0.08, Math.max(0.9, S * 0.016), 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(hx2 + ex, hy2 - headR * S * 0.08, Math.max(0.9, S * 0.016), 0, Math.PI * 2); ctx.fill();
-  }
-
-  arm(p.aLout, p.aLfwd, p.aLbend, -1, shSpanL, true);
-
-  if (S > 20 && a.fromBehind) {
-    ctx.font = `900 ${Math.round(S * 0.26)}px ui-sans-serif, system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    const ny = shY + (hipY - shY) * 0.30;
-    ctx.lineWidth = Math.max(2, S * 0.04); ctx.strokeStyle = 'rgba(16,16,22,0.9)';
-    ctx.strokeText(String(a.number), gx + shOff, ny);
-    ctx.fillStyle = a.trim;
-    ctx.fillText(String(a.number), gx + shOff, ny);
-  }
-
-  ctx.globalAlpha = 1;
 }

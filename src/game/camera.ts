@@ -111,8 +111,8 @@ export interface ZoomSpec {
 export const ZOOM_STEPS: Record<1 | 2 | 3 | 4, ZoomSpec> = {
   1: { level: 1, pxMul: 0.72, heightMul: 1.25, standbackMul: 1.2, track: 0.45, label: '1x — WIDEST, WHOLE PITCH' },
   2: { level: 2, pxMul: 1.0, heightMul: 1.0, standbackMul: 1.0, track: 0.65, label: '2x — STANDARD' },
-  3: { level: 3, pxMul: 1.45, heightMul: 0.82, standbackMul: 0.86, track: 0.9, label: '3x — CLOSE, FOLLOWS THE BALL' },
-  4: { level: 4, pxMul: 2.0, heightMul: 0.68, standbackMul: 0.74, track: 1.0, label: '4x — TIGHT, LOCKED ON THE BALL' },
+  3: { level: 3, pxMul: 1.22, heightMul: 0.74, standbackMul: 0.72, track: 0.9, label: '3x — CLOSE, FOLLOWS THE BALL' },
+  4: { level: 4, pxMul: 1.42, heightMul: 0.58, standbackMul: 0.52, track: 1.0, label: '4x — TIGHT, LOCKED ON THE BALL' },
 };
 
 /**
@@ -139,9 +139,13 @@ export function dynamicZoom(
   const t = (level - 1) / 3;
   return {
     level: Math.round(level * 10) / 10,
-    pxMul: 0.72 + t * 1.28,
-    heightMul: 1.25 - t * 0.57,
-    standbackMul: 1.2 - t * 0.46,
+    /* T-55: the lens is capped and the DOLLY does the zoom — the rig closes
+     * onto the contest and drops with it. The old curve pushed pxMul to 2.0
+     * (a long lens): the field around the ball was optically cropped to a
+     * slit and its polygon edges cut hard against the near plane. */
+    pxMul: 0.72 + t * 0.7,
+    heightMul: 1.25 - t * 0.67,
+    standbackMul: 1.2 - t * 0.68,
     track: 0.45 + t * 0.55,
     label: `DYNAMIC ${(Math.round(level * 10) / 10).toFixed(1)}x`,
   };

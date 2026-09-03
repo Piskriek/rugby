@@ -400,8 +400,13 @@ export function callPlay(
      * and kicks only once the exit stalls. With kick scores flat across
      * phases, a fielded kick became punt-swap-kick-swap and the multi-phase
      * pass game never left its own half (103 passes vs the 180 floor). */
+    /* T-13 put this at -0.9 to break a 72-punt carousel; the merged-tree
+     * re-balance measured the other failure — exits got so rare that
+     * lineouts fell to 10.9 and kicks to 28.3. The exit needs to be
+     * PREFERRED, not suppressed: first-phase punts are where lineouts
+     * come from. */
     if (zone === 'WIDE' && phaseNumber <= 1
-      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.9;
+      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.55;
     if (p.call === lastCall) s -= 1.5;
     if (s > bestScore) { bestScore = s; best = p; why = `${p.label} — ${p.instruction}`; }
   }
