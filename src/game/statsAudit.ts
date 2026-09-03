@@ -55,6 +55,13 @@ export const FORMATION_DRIFT_P90: Benchmark = {
   key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 2.5, perTeam: false,
   note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 2.5 m.',
 };
+export const FORMATION_MARK_ANCHOR_P90: Benchmark = {
+  key: 'formationMarkAnchorP90', label: 'P90 MARK-TO-BALL DISTANCE (M)', lo: 0, hi: 25, perTeam: false,
+  note: 'SPEC_11: the audit mean of each fixture’s worst-team P90 distance from a target mark to the LIVE BALL. '
+    + 'Drift only asks whether a man is reaching his mark; it cannot see a man who reaches a mark in the wrong place. '
+    + 'This is the channel that can. Two wingers and a sweeper legitimately stand 25-30 m out, so the ceiling is the '
+    + 'P90, not the maximum.',
+};
 
 export type Grade = 'REALISTIC' | 'LOW' | 'HIGH';
 
@@ -162,6 +169,12 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
     add('formationDriftP90', sampled
       ? Math.max(formation.formationDriftP90.A, formation.formationDriftP90.B)
       : Number.POSITIVE_INFINITY);
+    /* The companion channel. Same worst-team rule, same never-average-it
+     * discipline: one team strung out forty metres from its own ball is a
+     * defect even if the other side holds a perfect shape. */
+    add('formationMarkAnchorP90', sampled
+      ? Math.max(formation.formationMarkAnchorP90.A, formation.formationMarkAnchorP90.B)
+      : Number.POSITIVE_INFINITY);
   }
 
   const results: StatResult[] = BENCHMARKS.map((b) => {
@@ -171,18 +184,23 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
 
   const offside = metricFor(OFFSIDE_PENALTIES_PER_TEAM, totals.offsidePenalties ?? 0, matches);
   const drift = metricFor(FORMATION_DRIFT_P90, totals.formationDriftP90 ?? Number.POSITIVE_INFINITY, matches);
-  /* This is intentionally one audit row, but neither dimension is hidden: a
-   * green result requires both the legal-offside target and the drift ceiling. */
+  const anchor = metricFor(FORMATION_MARK_ANCHOR_P90, totals.formationMarkAnchorP90 ?? Number.POSITIVE_INFINITY, matches);
+  /* This is intentionally one audit row, but no dimension is hidden: a green
+   * result requires the legal-offside band, the drift ceiling AND the
+   * mark-to-ball ceiling. SPEC_11 added the third because drift alone passed
+   * while the formation sat in the wrong half of the pitch. */
   results.push({
     key: 'offsideFormationIntegrity',
     label: 'OFFSIDE & FORMATION INTEGRITY',
     value: offside.value,
     lo: offside.lo,
     hi: offside.hi,
-    grade: offside.grade !== 'REALISTIC' ? offside.grade : drift.grade,
-    note: 'Both the offside-penalty band and the target-slot-drift ceiling must pass; neither compensates for the other.',
+    grade: offside.grade !== 'REALISTIC' ? offside.grade
+      : drift.grade !== 'REALISTIC' ? drift.grade : anchor.grade,
+    note: 'The offside-penalty band, the target-slot-drift ceiling and the mark-to-ball ceiling must all pass; '
+      + 'neither compensates for another.',
     perTeam: true,
-    details: [offside, drift],
+    details: [offside, drift, anchor],
   });
 
   const realistic = results.filter((r) => r.grade === 'REALISTIC').length;

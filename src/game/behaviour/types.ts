@@ -77,27 +77,70 @@ export const SITUATION_META: Record<SituationId, {
   /** true when our side has the ball */
   attacking: boolean;
   blurb: string;
+  /**
+   * SPEC_11 — THE BALL ANCHOR (β) OF THE AUTHORED SITUATION.
+   *
+   * A situation's hundred points are a FORMATION drawn around wherever the
+   * ball happened to be when the author drew it — the ruck at 55, the scrum
+   * on our 22, the goal-line attack five metres out. The engine must therefore
+   * subtract this anchor before it mirrors a point into the live frame, or it
+   * will steer a man to an absolute patch of grass instead of to a place in
+   * the shape around the ball (the formation-drift bug).
+   *
+   *   along  = σ · (x − β.x)          metres along the pitch (dataset units
+   *                                   are metres here: 0..100 is the pitch)
+   *   across = σ · (y − β.y) · 0.70   metres across the pitch
+   *
+   * Both are offsets from the live ball, not coordinates.
+   *
+   * HOW β WAS DERIVED (each value is corroborated by the authored
+   * instructions of at least two shirts, not guessed):
+   *   att-phase-mid   55  shirt 9 "stand at the back of the ruck, hands on
+   *                       the ball"; the backs at 48 then read as the
+   *                       authored "8-10m behind the ruck".
+   *   def-line-mid    45  the fourteen line men at 44 ("feet on the gain
+   *                       line", "one step from the ruck"); shirt 15 at 28
+   *                       then reads as the authored "18-20m depth".
+   *   red-zone-22     82  shirt 9 "at the base of the red-zone ruck".
+   *   goal-line-def    5  the line at 3-4 ("feet on our own goal line") sits
+   *                       1-2 m off a ball five metres out — inside the
+   *                       situation's own trigger window (toLine < 8).
+   *   turnover-def    62  "get onside instantly — get behind the ball line";
+   *                       the scramble line at 60 is 2 m behind it.
+   *   broken-field-def 50 the cover arc at 42 is the authored "point in
+   *                       front of their carrier", ~8 m in front.
+   *   β.y is the mid-point of the situation's authored across-pitch spread,
+   *   which centres the formation on the ball.
+   *
+   * Authored-data conflict, recorded rather than silently resolved: in
+   * `goal-line-def` shirt 15 is drawn at x=10 ("cover behind the line at
+   * 10-12m") — six metres further from his own line than the ball, i.e. on
+   * the wrong side of it. Every other shirt in that situation is drawn behind
+   * the ball. β.x=5 is chosen for the fourteen; the sweeper is held by the
+   * engine's defensive-line invariant instead. Authoring ticket raised.
+   */
+  ball: { x: number; y: number };
 }> = {
-  'own-scrum-mid': { label: 'OUR SCRUM, MIDFIELD', phase: 'SCRUM', attacking: true, blurb: 'Our put-in around halfway. The platform situation.' },
-  'def-scrum-22': { label: 'THEIR SCRUM, OUR 22', phase: 'SCRUM', attacking: false, blurb: 'Defending a scrum inside our own 22. Squeeze their exit.' },
-  'own-lineout-att-5': { label: 'OUR LINEOUT, THEIR 5M', phase: 'LINEOUT', attacking: true, blurb: 'Attacking lineout five metres from their line. Maul territory.' },
-  'def-lineout-mid': { label: 'THEIR LINEOUT, MIDFIELD', phase: 'LINEOUT', attacking: false, blurb: 'Defending a lineout around halfway.' },
-  'att-phase-mid': { label: 'OUR PHASE PLAY, MIDFIELD', phase: 'OPEN_PLAY', attacking: true, blurb: 'Structured phase attack between the 22s.' },
-  'def-line-mid': { label: 'DEFENDING PHASES, MIDFIELD', phase: 'OPEN_PLAY', attacking: false, blurb: 'Holding a connected line through their phases.' },
-  'kickoff-receive': { label: 'RECEIVING THE KICK-OFF', phase: 'KICK', attacking: false, blurb: 'Restart receipt and the exit that follows it.' },
-  'kickoff-chase': { label: 'CHASING THE KICK-OFF', phase: 'KICK', attacking: true, blurb: 'Restart chase in connected lanes.' },
-  'exit-box-kick': { label: 'EXITING BY BOX KICK', phase: 'OPEN_PLAY', attacking: true, blurb: 'Getting out of our 22 through the air.' },
-  'counter-deep': { label: 'COUNTER-ATTACK FROM DEEP', phase: 'OPEN_PLAY', attacking: true, blurb: 'Ball caught deep with an unstructured chase in front.' },
-  'red-zone-22': { label: 'ATTACKING THEIR 22', phase: 'OPEN_PLAY', attacking: true, blurb: 'Red-zone phases. Tempo is everything.' },
-  'goal-line-def': { label: 'DEFENDING OUR GOAL LINE', phase: 'OPEN_PLAY', attacking: false, blurb: 'Line held on our own paint. No line speed, no dog-legs.' },
-  'att-maul': { label: 'OUR DRIVING MAUL', phase: 'MAUL', attacking: true, blurb: 'Maul formed and driving towards the posts.' },
-  'turnover-att': { label: 'WE HAVE JUST WON THE BALL', phase: 'OPEN_PLAY', attacking: true, blurb: 'The two-second window before their defence re-sets.' },
-  'turnover-def': { label: 'WE HAVE JUST LOST THE BALL', phase: 'OPEN_PLAY', attacking: false, blurb: 'Scramble. Get onside, fill the nearest hole.' },
-  'tap-pen': { label: 'QUICK TAP PENALTY', phase: 'OPEN_PLAY', attacking: true, blurb: 'Attack before their ten-metre retreat completes.' },
-  'pen-goal': { label: 'SHOT AT GOAL', phase: 'KICK', attacking: true, blurb: 'Place kick, and the restart shape that follows.' },
-  'drop-out-22': { label: '22-METRE DROP OUT', phase: 'KICK', attacking: true, blurb: 'Restarting from our own 22.' },
-  'wide-edge': { label: 'ATTACKING THE WIDE EDGE', phase: 'OPEN_PLAY', attacking: true, blurb: 'Ball on the touchline, and the reload that follows.' },
-  'broken-field-def': { label: 'BROKEN-FIELD DEFENCE', phase: 'OPEN_PLAY', attacking: false, blurb: 'They are through. Shepherd, cut the angle, never chase heels.' },
+  'own-scrum-mid': { label: 'OUR SCRUM, MIDFIELD', phase: 'SCRUM', attacking: true, blurb: 'Our put-in around halfway. The platform situation.', ball: { x: 50, y: 50 } },
+  'def-scrum-22': { label: 'THEIR SCRUM, OUR 22', phase: 'SCRUM', attacking: false, blurb: 'Defending a scrum inside our own 22. Squeeze their exit.', ball: { x: 22, y: 50 } },
+  'own-lineout-att-5': { label: 'OUR LINEOUT, THEIR 5M', phase: 'LINEOUT', attacking: true, blurb: 'Attacking lineout five metres from their line. Maul territory.', ball: { x: 95, y: 47 } },
+  'def-lineout-mid': { label: 'THEIR LINEOUT, MIDFIELD', phase: 'LINEOUT', attacking: false, blurb: 'Defending a lineout around halfway.', ball: { x: 50, y: 73 } },
+  'att-phase-mid': { label: 'OUR PHASE PLAY, MIDFIELD', phase: 'OPEN_PLAY', attacking: true, blurb: 'Structured phase attack between the 22s.', ball: { x: 55, y: 49 } },
+  'def-line-mid': { label: 'DEFENDING PHASES, MIDFIELD', phase: 'OPEN_PLAY', attacking: false, blurb: 'Holding a connected line through their phases.', ball: { x: 45, y: 50 } },
+  'kickoff-receive': { label: 'RECEIVING THE KICK-OFF', phase: 'KICK', attacking: false, blurb: 'Restart receipt and the exit that follows it.', ball: { x: 25, y: 51 } },
+  'kickoff-chase': { label: 'CHASING THE KICK-OFF', phase: 'KICK', attacking: true, blurb: 'Restart chase in connected lanes.', ball: { x: 50, y: 47 } },
+  'exit-box-kick': { label: 'EXITING BY BOX KICK', phase: 'OPEN_PLAY', attacking: true, blurb: 'Getting out of our 22 through the air.', ball: { x: 14, y: 48 } },
+  'counter-deep': { label: 'COUNTER-ATTACK FROM DEEP', phase: 'OPEN_PLAY', attacking: true, blurb: 'Ball caught deep with an unstructured chase in front.', ball: { x: 8, y: 58 } },
+  'red-zone-22': { label: 'ATTACKING THEIR 22', phase: 'OPEN_PLAY', attacking: true, blurb: 'Red-zone phases. Tempo is everything.', ball: { x: 82, y: 47 } },
+  'goal-line-def': { label: 'DEFENDING OUR GOAL LINE', phase: 'OPEN_PLAY', attacking: false, blurb: 'Line held on our own paint. No line speed, no dog-legs.', ball: { x: 5, y: 49 } },
+  'att-maul': { label: 'OUR DRIVING MAUL', phase: 'MAUL', attacking: true, blurb: 'Maul formed and driving towards the posts.', ball: { x: 92, y: 46 } },
+  'turnover-att': { label: 'WE HAVE JUST WON THE BALL', phase: 'OPEN_PLAY', attacking: true, blurb: 'The two-second window before their defence re-sets.', ball: { x: 35, y: 50 } },
+  'turnover-def': { label: 'WE HAVE JUST LOST THE BALL', phase: 'OPEN_PLAY', attacking: false, blurb: 'Scramble. Get onside, fill the nearest hole.', ball: { x: 62, y: 55 } },
+  'tap-pen': { label: 'QUICK TAP PENALTY', phase: 'OPEN_PLAY', attacking: true, blurb: 'Attack before their ten-metre retreat completes.', ball: { x: 70, y: 44 } },
+  'pen-goal': { label: 'SHOT AT GOAL', phase: 'KICK', attacking: true, blurb: 'Place kick, and the restart shape that follows.', ball: { x: 72, y: 48 } },
+  'drop-out-22': { label: '22-METRE DROP OUT', phase: 'KICK', attacking: true, blurb: 'Restarting from our own 22.', ball: { x: 21, y: 47 } },
+  'wide-edge': { label: 'ATTACKING THE WIDE EDGE', phase: 'OPEN_PLAY', attacking: true, blurb: 'Ball on the touchline, and the reload that follows.', ball: { x: 60, y: 72 } },
+  'broken-field-def': { label: 'BROKEN-FIELD DEFENCE', phase: 'OPEN_PLAY', attacking: false, blurb: 'They are through. Shepherd, cut the angle, never chase heels.', ball: { x: 50, y: 62 } },
 };
 
 /** The five beats of every situation. */

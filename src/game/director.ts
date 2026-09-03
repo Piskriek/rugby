@@ -49,7 +49,7 @@ import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
-import { situationOf, beatOf, datasetMark } from './engine/behaviour';
+import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
@@ -330,6 +330,11 @@ export interface FormationIntegrityTelemetry {
   offsideRate: TeamTally;
   formationDriftP50: TeamTally;
   formationDriftP90: TeamTally;
+  /** SPEC_11: P90 distance from a sampled mark to the live ball. */
+  formationMarkAnchorP90: TeamTally;
+  /** How many due-samples fed each drift channel. A percentile over an empty
+   * channel reads 0.0 and flatters the run; the n makes that visible. */
+  formationSampleCounts: TeamTally;
   recoveryEpisodes: TeamTally;
   recoveryEngineP90: TeamTally;
   recoveryClockP90: TeamTally;
@@ -393,6 +398,45 @@ const FORMATION_RESET_SETTLE_SECONDS = 0.75;
 const OFFSIDE_EPSILON_METRES = 0.35;
 const OFFSIDE_SUSTAINED_SECONDS = 0.30;
 
+/* ---- SPEC_11 — formation anchoring ----
+ * D11-a: a formation spreads from the ball's lateral position and squeezes
+ * rather than crossing the touchline. Two metres of grass is the margin the
+ * rest of the engine already uses for a body on the sideline. */
+const TOUCH_MARGIN = 2;
+/** The narrowest a squeezed formation may become, as a fraction of authored width. */
+const LATERAL_SQUEEZE_FLOOR = 0.35;
+/* D11-b: depth compression as the formation backs towards its own dead-ball
+ * line. Full authored depth with `DEPTH_COMPRESSION_ROOM` metres of room
+ * behind the ball, squeezing to `DEPTH_COMPRESSION_FLOOR` of it at the line. */
+const DEPTH_COMPRESSION_ROOM = 20;
+const DEPTH_COMPRESSION_FLOOR = 0.15;
+/** Metres to keep between a mark and the dead-ball line. */
+const DEAD_BALL_MARGIN = 2;
+/** The posts stand at ±3.1 m; a deep mark is held clear of the corridor. */
+const POST_CORRIDOR = 3.6;
+/** How far behind the ball a line defender may be marked before it is drift. */
+const DEFENCE_LINE_SLACK = 1.0;
+/* SPEC_11 metric recalibration. Drift is now a PROGRESS test across
+ * due-samples, not an instantaneous velocity test: a man is executing the
+ * shape when the gap is actually closing (`CONVERGE_PROGRESS_METRES` per
+ * 0.25 s sample ≈ 0.5 m/s), and drifting when it is not — at any speed, in
+ * any direction. `ON_MARK_METRES` is the arrival dead-band: a man already on
+ * his mark has nothing to close. */
+const CONVERGE_PROGRESS_METRES = 0.12;
+const ON_MARK_METRES = 1.0;
+/* T-51's pod hold freezes the attacking marks for a second so the pod arrives
+ * as a pod. It froze them in WORLD space, so a carrier who ran across field
+ * left his support standing on marks up to forty metres from the live ball —
+ * the hold was manufacturing drift. Marks are ball-relative now, so the hold
+ * only has to protect the men it was written for: the support pods around the
+ * ball. Anyone whose mark is further out than this is re-marked every frame,
+ * which costs him nothing (his mark is stable in ball-relative space) and
+ * keeps every attacker anchored to the ball. */
+const POD_HOLD_ANCHOR_METRES = 15;
+/** The lateral extent of the authored defensive channel map (D11-a). */
+const DEFENCE_LAT_MIN = Math.min(...DEFENCE_CHANNELS.map((c) => c.lat));
+const DEFENCE_LAT_MAX = Math.max(...DEFENCE_CHANNELS.map((c) => c.lat));
+
 
 /** T-39. Per-shirt build, as a visual scale multiplier. Forwards are big, the
  * back three are small. Combined with the SPD stat it gives real variety. */
@@ -444,6 +488,13 @@ export class Director {
     recoveryEpisodes: blankTally(),
   };
   private readonly formationDriftSamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  /** The raw drift channel, exposed so a harness can read the tail and not
+   * only its percentile. Read-only in spirit: nothing in the game loops on it. */
+  get formationDriftRaw() { return this.formationDriftSamples; }
+  /* SPEC_11: the distance from each sampled mark to the live ball. Drift
+   * measures a man against his mark; this measures the mark against the
+   * match, which is the half the old metric could not see. */
+  private readonly formationMarkAnchorSamples: { A: number[]; B: number[] } = { A: [], B: [] };
   private readonly formationRecoverySamples: { A: number[]; B: number[] } = { A: [], B: [] };
   private ruckOffsideWindow: OffsideWindow | null = null;
   private resetOffsideWindow: OffsideWindow | null = null;
@@ -456,7 +507,7 @@ export class Director {
    * sampled against. A drift sample only counts when the target has BEEN
    * STABLE across consecutive due-samples — a man sprinting to a freshly
    * assigned slot is executing the shape, not drifting from it. */
-  private readonly formationLastTarget = new Map<Live, { x: number; z: number }>();
+  private readonly formationLastTarget = new Map<Live, { x: number; z: number; d: number }>();
   private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
@@ -1163,6 +1214,14 @@ export class Director {
         A: percentile(this.formationDriftSamples.A, 0.9),
         B: percentile(this.formationDriftSamples.B, 0.9),
       },
+      formationMarkAnchorP90: {
+        A: percentile(this.formationMarkAnchorSamples.A, 0.9),
+        B: percentile(this.formationMarkAnchorSamples.B, 0.9),
+      },
+      formationSampleCounts: {
+        A: this.formationDriftSamples.A.length,
+        B: this.formationDriftSamples.B.length,
+      },
       recoveryEpisodes: { ...c.recoveryEpisodes },
       recoveryEngineP90,
       recoveryClockP90: {
@@ -1203,15 +1262,44 @@ export class Director {
      * the drift the metric exists to catch. Measurement-only: the eligible
      * count above still records every due-sample, so the denominator keeps
      * its meaning. */
-    const prev = this.formationLastTarget.get(p);
-    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
-    this.formationLastTarget.set(p, { x: p.tx, z: p.tz });
-    if (!stable) return;
     const dxT = p.tx - p.x, dzT = p.tz - p.z;
     const distT = Math.hypot(dxT, dzT);
-    const closing = distT > 0.35 ? (dxT * p.vx + dzT * p.vz) / distT : 0;
-    if (closing > 0.3) return;
-    this.formationDriftSamples[p.team].push(distT);
+    const prev = this.formationLastTarget.get(p);
+    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
+    this.formationLastTarget.set(p, { x: p.tx, z: p.tz, d: distT });
+    if (!stable) return;
+    /* SPEC_11 RECALIBRATION.
+     *
+     * The old rule dropped every sample whose closing speed exceeded
+     * 0.3 m/s, on the theory that a man running at his mark is executing the
+     * shape rather than drifting from it. That is a VELOCITY test, and it
+     * is the wrong instrument: it asks "is he moving fast?" when the
+     * question is "is he getting there?". Two failures follow.
+     *
+     *   1. A man sprinting in the wrong direction — orbiting the mark,
+     *      being shunted by `separate()`, sprinting past it — has a velocity
+     *      with a positive component toward the mark and was silently
+     *      forgiven every frame.
+     *   2. A man converging beautifully on a mark in the wrong place was
+     *      forgiven too, which is how a 25 m systematic anchor error sat
+     *      under a 0.3 m P90 for a whole season.
+     *
+     * So the test is now PROGRESS, measured across due-samples: how much of
+     * the gap he has actually closed since the last sample. Not closing is
+     * drift at any speed, in any direction; closing is executing the shape
+     * however far he still has to run. Failure 2 is not a progress problem
+     * at all — a wrong mark is caught by the companion measurement below,
+     * which measures the MARK against the ball rather than the man against
+     * the mark. */
+    const progress = prev ? prev.d - distT : 0;
+    const converging = distT <= ON_MARK_METRES || progress > CONVERGE_PROGRESS_METRES;
+    if (!converging) this.formationDriftSamples[p.team].push(distT);
+    /* The companion measurement, and the one that would have caught
+     * SPEC_11 on its own: a formation is a shape drawn AROUND THE BALL, so
+     * the distance from a mark to the live ball is a property of the
+     * formation, not of the player chasing it. */
+    const f = this.focusPoint();
+    this.formationMarkAnchorSamples[p.team].push(Math.hypot(p.tx - f.x, p.tz - f.z));
   }
 
   private startRuckOffsideWindow(s: BreakdownState) {
@@ -2164,6 +2252,91 @@ export class Director {
     p.z = z;
   }
 
+  /* ==================== SPEC_11 — FORMATION ANCHORING ====================
+   *
+   * Three invariants, all of which the engine used to break:
+   *
+   *   1. A mark is an OFFSET FROM THE BALL, never a place on the pitch. The
+   *      behaviour dataset is authored as an absolute formation around a ball
+   *      in one fixed spot (`SITUATION_META[sit].ball`); `datasetOffset()`
+   *      returns the shape relative to that anchor and it is re-anchored on
+   *      the live focus point here.
+   *   2. The direction of attack is applied ONCE. `defenceMark()` already
+   *      returns a world-space signed offset; multiplying a difference of
+   *      two world z values by `dir` again is `dir² = 1` — a mirror that
+   *      cancels itself.
+   *   3. A line defender's mark is in front of the ball. A mark behind the
+   *      attack is the drift bug, whatever produced it.
+   */
+
+  /**
+   * D11-a — the lateral budget of a formation anchored on the ball.
+   *
+   * The formation spreads from the ball's own lateral position, and when
+   * there is not room for the full spread it SQUEEZES (one factor for the
+   * whole shape, so the shape is preserved, only narrower) instead of
+   * spilling over the touchline. 1 = the authored width.
+   */
+  private lateralScale(anchorX: number, sign: number, minOffset: number, maxOffset: number): number {
+    const lo = Math.min(sign * minOffset, sign * maxOffset);
+    const hi = Math.max(sign * minOffset, sign * maxOffset);
+    let lam = 1;
+    if (hi > 0.01) lam = Math.min(lam, (FIELD.maxX - TOUCH_MARGIN - anchorX) / hi);
+    if (lo < -0.01) lam = Math.min(lam, (FIELD.minX + TOUCH_MARGIN - anchorX) / lo);
+    return clamp(lam, LATERAL_SQUEEZE_FLOOR, 1);
+  }
+
+  /**
+   * D11-b — turn a ball-relative along-pitch offset into a world z.
+   *
+   * `along` is metres along this team's attacking axis (σ): positive is
+   * toward the opposition dead-ball line, negative is behind the ball. As
+   * the formation backs up towards its own dead-ball line the depth is
+   * compressed by a multiplier — the shape tightens instead of marching
+   * out of the field — and is never allowed past the dead-ball line.
+   */
+  private anchorDepth(f: { x: number; z: number }, sigma: -1 | 1, along: number): number {
+    const back = -along;                                  // metres behind the ball
+    const room = FIELD.deadZFar + f.z * sigma - DEAD_BALL_MARGIN;
+    if (back <= 0 || room <= 0) return f.z + sigma * along;
+    const k = clamp(room / DEPTH_COMPRESSION_ROOM, DEPTH_COMPRESSION_FLOOR, 1);
+    return f.z - sigma * Math.min(back * k, room);
+  }
+
+  /**
+   * SPEC_11 invariant 3 — a line defender's mark is IN FRONT of the ball:
+   * `(z − F.z) · dir ≥ 0`, where `dir` is the direction the team in
+   * possession is attacking.
+   *
+   * A mark behind the attack is the drift bug, whatever produced it: it is
+   * what sent the defensive line through the offensive line to stand behind
+   * it. One metre of slack absorbs a ball moving between frames. The clamp
+   * warns in dev, because a mark this wrong is an authoring error that should
+   * be fixed at source, not silently absorbed.
+   */
+  private defensiveDepth(
+    f: { x: number; z: number }, dir: number, z: number, p: Live, source: string,
+  ): number {
+    const penetration = (z - f.z) * dir;
+    if (penetration >= -DEFENCE_LINE_SLACK) return z;
+    if (import.meta.env.DEV) {
+      console.warn(`[SPEC_11] shirt ${p.num} (${p.team}) defensive mark from ${source} is `
+        + `${(-penetration).toFixed(1)} m behind the ball — clamped to the line`);
+    }
+    return f.z - dir * DEFENCE_LINE_SLACK;
+  }
+
+  /**
+   * The last word on any mark: never beyond the dead-ball line, and never
+   * through the uprights (the posts stand at ±3.1 m inside the in-goal
+   * area, so a deep mark is pushed out of the post corridor).
+   */
+  private boundMark(x: number, z: number): { x: number; z: number } {
+    const mz = clamp(z, FIELD.deadZ + DEAD_BALL_MARGIN, FIELD.deadZFar - DEAD_BALL_MARGIN);
+    if (Math.abs(mz) <= Math.abs(FIELD.tryZFar) || Math.abs(x) >= POST_CORRIDOR) return { x, z: mz };
+    return { x: x >= 0 ? POST_CORRIDOR : -POST_CORRIDOR, z: mz };
+  }
+
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
     const s = this.shape();
@@ -2179,6 +2352,31 @@ export class Director {
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
     const f = this.focusPoint();
+
+    /* SPEC_11. The single live openside sign. `s.open * flip` was identically
+     * +1 — `open` is ±1 and `flip` was its own sign — so the attacking shape
+     * was never mirrored to the openside. */
+    const openSign: -1 | 1 = s.open < 0 ? -1 : 1;
+    /* σ: a team's attacking axis. +1 for A (+z), −1 for B (−z). It is the
+     * point mirror that carries the dataset's authored frame into the world,
+     * and it is applied exactly once. */
+    const atkSigma: -1 | 1 = atk === 'A' ? 1 : -1;
+    const defSigma: -1 | 1 = def === 'A' ? 1 : -1;
+    const atkSit = atk === 'A' ? sitA : sitB;
+    const defSit = def === 'A' ? sitA : sitB;
+    /* D11-a: one squeeze factor per formation per frame, so the whole shape
+     * narrows together rather than clipping only the men who reached touch. */
+    const atkDatasetLat = atkSit ? this.lateralScale(f.x, atkSigma, SITUATION_LATERAL[atkSit].min, SITUATION_LATERAL[atkSit].max) : 1;
+    const defDatasetLat = defSit ? this.lateralScale(f.x, defSigma, SITUATION_LATERAL[defSit].min, SITUATION_LATERAL[defSit].max) : 1;
+    let shapeMin = 0, shapeMax = 0;
+    for (const q of atkShape.slots) {
+      const l = q.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+      if (l < shapeMin) shapeMin = l;
+      if (l > shapeMax) shapeMax = l;
+    }
+    const shapeLat = this.lateralScale(f.x, openSign, shapeMin, shapeMax);
+    const defLineFactor = 0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4;
+    const defLineLat = this.lateralScale(f.x, 1, DEFENCE_LAT_MIN * defLineFactor, DEFENCE_LAT_MAX * defLineFactor);
 
     /* A KICK IS OWNED BY placeBound. If think() also assigned targets here it
      * would drag the defensive line back on top of the ball — which is exactly
@@ -2229,7 +2427,12 @@ export class Director {
       const carC = this.L(this.op.attacking, this.op.carrierNum);
       for (const q of this.live) {
         if (q.team === def || q.sinbin > 0 || q.beatenT > 0 || q.down) continue;
-        if ((q.z - carC.z) * dir < 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
+        /* SPEC_11: "the carrier has gone past him" is `(carC.z − q.z) · dir
+         * > 0.5`. The old form was its negation with a −0.5 threshold, which
+         * armed the chase for every defender up to half a metre IN FRONT of
+         * the carrier — half the line turning and sprinting at a man they had
+         * not been beaten by. */
+        if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
       }
       const carLat = this.op.carrierX - f.x;
       for (const r of DEFENCE_CHANNELS
@@ -2360,7 +2563,8 @@ export class Director {
          * ruck exit the support holds the marks it already has — the pod
          * arrives as a pod. The nine-with-ball and a ball in flight are the
          * exceptions above and below. */
-        if (this.op && this.op.podHold > 0) {
+        if (this.op && this.op.podHold > 0
+            && Math.hypot(p.tx - f.x, p.tz - f.z) <= POD_HOLD_ANCHOR_METRES) {
           steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
@@ -2394,53 +2598,73 @@ export class Director {
          * authored trail lines would pull them ten metres off it. */
         if (slot) {
           const sit = p.team === 'A' ? sitA : sitB;
-          const dsm = sit ? datasetMark(p.team, p.num, sit, beat) : null;
+          /* SPEC_11: the dataset is a FORMATION DRAWN AROUND A BALL, and the
+           * ball was in one fixed place when it was drawn. `datasetOffset()`
+           * returns the shape relative to that anchor; re-anchoring it on the
+           * live focus point is what makes the mark follow the play. Steering
+           * by the absolute point (`datasetMark`) is the drift bug: a
+           * midfield mark applied to a ball on the 22 put the whole backline
+           * thirty metres behind the carrier. */
+          const dsm = sit ? datasetOffset(p.num, sit, beat) : null;
           if (dsm) {
-            let targetX = clamp(dsm.x, -33, 33);
-            let targetZ = dsm.z;
+            const sigma = p.team === 'A' ? 1 : -1;
+            /* dsm.along is metres along the attacking axis from the ball:
+             * negative is behind it. Depth is what the red-zone drive and the
+             * dead-ball compression both act on, so it stays in that form
+             * until the world z is needed. */
+            let along = dsm.along;
             /* T-13/T-18. The authored red-zone beats march the pods to the
              * 22 and hold them 15 m out — an honest arrival, but nobody
              * threatens the line from there and tries died to zero. Inside
              * 20 m the dataset owns the APPROACH (lateral spot, job, timing)
              * and the engine owns the DRIVE: the mark is flattened to the
              * same pick-and-go depth the shape fix uses, so the carries,
-             * the dive and the reach-over actually happen. */
+             * the dive and the reach-over actually happen. Now expressed as a
+             * depth BEHIND THE BALL rather than an absolute z comparison. */
             if (sit === 'red-zone-22' && this.op) {
               const o = this.op;
               const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
-              if (toLine < 20) {
-                const deepest = o.carrierZ - o.dir * (0.5 + toLine * 0.08);
-                targetZ = o.dir > 0 ? Math.max(targetZ, deepest) : Math.min(targetZ, deepest);
-              }
+              if (toLine < 20) along = Math.max(along, -(0.5 + toLine * 0.08));
             }
+            /* D11-a: spread from the ball's own lateral position, squeezed
+             * when the formation would run into touch. */
+            const across = sigma * dsm.across * atkDatasetLat;
+            let targetX = clamp(f.x + across, -33, 33);
+            let targetZ = this.anchorDepth(f, sigma, along);
 
             /* SPEC_02: authored dataset marks remain the highest-priority
              * source of lane/job/timing. CPU support nevertheless enters the
              * same pure depth contract before committing its mark: the
-             * absolute dataset lane is preserved, while setup depth is
-             * validated and made usable for a run-on pass. */
+             * dataset lane is preserved (now as a ball-relative offset),
+             * while setup depth is validated and made usable for a run-on
+             * pass. The depth handed to the pure planner is a true depth —
+             * before SPEC_11 it was the distance between an absolute authored
+             * point and the live ball, which is not a depth at all. */
             if (!this.isHuman(atk) && this.op) {
               const toLine = Math.max(0, this.op.dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
               const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
               const plan = this.planCpuForwardAttack(gate, `think:dataset-depth:${p.team}${p.num}:${sit}`, {
                 anchor: f,
                 attackDirection: dir < 0 ? -1 : 1,
-                /* `dsm.x` is already a world-space authored lane; do not mirror it again. */
+                /* `across` is already mirrored into world space; do not mirror twice. */
                 openside: 1,
-                lateralOffsetMetres: dsm.x - f.x,
-                nominalSupportDepthMetres: Math.max(0.5, (f.z - targetZ) * dir),
+                lateralOffsetMetres: across,
+                nominalSupportDepthMetres: Math.max(0.5, -along),
                 shapeDepthBias: 1,
                 tempo: 0,
                 distanceToTryLineMetres: toLine,
                 role,
               });
               targetX = clamp(plan.setup.x, -33, 33);
-              targetZ = plan.setup.z;
+              /* Back to an offset, then through the same D11-b compression. */
+              targetZ = this.anchorDepth(f, sigma, (plan.setup.z - f.z) * sigma);
             }
+            /* D11-b: never past the dead-ball line, never through the posts. */
+            const mark = this.boundMark(targetX, targetZ);
             this.writeThinkPlayer(gate, `think:dataset-mark:${p.team}${p.num}:${sit}`, p,
               ['tx', 'tz', 'job', 'urgency'] as const, () => {
-                p.tx = targetX;
-                p.tz = clamp(targetZ, -59, 59);
+                p.tx = clamp(mark.x, -33, 33);
+                p.tz = clamp(mark.z, -59, 59);
                 p.job = dsm.job;
                 p.urgency = 0.9;
               });
@@ -2451,11 +2675,11 @@ export class Director {
 
         // Otherwise the man stands where the shape says he stands.
         if (slot) {
-          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+          /* D11-a: the touchline squeeze multiplies the offset itself, so both
+           * the planner path (CPU) and the direct path below inherit it. */
+          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width * shapeLat;
           const tempo = this.slider(atk, 'tempo') / 100;
           const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
-          // Flip the shape if the attack is going the other way.
-          const flip = this.op && this.op.open < 0 ? -1 : 1;
           let targetX: number;
           let targetZ: number;
 
@@ -2464,7 +2688,9 @@ export class Director {
              * the pure setup point. Arrival/carry geometry is checked before
              * this write, while no plan helper itself mutates Live state. */
             const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
-            const openside = s.open * flip < 0 ? -1 : 1;
+            /* SPEC_11: the live openside sign. `s.open * flip` was identically
+             * +1, so the shape never mirrored; this is the single sign. */
+            const openside = openSign;
             const plan = this.planCpuForwardAttack(gate, `think:shape-depth:${p.team}${p.num}:${slot.role}`, {
               anchor: f,
               attackDirection: dir < 0 ? -1 : 1,
@@ -2476,8 +2702,15 @@ export class Director {
               distanceToTryLineMetres: toLine,
               role,
             });
-            targetX = clamp(plan.setup.x, -33, 33);
-            targetZ = clamp(plan.setup.z, -59, 59);
+            /* D11-b: the planner's setup point is ball-relative and red-zone
+             * aware, but it knows nothing of the dead-ball line or the post
+             * corridor, so it gets the same clamps as every other mark. */
+            const mark = this.boundMark(
+              plan.setup.x,
+              this.anchorDepth(f, atkSigma, (plan.setup.z - f.z) * (dir < 0 ? -1 : 1)),
+            );
+            targetX = clamp(mark.x, -33, 33);
+            targetZ = clamp(mark.z, -59, 59);
           } else {
             let depth = slot.depth * atkShape.depthBias * (0.7 + tempo * 0.5);
             /* T-18. Inside the opposition 14 the shape goes FLAT — pick and go
@@ -2486,8 +2719,11 @@ export class Director {
              * ground: attacks entered at eight metres out and marched slowly
              * back to halfway. */
             if (toLine < 20) depth = Math.min(depth, 0.5 + toLine * 0.08);
-            targetX = clamp(f.x + lateral * s.open * flip, -33, 33);
-            targetZ = clamp(f.z - dir * depth, -59, 59);
+            /* D11-a: the shape spreads from the ball's lateral position and
+             * squeezes rather than crossing the touchline. */
+            targetX = clamp(f.x + lateral * openSign, -33, 33);
+            /* D11-b: the same depth compression every other mark gets. */
+            targetZ = clamp(this.anchorDepth(f, atkSigma, -depth), -59, 59);
           }
 
           this.writeThinkPlayer(gate, `think:shape-mark:${p.team}${p.num}:${slot.role}`, p,
@@ -2562,12 +2798,22 @@ export class Director {
          * pursuit and kick-fielding branches above are event-driven and
          * stay exactly as they are. */
         const sitD = p.team === 'A' ? sitA : sitB;
-        const dsm = sitD ? datasetMark(p.team, p.num, sitD, beat) : null;
+        /* SPEC_11: ball-relative, exactly as on the attacking side. This
+         * branch used to steer every defender at an absolute authored spot:
+         * the fullback's mark is 22 m behind a ruck drawn on the halfway
+         * line, so with the ruck on his own 22 he ran there through the
+         * whole attacking line and turned his back on the play. */
+        const dsm = sitD ? datasetOffset(p.num, sitD, beat) : null;
         if (dsm) {
+          const sigma = p.team === 'A' ? 1 : -1;
+          const mark = this.boundMark(
+            clamp(f.x + sigma * dsm.across * defDatasetLat, -33, 33),
+            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, dsm.along), p, sitD ?? 'dataset'),
+          );
           this.writeThinkPlayer(gate, `think:defence-dataset:${p.team}${p.num}:${sitD}`, p,
             ['tx', 'tz', 'job', 'urgency'] as const, () => {
-              p.tx = clamp(dsm.x, -33, 33);
-              p.tz = clamp(dsm.z, -59, 59);
+              p.tx = clamp(mark.x, -33, 33);
+              p.tz = clamp(mark.z, -59, 59);
               p.job = dsm.job;
               p.urgency = 0.85;
             });
@@ -2576,8 +2822,8 @@ export class Director {
         // than the system allows cannot open.
         const ch = DEFENCE_CHANNELS.find((q) => q.num === p.num);
         const m = defenceMark(p.num, s);
-        let lat = (ch ? ch.lat : (m.x - f.x)) * (0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4);
-        let tx = f.x + lat;
+        let lat = (ch ? ch.lat : (m.x - f.x)) * defLineFactor;
+        let tx = f.x + lat * defLineLat;
         /* T-18. YOU DRIFT ON THE PASS. A real line slides while the ball is
          * in flight — it does not wait for the catch and then react. The
          * old 0.5 factor, applied only to the stationary carrier, left the
@@ -2590,7 +2836,15 @@ export class Director {
           tx += (this.op.carrierX - f.x) * dw;
         }
         const umb = defSys.umbrella * (Math.abs(lat) / 22);
-        const tz = f.z + dir * (m.z - f.z) * 0.9 + dir * umb;
+        /* SPEC_11 — the direction is applied ONCE. `m.z − f.z` is a
+         * world-space signed offset that already carries `s.dir` out of
+         * `defenceMark()`; multiplying the difference by `dir` again is
+         * `dir² = 1`, a mirror that cancels itself — the line ended up a
+         * fixed +z offset from the ball whichever way the attack was
+         * running, i.e. behind it whenever team B had the ball. The
+         * umbrella term is separate and correctly signed: an arc deepest at
+         * the edge sits further towards the DEFENDING team's own line. */
+        const tz = f.z + (m.z - f.z) * 0.9 + dir * umb;
         const react = 1 - clamp((100 - p.attrs.AWA) / 400, 0, 0.22);
         /* T-18. THE GRIND BENDS THE LINE. A defence that has given up the
          * gain line six phases running is backpedalling: line speed decays
@@ -2601,10 +2855,11 @@ export class Director {
          * turns over. */
         const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
         const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
+        const line = this.boundMark(tx, this.defensiveDepth(f, dir, tz, p, 'channel-map'));
         this.writeThinkPlayer(gate, `think:defence-line:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
-            p.tx = clamp(tx, -33, 33);
-            p.tz = clamp(tz, -59, 59);
+            p.tx = clamp(line.x, -33, 33);
+            p.tz = clamp(line.z, -59, 59);
             p.job = defSys.job;
             p.urgency = urgency;
           });

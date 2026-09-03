@@ -70,6 +70,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     if (dist <= Math.max(0.55, 13 * dt * 1.05) || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
+      /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
+       * `op.carrierX/Z`. Those are synced by the carry path below, which
+       * this branch returns before reaching — so for the whole frame the
+       * catch lands, the anchor still sat on the PASSER, up to eight metres
+       * behind the new carrier. Every mark in the formation was written
+       * against a stale ball for that frame, and the camera and the HUD
+       * pointed at a man who no longer had it. */
+      s.carrierX = rec.x; s.carrierZ = rec.z;
       rec.carrier = true;
       // catch where the receiver actually is — no snap.
       s.ball.x = rec.x; s.ball.z = rec.z;
