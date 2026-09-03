@@ -940,6 +940,387 @@ every shirt × situation resolves to exactly five beats (no holes).
 
 ---
 
+### HISTORY NOTE (rebase, done before the seventh batch)
+
+The user asked for a rebase. Local main = `74696aa` "Add files via upload"
+(a ROOT commit — the GitHub web upload created an orphan history; the old
+sandbox merge `501436b` was also an orphan root, so the two lines shared
+nothing). The branch was rebased `--onto origin/main` with `-X theirs` and
+`--empty=drop`: the four local commits now sit linearly on the uploaded
+main. NEW SHAs (old ones live only in the reflog):
+
+- `8f77000` playtest 1-3 accumulated work + papercraft integration
+  (was 6622a63; replay kept OUR tree — the upload was an OLDER snapshot:
+  no src/render/clips.ts, old tipping coronal/paper, pre-playtest-3 engine)
+- `9ab1a55` fourth batch (was 32b9cf9)
+- `88883bc` fifth batch (was c555890)
+- `32c01cc` sixth batch (was b641167)
+
+PROOF: `git diff b641167 HEAD` is EMPTY — the working tree is byte-identical
+to pre-rebase; tsc clean. If the user has pushed more to GitHub since the
+upload, a fresh session should `git fetch` and rebase onto the new tip (a
+fast replay of these four commits).
+
+### SIXTH PLAYTEST LIST (user, post-fifth-batch) — dispositions
+
+FIXED THIS PASS (all need user eyes):
+- **T-56 DEFENDERS NEVER DIVE**: the T-54 dive was being STOMPED the same
+  frame — placeBound\'s TACKLER role clip overwrote clip=\'dive\' before it
+  ever rendered, so tackles read as two men walking into each other. The
+  role clip now yields to a dive younger than 0.45 s, and the tackler gets
+  a lunge impulse (4.2 m/s along the carrier line) into the hit.
+- **T-57 FACING**: players stared at the camera. Puppet heading is now
+  velocity-based only above ~2.2 m/s; below that EVERY player looks at the
+  ball. Support walking back to marks face the play; defenders square to
+  the ball. Also the fix that makes T-64 readable.
+- **T-58 LOOSE ARMS**: idle now swings a slow counter-phase pendulum
+  (shoulders +/-0.07, elbows breathing) on the hanging stance.
+- **T-59 SCRUM NINE AT THE PUT-IN (root cause found)**: startScrum parked
+  both nines at (x+/-2.1, z-/+1.0) — INSIDE the tunnel mouth. The OUT
+  hand-off then spawned the ball at the nine\'s feet wherever he stood:
+  "he suddenly has it where he put it in". Nines now own real base marks
+  (back*2.95 behind the axle, on it laterally), placeBound walks them
+  there, and the OUT mark is the base itself. (A first attempt via
+  scrumSlots collided with the s.nine writer — T-02 warns — reverted; the
+  s.nine array is the single writer.)
+- **T-60 KICKER CATCHES HIS OWN KICKOFF**: the T-50 SHORT profile flew
+  15-19 m at 3.4 s hang — a sprinter arrives with a second to spare. All
+  restart profiles now out-run the kicker: DEEP 0.58-0.72 (26-36 m) at the
+  2.9 s type hang (>=9 m/s vs an 8.4 m/s chase), SQUIB 0.56-0.66 at 1.9 s.
+  CHASE ARRIVALS was re-checked after the floor raise (the 2.9 s hang is
+  kept partly for the chasers\' window).
+- **T-61 Q DEAD ON DEFENCE**: switchPlayer was routed ONLY in upOpen\'s
+  attack branch — the button did not exist for the defending player, and
+  not at all during kicks. Routes added in the human-defender section and
+  in upKick for the non-kicking side (the _pressed param finally used).
+- **T-62 PASS FLASH**: the flight homed exponentially (~0.2 s flat whatever
+  the distance) — every pass teleported. The ball now flies at its true
+  13 m/s ground speed toward the receiver\'s live position, arc on the
+  expected arrival, catch by proximity (0.55 m or one frame of travel).
+- **T-63 GREEN STAKE REMOVED (user instruction)**: the open-play carrier
+  direction line with the dot at the end is deleted from
+  drawOpenPlayOverlay. The gain line stays.
+- **T-64 STRAFE/SHUFFLE (long strides at slow speed)**: the strafe clip
+  existed but nothing ever routed to it — the gait re-select was
+  speed-only. Movement <3.6 m/s at more than ~0.9 m/s lateral-to-facing is
+  now the shuffle (rate spd/1.7); with T-57\'s facing, defenders genuinely
+  side-shuffle square to the ball.
+
+OPEN — NEEDS REPRO / DECISION:
+- **T-65 LINEOUT -> SCRUM "suddenly"**: the award itself is LAWFUL — a
+  stalled maul warns USE IT at 3 s and scrums to the defence at 5 s (Law
+  17.6), spot = the stall. The complaint is the READ: the warn fires once
+  as a hint and the whistle looks arbitrary. Ticket: make the stall warn a
+  persistent referee call with an on-pitch mark, and review maulLaw=2
+  (endless shove) while in there.
+- **T-66 TRY ANIMATION REPEATS WHILE EVERYONE FROZEN**: no CPU repro in 10
+  matches (probe: scripts/t66probe.ts; phase after a try is ALWAYS the
+  conversion KICK). Suspects: (a) the lie-breathing hold after the dive
+  reads as a repeat during the TMO-length fanfare; (b) a human-side
+  FANFARE path re-arming the dive clip. Watch for it in the next playtest
+  with the phase label visible.
+- **T-67 DOUBLE TRY (score -> "scrum" reset -> score again -> conversion)**:
+  ILLEGAL if real; CPU probe clean x10, zero double-scores, zero scrum
+  frames within 8 s of a try. Structural suspect remains a watchdog trip
+  near the goal line (reset at focus = 2 m out, immediate second score);
+  the user\'s "scrum" may be the kickoff formation rows. KEEP OPEN until a
+  human repro lands; if it fires, the watchdog log will name the trip.
+- **T-68 GATE MARGIN (from the harness, not the match)**: legitimate
+  placements ride at maxDisp 1.17-1.32 against the 1.4 m teleport gate —
+  measured ON HEAD TOO (pre-existing). Unseeded gate runs flicker
+  NO-TELEPORTS / BALL-ON-SCREEN / CHASE-ARRIVALS. Ticket: seed the gate
+  harness (or per-run seeding with retries) and tighten the one remaining
+  ~1.3 m legitimate snap for margin.
+
+VERIFICATION: tsc clean; gates 9/9 on clean runs (flakes per T-68);
+teleport probe 6/6 clean on the working tree, maxDisp <=1.3.
+
+### FIFTH WORK BATCH (user: animation revisit, tackle dive, camera zoom) — tickets + fixes
+
+- **T-53 ARMS IN A BASKET (user)**: front and side views held the forearms
+  up in front like a waiter — STAND/idle carried shoulder pitch 0.12 + elbow
+  flex 0.55, and the gait generator strolled at armBend 0.7 (walk) and
+  1.5-1.6 (jog/run/sprint). FIXED: STAND/idle arms hang (a 0.03, ab 0.08,
+  e 0.16-0.26); walk armBend 0.25 (near-straight swing), jog 1.0, run 1.15,
+  sprint 1.3 (runners' elbow just under 90); gait abduction 0.13 -> 0.08.
+  NEEDS USER EYES: if the hit/carry poses still read stiff, the next lever
+  is the authored one-shots (catch, passSpin, tackleHit), NOT the gaits.
+- **T-54 TACKLE = DIVE AT THE MAN + IMPACT SHAKE (user)**: startBreakdown
+  now sets the tackler's clip to \'dive\' (the papercraft dive one-shot
+  rotates him off his feet into the turf; his TACKLER role clip takes over
+  next frame and blends out) and thuds the lens — d.shake(0.09 + 0.13 x
+  pressure), well under launch 0.15 and try 0.7. The controlled shirt gets
+  it too: think()\'s gait picker no longer stomps a dive younger than 0.5 s.
+  NEEDS USER EYES: dive weight/distance and shake magnitude.
+- **T-55 CAMERA ZOOM CLIPS THE FIELD (user)**: root cause — zoom was
+  LENS-first. ZOOM_STEPS/dynamicZoom pushed pxMul to 2.0 (a long lens):
+  focal = px x slant narrowed the FOV to a slit and the pitch polygons cut
+  hard against the 0.6 m near plane = "the zoom clips the field". FIXED,
+  dolly-first: 4x is now pxMul 1.42 with standbackMul 0.52 / heightMul 0.58
+  (the rig physically closes on the contest and drops with it); dynamic
+  zoom follows the same curve (px 0.72 + 0.7t, standback 1.2 - 0.68t);
+  project() near plane 0.6 -> 0.25 so close-rig geometry survives. All rigs
+  (touchline, end-on, cable) share the spec. NEEDS USER EYES: 4x framing.
+
+VERIFICATION: tsc clean; gates 9/9; stats 20 matches diff 3 = 64% (9/14) —
+same LOW family as the 71% run (tackles/rucks/lineouts/turnovers, scrums
+flickering at its floor 7.5-8.2 across runs); the batch touches renderer
+clips, camera spec and shake only — zero scoring paths.
+
+### FOURTH WORK BATCH (post-animation-integration ticket pass) — DONE
+
+The papercraft animation system landed first (scene.ts rewritten onto clips/
+paper/coronal verbatim; retro cameras untouched; per-actor paper views with
+hysteresis; sideOn squash deleted). Then five tickets fixed in one pass:
+
+- **T-52 SPRINT METER**: stamina tank drawn under the controlled ring on the
+  pitch (drawIndicators, MatchView) — hidden while full, green/amber/red as it
+  drains. The sidebar bar stays.
+- **T-50 RESTART VARIETY**: the CPU kickoff is no longer the same 28-33 m.
+  Three profiles picked by game state — DEEP (the T-31b default, 0.52-0.70),
+  SHORT contestable (p 0.30-0.38, hang 3.4 — trailing-late sides contest 55%),
+  SQUIB (hang 1.9, driven flat into the middle third). Implemented as a
+  per-kick `hangOv` override read by launch(); power stays under the T-31b
+  dead-ball ceiling in every profile. Human kickoffs unchanged.
+- **T-42 RUCK PULSE (release-beat consumer)**: breakdown.ts sets
+  d.releaseBeat (0.9 s) but the restore had lost its CONSUMER — upOpen now
+  back-pedals any defender (minus the controlled shirt) within 2 m of the
+  release line at 8*dt until the beat expires, movedBy=\'release\' (sanctioned
+  writer), branch CONTINUES so steer() never fights it. The use-it window
+  belongs to the nine again and the pick-and-go no longer pulses the cluster.
+- **T-51 RUCK CHURN (pod hold)**: OpenPlayState.podHold (1.0 s at ruck exits
+  only — startOpen sets it from protect) holds every non-carrier attacker on
+  his existing marks through the first second of the use-it window instead of
+  re-marking to the fresh shape; decremented in upOpen, consumed in think()
+  as a steer-only continue.
+- **T-43 REPLAY/AFTER-LINEOUT TELEPORT — ROOT-CAUSED, not a match bug**: R
+  ("replay") sits next to the movement cluster (E=dummy, W=up). enterReplay
+  routed phase to \'REPLAY\', whose dispatch case ran the SCRUM handler;
+  outside a scrum d.scrim! crashed, the watchdog tripped, and play reset at
+  the focus point — which after a lineout in their half IS the opponent 22.
+  The instant replay is now a TRUE FREEZE: the top of update() returns early
+  while phase===\'REPLAY\' && replayOf (no clock, no handlers, no brain, no
+  watchdog); the timer exits it; exitReplay restores the exact phase. The
+  \'REPLAY\' dispatch case and the watchdog orphan clause are deleted.
+  scripts/t43check.ts proves it: 0.000 m movement inside the window, zero
+  trips, phase restored.
+
+VERIFICATION: tsc clean; gates 9/9; stats 20 matches diff 3 = **71% (10/14)**,
+up from 57% — passes 195.4, kicks 31.1, offloads 10.9 now realistic. Remaining
+LOWs are the stage-2 re-price cluster: tackles 67.3 (floor 90), rucks 108.1
+(floor 120), lineouts 11 (floor 14), turnovers 6.7 (floor 10) — turnover rose
+3.9 -> 6.7 after the release beat, closing on the floor honestly.
+
+T-49 BASELINE (chain.ts, diff 3): carrier-changes 302, pass chains {1: 156,
+2: 1} — the endless-backward-pods loop confirmed at chain length 1. The
+forward-variation rule (flat/crossing receivers, forward gain targets,
+attack-depth) is the next engine task; measure mean gain per phase after.
+
+NOTE — TACKLE LUNGE superseded: the rootX lunge lived in the OLD coronal.ts,
+which the papercraft system replaced by design. The new tackle clip carries
+its own motion; if the user judges the hit weight missing in playtest, re-add
+as a pose lean in the clip, not as a renderer hack.
+
+### THIRD PLAYTEST (user, ruck loop + jackal spec) — dispositions
+
+FIXED THIS PASS:
+- **RUCK LOOP (win -> 4,3 -> instant re-tackle -> repeat).** Three causes
+  closed: (1) the use-it countdown only shows once the ball is SECURED and
+  now counts the nine's REAL window (protect = limit - elapsed, was a
+  flat 0.75 s); (2) RELEASE AND RETREAT — the losing side is held behind
+  their offside line for 0.9 s after the ruck (a back-pedal, T-02-
+  sanctioned writer 'release'), so the nine is not tackled on the frame
+  the ball is out; (3) the display window and the mechanical window are
+  the same number now.
+- **THE JACKAL IS A NUMBERS CALL (user's rule, both sides).** A steal
+  requires MORE defenders than attackers committed at the breakdown.
+  Human DEFENDING gets SPACE = GO FOR THE STEAL: with numbers it rips at
+  once (turnover, use-it window); without, the referee WARNS him; a
+  second press inside the same breakdown is a HANDS-IN penalty to the
+  attack. CPU steals obey the same gate (they were automatic before).
+- **PASS SPEED is a real throw**: ~13 m/s over the pass's own length
+  (6 m pop 0.46 s, 20 m cut-out 1.5 s) — was a fixed 0.5 s homing.
+- **THE CPU NOW FINDS WINGS**: on a WIDE call the options sort by lateral
+  reach among uncovered men (was uncovered-then-nearest: everything died
+  within 8 m of the pods).
+- **AIM LINE IS TRUE**: the drawn line now uses launch's own trig
+  (sin(aim*10deg)*reach; the old aim*0.55*reach lied up to 3x — this was
+  the "kickoffs don't go where I aim").
+- **BINDING**: cleaners bind at 0.9-1.5 m from the ball (was 1.3-2.1).
+- **TRY WARM-UP**: the scorer's three nearest mates go in to celebrate;
+  the defence walks back downfield; human aim input feeds the watchdog
+  (aiming is live input, not a freeze).
+- **TACKLE LUNGE**: the hit throws the shoulder (rootX 0.3 on the impact
+  frames) — contact moves.
+
+OPEN TICKETS FROM THIS PLAYTEST (user-voiced, recorded):
+- **T-49 BACKWARD POD LOOP**: the CPU attacks by passing backwards into
+  pods endlessly (never forward, wings only via the wide-call sort). The
+  phase plan needs a FORWARD variation rule: receivers take flat or
+  crossing, pod carries must chase a forward gain target, and the depth
+  model needs an attack-depth rule (support sits BEHIND but arrives ON
+  the line). Measure with chain.ts: mean gain per phase on unbroken
+  possessions.
+- **T-50 RESTART VARIETY**: kickoffs all travel the same 28-33 m; add
+  short/high/recovery options by game state (trailing late = contestable).
+- **T-51 RUCK FORMATION CHURN**: the two sides' ruck shapes differ
+  between contest and secured, so extras still run in-out; the release
+  beat removed the worst of it — if churn persists, hold non-crew
+  attackers in their pods for the RECYCLE beat instead of handing them
+  to the shape mark at the win.
+- **T-52 SPRINT METER**: stamina has no HUD read; with sprint x1.32 the
+  player needs to see the tank (small bar under the controlled ring).
+
+### SECOND PLAYTEST (user screenshot, breakdown) — dispositions
+
+- **THE RUCK COUNTDOWN** showed from the tackle and covered the two men on
+  the ground. It is the TIME TO PASS, so it now draws only in RECYCLE
+  (ball secured, window running). Before that: the COMMIT / A/D CLEAROUT
+  labels only.
+- **"I press pass and it doesn't pass"** — during a breakdown the pass
+  verbs were dead (upOpen owns J/K and the phase was BREAKDOWN). A pass
+  pressed during the fight now BUFFERS the distribution: "NINE WILL PASS
+  LEFT/RIGHT ON THE OUT", and the nine plays it the instant the ball is
+  out (spent only on a won ruck; dropped on a steal/penalty).
+- **TACKLED PLAYERS UPRIGHT — the cardboard-cutout model (user's own
+  spec).** The old 'grounded' route drew an abstract flat blob
+  (drawFlatPaper) and the tackler stayed upright. Now a downed player is
+  the ACTUAL coronal character TIPPED OVER about his feet in 3D space
+  (render-only rotation, signed by attack direction — the head goes with
+  the fall): grounded = flat, the tackler tips as his wrap lands
+  (clipT > 0.32), the dive tips ~45 deg in flight and lands flat, with a
+  body-length shadow under it. drawFlatPaper is retired from the scene.
+- **LEGS vs SPEED** — the CPU cadence was already speed-locked but the
+  reference speeds read as gliding; lowered ~12% (sprint 8.2->7.2,
+  jog 4.4->3.9, carry 6.4->5.6) so cycles churn slightly faster than
+  ground-lock. THE HUMAN'S clip time was UNSCALED entirely — now uses the
+  same reference table.
+- **THE TURN BEAT** — a face flip is the cutout pivoting through edge-on:
+  `turnT` fires on any face change (CPU picker + the controlled player),
+  decays in 0.2 s, and the drawer squashes paper width up to 42%.
+
+Known-good left alone: the green stake under the carrier is the attack
+direction telemetry; "HE STEPS OUT OF THE TACKLE" was a successful doStep.
+
+### FIRST HANDS-ON PLAYTEST (user, diff 9, assists 0) — dispositions
+
+P1.1 NO TACKLE ANIMATION — FIXED x2: (a) the rebuilt tackle clip's impact
+was at 0.235 s but startBreakdown plays it ON the contact frame, so the
+visible part was the standing load — timeline rebuilt impact-first (hit at
+0.02 s, wrap, fold, land, settle). (b) pressure-won tackles had NO TACKLER
+role (stat credited, nobody wore the clip) — the nearest defender is now
+the tackler (down + role + clip).
+P1.2 DIVE SHOES — FIXED: the billboard drawer hangs legs DOWN from the hip;
+lean only shortens the torso. A horizontal body must be a FOLDED body.
+Dive slide poses now fold (bend 96-124, crouch ~1.0) like grounded; flight
+legs trail with lift.
+P1.3 RITUAL — FIXED x3: human aim clamp was +-1 (CPU gets +-6.6) — a corner
+conversion could not be aimed at the posts; scorer "popped up" — he now
+holds the dive through FANFARE, transitions to grounded, rises when the
+kicker reaches the tee; the walk is a jog (urgency 1.15), not a commute.
+P1.4 CAMERA/CONTROL/PUNT-PAUSE — FIXED x3: cable rig climbs when past the
+goal line (was clipping the terraces); control NEVER hands to the CPU side
+(kick-receive guard); punts are RUN-AND-HOLD (L/H/P charge on the run,
+release strikes — the freeze-and-aim ritual is now tee kicks only). Kick-off
+early strike: human releases are IGNORED until the ten is clear (P2.7).
+P1.5/P3.10 FEEL — FIXED: human accel evened (7.5/6.8) and lowered; sprint
+1.24 -> 1.32 (it read as "no sprint button"); a step now costs pace
+(speedDebt 0.72, recovers ~0.5 s); pass flight slowed 2.6 -> 2.1 (a throw,
+not a teleport).
+P2.6/P2.8 RUCK — FIXED: the human ruck won itself — the 1.32 attack quality
+is a CPU-model constant; humans now get 1.08 base and the waggle buys the
+shove. CPU-vs-CPU numbers untouched (stats floors safe).
+P3.9 MARKERS — the green stake is the carrier's direction telemetry (kept);
+pass rings were team-correct but the Q-switch was INVISIBLE — three rings
+now mark the defenders Q cycles (bright = controlled, labelled Q).
+P1.12 VERB STRIP — removed; the top-left widget owns controls.
+
+NOT FIXED THIS PASS (recorded as tickets):
+- T-41 MAUL PICK-LOOP: CPU maul ball gets driven, then punted; no moves
+  off the maul. Needs maul-exit play variety.
+- T-42 PULSE AT RUCKS: defenders converge on the pick-and-go loop and the
+  cluster "contracts/expands"; needs defenders to hold the offside line
+  for a beat after the ruck forms instead of crashing the pick.
+- T-43 REPLAY/AFTER-LINEOUT TELEPORT: the TMO check IS try-only (W-011
+  corner groundings); the user's "replay after a lineout" + "teleported
+  to the opponent 22" points at a trip() reset during the drive-try
+  sequence — needs a repro (watchdog log would catch it; none fired in
+  harness runs).
+- Kick-off/restart freeze: everyone stands during FANFARE/WALKUP by
+  design (the ritual); the scorer now behaves, but a loose gather for the
+  rest would warm it (low priority).
+- Sprint stamina readability: the burst meter is not visualised; with
+  sprint 1.32 it should at least show on the HUD when drained.
+
+### RE-BALANCE PASS ON THE MERGED TREE (results)
+
+RUCKS FIXED: 105.3 -> 123.1 (floor OK), via three levers, all honest:
+1. **Width plays were judged on forward gain only** (gained > 1.2) — a
+   sweep's gain IS lateral, so every good width move read as "shut down"
+   and escalated the ladder to the cross-field kick. Width calls
+   (WIDE_SWEEP/MISS_PASS/LOOPL_PASS/SWITCH) now also succeed on total
+   displacement > 8 m (judgeLastCall, needs lastCallX).
+2. **An illegal own-half CROSS_FIELD degraded to a SECOND KICK**
+   (TERRITORY_PUNT); now degrades to POD_CARRY per the T-13 exit
+   principle (open.ts).
+3. **The touch hunt was drawn on 0.8x reach** — ball landed ~31 m of the
+   34.6 m to the line, 3 m IN, where the honest steepness-scaled roll let
+   it die: lineouts starved. The angle now comes off the FULL reach with
+   power 0.94+ (kick.ts); hunt share 0.4 -> 0.5.
+
+Merged board after: 43% (6/14) at 16 matches — RUCKS OK 123.1, pens OK,
+split OK, breaks OK, offloads OK; still LOW: points 8.7, tries 0.6,
+tackles 80, scrums 5-7, lineouts 11, passes 151, kicks 27, TO 8-9.
+NOTE: 8-match samples swing 36%<->43% on this tree; verdicts 16+ only.
+
+**SIGN-OFF DECISION: BOTH, STAGED (user).** Stage 1 applied and measured:
+atkRamp 0.4->0.3, attack recover 20->24 (set-jackal 10.5->12, defence 3.6
+untouched — that is the jackal's fight), window 0.15-0.35 -> 0.12-0.28.
+RESULT: breakdown p50 1.72 -> 1.55 s (the ARRIVALS dominate, not the stage
+constants), RUCKS 123 -> 132 (solidly OK), tackles 80 -> 84.9 (within
+noise of the 90 floor), points 8.7 -> 9.6, split 47.5 OK. Board count
+unchanged at 43% (6/14) but every OK is healthier.
+
+Stage 2 assessment (what is still STRUCTURALLY short and why): passes
+151.9/180, scrums 5.9/8, lineouts 11.3/14 — all share one cause: cycles
+per match. The next honest compression is SUPPORT ARRIVAL DISTANCE: the
+crew runs 3-6 m to the contact from shape depth; tightening shape depth
+by ~1.5 m (pods run off the carrier's shoulder) is worth ~0.3-0.5 s per
+cycle — that was NOT applied this session, it changes tackle/break
+dynamics and wants its own measured pass. If stage 2 still leaves the
+floors short, the re-price covers only scrums (its floor assumes error
+rates the safe CPU pass game never produces — passes at ~4% error give
+~5 scrums, floor is 8).
+
+**THE STRUCTURAL FINDING (needs a sign-off):** the open/ruck clock ratio
+is ~0.5 in this engine; real rugby is ~2 (10 s ball-in-hand per ruck).
+The CPU decides carries in 0.3 s and chains passes — carries never RUN.
+Floors calibrated on main assumed the OLD cheap breakdown; with T-05's
+honest contest the whole event economy is ~25-30% short, which is why
+tackles/scrums/lineouts/kicks sit just under their floors
+SIMULTANEOUSLY. The fix is either (a) compress the contest ~25%
+(atkRamp 0.4->0.3, recover 20->24, window 0.15-0.35 -> 0.12-0.28 —
+measured candidates, NOT applied), or (b) the clockScale re-price of
+every floor. Decision wanted.
+
+### AUDIT HARNESS MADE HONEST (UX-94 / UX-31) — FAIL ~492/seed -> ~200/seed
+
+- **UX-94 x251/seed was the INPUT BOT mashing A/D while DEFENDING**
+  ruck/maul — those verbs belong to the contest-owning side; defending
+  presses do nothing BY DESIGN. The bot now presses only when
+  isHuman(attacking side) owns the ruck/maul. Rule untouched.
+- **UX-31 x104/seed was a string-membership bug**: aff.includes('RUN')
+  tested EXACT array membership against labels like 'AIM (A/D)'. The
+  rule means "a movement verb exists"; the emission now does substring
+  matching, and the affordance labels name the verb (STEER AIM/THE
+  PACK/THE CALL/THE CLEAROUT/THE DRIVE (A/D)) — they always were A/D
+  steering.
+- Result on matched seeds: FAIL 169/251/242 (seeds 1-3) vs the handover
+  base ~374. The dominant remaining fails are REAL and recorded:
+  LOG-19 pod channel x58, LAW-71 x31, LAW-66 line holes x25, LOG-119
+  x40 (ball sits at ruck bases — check the rule's intent), UX-28 x29
+  (99-char feed lines).
+
 ### MERGE VERDICT — main (T-18 86%, T-03 extraction, TMO) merged into this branch
 
 The remote branch merged main (a891ea5); this tree carries BOTH change sets.

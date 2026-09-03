@@ -112,8 +112,15 @@ export function botInput(d: Director, dt: number, st: BotState): { inp: Input; p
       break;
     }
     case 'BREAKDOWN':
-      if (wobble) pressed.add('left'); else pressed.add('right');
-      inp.left = wobble; inp.right = !wobble;
+      /* UX-94: the mash is the CLEAROUT — the attacking side's verb. A
+       * side defending the ruck has no A/D verb (its contest is the
+       * jackal, which is modelled, not mashed); pressing anyway produced
+       * 251 "pressed and nothing changed" faults a run that were never a
+       * game defect. The bot presses only when the affordance exists. */
+      if (d.bd && d.isHuman(d.bd.attacking)) {
+        if (wobble) pressed.add('left'); else pressed.add('right');
+        inp.left = wobble; inp.right = !wobble;
+      }
       break;
     case 'SCRUM':
       if (['ENGAGE', 'DRIVE', 'STRIKE'].includes(d.scrim?.stage ?? '')) {
@@ -126,8 +133,12 @@ export function botInput(d: Director, dt: number, st: BotState): { inp: Input; p
       else if (d.lo?.stage === 'THROW') { if (d.lo.meter > 0.58 && d.lo.meter < 0.72) pressed.add('action'); }
       break;
     case 'MAUL':
-      pressed.add(wobble ? 'left' : 'right');
-      if (st.wait <= 0 && Math.random() < 0.3) { pressed.add('action'); st.wait = 1.2; }
+      /* Same affordance gate as the breakdown: the drive belongs to the
+       * mauling side. */
+      if (d.ml && d.isHuman(d.ml.attacking)) {
+        pressed.add(wobble ? 'left' : 'right');
+        if (st.wait <= 0 && Math.random() < 0.3) { pressed.add('action'); st.wait = 1.2; }
+      }
       break;
     default: break;
   }
@@ -289,7 +300,10 @@ function emit(d: Director, rec: Recorder) {
   rec.push(d, 'AFFORDANCES', 'VERBS AVAILABLE TO THE PLAYER', {
     count: aff.length,
     list: aff.join(', '),
-    hasMovement: aff.includes('RUN') || aff.includes('STEER'),
+    /* Movement is offered if ANY verb moves something — the array holds
+     * whole labels ('RUN (A/D)', 'STEER AIM (A/D)'), so exact membership
+     * against the bare word was always false outside open play. */
+    hasMovement: aff.some((a) => a.includes('RUN') || a.includes('STEER')),
     duplicates: aff.length !== new Set(aff).size,
   });
 

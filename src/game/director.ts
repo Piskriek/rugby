@@ -79,6 +79,7 @@ export interface Actor {
   renderClip: string; clipT: number; jitter: number;
   ring: number;     // 0 none, 1 controlled, 2 pass target
   size: number;     // T-39 per-player build, 0.92 .. 1.12
+  turnT: number;    // playtest 2: the turn beat, 0..1
 }
 
 interface Pack { force: number; forceTransmitted: number; waggle: number; fitness: number }
@@ -136,6 +137,10 @@ export interface KickState {
    *  walked back, not teleported back. */
   form?: Array<{ num: number; team: 'A' | 'B'; x: number; z: number }>;
   formReady?: number;
+  /** T-50 RESTART VARIETY — per-kick hang override. A short contestable hangs
+   *  like a bomb (chasers arrive under it); a squib recovery is driven flat.
+   *  0 = type default. launch() reads it; nothing else touches it. */
+  hangOv?: number;
   /** penalty kick to touch — an uncontested strike at full range (T-18) */
   fromPenalty?: boolean;
 }
@@ -167,9 +172,21 @@ export interface OpenPlayState {
   aiTimer: number; aiIntent: string; aiPlay: string; aiPhasePlan: number;
   /** T-18: defenders who have already had their one slip-roll this episode */
   beatTried?: Set<number>;
+  /* Playtest P1.4: from-hand kicks charge ON THE RUN. 0 = not kicking;
+   * >0 = the key is held and power is building; released = strike. The
+   * match never pauses for a punt — only tee kicks get the ritual. */
+  kickCharge: number;
+  kickKind: 'PUNT' | 'GRUBBER' | 'DROP_GOAL' | '';
+  /** Playtest P3.10: a step buys the beat and pays in pace — 0.78 at the
+   * step, back to 1 in about half a second. */
+  speedDebt: number;
   open: number;
   /** seconds of immunity after the phase starts, so ruck ball is playable */
   protect: number;
+  /** T-51: seconds left of the pod hold — non-crew attackers keep their marks
+   * through the first second of the use-it window instead of re-marking to
+   * the fresh shape (the in-out churn). Zero outside ruck exits. */
+  podHold: number;
   /** T-18. Seconds the current carrier has actually held the ball. Hot-potato
    *  attack — catch, fling, kick, all inside half a second — is why tackles,
    *  rucks and metres were all near zero: the CPU decided on the frame the ball
@@ -178,6 +195,9 @@ export interface OpenPlayState {
   ball: { x: number; y: number; z: number; vx: number; vz: number; live: boolean; t: number };
   /** T-35 pass flight: who the ball is travelling to, and the arc progress 0..1 */
   pendingReceiver: number;
+  /** Playtest 3: the length of the current throw — the flight rate is a
+   * real 13 m/s over this distance, not a fixed half-second homing. */
+  passDist: number;
   passT: number;
 }
 
@@ -203,6 +223,12 @@ export interface BreakdownState {
   ball: { x: number; z: number; placed: boolean };
   players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean }[];
   crew: number[]; defCrew: number[];
+  /* Playtest 2: J/K pressed during the fight buffers the distribution —
+   * the nine passes the MOMENT the ball is out. Cleared unless the ruck
+   * is won. */
+  bufferedPass?: -1 | 0 | 1;
+  /** Playtest 3: the human jackal was warned once this breakdown. */
+  stealWarned?: boolean;
   groundAt: number; ballOutAt: number; phase: number; expectedPoints: number;
   power: { A: number; B: number }; window: number; result: string; resultWhy: string;
   contestMeter: number; meterDir: number; meterOn: boolean; waggle: number;
@@ -371,7 +397,7 @@ export class Director {
       this.actors.push({
         id: i, team: i < 15 ? 'A' : i < 30 ? 'B' : 'REF',
         num: i < 15 ? i + 1 : i < 30 ? i - 14 : 0,
-        rx: 0, rz: 0, rf: 1, renderClip: 'idle', clipT: R() * 3, jitter: R() * 1.7, ring: 0, size: 1,
+        rx: 0, rz: 0, rf: 1, renderClip: 'idle', clipT: R() * 3, jitter: R() * 1.7, ring: 0, size: 1, turnT: 0,
       });
     }
     this.buildLive();
@@ -497,7 +523,12 @@ export class Director {
       if (this.lo.stage === 'THROW') return { key: 'SPACE', label: 'RELEASE THE THROW', act: 'action' };
       return { key: 'SPACE', label: 'CONTEST THE BALL', act: 'run' };
     }
-    if (this.bd) return { key: 'A / D', label: 'CLEAR OUT THE RUCK', act: 'waggle' };
+    if (this.bd) {
+      /* Playtest 3: the defending side has a verb now — the steal is a
+       * numbers call (see upBreakdown). */
+      if (this.isHuman(this.bd.attacking)) return { key: 'A / D', label: 'CLEAR OUT THE RUCK', act: 'waggle' };
+      return { key: 'SPACE', label: this.bd.defCrew.length > this.bd.crew.length ? 'STOLEN — NUMBERS TOLD' : 'GO FOR THE STEAL (NEED NUMBERS)', act: 'action' };
+    }
     if (this.ml) return { key: 'A / D', label: 'DRIVE THE MAUL', act: 'waggle' };
     if (this.op) {
       const attacking = this.ctrlPlayer.team === this.op.attacking;
@@ -648,11 +679,16 @@ export class Director {
       }
       out.push('RUN (A/D)', 'SPRINT (SPACE)');
     }
-    if (this.kk) { out.push('AIM (A/D)', this.kk.stage === 'AIM' || this.kk.stage === 'METER' ? 'SET (SPACE)' : 'CHASE'); }
-    if (this.scrim) out.push('PUSH THE PACK (A/D)');
-    if (this.lo) out.push(this.lo.stage === 'CALL' ? 'CHOOSE CALL (A/D)' : 'THROW (SPACE)');
-    if (this.bd) out.push('CLEAR OUT (A/D)', 'COMMIT MORE (SPACE)');
-    if (this.ml) out.push('DRIVE (A/D)', 'SHIFT BALL (SPACE)');
+    /* UX-31: every live state has an A/D verb — the kicker steers his aim,
+     * the pack steers its push, the jumper's call is steered through the
+     * sheet. The old labels named the CONSEQUENCE (push, drive) and not
+     * the VERB (steer), so the affordance reader reported "no movement
+     * offered" in the middle of states where movement is the whole verb. */
+    if (this.kk) { out.push('STEER AIM (A/D)', this.kk.stage === 'AIM' || this.kk.stage === 'METER' ? 'SET (SPACE)' : 'CHASE (A/D + SPRINT)'); }
+    if (this.scrim) out.push('STEER THE PACK (A/D)');
+    if (this.lo) out.push(this.lo.stage === 'CALL' ? 'STEER THE CALL (A/D)' : 'THROW (SPACE)');
+    if (this.bd) out.push('STEER THE CLEAROUT (A/D)', 'COMMIT MORE (SPACE)');
+    if (this.ml) out.push('STEER THE DRIVE (A/D)', 'SHIFT BALL (SPACE)');
     out.push('REPLAY (R)', 'PAUSE (ESC)', 'ZOOM (WHEEL)');
     return Array.from(new Set(out));
   }
@@ -728,7 +764,7 @@ export class Director {
 
   /* ============================ UPDATE ============================ */
 
-  update(dtReal: number, input: Input, pressed: Set<string>) {
+  update(dtReal: number, input: Input, pressed: Set<string>, released = new Set<string>()) {
     /* Unattended hold timer (T-18): counts down even while paused, so a
      * CPU-v-CPU half time resumes on its own. */
     if (this.holdTimer > 0) {
@@ -737,6 +773,21 @@ export class Director {
     }
     if (this.paused || this.over) return;
     const dt = Math.min(dtReal, 1 / 25) * this.gameSpeed;
+
+    /* T-43 — THE INSTANT REPLAY IS A FREEZE. R re-routed the phase to
+     * 'REPLAY', whose dispatch case ran the SCRUM handler — with no scrum
+     * object outside a scrum, upScrum crashed on d.scrim!, the watchdog
+     * tripped, and play restarted at the focus point. That was the user's
+     * "replay after a lineout" that "teleported" everyone to the opponent
+     * 22: the reset mark is wherever the focus happened to be. A replay now
+     * owns the frame completely — no clock, no phase handler, no brain, no
+     * watchdog — and the timer exits it back into the exact phase it came
+     * from. R stays live everywhere, because it can no longer break anything. */
+    if (this.phase === 'REPLAY' && this.replayOf) {
+      this.replayTimer -= dt;
+      if (this.replayTimer <= 0) this.exitReplay();
+      return;
+    }
 
     /* T-32. The conversion ritual is dead time: the clock holds while the try
      * is celebrated and the kicker walks to the tee. It resumes on the strike. */
@@ -809,10 +860,10 @@ export class Director {
      * the audit can see it, and force a reset. */
     try {
       switch (this.phase) {
-        case 'OPEN_PLAY': this.upOpen(dt, input, pressed); break;
+        case 'OPEN_PLAY': this.upOpen(dt, input, pressed, released); break;
         case 'BREAKDOWN': case 'BREAKDOWN_REPLAY': this.upBreakdown(dt, input, pressed); break;
         case 'MAUL': case 'MAUL_REPLAY': this.upMaul(dt, input, pressed); break;
-        case 'SCRUM': case 'REPLAY': this.upScrum(dt, input, pressed); break;
+        case 'SCRUM': this.upScrum(dt, input, pressed); break;
         case 'LINEOUT': case 'LINEOUT_REPLAY': this.upLineout(dt, input, pressed); break;
         case 'KICK': case 'KICK_REPLAY': this.upKick(dt, input, pressed); break;
       }
@@ -872,7 +923,12 @@ export class Director {
    * logged to the feed and counted, and the engine self-heals to open play
    * rather than leaving the player stranded.
    */
-  private phaseAge = 0;
+  phaseAge = 0;   // watchdog timer (public: a human aiming is live input, kick.ts feeds it)
+  /** Playtest 3: after a ruck the losing side must RELEASE AND RETREAT —
+   * this line (contact point) holds them behind their offside line for
+   * the beat, instead of letting them tackle the nine on the frame the
+   * ball is out. */
+  releaseBeat: { z: number; dir: number; until: number } | null = null;
   private lastWatchPhase: Phase | null = null;
   private lastPhaseToken: unknown = null;
   watchdogTrips = 0;
@@ -916,7 +972,9 @@ export class Director {
 
     // B. The phase object the handler needs has vanished underneath it.
     const orphan =
-      ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && !this.scrim) ||
+      /* ('REPLAY' is the human instant replay — a frozen frame owned by
+       * replayTimer at the top of update(); it never reaches the watchdog.) */
+      ((this.phase === 'SCRUM') && !this.scrim) ||
       ((this.phase === 'LINEOUT' || this.phase === 'LINEOUT_REPLAY') && !this.lo) ||
       ((this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY') && !this.bd) ||
       ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && !this.ml) ||
@@ -980,9 +1038,26 @@ export class Director {
       this.lastCallSucceeded = gained > 1.2 || (f.z - this.lastCallZ) * dir > 8;
       return;
     }
+    /* A WIDTH play is judged like a kick is judged on territory: by what it
+     * was FOR. A sweep's purpose is to make the defence travel — its gain
+     * is lateral, and judging it on forward metres alone marked every
+     * successful sweep "shut down", which escalated the ladder straight to
+     * the cross-field kick. Measured on the merged tree: 45% of all CPU
+     * calls were kicks and open phases averaged 0.9 s — the contact game
+     * was being talked out of existence. Success = forward OR the ball
+     * genuinely moved the contest. */
+    const widthCalls: PlayCall[] = ['WIDE_SWEEP', 'MISS_PASS', 'LOOPL_PASS', 'SWITCH'];
+    if (widthCalls.includes(this.lastCall ?? 'POD_CARRY') && this.lastCallZ !== null) {
+      const f = this.focusPoint();
+      const dir = this.possession === 'A' ? 1 : -1;
+      const travel = Math.hypot((f.z - this.lastCallZ) * dir, (f.x - this.lastCallX) * 0.6);
+      this.lastCallSucceeded = gained > 1.2 || travel > 8;
+      return;
+    }
     this.lastCallSucceeded = gained > 1.2;
   }
   private lastCallZ: number | null = null;
+  private lastCallX = 0;
 
   /**
    * Set-piece participants are placed exactly, and given the correct clip for
@@ -1165,8 +1240,11 @@ export class Director {
         else if (q.role === 'JACKAL') clip(p, 'jackal');
         else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');
         else if (q.role === 'CLEANER') clip(p, s.stage === 'PLACE' ? 'cleanout' : 'maulBind');
-        else if (q.role === 'TACKLER') clip(p, 'tackle');
-        else clip(p, s.ruckFormed ? 'maulBind' : 'ready');
+        /* PLAYTEST 4: the tackler's dive-at-the-man one-shot gets its beat —
+         * the role clip used to stomp it the same frame and the hit read as
+         * two men walking into each other. */
+        else if (q.role === 'TACKLER' && !(p.clip === 'dive' && p.clipT < 0.45)) clip(p, 'tackle');
+        else if (q.role !== 'TACKLER') clip(p, s.ruckFormed ? 'maulBind' : 'ready');
         p.job = q.role === 'CARRIER' ? 'PRESENT THE BALL BACK TO YOUR NINE'
           : q.role === 'JACKAL' ? 'GET YOUR HANDS ON THE BALL, LEGALLY'
             : q.role === 'TACKLER' ? 'ROLL AWAY AND GET BACK ON SIDE'
@@ -1211,7 +1289,9 @@ export class Director {
         if (s.stage === 'WALKUP' && Math.hypot(k.x - s.bx, k.z - (s.bz - s.dir * 1.1)) > 0.8) {
           k.tx = s.bx;
           k.tz = s.bz - s.dir * 1.1;
-          k.urgency = 0.7;
+          /* Playtest P1.3: the walk read as five dead seconds. A kicker
+           * jogs to the mark — the ritual is the REVERENCE, not the commute. */
+          k.urgency = 1.15;
           k.job = 'WALK TO THE TEE';
           k.face = s.dir;
           steer(k, dt, false);
@@ -1221,11 +1301,42 @@ export class Director {
           clip(k, 'ready');
           k.vx = 0; k.vz = 0;
         }
+        /* PLAYTEST 3: the try froze all thirty. The scorer's three nearest
+         * mates go TO him (the huddle), everyone else walks back toward
+         * their own half — a rugby pitch after a try is never a still. */
+        const scorer = this.lastScorer
+          ? this.live.find((q) => q.team === this.lastScorer!.team && q.num === this.lastScorer!.num)
+          : null;
+        let celebrations: Live[] = [];
+        if (scorer && s.stage === 'FANFARE') {
+          celebrations = this.live
+            .filter((q) => q !== scorer && q.team === scorer.team && q.sinbin <= 0 && !q.down)
+            .sort((a, b) => Math.hypot(a.x - scorer.x, a.z - scorer.z) - Math.hypot(b.x - scorer.x, b.z - scorer.z))
+            .slice(0, 3);
+        }
         for (const p of this.live) {
           if (p === k || p.sinbin > 0) continue;
-          /* T-31. The man who just dived stays where he landed until the
-           * walk-up — steer() would stand him straight back up mid-slide. */
-          if (p.clip === 'dive') { p.clipT += dt; p.vx = 0; p.vz = 0; continue; }
+          /* T-31 + P1.3. The man who just dived stays DOWN through the
+           * fanfare and the walk-up (steer() would stand him mid-slide);
+           * upKick stands him up when the kicker reaches the tee. */
+          if (p.clip === 'dive' || (p.clip === 'grounded' && !p.down)) {
+            p.clipT += dt; p.vx = 0; p.vz = 0; continue;
+          }
+          if (celebrations.includes(p) && scorer) {
+            p.tx = clamp(scorer.x + (p.x - scorer.x) * 0.2, -33, 33);
+            p.tz = clamp(scorer.z + (p.z - scorer.z) * 0.2, -59, 59);
+            p.urgency = 0.55;
+            p.job = 'IN TO CELEBRATE WITH HIM';
+            steer(p, dt, false);
+            continue;
+          }
+          if (s.stage === 'FANFARE' && scorer && p.team !== scorer.team) {
+            p.tx = p.x; p.tz = clamp(p.z - p.face * 5, -59, 59);
+            p.urgency = 0.3;
+            p.job = 'BACK DOWNFIELD — THE KICK IS COMING';
+            steer(p, dt, false);
+            continue;
+          }
           p.tx = p.x; p.tz = p.z;
           p.urgency = 0.15;
           p.job = 'WAIT FOR THE CONVERSION';
@@ -1528,21 +1639,41 @@ export class Director {
         // ×1.15 on top for 0.8 s, so the two read as distinct — one you hold,
         // one you pop to beat a man.
         const burstMul = this.op && this.op.burst > 0 ? 1.15 : 1;
-        const sp = maxSpeed(ctrlHuman, this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul;
+        /* Playtest P1.4/P3.10: 95% of top speed arrived in a third of a
+         * second and lateral arrived faster than depth (rates 9 vs 7) —
+         * the game had no weight and strafing beat running. Both rates
+         * evened and lowered; a step leaves a speed debt that recovers
+         * over ~half a second, so a step is a gamble, not a teleport. */
+        const debt = this.op?.speedDebt ?? 1;
+        const sp = maxSpeed(ctrlHuman, this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul * debt;
         // WASD is relative to the camera by default, so the stick always agrees
         // with what the player can see whatever the rig is doing.
         const m = mapInputToWorld(lat, dep, this.cam.yaw, dir, this.relativeControls);
-        ctrlHuman.vx = approach(ctrlHuman.vx, m.vx * sp * 0.9, 9, dt);
-        ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 7, dt);
+        ctrlHuman.vx = approach(ctrlHuman.vx, m.vx * sp * 0.9, 7.5, dt);
+        ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 6.8, dt);
       ctrlHuman.x = clamp(ctrlHuman.x + ctrlHuman.vx * dt, -34.2, 34.2);
       ctrlHuman.z = clamp(ctrlHuman.z + ctrlHuman.vz * dt, -60, 60);
       ctrlHuman.movedBy = 'input';   // T-02: input is an integration writer
       if (Math.abs(ctrlHuman.vz) > 0.4) ctrlHuman.face = ctrlHuman.vz > 0 ? 1 : -1;
+      /* The turn beat for the controlled man too — same pivoting cutout. */
+      if (ctrlHuman.lastFace === undefined) ctrlHuman.lastFace = ctrlHuman.face;
+      if (ctrlHuman.face !== ctrlHuman.lastFace) { ctrlHuman.turnT = 1; ctrlHuman.lastFace = ctrlHuman.face; }
+      ctrlHuman.turnT = Math.max(0, (ctrlHuman.turnT ?? 0) - dt * 5);
       const sp2 = Math.hypot(ctrlHuman.vx, ctrlHuman.vz);
-      ctrlHuman.clipT += dt;
-      ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
-        : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
-          : sp2 > 0.7 ? 'jog' : 'ready';
+      /* Playtest 2: the human's legs ran at authored speed regardless of
+       * actual speed — the CPU picker already scales by sp/clipSpeed; the
+       * controlled player now does too (same reference speeds). */
+      const clipRef = sp2 > 6.2 ? 8.2 : ctrlHuman.carrier ? 6.4 : 4.4;
+      ctrlHuman.clipT += dt * (sp2 > 0.7 ? sp2 / clipRef : 1);
+      /* PLAYTEST 4: the tackle dive belongs to the human too — the tackle
+       * engine sets clip='dive' on the hit; the gait picker must not stomp
+       * it in the same beat. Half a second of committed dive, then the gait
+       * resumes (or the ruck role clip takes over, which blends anyway). */
+      if (!(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
+        ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
+          : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
+            : sp2 > 0.7 ? 'jog' : 'ready';
+      }
       if (sp2 > 7.0) ctrlHuman.stamina = clamp(ctrlHuman.stamina - dt * 4.4, 0, 100);
     }
 
@@ -1563,6 +1694,17 @@ export class Director {
       if (onAtk) {
         // carrier: driven by phase logic, not by shape
         if (this.op && p.num === this.op.carrierNum) { p.carrier = true; p.urgency = 0; continue; }
+
+        /* T-51 — HOLD THE PODS THROUGH THE RECYCLE BEAT. At the ruck win the
+         * fresh shape re-marked every attacker and the extras ran in-out all
+         * through the use-it window (the churn). For the first second of a
+         * ruck exit the support holds the marks it already has — the pod
+         * arrives as a pod. The nine-with-ball and a ball in flight are the
+         * exceptions above and below. */
+        if (this.op && this.op.podHold > 0) {
+          steer(p, dt, false);
+          continue;
+        }
 
         // The seven rides the carrier's hip and the eight trails — the offload
         // options — unless the shape needs them in a pod on the far side.
@@ -1904,11 +2046,12 @@ export class Director {
       t: 0, attacking: team, dir,
       carrierX: cx, carrierZ: cz, carrierNum: num,
       vx: 0, vz: dir * 4.2, protect,
+      podHold: protect > 0 ? Math.min(1.0, protect) : 0,
       supports: [], defenders: [],
       gained, toLine: Math.abs(dir * 50 - z), z, pressure: 0, phase,
       lineBreak: false,
       current: { label: '' },
-      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0, dive: 0,
+      burst: 0, burstCd: 0, stepCd: 0, fendCd: 0, dive: 0, kickCharge: 0, kickKind: '', speedDebt: 1,
       originZ: z, originX: x,
       /* T-18. The first decision comes after the carrier has actually taken the
        * ball to the line — not on the frame it arrived. `protect` is now opt-in
@@ -1920,7 +2063,7 @@ export class Director {
       heldT: 0,
       open,
       ball: { x, y: 1.05, z, vx: 0, vz: 0, live: false, t: 0 },
-      pendingReceiver: num, passT: 0,
+      pendingReceiver: num, passT: 0, passDist: 8,
     };    this.bd = undefined; this.ml = undefined;
     this.phase = 'OPEN_PLAY';
     this.setCtrl(team, num);
@@ -1957,10 +2100,17 @@ export class Director {
       } else if (this.isHuman(this.kk.kicker)) {
         this.setCtrl(this.kk.kicker, this.kk.chasers[0]?.num ?? this.kk.kickerNum);
       } else {
-        const lp = this.landingPrediction();
-        const t = lp ?? { x: this.kk.bx, z: this.kk.bz };
-        const rec = assignReceiver(this.live, this.receivingSide(), t.x, t.z);
-        if (rec) this.setCtrl(this.receivingSide(), rec.num);
+        /* Playtest P1.4: control must never land on the opposition. If the
+         * CPU kicked, the human receives and takes the fielder. If the
+         * HUMAN kicked, control stays with the human's lead chaser even
+         * when the CPU is better placed to field — the player never loses
+         * the side he is playing. */
+        if (this.isHuman(this.receivingSide())) {
+          const lp = this.landingPrediction();
+          const t = lp ?? { x: this.kk.bx, z: this.kk.bz };
+          const rec = assignReceiver(this.live, this.receivingSide(), t.x, t.z);
+          if (rec) this.setCtrl(this.receivingSide(), rec.num);
+        }
       }
       return;
     }
@@ -1992,7 +2142,7 @@ export class Director {
     this.passOpts = passOptions(car, this.live, this.op.open, false, wet);
   }
 
-  upOpen(dt: number, _input: Input, pressed: Set<string>) { /* T-03: engine/open */ return upOpen(this, dt, _input, pressed); }
+  upOpen(dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) { /* T-03: engine/open */ return upOpen(this, dt, _input, pressed, released); }
 
 
   contextLabel(s: OpenPlayState): string { /* T-03: engine/open */ return contextLabel(this, s); }
@@ -2051,6 +2201,7 @@ export class Director {
     );
     this.lastCall = chosen.call;
     this.lastCallZ = this.focusPoint().z;
+    this.lastCallX = this.focusPoint().x;
     this.cpuPlan = chosen.plan;
     this.op.aiPlay = chosen.call;
     this.say(`CALL — ${chosen.plan.label}`);
@@ -2133,8 +2284,14 @@ export class Director {
       t: 0, stage: 'ASSEMBLE', outcome: 'PENDING', feed,
       players: this.scrumSlots(feed, this.scrumAnchor.x, this.scrumAnchor.z),
       nine: [
-        { team: 'A', x: this.scrumAnchor.x + 2.1, z: this.scrumAnchor.z - 1.0 },
-        { team: 'B', x: this.scrumAnchor.x - 2.1, z: this.scrumAnchor.z + 1.0 },
+        /* PLAYTEST 4 — THE NINE STANDS AT THE BASE. The old marks (x+/-2.1,
+         * z-/+1.0) put each scrum-half INSIDE the put-in mouth — the user
+         * watched him "suddenly have the ball where he put it in". These are
+         * real base positions: a stride behind his own hindmost row (the
+         * rows end at back*1.94), on the axle. The OUT hand-off mark in
+         * setpieces matches these exactly. */
+        { team: 'A', x: this.scrumAnchor.x - 0.3, z: this.scrumAnchor.z - 2.95 },
+        { team: 'B', x: this.scrumAnchor.x + 0.3, z: this.scrumAnchor.z + 2.95 },
       ],
       ball: { x: 0, y: 0.16, z: 0, state: 'OUT' },
       packs: { A: mk('A'), B: mk('B') },
@@ -2536,6 +2693,7 @@ export class Director {
       const a = this.actors[i];
       a.rx = p.x; a.rz = p.z; a.rf = p.face;
       a.renderClip = p.clip; a.clipT = p.clipT; a.jitter = p.jitter;
+      a.turnT = p.turnT ?? 0;
       a.size = p.size;
       a.num = p.num; a.team = p.team;
       a.ring = p.controlled ? 1 : (this.passOpts.some((o) => o.player === p) ? 2 : 0);

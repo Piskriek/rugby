@@ -110,6 +110,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       // space is sprint while held and action on the edge
       const pressed = new Set<string>();
       for (const raw of keys.current) if (!prev.current.has(raw)) pressed.add(KEYMAP[raw] ?? raw);
+      /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
+      const released = new Set<string>();
+      for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
       inp.run = inp.sprint;
       prev.current = new Set(keys.current);
 
@@ -126,7 +129,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       if (pressed.has('replay')) { if (!d.phase.includes('REPLAY')) d.enterReplay('REPLAY'); }
 
       d.gameSpeed = slow;
-      d.update(dt, inp, pressed);
+      d.update(dt, inp, pressed, released);
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -192,18 +195,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       return `${d.bd.stage} — A / D POUND TO CLEAR OUT · SPACE COMMITS ONE MORE (${d.bd.commitA} IN)`;
     }
     if (d.phase === 'MAUL' && d.ml) return 'A / D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT';
-    if (d.phase === 'OPEN_PLAY' && d.op) {
-      if (ctrl && ctrl.team === d.op.attacking) {
-        const l = d.passOpts.find((o) => o.side === -1);
-        const r = d.passOpts.find((o) => o.side === 1);
-        return [
-          l ? `J→${l.player.num}` : null,
-          r ? `K→${r.player.num}` : null,
-          'L PUNT', 'H GRUBBER', 'P DROP', 'I CONTACT', 'F FEND', 'G STEP',
-        ].filter(Boolean).join('  ·  ');
-      }
-      return 'X DIVING TACKLE  ·  C SMOTHER  ·  Q SWITCH DEFENDER';
-    }
+    /* Playtest P1.12: the verb strip under the commentary is gone — the
+     * top-left CONTROLS widget is the one source of truth, and a second
+     * copy was just noise over the feed. */
     return '';
   };
 
@@ -366,7 +360,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>SPEED</span><span className="text-[#f4efe2]">{d.ml.speed.toFixed(2)} m/s</span></div>
           </Panel>
         )}
-        {d.phase === 'OPEN_PLAY' && d.op && density !== 'MINIMAL' && (
+        {d.phase === 'OPEN_PLAY' && d.op && density !== 'MINIMAL' && ctrlTeam(d) === d.op.attacking && (
           <Panel title="OPEN PLAY">
             <div className="h-2 w-full border border-[#3d4b66] bg-[#0a0e16]">
               <div className="h-full" style={{
@@ -633,7 +627,9 @@ function drawIndicators(ctx: CanvasRenderingContext2D, d: Director, v: { w: numb
   const cam = { ...d.cam, shake: 0 };
 
   // pass-target markers: you always know who you are passing to
-  if (d.phase === 'OPEN_PLAY' && d.passOpts.length && d.op && ctrlTeam(d) === d.op.attacking) {
+  // (playtest P3.9: only ever drawn on the HUMAN side's teammates)
+  if (d.phase === 'OPEN_PLAY' && d.passOpts.length && d.op && ctrlTeam(d) === d.op.attacking
+    && d.isHuman(d.op.attacking)) {
     for (const o of d.passOpts) {
       const p = project(cam, v, o.player.x, 0.02, o.player.z);
       if (!p) continue;
@@ -650,6 +646,37 @@ function drawIndicators(ctx: CanvasRenderingContext2D, d: Director, v: { w: numb
       ctx.fillStyle = '#6ee7a0';
       ctx.fillText(`${o.side < 0 ? 'J' : 'K'}${o.cutOut ? '·U/O' : ''} ${o.player.num}`, p.sx, p.sy - r * 0.9);
       ctx.textAlign = 'left';
+    }
+  }
+
+  /* Playtest P3.9: the Q-switch was invisible — three rings mark the
+   * defenders Q cycles through, the brightest on the one you control. */
+  if (d.phase === 'OPEN_PLAY' && d.op && d.op.attacking !== ctrlTeam(d)) {
+    const carP = d.live.find((q) => q.team === d.op!.attacking && q.num === d.op!.carrierNum);
+    if (carP) {
+      const cands = d.live
+        .filter((q) => q.team === ctrlTeam(d) && q.sinbin <= 0 && !q.down)
+        .sort((a, b) => Math.hypot(a.x - carP.x, a.z - carP.z) - Math.hypot(b.x - carP.x, b.z - carP.z))
+        .slice(0, 3);
+      for (const q of cands) {
+        const p = project(cam, v, q.x, 0.02, q.z);
+        if (!p) continue;
+        const mine = q === d.ctrlPlayer;
+        ctx.strokeStyle = mine ? '#6ee7a0' : 'rgba(110,231,160,0.45)';
+        ctx.lineWidth = mine ? 3 : 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.ellipse(p.sx, p.sy, Math.max(8, p.sc * 0.4), Math.max(3.2, p.sc * 0.16), 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (mine) {
+          ctx.font = '900 10px ui-sans-serif, system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#6ee7a0';
+          ctx.fillText('Q', p.sx, p.sy - Math.max(8, p.sc * 0.4) - 3);
+          ctx.textAlign = 'left';
+        }
+      }
     }
   }
 
@@ -720,6 +747,19 @@ function drawIndicators(ctx: CanvasRenderingContext2D, d: Director, v: { w: numb
       ctx.beginPath();
       ctx.ellipse(p.sx, p.sy, Math.max(9, p.sc * 0.44), Math.max(4, p.sc * 0.18), 0, 0, Math.PI * 2);
       ctx.stroke();
+      /* T-52 SPRINT METER — the tank lives under the ring, on the pitch,
+       * because that is where the player's eyes are when SHIFT runs dry.
+       * Hidden while full; colour walks green -> amber -> red as it drains. */
+      if (c.stamina < 99.5) {
+        const bw = Math.max(9, p.sc * 0.44) * 1.7;
+        const bx = p.sx - bw / 2;
+        const by = p.sy + Math.max(4, p.sc * 0.18) + 4;
+        ctx.fillStyle = 'rgba(12,14,20,0.78)';
+        ctx.fillRect(bx - 1, by - 1, bw + 2, 5);
+        const st = Math.max(0, Math.min(100, c.stamina)) / 100;
+        ctx.fillStyle = st > 0.5 ? '#6ee7a0' : st > 0.25 ? '#ffd76a' : '#ff6a5a';
+        ctx.fillRect(bx, by, bw * st, 3);
+      }
     }
   }
 }

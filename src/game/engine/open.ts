@@ -17,11 +17,11 @@ import { R } from './rng';
 import { steer } from '../intelligence';
 import { PlayCall } from '../shapes';
 import { REFEREE_CALLS } from '../data';
-import { wetnessOf, WEATHERS } from './weather';
+import { wetnessOf, windOf, WEATHERS } from './weather';
 import { approach } from './approach';
 import { clamp } from './clamp';
 
-export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<string>) {
+export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) {
 
   if (!d.op) { d.startOpen(d.possession, 0, -10); return; }
   const s = d.op;
@@ -34,7 +34,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * while it flies — the pass is a commitment. */
   if (s.ball.live) {
     const rec = d.L(s.attacking, s.pendingReceiver);
-    s.passT += dt * 2.6;
+    /* Playtest 3: a throw flies at ~13 m/s OVER ITS OWN LENGTH — a 6 m pop
+     * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
+     * made every pass feel like a teleport. */
+    s.passT += dt * (13 / s.passDist);
     /* T-40. The receiver runs onto the pass; the ball flies to where he is.
      * Nobody is snapped — the receiver was teleporting because the old code
      * set `rec.x/z = ball.x/z` on arrival while `think()` kept steering him
@@ -46,12 +49,21 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     rec.job = 'TAKE THE PASS';
     steer(rec, dt, true);
 
-    const k = 1 - Math.exp(-dt * 12);
-    s.ball.x += (rec.x - s.ball.x) * k;
-    s.ball.z += (rec.z - s.ball.z) * k;
+    /* PLAYTEST 4: THE FLASH. The old flight lerped the ball toward the
+     * receiver at an exponential rate — ~0.2 s flat, whatever the distance —
+     * so every pass read as a teleport. The ball now flies at its TRUE
+     * 13 m/s ground speed toward where the receiver actually is (a light
+     * track, no snap), the arc peaks on the expected arrival, and the catch
+     * is proximity. A 6 m pop takes 0.46 s; a 20 m cut-out 1.5 s — visible
+     * flights, at the dataset speed. */
+    const dx = rec.x - s.ball.x, dz = rec.z - s.ball.z;
+    const dd = Math.max(0.01, Math.hypot(dx, dz));
+    const step = Math.min(dd, 13 * dt);
+    s.ball.x += (dx / dd) * step;
+    s.ball.z += (dz / dd) * step;
     s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
-    const dist = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
-    if (dist < 0.55 || s.passT >= 1.1) {
+    const dist = dd;
+    if (dist <= Math.max(0.55, 13 * dt * 1.05) || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
       rec.carrier = true;
@@ -132,12 +144,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   d.run(s.attacking, s.carrierNum).metres += Math.max(0, car.vz * dt * s.dir);
 
   if (s.burst > 0) s.burst -= dt;
-  s.protect = Math.max(0, s.protect - dt);
+    s.protect = Math.max(0, s.protect - dt);
+    s.podHold = Math.max(0, s.podHold - dt);
   s.burstCd = Math.max(0, s.burstCd - dt);
   s.stepCd = Math.max(0, s.stepCd - dt);
   s.fendCd = Math.max(0, s.fendCd - dt);
 
   // ---- verbs. Sampled now, resolved now, never queued. ----
+  if (s.speedDebt < 1) s.speedDebt = Math.min(1, s.speedDebt + dt * 0.45);
   if (human) {
     // SPACE performs the context action when the player has asked for that
     if (pressed.has('action') && (d.options.spaceAction ?? 0) !== 0) { d.fireContext(); return; }
@@ -149,9 +163,36 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     if (pressed.has('passR')) { d.doPass(1, false); return; }
     if (pressed.has('cutL')) { d.doPass(-1, true); return; }
     if (pressed.has('cutR')) { d.doPass(1, true); return; }
-    if (pressed.has('kick')) { d.startKick(s.attacking, 'PUNT', { x: car.x, z: car.z }, s.carrierNum); return; }
-    if (pressed.has('grubber')) { d.startKick(s.attacking, 'GRUBBER', { x: car.x, z: car.z }, s.carrierNum); return; }
-    if (pressed.has('drop')) { d.startKick(s.attacking, 'DROP_GOAL', { x: car.x, z: car.z }, s.carrierNum); return; }
+    /* Playtest P1.4: RUN AND HOLD. The old press fired startKick straight
+     * into the AIM state, which froze the whole match while the meter ran —
+     * a punt from hand paused the game. Now the key HELDS: charge builds
+     * while you keep running, release strikes. Only tee kicks (GOAL,
+     * RESTART, DROP_OUT) keep the freeze-and-aim ritual. */
+    const kickKeys: Record<string, 'PUNT' | 'GRUBBER' | 'DROP_GOAL'> = {
+      kick: 'PUNT', grubber: 'GRUBBER', drop: 'DROP_GOAL',
+    };
+    if (s.kickCharge > 0) {
+      s.kickCharge = Math.min(1, s.kickCharge + dt / 1.6);
+      d.showHint(`${s.kickKind} CHARGING ${Math.round(s.kickCharge * 100)}% — RELEASE TO STRIKE`, 0.3);
+      let want = '';
+      for (const k of Object.keys(kickKeys)) if (released.has(k)) want = k;
+      if (want) {
+        if (kickKeys[want] !== s.kickKind) {
+          s.kickCharge = 0; s.kickKind = '';   // changed his mind mid-charge
+        } else {
+          const kind = s.kickKind;
+          const pow = Math.max(0.3, s.kickCharge);
+          s.kickCharge = 0; s.kickKind = '';
+          d.startKick(s.attacking, kind, { x: car.x, z: car.z }, s.carrierNum);
+          if (d.kk) d.launch(pow, d.kickerAccuracy(d.kk), windOf(d.options));
+          return;
+        }
+      }
+    } else {
+      for (const k of Object.keys(kickKeys)) {
+        if (pressed.has(k)) { s.kickCharge = 0.001; s.kickKind = kickKeys[k]; break; }
+      }
+    }
     if (pressed.has('contact')) { d.startBreakdown(); return; }
     if (pressed.has('switchPlayer')) d.cycleDefender();
   } else {
@@ -180,10 +221,30 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   // ---- defenders: honest contact radius, honest reaction ----
   const dTeam = d.defending();
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
+  /* PLAYTEST 3 / T-42 — THE RELEASE BEAT (consumer). breakdown.ts sets
+   * d.releaseBeat when the ball comes out (0.9 s). Until it expires, any
+   * defender inside two metres of the release line back-pedals instead of
+   * chasing: the use-it window belongs to the nine, and the pick-and-go
+   * stop-start no longer pulls the whole cluster onto the ball and snaps
+   * it back (the contract/expand pulse). The controlled shirt is exempt —
+   * the human owns his own retreat. 'release' is a sanctioned writer
+   * (intelligence.ts ownership check) and the branch CONTINUES, so steer()
+   * never fights it in the same frame. */
+  const rb = d.releaseBeat;
+  const beatOn = !!(rb && d.t < rb.until);
   const dists: { num: number; d: number }[] = [];
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);
     if (p.team !== dTeam || p.sinbin > 0) continue;
+    if (beatOn && p !== d.ctrlPlayer) {
+      const gap = (p.z - rb!.z) * rb!.dir;
+      if (gap < 2.0) {
+        p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;
+        p.movedBy = 'release';
+        p.job = 'RELEASE AND RETREAT';
+        continue;   // the retreat owns this frame — no steer on top
+      }
+    }
     const dd = Math.hypot(p.x - car.x, p.z - car.z);
     dists.push({ num: p.num, d: dd });
     // reaction per player, capped. Never scaled up to fake difficulty.
@@ -240,6 +301,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   }
 
   // ---- the human defender chooses his tackle ----
+  /* PLAYTEST 4: Q WORKS ON DEFENCE. It lived only in the attack branch, so
+   * the user was told "Q — change player" and it never fired while
+   * defending. Route it here first — a switch must not eat a tackle press. */
+  if (human && pressed.has('switchPlayer')) { d.cycleDefender(); return; }
   if (!human) { /* CPU tackles resolve below */ }
   else if ((pressed.has('tackleDive') || pressed.has('tackleSmother')) && s.protect <= 0) {
     const dive = pressed.has('tackleDive');
@@ -352,6 +417,8 @@ export function doStep(d: Director, dt: number) {
   const square = near ? Math.abs(near.x - car.x) < 2.5 : false;
   if (!square || dd > 2.6) { d.showHint('NO ROOM TO STEP — THE DEFENDER IS LATERAL', 1.6); return; }
   const chance = clamp(0.82 - dd * 0.07 + (car.attrs.SPD / 500), 0.15, 0.88);
+  /* Playtest P3.10: a step is a gamble — the beat is bought with pace. */
+  s.speedDebt = 0.72;
   if (R() < chance) {
     /* T-16/NO-TELEPORT. The step used to write `car.x ± 3.4` outright — an
      * instantaneous 3.4 m slide, over twice the teleport threshold. It is now
@@ -476,6 +543,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   s.ball.y = 1.05;
   s.pendingReceiver = opt.player.num;
   s.passT = 0;
+  s.passDist = Math.max(3.5, Math.hypot(opt.player.x - car.x, opt.player.z - car.z));
   if (cutOut) d.say(`CUT-OUT PASS TO ${d.L(s.attacking, opt.player.num).num}`);
 }
 
@@ -614,7 +682,11 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
       /* A cross-field call that never developed is not a carry — in the own
        * half the ten turns it around and finds touch, exactly as a real
        * side does when the move breaks down behind the gain line. */
-      if (!legal && call === 'CROSS_FIELD' && ownHalf) { intent = 'KICK'; s.aiPlay = 'TERRITORY_PUNT'; d.lastCall = 'TERRITORY_PUNT'; }
+      /* An illegal cross-field in the OWN half is not a second kick — the
+       * exit principle (T-13) takes 1-2 carries before the ball goes to
+       * boot. Degrade to the carry game; the kicker keeps his role for a
+       * legal call in the opponent half. */
+      if (!legal && call === 'CROSS_FIELD' && ownHalf) { intent = 'CARRY'; s.aiPlay = 'POD_CARRY'; d.lastCall = 'POD_CARRY'; }
       else if (!legal) intent = s.pressure > 0.82 ? 'CONTACT' : 'CARRY';
     }
     /* T-18. A drop goal is the stuck-attack release or the dying-seconds

@@ -13,11 +13,14 @@ import { CHASE_ORDER, CHASE_LANES } from '../shapes';
 import { assignReceiver } from '../intelligence';
 import { clamp } from './clamp';
 
-export function upKick(d: Director, dt: number, input: Input, _pressed: Set<string>) {
+export function upKick(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
   const s = d.kk!;
   s.t += dt;
   const human = d.isHuman(s.kicker);
+  /* PLAYTEST 4: Q on defence during the kick too — chasing coverage and
+   * receiver control were dead zones for the defender switch. */
+  if (!human && pressed.has('switchPlayer')) { d.cycleDefender(); return; }
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
   const wind = windOf(d.options);
 
@@ -27,7 +30,17 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
     /* W-011: a corner try's conversion waits for the TMO review — the
      * celebration and the check share the fanfare window (4.2 s, still
      * well inside the KICK phase limit). */
-    if (s.t > (d.tmo ? 4.2 : 2.2)) { s.stage = 'WALKUP'; s.t = 0; d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`); }
+    if (s.t > (d.tmo ? 4.2 : 2.2)) {
+      s.stage = 'WALKUP'; s.t = 0;
+      d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`);
+      /* Playtest P1.3: the scorer "popped up" — the dive clip ended and the
+       * ritual stood him upright in one frame. He gets a beat on the turf
+       * (grounded) first; the prepping hold releases him at the tee. */
+      if (d.lastScorer) {
+        const scorer = d.live.find((q) => q.team === d.lastScorer!.team && q.num === d.lastScorer!.num);
+        if (scorer && scorer.clip === 'dive') { scorer.clip = 'grounded'; scorer.clipT = 0; }
+      }
+    }
     return;
   }
   if (s.stage === 'WALKUP') {
@@ -40,6 +53,11 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
      * keeps steering him the last metres to the mark. */
     if (atTee || s.t > 5.0) {
       s.stage = 'AIM'; s.t = 0;
+      /* The scorer rises here — the tee is reached, the reverence is done. */
+      if (d.lastScorer) {
+        const scorer = d.live.find((q) => q.team === d.lastScorer!.team && q.num === d.lastScorer!.num);
+        if (scorer && scorer.clip === 'grounded' && !scorer.down) { scorer.clip = 'ready'; scorer.clipT = 0; }
+      }
       if (human) d.showHint('A/D AIM · HOLD SPACE TO KICK', 3);
       return;
     }
@@ -54,8 +72,11 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
        * Accuracy is NOT a second timing minigame — it comes from the kicker's
        * rating, the wind and the wet, which is what actually decides a kick.
        * Charge takes 1.6 s for the full range, roughly half the old speed. */
-      if (input.left) s.aim = clamp(s.aim - dt * 0.85, -1, 1);
-      if (input.right) s.aim = clamp(s.aim + dt * 0.85, -1, 1);
+      /* Playtest P1.3: +-1 was a tenth of the CPU's range — a corner
+       * conversion physically could not be aimed at the posts. The CPU
+       * aims +-6.6; so does the human now. */
+      if (input.left) s.aim = clamp(s.aim - dt * 1.1, -6.6, 6.6);
+      if (input.right) s.aim = clamp(s.aim + dt * 1.1, -6.6, 6.6);
 
       const holding = input.sprint || input.run;
       if (holding) {
@@ -63,15 +84,38 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
         s.meter = clamp(s.meter + dt / 1.6, 0, 1);
         s.power = s.meter;
       } else if (s.stage === 'METER' && s.power > 0.04) {
+        /* Playtest P2.7: the human could strike a restart before anyone was
+         * back on side — the CPU waits for the gapOk gate, the human must
+         * too. An early release is IGNORED (the charge keeps building; the
+         * whistle comes when the ten is clear). */
+        if (s.type === 'RESTART' || s.type === 'DROP_OUT') {
+          let nearest = 99;
+          for (const p of d.live) {
+            if (p.team === s.kicker || p.sinbin > 0) continue;
+            const gap = (p.z - s.bz) * s.dir;
+            if (gap < nearest) nearest = gap;
+          }
+          if (nearest < 9.5 || (s.formReady ?? 1) < 0.85) {
+            d.showHint('NOT BACK TEN — THEY ARE NOT READY', 1.2);
+            s.stage = 'AIM'; s.power = 0; s.meter = 0;
+            return;
+          }
+        }
         // released — strike it
         s.accuracy = d.kickerAccuracy(s);
         d.launch(s.power, s.accuracy, wind);
         return;
       }
-      // The aim line is the honest prediction of where it lands.
+      /* The aim line is the honest prediction of where it lands — the SAME
+       * trigonometry launch uses (aim is degrees x10; the old linear
+       * aim*0.55*reach lied by up to 3x and kickoffs flew nowhere near the
+       * drawn line — playtest 3). */
       const reach = d.kickReach(s, s.power);
-      s.landX = clamp(s.bx + s.aim * reach * 0.55, -34, 34);
-      s.landZ = clamp(s.bz + s.dir * reach, -60, 60);
+      s.landX = clamp(s.bx + Math.sin((s.aim * 10 * Math.PI) / 180) * reach, -34, 34);
+      s.landZ = clamp(s.bz + Math.cos((s.aim * 10 * Math.PI) / 180) * reach * s.dir, -60, 60);
+      /* A human taking his time over a tee kick is not a freeze: his input
+       * feeds the watchdog like any live action. */
+      if (input.left || input.right || input.sprint || input.run) d.phaseAge = Math.min(d.phaseAge, 5);
     } else {
       /* T-18. CPU aim is chosen by what the kick is FOR. A territory punt or
        * a box kick hunts the touchline (that is the entire point of the
@@ -108,7 +152,35 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
          * restarts died over the dead-ball line (touch-down, drop-out, the
          * camera chasing the ball to the fence). A real restart targets
          * 25-35 m of travel and catches the chaser. */
-        case 'RESTART': case 'DROP_OUT': aimTo = (R() - 0.5) * 0.5; powerTo = 0.52 + R() * 0.18; break;
+        /* T-50 RESTART VARIETY, AMENDED (playtest 4): the SHORT profile let
+         * the kicker arrive under his own bomb — the ball flew 15-19 m at
+         * 3.4 s hang, a sprinter covers that with a second to spare. All
+         * profiles now out-run the kicker: DEEP targets 26-36 m at 2.6 s
+         * (10-13.8 m/s against a ~8.4 m/s chase), SQUIB 27-32 m at 1.9 s.
+         * Both stay UNDER the T-31b dead-ball ceiling. Variety survives in
+         * the hang and the contest intent, not in self-catchable lengths. */
+        case 'RESTART': case 'DROP_OUT': {
+          aimTo = (R() - 0.5) * 0.5;
+          const opp: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
+          const diff2 = d.teams[s.kicker].score - d.teams[opp].score;
+          const left = Math.max(0, d.halfLength + d.addedTime - d.clock);
+          const late = left < (d.halfLength + d.addedTime) * 0.28;
+          const r = R();
+          if (diff2 < 0 && late) {
+            // need the ball back: chase hard
+            if (r < 0.55) { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
+            else { powerTo = 0.58 + R() * 0.14; }   // 2.9 s default hang — the chasers' 2.9 s
+          } else if (diff2 > 0) {
+            // protecting a lead: mostly deep, some messy
+            if (r < 0.65) { powerTo = 0.58 + R() * 0.14; }
+            else { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
+          } else {
+            // level: deep with squib seasoning
+            if (r < 0.7) { powerTo = 0.58 + R() * 0.14; }
+            else { s.hangOv = 1.9; powerTo = 0.56 + R() * 0.10; }
+          }
+          break;
+        }
         default:
           // PUNT from hand. Roughly half of territory kicks hunt touch (that
           // is the point of the kick, and the only source of lineouts); the
@@ -143,16 +215,19 @@ export function upKick(d: Director, dt: number, input: Input, _pressed: Set<stri
             const deg = Math.min(80, (Math.atan2(lateral, fwdForAim) * 180) / Math.PI);
             aimTo = wide * (deg / 10);
           } else if (s.bz * s.dir < 0 || Math.abs(s.bz) < 20) {
-            if (R() < 0.4) {
-              /* Find touch GEOMETRICALLY: aim at a point past the nearest
-               * touchline, with the power to reach it. The aim field is
-               * degrees/10 of kick-path rotation, so the required angle
-               * comes straight off the triangle. */
-              const reach = d.kickReach(s, 0.95);
-              const lateralNeeded = Math.max(6, 34.6 - s.bx * wide + 5);
-              const deg = Math.min(50, (Math.atan2(lateralNeeded, reach * 0.8) * 180) / Math.PI);
+            /* T-18 re-balance: the touch hunt was drawn on 0.8x reach, so
+             * the ball crossed ~31 m of the 34.6 m to the line — three
+             * metres IN, where the honest post-bounce roll (steepness
+             * scaled) let it die instead of carrying it out. Lineouts
+             * starved. The angle now comes off the FULL reach with the
+             * power to match: the aimed line passes through touch, and
+             * accuracy decides the margin — which is what a finder is. */
+            if (R() < 0.5) {
+              const reach = d.kickReach(s, 1);
+              const lateralNeeded = Math.max(6, 34.6 - s.bx * wide + 2.5);
+              const deg = Math.min(52, (Math.atan2(lateralNeeded, reach) * 180) / Math.PI);
               aimTo = wide * (deg / 10);
-              powerTo = 0.88 + R() * 0.12;
+              powerTo = 0.94 + R() * 0.08;
             } else {
               aimTo = (R() - 0.5) * 0.5;
               powerTo = 0.4 + R() * 0.2;
@@ -355,12 +430,12 @@ export function launch(d: Director, power: number, accuracy: number, wind: numbe
    * the posts for anything beyond 30 m: it failed the crossing test
    * silently, no SCORE, no MISS, and the kick just died into open play.
    * CPU teams were taking ~23 shots a match and scoring 6% of them. */
-  const hang = s.type === 'GRUBBER' ? 1.0
+  const hang = s.hangOv ?? (s.type === 'GRUBBER' ? 1.0
     : s.type === 'DROP_GOAL' ? 2.6
       : s.type === 'GOAL' ? 2.9
         : s.type === 'BOMB' ? 3.4
           : s.type === 'RESTART' || s.type === 'DROP_OUT' ? 2.9
-            : 2.0;   // punt — a flat, chasing territory kick
+            : 2.0);   // punt — a flat, chasing territory kick
 
   const speed = dist / Math.max(0.6, hang);
   const spread = (1 - acc) * 9 + wind * 6;

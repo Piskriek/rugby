@@ -4,17 +4,156 @@
  */
 import { Director, Actor } from '../game/director';
 import {
-  drawStadium, project, ball, PALETTES, SKINS, HAIRS,
+  drawStadium, project,
   drawGoalPosts, HOME_POST_Z, Camera, View,
 } from './retro';
-import { C_CLIPS, sampleC, drawCoronal, CPose } from './coronal';
-import { drawFlatPaper, isSideOnCam } from './paper';
+/* THE PAPERCRAFT ANIMATION SYSTEM (animationBuild handoff, verbatim files).
+ * Poses/clips: clips.ts. Puppets: coronal.ts. Material/views/characters:
+ * paper.ts. The engine keeps its own clip vocabulary; mapAction() below is
+ * the single translation point. */
+import { Pose, STAND, sampleC, lerpPose, smooth, actionClip, CLIPS } from './clips';
+import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
+import {
+  PALETTES, PaperView, Character, makeCharacter, makeRef,
+  paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
+} from './paper';
 
-function poseFor(clip: string, t: number): CPose {
-  const c = C_CLIPS[clip] ?? C_CLIPS.idle;
-  return sampleC(c, t);
+/** Screen-right vector of the camera in world terms (handoff section 5). */
+function camRightOf(cam: Camera): [number, number] {
+  return [Math.cos(cam.yaw), -Math.sin(cam.yaw)];
 }
 
+/* ============================ THE PUPPET PIPELINE ============================
+ * Per-actor, per-frame: engine clip vocabulary -> action -> clip -> pose, with
+ * seamless blends (animationBuild handoff section 4.1). State lives here, keyed
+ * by team+num; the engine stays untouched. */
+interface Puppet {
+  clipName: string; u: number;
+  pose: Pose; blendFrom: Pose | null; blendT: number; blendDur: number;
+  face: number;                 // true heading, radians (derived from velocity)
+  lx: number; lz: number;       // last position — velocity is derived per frame
+  spd: number;
+  hold: string | null;          // forced action (get-up) with a cycle countdown
+  holdT: number;
+  lie: boolean;                 // sequenced into the lying hold
+  ch: Character; seed: number;
+}
+const puppets = new Map<string, Puppet>();
+let lastDirector: Director | null = null;
+
+const clamp01p = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/** Engine clip vocabulary -> the system's action strings. */
+function mapAction(clip: string): string {
+  switch (clip) {
+    case 'ready': case 'nineSquat': case 'refReady': return 'idle';
+    case 'jog': return 'jog';
+    case 'sprint': return 'sprint';
+    case 'carry': return 'run';
+    case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
+    case 'catchHigh': case 'lineoutCatch': return 'catch';
+    case 'kick': return 'kick';
+    case 'tackle': return 'tackle';
+    case 'grounded': return 'tackled';
+    case 'dive': return 'dive';
+    case 'jackal': return 'jackal';
+    case 'cleanout': return 'ruck';
+    case 'maulBind': case 'maulDrive': return 'maul';
+    case 'scrumCrouch': case 'scrumBind': return 'scrumBind';
+    case 'scrumDrive': return 'scrumShove';
+    case 'lineoutJump': return 'jump';
+    case 'lineoutLift': return 'lift';
+    case 'refSignal': return 'idle';
+    default: return 'idle';
+  }
+}
+
+function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | null): Puppet {
+  /* New match (or new Director) — reset every puppet and every paper view. */
+  if (lastDirector !== d) { lastDirector = d; puppets.clear(); resetPaperViews(); }
+  const key = paperViewKey(a.team, a.num);
+  let pg = puppets.get(key);
+  if (!pg) {
+    pg = {
+      clipName: '', u: 0, pose: { ...STAND }, blendFrom: null, blendT: 0, blendDur: 0.16,
+      face: a.rf > 0 ? 0 : Math.PI, lx: a.rx, lz: a.rz, spd: 0,
+      hold: null, holdT: 0, lie: false,
+      ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
+      seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
+    };
+    puppets.set(key, pg);
+  }
+  /* velocity + true heading from the streamed positions */
+  const vx = (a.rx - pg.lx) / Math.max(dt, 1e-4);
+  const vz = (a.rz - pg.lz) / Math.max(dt, 1e-4);
+  pg.lx = a.rx; pg.lz = a.rz;
+  pg.spd = Math.hypot(vx, vz);
+  /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
+   * stationary man LOOKS AT THE BALL. The old velocity-only heading had
+   * support runners strolling back to marks staring straight at the camera
+   * ("my players are mostly facing me") and defenders square-on to their own
+   * jog instead of the play. */
+  if (pg.spd > 2.2) {
+    let target = Math.atan2(vx, vz);
+    let dy = target - pg.face;
+    while (dy > Math.PI) dy -= Math.PI * 2;
+    while (dy < -Math.PI) dy += Math.PI * 2;
+    pg.face += dy * (1 - Math.exp(-dt * 10));
+  } else if (look) {
+    let target = Math.atan2(look[0] - a.rx, look[1] - a.rz);
+    let dy = target - pg.face;
+    while (dy > Math.PI) dy -= Math.PI * 2;
+    while (dy < -Math.PI) dy += Math.PI * 2;
+    pg.face += dy * (1 - Math.exp(-dt * 6));
+  }
+
+  /* action sequencing: tackles and dives play once, then hold the lying
+   * cycle; getting up plays the unwind once before the gait takes over. */
+  let action = mapAction(a.renderClip);
+  if ((action === 'tackled' || action === 'dive') && pg.u * CLIPS[action === 'dive' ? 'diveFront' : 'tackled'].dur >= 1) {
+    action = 'lieF'; pg.lie = true;
+  }
+  if (pg.lie && action !== 'lieF' && action !== 'tackled' && action !== 'dive') {
+    /* the engine stood him up — play the unwind, then the new action */
+    pg.hold = 'getupF'; pg.holdT = 1 / 0.95; pg.lie = false;
+  }
+  if (pg.hold) {
+    action = pg.hold;
+    pg.holdT -= dt;
+    if (pg.holdT <= 0) pg.hold = null;
+  }
+
+  /* Gait normalisation by REAL speed — and the STRAFE ROUTE: movement at an
+   * angle to the facing at low speed is a side-shuffle, NOT a walk. This is
+   * what kills the long-strides-at-crawling-pace read the user flagged. */
+  let lat: number | undefined;
+  if (action === 'jog' || action === 'sprint' || action === 'run') {
+    const cf = Math.cos(pg.face), sf = Math.sin(pg.face);
+    lat = vx * cf - vz * sf;
+    if (pg.spd < 3.6 && Math.abs(lat) > 0.9) action = 'shuffle';
+    else {
+      action = pg.spd < 0.7 ? 'idle' : pg.spd < 1.6 ? 'walk' : pg.spd < 3.6 ? 'jog' : pg.spd < 6.2 ? 'run' : 'sprint';
+      lat = undefined;
+    }
+  }
+  const choice = actionClip(action, pg.spd, lat);
+  if (choice.name !== pg.clipName) {
+    pg.blendFrom = { ...pg.pose };
+    pg.blendT = 0;
+    pg.blendDur = CLIPS[choice.name].loop ? 0.16 : 0.12;
+    pg.clipName = choice.name;
+    pg.u = 0;
+  }
+  pg.u += choice.rate * dt;
+  const sampled = sampleC(pg.clipName, pg.u);
+  if (pg.blendFrom && pg.blendT < pg.blendDur) {
+    pg.blendT += dt;
+    pg.pose = lerpPose(pg.blendFrom, sampled, smooth(clamp01p(pg.blendT / pg.blendDur)));
+  } else { pg.blendFrom = null; pg.pose = sampled; }
+  return pg;
+}
+
+<<<<<<< ours
 const CLIP_MAP: Record<string, string> = {
   idle: 'idle', jog: 'jog', sprint: 'sprint', carry: 'carry',
   lineoutStand: 'ready', lineoutPreGrip: 'ready',
@@ -30,8 +169,11 @@ const CLIP_MAP: Record<string, string> = {
   kickStep: 'kick', refReady: 'refReady', refSignal: 'refSignal',
 };
 function mapClip(name: string): string { return CLIP_MAP[name] ?? 'idle'; }
+=======
+>>>>>>> theirs
 
 export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
+  const ddt = 1 / 60;   // the puppet pipeline only needs a stable beat for velocity
   const cam = d.cam;
   const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
   const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
@@ -40,10 +182,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   drawStadium(ctx, cam2, v, d.t, d.pitch);
   drawGoalPosts(ctx, cam2, v, -HOME_POST_Z, false);
 
-  /* Facing is judged against the camera's own forward vector, not against the
-   * pitch axis, so the read stays correct whatever angle the rig is on. */
-  const cf = { x: Math.sin(cam.yaw), z: Math.cos(cam.yaw) };
-  const seesBack = (a: Actor): boolean => (0 * cf.x + a.rf * cf.z) > 0;
+  /* Facing-vs-camera is now the paper-view system's job (per-actor). */
 
   /* --- ball --- */
   let ballWorld: { x: number; y: number; z: number; spin: number; visible: boolean } = { x: 0, y: 0, z: 0, spin: 0, visible: false };
@@ -63,7 +202,13 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     if (o.ball.live) {
       ballWorld = { x: o.ball.x, y: o.ball.y, z: o.ball.z, spin: o.t * 5, visible: true };
     } else {
-      ballWorld = { x: o.carrierX + 0.3, y: 1.05, z: o.carrierZ, spin: o.t * 1.6, visible: true };
+      /* held ball rides at the chest of the carrier's true heading so the
+       * paper layers occlude it correctly (handoff 8.1) */
+      const ck = paperViewKey(o.attacking, o.carrierNum);
+      const cp = puppets.get(ck);
+      const hx = cp ? Math.sin(cp.face) * 0.26 : 0.3;
+      const hz = cp ? Math.cos(cp.face) * 0.26 : 0;
+      ballWorld = { x: o.carrierX + hx, y: 1.14, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
     }
   } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
     const m = d.ml;
@@ -87,44 +232,38 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   type Item = { f: number; draw: () => void };
   const items: Item[] = [];
 
+  /* PLAYTEST 3 / ANIMATION HANDOFF — per-actor paper views, true profiles,
+   * fall rotation, stride-locked gaits. spinDir/gs/fore/headDir are the
+   * screen-direction helpers from the handoff (section 5). */
+  const gs = Math.min(0.95, Math.max(0.42, Math.sin(cam.tilt) * 1.15));
+  const cr = camRightOf(cam);
   for (const a of d.actors) {
-    const p = project(cam2, v, a.rx, 0, a.rz, jx, jy);
-    if (!p) continue;
-    if (p.sx < -260 || p.sx > v.w + 260 || p.sy < -320 || p.sy > v.h + 320) continue;
-    const mapped = mapClip(a.renderClip);
-    const pal = a.team === 'REF' ? PALETTES.REF : PALETTES[a.team];
-    const skin = SKINS[(a.num * 5 + (a.team === 'B' ? 2 : 0)) % SKINS.length];
-    const hair = HAIRS[(a.num * 3 + (a.team === 'B' ? 1 : 0)) % HAIRS.length];
-    const sideOn = isSideOnCam(cam.yaw) && a.team !== 'REF';
-    const lying = mapped === 'grounded';
-    items.push({
-      f: p.f,
-      draw: () => {
-        const pose = poseFor(mapped, a.clipT + a.jitter);
-        const clarity = 1 - Math.min(0.6, Math.max(0, (p.f - 22) / 95));
-        if (lying) {
-          // The paper falls flat on the turf — a horizontal body, not a crouch.
-          drawFlatPaper(ctx, {
-            sx: p.sx, sy: p.sy, scale: p.sc * a.size, pal,
-            skin, hair, number: a.num,
-            fromBehind: seesBack(a),
-            cap: a.num <= 3 && a.team !== 'REF',
-            clarity,
-          });
-          return;
-        }
-        drawCoronal(ctx, {
-          sx: p.sx, sy: p.sy, scale: p.sc * a.size, pose,
-          kit: pal.kit, kitDark: pal.kitDark, kitLight: pal.kitLight,
-          trim: pal.trim, shorts: pal.shorts, socks: pal.socks,
-          skin, hair, number: a.num,
-          fromBehind: seesBack(a),
-          cap: a.num <= 3 && a.team !== 'REF',
-          clarity,
-          sideOn,
-        });
-      },
-    });
+    const pg = puppetFor(d, a, ddt, ballWorld.visible ? [ballWorld.x, ballWorld.z] : null);
+    const pr = project(cam2, v, a.rx, 0, a.rz, jx, jy);
+    if (!pr || pr.sc < 1.2) continue;
+    if (pr.sx < -260 || pr.sx > v.w + 260 || pr.sy < -320 || pr.sy > v.h + 320) continue;
+    const fx = Math.sin(pg.face), fz = Math.cos(pg.face);
+    let view: PaperView;
+    if (pg.lie) {
+      view = 'lieFaceDown';
+    } else {
+      view = updatePaperView(paperViewKey(a.team, a.num), fx, fz, a.rx, a.rz, cam.x, cam.z);
+    }
+    const dot = fx * cr[0] + fz * cr[1];
+    const sdir = dot >= 0 ? 1 : -1;
+    const perp = Math.abs(dot);
+    const carried = !!d.op && !d.op.ball.live && a.team === d.op.attacking && a.num === d.op.carrierNum;
+    const args: PaperDrawArgs = {
+      ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose: pg.pose,
+      pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
+      num: pg.ch.num, seed: pg.seed,
+      carry: carried ? 1 : 0,
+      carryStyle: Math.min(1, Math.max(0, (pg.spd - 3) / 4)),
+      ballSide: pg.pose.ballSide, ballSpin: ballWorld.spin,
+      cap: pg.ch.cap, tape: pg.ch.tape,
+      spinDir: sdir, gs, fore: 0.45 + 0.55 * perp, headDir: sdir || 1, depth: pr.f,
+    };
+    items.push({ f: pr.f, draw: () => { drawPaperShadow(args); drawPaperActor(args); } });
   }
 
   if (ballWorld.visible) {
@@ -134,12 +273,8 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
       items.push({
         f: p.f - 0.01,
         draw: () => {
-          if (sh) {
-            ctx.globalAlpha = 0.22;
-            ctx.beginPath(); ctx.ellipse(sh.sx, sh.sy, p.sc * 0.16, p.sc * 0.06, 0, 0, Math.PI * 2);
-            ctx.fillStyle = '#0d1408'; ctx.fill(); ctx.globalAlpha = 1;
-          }
-          ball(ctx, p.sx, p.sy, Math.max(3, p.sc * 0.11), ballWorld.spin);
+          if (sh) shadowBlob(ctx, sh.sx, sh.sy, p.sc * 0.16, p.sc * 0.06, 0.25);
+          ballPaper(ctx, p.sx, p.sy, Math.max(3, p.sc * 0.11), ballWorld.spin);
         },
       });
     }
@@ -169,13 +304,8 @@ function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View
     ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
     ctx.setLineDash([]);
   }
-  const c0 = project(cam, v, s.carrierX, 2.4, s.carrierZ, jx, jy);
-  const c1 = project(cam, v, s.carrierX, 2.4, s.carrierZ + s.dir * 4, jx, jy);
-  if (c0 && c1) {
-    ctx.strokeStyle = '#6ee7a0'; ctx.lineWidth = 5; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(c0.sx, c0.sy); ctx.lineTo(c1.sx, c1.sy); ctx.stroke();
-    ctx.beginPath(); ctx.arc(c1.sx, c1.sy, 6, 0, Math.PI * 2); ctx.fillStyle = '#6ee7a0'; ctx.fill();
-  }
+  /* (The green carrier-direction stake is GONE — playtest 4: remove the
+   * open-play line with the dot at the end. The gain line stays.) */
   const cp = project(cam, v, s.carrierX, 0, s.carrierZ, jx, jy);
   if (cp) {
     const zone = zoneLabel(s.z, s.dir);
@@ -379,14 +509,18 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
       } else {
         worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'A/D - CLEAROUT', '#6ee7a0', jx, jy);
       }
-      // The countdown itself, large and banded.
-      ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
-      ctx.strokeText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
-      ctx.fillStyle = band;
-      ctx.fillText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
-      ctx.textAlign = 'left';
+      /* Playtest 2: the big number is the TIME TO PASS — it belongs to the
+       * secured ball (RECYCLE window), not the shove. Over the fight it just
+       * covered the two men on the ground. */
+      if (s.stage === 'RECYCLE') {
+        ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
+        ctx.strokeText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+        ctx.fillStyle = band;
+        ctx.fillText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+        ctx.textAlign = 'left';
+      }
       const gain = s.gainLine;
       worldLabel(ctx, cam, v, s.contactX, 3.1, s.contactZ,
         `${gain >= 0 ? '+' : ''}${gain.toFixed(1)} m · PHASE ${s.phase}`, '#f4efe2', jx, jy);

@@ -18,6 +18,8 @@
 import { ROLE_CONTRACTS, contractFor, PhaseName } from './jlr';
 
 export interface Live {
+  /* Playtest 2: the turn beat (the cutout pivots through edge-on) */
+  lastFace?: number; turnT?: number;
   team: 'A' | 'B';
   num: number;
   x: number; z: number;
@@ -78,7 +80,9 @@ export function maxSpeed(p: Live, carrying: boolean, sprint: boolean, fatigue: n
    * and acceleration. Nobody runs a flat, shared pace. */
   const base = 2.9 + (p.attrs.SPD / 100) * 5.0;
   const carryPenalty = carrying ? 0.45 + (100 - p.attrs.SKL) * 0.006 : 0;
-  const sprintMul = sprint ? 1.24 : 1.0;
+  /* Playtest P1.4/P3.10: at x1.24 sprint read as "no sprint button". x1.32
+   * keeps the prop/wing spread and makes the hold worth the stamina. */
+  const sprintMul = sprint ? 1.32 : 1.0;
   const sizeMul = 1.03 - (p.size ?? 1) * 0.03;
   const tired = 1 - clamp(1 - fatigue / 100, 0, 1) * 0.22;
   return Math.max(3.4, base - carryPenalty) * sprintMul * sizeMul * tired;
@@ -127,7 +131,8 @@ export function steer(p: Live, dt: number, sprint: boolean) {
    * different: it sets position outright, and steering on top of one is the
    * same-frame double-move that used to read as teleporting. Warn on that. */
   if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer'
-    && p.movedBy !== 'carrier' && p.movedBy !== 'input') {
+    && p.movedBy !== 'carrier' && p.movedBy !== 'input'
+    && p.movedBy !== 'release') {   // playtest 3: the release-and-retreat beat is a sanctioned retarget
     console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then steer() again in one frame`);
   }
   p.movedBy = 'steer';
@@ -155,9 +160,19 @@ export function steer(p: Live, dt: number, sprint: boolean) {
     else clip = 'jog';
   }
   // The speed each clip was authored to look correct at.
-  if (clip === 'sprint') clipSpeed = 8.2;
-  else if (clip === 'jog') clipSpeed = 4.4;
-  else if (clip === 'carry') clipSpeed = 6.4;
+  /* Playtest 2: reference speeds lowered ~12% — the cycles now churn a
+   * touch faster than strict ground-lock, which reads as effort (the old
+   * exact lock read as gliding). */
+  if (clip === 'sprint') clipSpeed = 7.2;
+  else if (clip === 'jog') clipSpeed = 3.9;
+  else if (clip === 'carry') clipSpeed = 5.6;
+
+  /* THE TURN BEAT. A face flip is the cutout pivoting — it passes through
+   * edge-on. One field, decays in a fifth of a second; the drawer squashes
+   * the paper width by up to 42% at the flip. */
+  if (p.lastFace === undefined) p.lastFace = p.face;
+  if (p.face !== p.lastFace) { p.turnT = 1; p.lastFace = p.face; }
+  p.turnT = Math.max(0, (p.turnT ?? 0) - dt * 5);
 
   if (p.clip !== clip) { p.clip = clip; p.clipT = 0; }   // one-shots start clean
   p.clipT += dt * (clipSpeed > 0 ? sp / clipSpeed : 1);

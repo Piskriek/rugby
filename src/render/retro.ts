@@ -37,7 +37,10 @@ export function project(cam: Camera, v: View, wx: number, wy: number, wz: number
   const rel = wy - cam.h;
   const st = Math.sin(cam.tilt), ct = Math.cos(cam.tilt);
   const depth = fwd * ct - rel * st;
-  if (depth < 0.6) return null;
+  /* T-55: the near plane sits at 0.6 m so a dolly-first zoom (the rig now
+   * physically closes on the contest) can push pitch geometry through the
+   * lens and clip it mid-polygon. 0.25 m keeps the cut off the grass. */
+  if (depth < 0.25) return null;
   const up = rel * ct + fwd * st;
   const focal = (v.h * 0.5) / Math.tan(cam.fov * 0.5);
   const sc = focal / depth;
