@@ -44,6 +44,8 @@ import type {
   ForwardAttackGateFailure, ForwardAttackGateReporter, ForwardAttackGateValue,
   ForwardAttackPlayerField,
 } from './forwardAttackGates';
+import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START } from './maulRegate';
+import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
@@ -211,14 +213,30 @@ export interface OpenPlayState {
 
 export interface MaulState {
   t: number;
-  stage: 'ENGAGE' | 'DRIVE' | 'STALL' | 'OVER';
+  /** The active, non-terminal state; the seven terminal paths live in `exit`. */
+  stage: 'RE_GATE' | 'ATTACK_CONTROL' | 'DEFENCE_HOLD' | 'EXIT' | 'OVER';
   x: number; z: number; dir: number; yaw: number;
   forceA: number; forceD: number;
   ballRank: number; ranks: number;
   speed: number; gained: number;
   stallClock: number; stoppedOnce: boolean; useItCalled: boolean; warned: boolean;
   tryLineZ: number; attacking: 'A' | 'B';
-  committed: number; transferCd: number;
+  committed: number;
+  /** Exactly one human side enables the four-window pure re-gate. */
+  humanTeam: 'A' | 'B' | null;
+  contest: MaulContestControl;
+  regateWindowT: number;
+  regateCandidate: MaulCommit | null;
+  regateWindows: MaulCommit[];
+  humanWinShare: number | null;
+  humanWon: boolean | null;
+  /** A write-once terminal route; it prevents a second hand-off in the same maul. */
+  exit: MaulExitState;
+  exitT: number;
+  exitRunner: number;
+  exitLane: 'LEFT' | 'RIGHT' | null;
+  exitX: number;
+  exitZ: number;
   /** T-18: formed off a lineout take — the pack drives as one */
   fromLineout: boolean;
 }
@@ -496,7 +514,7 @@ export class Director {
       return 'THE BALL IS IN THE AIR — CONTEST IT';
     }
     if (this.bd) return `${this.bd.stage} — A / D POUND TO CLEAR OUT · SPACE COMMITS ONE MORE (${this.bd.commitA} IN)`;
-    if (this.ml) return 'A / D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT';
+    if (this.ml) return this.maulPrompt();
     if (this.op) {
       if (this.ctrlPlayer.team === this.op.attacking) {
         const l = this.passOpts.find((o) => o.side === -1);
@@ -537,7 +555,12 @@ export class Director {
       if (this.isHuman(this.bd.attacking)) return { key: 'A / D', label: 'CLEAR OUT THE RUCK', act: 'waggle' };
       return { key: 'SPACE', label: this.bd.defCrew.length > this.bd.crew.length ? 'STOLEN — NUMBERS TOLD' : 'GO FOR THE STEAL (NEED NUMBERS)', act: 'action' };
     }
-    if (this.ml) return { key: 'A / D', label: 'DRIVE THE MAUL', act: 'waggle' };
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') return { key: 'A / D', label: 'ALTERNATE TO WIN THE MAUL', act: 'waggle' };
+      if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) return { key: 'L', label: 'PICK AND GO', act: 'kick' };
+      return { key: 'A / D', label: 'HOLD THE MAUL UP', act: 'waggle' };
+    }
     if (this.op) {
       const attacking = this.ctrlPlayer.team === this.op.attacking;
       if (attacking) {
@@ -607,7 +630,13 @@ export class Director {
     if (this.scrim && this.scrim.stage !== 'ASSEMBLE') add('A / D', 'PUSH');
     if (this.lo && (this.lo.stage === 'CALL' || this.lo.stage === 'THROW')) { add('A / D', 'CHOOSE THE CALL'); add('SPACE', cv.label); }
     if (this.bd) { add('A / D', 'CLEAR OUT'); add('SPACE', 'COMMIT ONE MORE'); }
-    if (this.ml) { add('A / D', 'DRIVE'); add('SPACE', 'BALL TO THE TAIL'); }
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') add('A / D', `ALTERNATE (${m.regateWindows.length}/4)`);
+      else if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+        add('A / D', 'WHEEL AND PEEL'); add('SPACE', 'TRANSFER TO 9'); add('L', 'PICK AND GO');
+      } else add('A / D', 'HOLD THE MAUL UP');
+    }
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }
@@ -652,10 +681,24 @@ export class Director {
     if (this.lo) return { now: `Lineout — ${this.lo.call.label}`, next: this.lo.stage === 'CALL' ? 'A/D to change the call, SPACE to throw' : 'Stop the bar in the gold band', clock: 0, danger: false };
     if (this.ml) {
       const m = this.ml;
+      if (m.exit !== 'NONE') {
+        return { now: m.exit.replace(/_/g, ' '), next: 'The maul exit is committed', clock: 0, danger: false };
+      }
+      if (m.contest === 'PENDING') {
+        return {
+          now: `Maul re-gate — ${m.regateWindows.length} of 4 input beats closed`,
+          next: 'Alternate A/D once in each beat to win control',
+          clock: Math.max(0, MAUL_REGATE_WINDOW_SECONDS - m.regateWindowT), danger: false,
+        };
+      }
+      const attackControl = m.contest === 'ATTACK_CONTROL';
       return {
-        now: `Maul driving at ${m.speed.toFixed(1)} m/s, ball at rank ${m.ballRank + 1}`,
-        next: m.stallClock > 2 ? 'It has stalled — press L to use it before the whistle' : 'Pound A/D to keep it moving',
-        clock: m.stallClock > 0 ? 5 - m.stallClock : 0, danger: m.stallClock > 2.5,
+        now: `${attackControl ? 'Attack' : 'Defence'} controls the maul — ${m.speed.toFixed(1)} m/s`,
+        next: attackControl && this.isHuman(m.attacking)
+          ? 'A/D peels, SPACE transfers to 9, L picks and goes'
+          : 'The maul is held; wait for the use-it decision',
+        clock: m.stallClock > 0 ? Math.max(0, 5 - m.stallClock) : 0,
+        danger: !attackControl && m.stallClock > 2.5,
       };
     }
     if (this.op) {
@@ -696,7 +739,13 @@ export class Director {
     if (this.scrim) out.push('STEER THE PACK (A/D)');
     if (this.lo) out.push(this.lo.stage === 'CALL' ? 'STEER THE CALL (A/D)' : 'THROW (SPACE)');
     if (this.bd) out.push('STEER THE CLEAROUT (A/D)', 'COMMIT MORE (SPACE)');
-    if (this.ml) out.push('STEER THE DRIVE (A/D)', 'SHIFT BALL (SPACE)');
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') out.push('ALTERNATE THE MAUL RE-GATE (A/D)');
+      else if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+        out.push('WHEEL AND PEEL (A/D)', 'TRANSFER TO 9 (SPACE)', 'PICK AND GO (L)');
+      } else out.push('HOLD THE MAUL UP (A/D)');
+    }
     out.push('REPLAY (R)', 'PAUSE (ESC)', 'ZOOM (WHEEL)');
     return Array.from(new Set(out));
   }
@@ -729,6 +778,25 @@ export class Director {
   attack(): 'A' | 'B' { return this.possession; }
   defending(): 'A' | 'B' { return this.possession === 'A' ? 'B' : 'A'; }
   isHuman(team: 'A' | 'B') { return !this.teams[team].cpu; }
+
+  /** SPEC_03's maul instruction is shared by the HUD and trace/audit surface. */
+  maulPrompt(): string {
+    const m = this.ml;
+    if (!m) return '';
+    if (m.exit !== 'NONE') {
+      if (m.exit === 'TRANSFER_TO_9') return 'THE NINE IS TAKING IT AWAY';
+      return `${m.exit.replace(/_/g, ' ')} — PLAY CONTINUES`;
+    }
+    if (m.contest === 'PENDING') return `A / D ALTERNATE — WIN THE MAUL (${m.regateWindows.length}/4)`;
+    if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+      return 'A / D PEEL · SPACE TRANSFER TO 9 · L PICK AND GO';
+    }
+    if (m.contest === 'DEFENCE_CONTROL' && m.humanTeam !== null) {
+      return 'A / D WON THE HOLD-UP — WAIT FOR USE IT';
+    }
+    return m.contest === 'ATTACK_CONTROL' ? 'THE MAUL IS YOURS — PLAYING IT AWAY' : 'THE MAUL IS HELD UP';
+  }
+
   slider(team: 'A' | 'B', id: string) { return this.teams[team].sliders.find((s) => s.id === id)?.v ?? 50; }
   get ctrlPlayer(): Live { return this.live[this.ctrl]; }
 
@@ -1248,6 +1316,12 @@ export class Director {
           p.face = face;
         }
       };
+      /* SPEC_03's semantic state maps only to clips already present in the
+       * renderer: maulBind/maulDrive both resolve to maulPush. The difference
+       * is useful engine vocabulary without inventing a wheel or peel asset. */
+      const attackDriving = s.stage === 'ATTACK_CONTROL'
+        || s.exit === 'WHEEL_AND_PEEL' || s.exit === 'TOUCH_LINEOUT' || s.exit === 'TRY_AWARDED';
+      const attackClip = attackDriving ? 'maulDrive' : 'maulBind';
       for (let i = 1; i <= 8; i++) {
         const rank = i % 3, col = Math.floor(i / 3);
         const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
@@ -1257,18 +1331,32 @@ export class Director {
           s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
           s.z + lz,
           s.dir >= 0 ? 1 : -1);
-        clip(a, i < 3 ? 'maulBind' : 'maulDrive');
-        a.job = i < 3 ? 'BIND AT THE FRONT AND DRIVE LOW' : 'KEEP THE LEGS GOING, STAY BOUND';
+        const runnerLeaving = (s.exit === 'PICK_AND_GO' || s.exit === 'WHEEL_AND_PEEL') && a.num === s.exitRunner;
+        clip(a, runnerLeaving ? 'carry' : attackClip);
+        a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
+          ? 'KEEP THE LEGS GOING, STAY BOUND'
+          : 'BIND TIGHT AND HOLD THE MAUL';
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
          * team. */
         const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
-        const dlx = 1.4 - (i % 2) * 2.2;
         const d = this.L(dTeam, i);
+        const dlx = 1.4 - (i % 2) * 2.2;
         settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
         clip(d, 'maulBind');
+        d.job = s.contest === 'DEFENCE_CONTROL' ? 'HOLD THE MAUL UP AND WAIT FOR USE IT' : 'BIND AND RESIST THE DRIVE';
       }
+      /* The nine has a fixed base behind the maul. It is marked bound by
+       * think(), then placed here, so TRANSFER_TO_9 can show existing idle
+       * (nineSquat) followed by passSpin (ninePass) before open play begins. */
+      const nine = this.L(s.attacking, 9);
+      const baseX = clamp(s.x + (s.x > 0 ? -1.6 : 1.6), -32, 32);
+      const baseZ = clamp(s.z - s.dir * 6.6, -58, 58);
+      settle(nine, baseX, baseZ, s.dir >= 0 ? 1 : -1);
+      if (s.exit === 'TRANSFER_TO_9') clip(nine, s.exitT < MAUL_TRANSFER_PASS_START ? 'nineSquat' : 'ninePass');
+      else clip(nine, 'ready');
+      nine.job = s.exit === 'TRANSFER_TO_9' ? 'TAKE THE BALL FROM THE MAUL AND PLAY IT' : 'HOLD THE BASE — READY FOR THE RELEASE';
       return;
     }
 
@@ -1686,6 +1774,10 @@ export class Director {
     }
     if (this.ml && (this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY')) {
       for (let i = 1; i <= 8; i++) { markBound(atk, i); markBound(def, i); }
+      /* SPEC_03: the attacking nine walks to and holds the maul base under
+       * placeBound, so a TRANSFER_TO_9 can play its existing idle/pass clip
+       * without a same-frame shape writer or a teleport at the hand-off. */
+      markBound(atk, 9);
     }
     if (this.bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY')) {
       for (const p of this.bd.players) markBound(p.team, p.num);
@@ -2463,22 +2555,33 @@ export class Director {
 
   startMaul(team: 'A' | 'B', x: number, z: number, ranks = 5, fromLineout = false) {
     const dir = team === 'A' ? 1 : -1;
+    const def: 'A' | 'B' = team === 'A' ? 'B' : 'A';
     this.possession = team;
     this.clearRuck();
-    for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(this.defending(), i).bound = true; }
+    for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(def, i).bound = true; }
+    /* SPEC_03. The re-gate has exactly one human contender. CPU-v-CPU and a
+     * future human-v-human match retain deterministic attacking control rather
+     * than borrowing a human result that does not exist. */
+    const exactlyOneHuman = this.isHuman(team) !== this.isHuman(def);
+    const humanTeam = exactlyOneHuman ? (this.isHuman(team) ? team : def) : null;
     this.ml = {
-      t: 0, stage: 'ENGAGE', x, z, dir, yaw: 0,
+      t: 0, stage: humanTeam ? 'RE_GATE' : 'ATTACK_CONTROL', x, z, dir, yaw: 0,
       forceA: 2600 + this.teams[team].nation.att.maul * 26,
-      forceD: 2400 + this.teams[this.defending()].nation.att.maul * 24,
+      forceD: 2400 + this.teams[def].nation.att.maul * 24,
       ballRank: 1, ranks, speed: 0, gained: 0,
       stallClock: 0, stoppedOnce: false, useItCalled: false, warned: false,
       tryLineZ: dir > 0 ? FIELD.tryZFar : FIELD.tryZ, attacking: team,
-      committed: 5, transferCd: 0, fromLineout,
+      committed: 5,
+      humanTeam, contest: humanTeam ? 'PENDING' : 'ATTACK_CONTROL',
+      regateWindowT: 0, regateCandidate: null, regateWindows: [],
+      humanWinShare: null, humanWon: null,
+      exit: 'NONE', exitT: 0, exitRunner: 0, exitLane: null, exitX: x, exitZ: z,
+      fromLineout,
     };
     this.phase = 'MAUL';
     if (fromLineout) this.say('CAUGHT, AND THE MAUL IS FORMED');
-    this.setCtrl(team, 8);
-    if (this.isHuman(team)) this.showHint('A/D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT', 3);
+    this.setCtrl(humanTeam ?? team, humanTeam === def ? 7 : 8);
+    if (humanTeam) this.showHint('A/D ALTERNATE — FOUR BEATS TO WIN THE MAUL', 3);
   }
 
   upMaul(dt: number, input: Input, pressed: Set<string>) { /* T-03: engine/setpieces */ return upMaul(this, dt, input, pressed); }

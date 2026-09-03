@@ -5,16 +5,21 @@
  * function takes a Director reference.
  */
 
-import { Director, ScrumSlot, Input } from '../director';
+import { Director, ScrumSlot, Input, MaulState } from '../director';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
-import { ruckDistributor } from '../intelligence';
 import { R } from './rng';
 import { clamp } from './clamp';
+import { approach } from './approach';
+import {
+  MAUL_REGATE_WINDOW_COUNT,
+  MAUL_REGATE_WINDOW_SECONDS,
+  resolveMaulRegate,
+} from '../maulRegate';
+import type { MaulExitState } from '../maulRegate';
 
 /** The calls that exist to be driven — the index set the CPU leans on in
  * the attacking 22, where a five-metre lineout is a try invitation. */
 const LO_DRIVE_CALLS = [1, 3, 1, 2];
-import { approach } from './approach';
 
 export function upScrum(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
@@ -363,81 +368,278 @@ export function releaseThrow(d: Director, ) {
   d.say(`${s.call.label} — THE THROW GOES IN`);
 }
 
-export function upMaul(d: Director, dt: number, input: Input, pressed: Set<string>) {
+/* ============================ SPEC_03 — MAUL RE-GATE + EXITS ============================ */
 
+/* These are animation/readability beats only. They never enter the pure contest
+ * resolver: that resolver receives just readRate and four closed inputs. */
+const MAUL_EXIT_SECONDS: Record<Exclude<MaulExitState, 'NONE'>, number> = {
+  PICK_AND_GO: 0.22,
+  WHEEL_AND_PEEL: 0.24,
+  TRANSFER_TO_9: 0.56,
+  UNPLAYABLE_SCRUM: 0.22,
+  TOUCH_LINEOUT: 0.22,
+  PENALTY_AWARDED: 0.22,
+  TRY_AWARDED: 0.22,
+};
+const MAUL_CPU_PICK_AT = 4.4;
+const MAUL_AUTO_EXIT_AT = 6.0;
+const MAUL_NO_LIMIT_SAFETY_AT = 15.0;
+const MAUL_PICK_ORDER = [8, 7, 6, 5, 4, 3, 2, 1] as const;
+
+type MaulExit = Exclude<MaulExitState, 'NONE'>;
+
+function maulRunner(d: Director, team: 'A' | 'B', requested: number): number | null {
+  const p = d.live.find((q) => q.team === team && q.num === requested && q.sinbin <= 0 && !q.down);
+  return p ? requested : null;
+}
+
+/** Deterministic roster order; deliberately never selects a player by distance. */
+function maulPicker(d: Director, team: 'A' | 'B'): number {
+  for (const num of MAUL_PICK_ORDER) {
+    const runner = maulRunner(d, team, num);
+    if (runner !== null) return runner;
+  }
+  // A legal maul always has a forward. This keeps the state total if a test
+  // fixture has removed every one of them; startOpen's normal watchdog owns it.
+  return 8;
+}
+
+function beginMaulExit(
+  s: MaulState,
+  exit: MaulExit,
+  runner = 0,
+  lane: 'LEFT' | 'RIGHT' | null = null,
+) {
+  if (s.exit !== 'NONE') return;
+  s.exit = exit;
+  s.stage = 'EXIT';
+  s.exitT = 0;
+  s.exitRunner = runner;
+  s.exitLane = lane;
+  /* Capture a stable legal mark for terminal law hand-offs. Runner exits use
+   * their actual later position at completion so startOpen never teleports one
+   * from a bound rank. This coordinate is not an input to contest resolution. */
+  s.exitX = s.x;
+  s.exitZ = s.z;
+  if (exit === 'PICK_AND_GO' || exit === 'WHEEL_AND_PEEL' || exit === 'TRANSFER_TO_9') {
+    s.ballRank = s.ranks - 1;
+  }
+  if (exit === 'UNPLAYABLE_SCRUM') s.useItCalled = true;
+}
+
+function finishMaulExit(d: Director, s: MaulState, atk: 'A' | 'B', def: 'A' | 'B') {
+  const exit = s.exit;
+  if (exit === 'NONE') return;
+  const runner = s.exitRunner > 0 ? maulRunner(d, atk, s.exitRunner) : null;
+  const x = runner === null ? s.exitX : d.L(atk, runner).x;
+  const z = runner === null ? s.exitZ : d.L(atk, runner).z;
+
+  switch (exit) {
+    case 'PICK_AND_GO':
+    case 'WHEEL_AND_PEEL':
+    case 'TRANSFER_TO_9':
+      d.clearRuck();
+      d.startOpen(atk, x, z, runner ?? maulPicker(d, atk), 1, 0, 0.6);
+      return;
+    case 'UNPLAYABLE_SCRUM':
+      d.lawCall('MAUL_STOPPED', REFEREE_CALLS.MAUL_STOPPED, def);
+      d.clearRuck();
+      d.startScrum(def, s.exitX, s.exitZ);
+      return;
+    case 'TOUCH_LINEOUT':
+      d.say('THE MAUL IS DRAGGED INTO TOUCH');
+      d.clearRuck();
+      d.startLineout(def, s.exitZ, (Math.sign(s.exitX) || 1) * 6);
+      return;
+    case 'PENALTY_AWARDED':
+      d.beginPenalty(def, 'PENALTY — MAUL STOPPED TWICE', 8);
+      return;
+    case 'TRY_AWARDED':
+      d.clearRuck();
+      d.scoreTry();
+      return;
+  }
+}
+
+/** The first A/D edge resolves one window: a direction or an ambiguous NONE. */
+function captureMaulRegateEdge(s: MaulState, pressed: Set<string>) {
+  if (s.contest !== 'PENDING' || s.regateCandidate !== null) return;
+  const left = pressed.has('left');
+  const right = pressed.has('right');
+  /* A simultaneous A/D edge consumes this window as NONE. Letting a later
+   * clean edge replace it would turn an ambiguous commit into an advantage. */
+  if (left && right) { s.regateCandidate = 'NONE'; return; }
+  if (!left && !right) return;
+  s.regateCandidate = left ? 'LEFT' : 'RIGHT';
+}
+
+/**
+ * Close input windows and call the pure resolver exactly once. No state from the
+ * drive simulation is passed to it; this is the one-way wall around the contest.
+ */
+function advanceMaulRegate(d: Director, s: MaulState, dt: number, atk: 'A' | 'B'): boolean {
+  if (s.contest !== 'PENDING' || s.humanTeam === null) return false;
+  s.regateWindowT += dt;
+  while (s.regateWindowT >= MAUL_REGATE_WINDOW_SECONDS && s.regateWindows.length < MAUL_REGATE_WINDOW_COUNT) {
+    s.regateWindowT -= MAUL_REGATE_WINDOW_SECONDS;
+    s.regateWindows.push(s.regateCandidate ?? 'NONE');
+    s.regateCandidate = null;
+  }
+  if (s.regateWindows.length !== MAUL_REGATE_WINDOW_COUNT) return false;
+
+  const readRate = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)].readRate;
+  const result = resolveMaulRegate({ readRate, windows: s.regateWindows });
+  s.humanWinShare = result.humanWinShare;
+  s.humanWon = result.humanWon;
+  const attackControls = (s.humanTeam === atk) === result.humanWon;
+  s.contest = attackControls ? 'ATTACK_CONTROL' : 'DEFENCE_CONTROL';
+  s.stage = attackControls ? 'ATTACK_CONTROL' : 'DEFENCE_HOLD';
+  d.showHint(attackControls ? 'MAUL WON — CALL THE EXIT' : 'THEY HAVE HELD IT UP — WAIT FOR USE IT', 1.8);
+  return true;
+}
+
+function requestTransferOrPick(d: Director, s: MaulState, atk: 'A' | 'B') {
+  const nine = maulRunner(d, atk, 9);
+  if (nine !== null) beginMaulExit(s, 'TRANSFER_TO_9', nine);
+  else beginMaulExit(s, 'PICK_AND_GO', maulPicker(d, atk));
+}
+
+/** Human actions map to the approved explicit exits, never to a generic release. */
+function requestHumanMaulExit(d: Director, s: MaulState, atk: 'A' | 'B', pressed: Set<string>): boolean {
+  if (!d.isHuman(atk) || s.contest !== 'ATTACK_CONTROL') return false;
+  if (pressed.has('kick')) {
+    beginMaulExit(s, 'PICK_AND_GO', maulPicker(d, atk));
+    return true;
+  }
+  if (pressed.has('action')) {
+    requestTransferOrPick(d, s, atk);
+    return true;
+  }
+  const left = pressed.has('left');
+  const right = pressed.has('right');
+  if (left === right) return false;
+  const lane = left ? 'LEFT' : 'RIGHT';
+  const requested = left ? 6 : 7;
+  const runner = maulRunner(d, atk, requested);
+  if (runner !== null) beginMaulExit(s, 'WHEEL_AND_PEEL', runner, lane);
+  else beginMaulExit(s, 'PICK_AND_GO', maulPicker(d, atk));
+  return true;
+}
+
+/** CPU decisions are fixed timing/call choices; they never use force or RNG. */
+function requestCpuMaulExit(d: Director, s: MaulState, atk: 'A' | 'B') {
+  if (d.isHuman(atk) || s.contest !== 'ATTACK_CONTROL') return;
+  if (s.fromLineout && s.t >= MAUL_CPU_PICK_AT) {
+    beginMaulExit(s, 'PICK_AND_GO', maulPicker(d, atk));
+    return;
+  }
+  if (s.t >= MAUL_AUTO_EXIT_AT) requestTransferOrPick(d, s, atk);
+}
+
+function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
+  if (Math.abs(s.speed) >= 0.12) {
+    s.stallClock = Math.max(0, s.stallClock - dt * 1.5);
+    return false;
+  }
+  s.stallClock += dt;
+  if (s.stallClock > 3 && !s.warned) {
+    s.warned = true;
+    s.useItCalled = true;
+    d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4);
+  }
+  if (s.stallClock <= 5 || s.contest !== 'DEFENCE_CONTROL') return false;
+
+  const law = d.options.maulLaw ?? 0;
+  if (law === 1 && !s.stoppedOnce) {
+    s.stoppedOnce = true;
+    s.stallClock = 0;
+    s.warned = false;
+    d.showHint('STOPPED ONCE — USE IT OR LOSE IT', 2.2);
+    return false;
+  }
+  if (law === 2) {
+    s.stoppedOnce = true;
+    s.stallClock = 0;
+    s.warned = false;
+    return false;
+  }
+  beginMaulExit(s, law === 1 ? 'PENALTY_AWARDED' : 'UNPLAYABLE_SCRUM');
+  return true;
+}
+
+export function upMaul(d: Director, dt: number, input: Input, pressed: Set<string>) {
   const s = d.ml!;
   s.t += dt;
-  /* T-16 FREEZE. `d.defending()` reads from `possession`, which a penalty
-   * can flip mid-drive — after which the maul was computing its own defending
-   * side as the side that owned it, both force values fed from one team, and
-   * the drive could neither advance nor stall. The maul owns its own two sides
-   * from its own `attacking` field and never consults possession. */
+  /* The maul owns its two sides. Possession can change in a law hand-off, but
+   * must never make a maul defend itself. */
   const atk = s.attacking;
   const def: 'A' | 'B' = atk === 'A' ? 'B' : 'A';
-  const human = d.isHuman(atk);
-  const commit = clamp(1 + Math.round((d.slider(s.attacking, 'setPiece') / 100) * 4), 1, 6);
-  s.committed = commit;
 
-  if (human) {
-    if (pressed.has('left') || pressed.has('right')) s.forceA += 150;
-    if (pressed.has('action') && s.transferCd <= 0) { s.ballRank = Math.min(s.ranks - 1, s.ballRank + 1); s.transferCd = 1.6; }
-    if (pressed.has('kick')) {
-      const dist = ruckDistributor(d.live, s.attacking, s.x, s.z);
-      d.clearRuck();
-      d.startOpen(s.attacking, s.x + 1.2, s.z - s.dir * 1.6, dist.num, 1, 0, 0.6);
-      return;
-    }
-  } else {
-    s.forceA += dt * (200 + DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)].reaction * 420);
-    if (R() < dt * 0.25 && s.transferCd <= 0) { s.ballRank = Math.min(s.ranks - 1, s.ballRank + 1); s.transferCd = 1.8; }
+  // A terminal route is write-once. While its clip beat plays, no force, law,
+  // input, or random branch can select a second route.
+  if (s.exit !== 'NONE') {
+    s.exitT += dt;
+    if (s.exitT >= MAUL_EXIT_SECONDS[s.exit]) finishMaulExit(d, s, atk, def);
+    return;
   }
-  s.transferCd = Math.max(0, s.transferCd - dt);
-  /* T-18. Off a lineout the attacking pack is bound as one — the drive
-   * has more shove than a broken-play maul formed around a tackled man.
-   * Without the bonus the forces cancelled and a five-metre lineout drive
-   * could not reach the line before the referee lost patience. */
+
+  if (s.contest === 'PENDING') captureMaulRegateEdge(s, pressed);
+
+  /* Legacy physical drive remains visual/location progression only. Neither
+   * force nor its dependent values can enter resolveMaulRegate(). Human A/D is
+   * intentionally absent here: it is consumed only as a commit-window edge. */
+  const commit = clamp(1 + Math.round((d.slider(atk, 'setPiece') / 100) * 4), 1, 6);
+  s.committed = commit;
+  if (!d.isHuman(atk)) {
+    s.forceA += dt * (200 + DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)].reaction * 420);
+  }
   const lineoutDrive = s.fromLineout ? 1900 : 0;
   s.forceA = approach(s.forceA, 2600 + lineoutDrive + d.teams[atk].nation.att.maul * 26 + commit * 320, 2.2, dt);
   s.forceD = approach(s.forceD, 2400 + d.teams[def].nation.att.maul * 24 + (6 - commit) * 300, 1.6, dt);
 
   const net = (s.forceA - s.forceD) / 1400;
-  s.speed = approach(s.speed, clamp(net, -0.5, 1.15), 3, dt);
+  if (s.contest === 'DEFENCE_CONTROL') {
+    // The re-gate may direct presentation into a held-up maul, but force is not
+    // consulted to award that control or to reverse it once it is locked.
+    s.speed = approach(s.speed, 0, 6, dt);
+    s.yaw = approach(s.yaw, 0, 3, dt);
+  } else {
+    s.speed = approach(s.speed, clamp(net, -0.5, 1.15), 3, dt);
+    s.yaw = approach(s.yaw, clamp(net * 12, -22, 22), 1.2, dt);
+  }
   s.z += s.speed * dt;
-  s.yaw = approach(s.yaw, clamp(net * 12, -22, 22), 1.2, dt);
   s.gained += Math.max(0, s.speed * dt);
   s.x += Math.sin((s.yaw * Math.PI) / 180) * dt * 0.6;
 
-  if (Math.abs(s.speed) < 0.12) {
-    s.stallClock += dt;
-    // warn once before whistling, so it never feels arbitrary
-    if (s.stallClock > 3 && !s.warned) { s.warned = true; d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4); }
-    if (s.stallClock > 5) {
-      s.stoppedOnce = true;
-      if ((d.options.maulLaw ?? 0) === 2) { s.stallClock = 0; }
-      else {
-        d.lawCall('MAUL_STOPPED', REFEREE_CALLS.MAUL_STOPPED, def);
-        d.clearRuck();
-        d.startScrum(def, s.x, s.z);
-        return;
-      }
-    }
-  } else s.stallClock = Math.max(0, s.stallClock - dt * 1.5);
-
-  if ((s.dir > 0 && s.z >= s.tryLineZ) || (s.dir < 0 && s.z <= s.tryLineZ)) { d.clearRuck(); d.scoreTry(); return; }
+  /* Legal physical boundary events are terminal exits, not contest evidence.
+   * They have priority over a same-frame re-gate completion or exit request. */
+  if ((s.dir > 0 && s.z >= s.tryLineZ) || (s.dir < 0 && s.z <= s.tryLineZ)) {
+    beginMaulExit(s, 'TRY_AWARDED');
+    return;
+  }
   if (Math.abs(s.z) > 48 && s.gained > 0.5) {
-    d.say('THE MAUL IS DRAGGED INTO TOUCH');
-    d.clearRuck();
-    d.startLineout(def, s.z, Math.sign(s.x) * 6);
+    beginMaulExit(s, 'TOUCH_LINEOUT');
     return;
   }
-  if (R() < dt * 0.03) { d.beginPenalty(def, REFEREE_CALLS.IN_AT_SIDE, 6); return; }
-  if (s.t > 8) {
-    const dist = ruckDistributor(d.live, atk, s.x, s.z);
-    d.clearRuck();
-    d.startOpen(atk, s.x + 1.2, s.z - s.dir * 2.2, dist.num, 1, 0, 0.6);
+  /* NO LIMIT still needs a deterministic safety hand-off before the 18 s
+   * watchdog ceiling. It is a fixed law-clock exit, never a force outcome. */
+  if (s.contest === 'DEFENCE_CONTROL' && (d.options.maulLaw ?? 0) === 2 && s.t >= MAUL_NO_LIMIT_SAFETY_AT) {
+    beginMaulExit(s, 'UNPLAYABLE_SCRUM');
     return;
   }
-  /* T-11 void audit: frozen-interface param — the ruck timing bar is read
-   * via d.pressed earlier in the updater; the param itself is unused. */
+  if (updateMaulStall(d, s, dt)) return;
+
+  // The result becomes immutable when window four closes. Requests wait until
+  // the following frame, so the final A/D commit cannot double as a peel call.
+  if (advanceMaulRegate(d, s, dt, atk)) return;
+
+  if (requestHumanMaulExit(d, s, atk, pressed)) return;
+  requestCpuMaulExit(d, s, atk);
+
+  /* The former t > 8 generic release is intentionally gone. A winning attack
+   * gets one explicit deterministic no-request fallback at six seconds. */
+  if (s.exit === 'NONE' && s.contest === 'ATTACK_CONTROL' && s.t >= MAUL_AUTO_EXIT_AT) {
+    requestTransferOrPick(d, s, atk);
+  }
   void input;
 }

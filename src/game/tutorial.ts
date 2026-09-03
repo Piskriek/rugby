@@ -117,9 +117,9 @@ export const TUTORIAL: TutorialStep[] = [
     what: 'You caught the lineout and your pack has bound onto the catcher while he is still on his feet. That is a maul, and you can drive it forward.',
     why: 'A maul is the hardest thing in rugby to defend legally. Near their line it is the highest-percentage way to score. But if it stops twice, you lose the ball.',
     keys: [
-      { key: 'A / D ALTERNATE', does: 'Drive the maul forward' },
-      { key: 'SPACE', does: 'Move the ball to the back of the maul where it is safe' },
-      { key: 'L', does: 'Use it — take the ball out and play' },
+      { key: 'A / D ALTERNATE', does: 'Win the four-beat maul contest; after it, A/D peels' },
+      { key: 'SPACE', does: 'Transfer the ball to the nine' },
+      { key: 'L', does: 'Pick and go from the back of the maul' },
     ],
     resumeOn: ['left', 'right', 'action', 'kick'],
     then: 'Watch the stall clock. If it stops, take the ball out before the referee whistles.',

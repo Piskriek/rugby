@@ -182,6 +182,22 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   { kind: 'MAUL', id: 'LAW-91', standard: 'LAW', law: 'Law 16 — the maul must move', claim: 'The referee warns before whistling a stalled maul', check: (p) => (num(p, 'stallClock') < 3.2) || bool(p, 'warned') ? ok() : bad('stalled maul whistled without a warning') },
   { kind: 'MAUL', id: 'LOG-92', standard: 'LOGIC', claim: 'Maul forces are positive and within human limits', check: (p) => (num(p, 'forceAttack') > 0 && num(p, 'forceAttack') < 7000 && num(p, 'forceDefence') > 0) ? ok() : bad(`forces ${num(p, 'forceAttack')} / ${num(p, 'forceDefence')} N`) },
   { kind: 'MAUL', id: 'UX-93', standard: 'UX', claim: 'Maul speed and metres gained are both visible', check: (p) => (p.d.speed !== undefined ? ok() : bad('no maul telemetry')) },
+  { kind: 'MAUL', id: 'LOG-94', standard: 'LOGIC', claim: 'The contest re-gate has a valid state and closes exactly four windows', check: (p) => {
+    const contest = str(p, 'contest');
+    const windows = num(p, 'regateWindows');
+    return ['PENDING', 'ATTACK_CONTROL', 'DEFENCE_CONTROL'].includes(contest)
+      && windows >= 0 && windows <= 4 && (contest !== 'PENDING' || windows < 4)
+      ? ok() : bad(`contest=${contest}, windows=${windows}`);
+  } },
+  { kind: 'MAUL', id: 'LOG-95', standard: 'LOGIC', claim: 'A reported human contest share is a legal proportion', check: (p) => {
+    const share = p.d.humanWinShare;
+    return share === null || (typeof share === 'number' && share >= 0 && share <= 1)
+      ? ok() : bad(`human win share ${String(share)}`);
+  } },
+  { kind: 'MAUL', id: 'LOG-96', standard: 'LOGIC', claim: 'Every maul exit is a named deterministic route', check: (p) => [
+    'NONE', 'PICK_AND_GO', 'WHEEL_AND_PEEL', 'TRANSFER_TO_9', 'UNPLAYABLE_SCRUM',
+    'TOUCH_LINEOUT', 'PENALTY_AWARDED', 'TRY_AWARDED',
+  ].includes(str(p, 'exit')) ? ok() : bad(`unknown maul exit ${str(p, 'exit')}`) },
 
   /* ---------- BALL PHYSICS ---------- */
   { kind: 'BALL', id: 'LOG-119', standard: 'LOGIC', claim: 'A ball that reaches the turf bounces rather than ending the phase', check: (p) => (str(p, 'state') === 'FLIGHT' || num(p, 'bounces') > 0) ? ok() : warn('ball on the turf with no bounce recorded') },

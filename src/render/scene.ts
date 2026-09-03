@@ -409,7 +409,7 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
     label(ctx, `${(f / 1000).toFixed(2)} kN`, (a.sx + b.sx) / 2, (a.sy + b.sy) / 2 - 10, col);
   };
-  if (s.stage === 'DRIVE' || s.stage === 'STALL' || s.stage === 'ENGAGE') {
+  if (s.stage !== 'EXIT' && s.stage !== 'OVER') {
     bar('A', s.forceA, -2.4, '#ff6a5a');
     bar('D', s.forceD, 2.4, '#7fa3e6');
   }
@@ -428,8 +428,14 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     worldLabel(ctx, cam, v, s.x, 4.2, s.z,
       `+${s.gained.toFixed(1)} m · ${s.speed.toFixed(2)} m/s · ${toLine.toFixed(1)} m TO GO`, spdCol, jx, jy);
     const stall = s.stallClock > 0 ? `STOPPED ${s.stallClock.toFixed(1)}s / 5.0s` : s.stoppedOnce ? 'STOPPED ONCE' : 'DRIVING';
+    const contest = s.contest === 'PENDING'
+      ? `RE-GATE ${s.regateWindows.length}/4`
+      : s.humanWinShare === null
+        ? s.contest.replace('_', ' ')
+        : `${s.contest === 'ATTACK_CONTROL' ? 'ATTACK' : 'DEFENCE'} CONTROL ${(s.humanWinShare * 100).toFixed(0)}%`;
+    const exit = s.exit === 'NONE' ? '' : ` · ${s.exit.replace(/_/g, ' ')}`;
     worldLabel(ctx, cam, v, s.x, 3.5, s.z,
-      `${stall} · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(0)}°`, s.useItCalled ? '#ff6a5a' : '#f4efe2', jx, jy);
+      `${contest}${exit} · ${stall} · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(0)}°`, s.useItCalled ? '#ff6a5a' : '#f4efe2', jx, jy);
   }
 }
 

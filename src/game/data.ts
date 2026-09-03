@@ -599,7 +599,7 @@ export const MANUAL: ManualSection[] = [
       { k: 'R', v: 'INSTANT REPLAY — hold to capture, release to play' },
       { k: 'TAB', v: 'STATS PANEL — live match statistics' },
       { k: '1 / 2 / 3', v: 'TACTIC QUICK-SET — balanced / wide / blitz' },
-      { k: 'A + D ALTERNATE', v: 'WAGGLE — scrum, ruck and maul power in manual mode' },
+      { k: 'A + D ALTERNATE', v: 'WAGGLE — scrum/ruck power; maul re-gate and peel call' },
       { k: 'MOUSE WHEEL', v: 'ZOOM — pulls the camera back and up into a tactical view' },
       { k: 'ESC', v: 'PAUSE — menu, substitutions, tactic changes, quit' },
       { k: 'ENTER', v: 'CONFIRM — menus and set-piece calls' },

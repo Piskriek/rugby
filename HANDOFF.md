@@ -9,6 +9,19 @@
 > The rerun of `npx vite-node scripts/chain.ts 3` was silent and green. This Arena
 > session remains on `arena/01a06671-rugby`: commit and push only that branch,
 > never the historical `arena/01a0662a-rugby` branch.
+>
+> **SPEC_03 / T-41 implemented and validated — 2026-09-03.** The maul now has a
+> pure four-window human-v-CPU re-gate (`readRate` plus closed A/D commits only),
+> a write-once seven-route exit state machine, and the existing clip mapping
+> (`maulBind`/`maulDrive` → `maulPush`, `carry` → run, `nineSquat` → idle,
+> `ninePass` → passSpin). `npx vite-node scripts/spec03-contracts.ts` passes
+> **54/54**, `npx tsc --noEmit`, `npx vite-node scripts/chain.ts 3`,
+> `npx vite-node scripts/maulprobe.ts`, and `npm run build` pass. The 60-second
+> fault hunt reported zero teleports and zero freezes at difficulties 0/3/6/9.
+> Its aggregate `TACKLES HAPPEN` (5 vs ≥8) and `BALL ON SCREEN` (364 vs ≤60)
+> failures are pre-existing/unseeded: detached baseline `47e94ad` also failed
+> those same gates (6 and 262 respectively). Do not tune the maul feature to
+> chase those unrelated stochastic gate values.
 
 **For the next engineer.** Read this before touching `director.ts`.
 
