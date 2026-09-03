@@ -16,6 +16,7 @@ import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
 import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
+  upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
 } from './paper';
 
 /** Screen-right vector of the camera in world terms (handoff section 5). */
@@ -33,6 +34,7 @@ interface Puppet {
   face: number;                 // true heading, radians (derived from velocity)
   lx: number; lz: number;       // last position — velocity is derived per frame
   spd: number;
+  runU: number;                 // SPEC_01 — separate cadence-locked gait phase for the running pass
   hold: string | null;          // forced action (get-up) with a cycle countdown
   holdT: number;
   lie: boolean;                 // sequenced into the lying hold
@@ -75,7 +77,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
   let pg = puppets.get(key);
   if (!pg) {
     pg = {
-      clipName: '', u: 0, pose: { ...STAND }, blendFrom: null, blendT: 0, blendDur: 0.16,
+      clipName: '', u: 0, runU: 0, pose: { ...STAND }, blendFrom: null, blendT: 0, blendDur: 0.16,
       face: a.rf > 0 ? 0 : Math.PI, lx: a.rx, lz: a.rz, spd: 0,
       hold: null, holdT: 0, lie: false,
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
@@ -145,6 +147,10 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
     pg.u = 0;
   }
   pg.u += choice.rate * dt;
+  // SPEC_01 — keep a cadence-locked gait phase so a running carrier's legs keep
+  // tracking the turf while his upper body plays the pass clip.
+  const gaitAct = pg.spd < 0.7 ? 'idle' : pg.spd < 1.6 ? 'walk' : pg.spd < 3.6 ? 'jog' : pg.spd < 6.2 ? 'run' : 'sprint';
+  pg.runU += actionClip(gaitAct, pg.spd).rate * dt;
   const sampled = sampleC(pg.clipName, pg.u);
   if (pg.blendFrom && pg.blendT < pg.blendDur) {
     pg.blendT += dt;
@@ -152,77 +158,6 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
   } else { pg.blendFrom = null; pg.pose = sampled; }
   return pg;
 }
-const puppets = new Map<string, Puppet>();
-let lastDirector: Director | null = null;
-
-const clamp01p = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-
-/** Engine clip vocabulary -> the system's action strings. */
-function mapAction(clip: string): string {
-  switch (clip) {
-    case 'ready': case 'nineSquat': case 'refReady': return 'idle';
-    case 'jog': return 'jog';
-    case 'sprint': return 'sprint';
-    case 'carry': return 'run';
-    case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
-    case 'catchHigh': case 'lineoutCatch': return 'catch';
-    case 'kick': return 'kick';
-    case 'tackle': return 'tackle';
-    case 'grounded': return 'tackled';
-    case 'dive': return 'dive';
-    case 'jackal': return 'jackal';
-    case 'cleanout': return 'ruck';
-    case 'maulBind': case 'maulDrive': return 'maul';
-    case 'scrumCrouch': case 'scrumBind': return 'scrumBind';
-    case 'scrumDrive': return 'scrumShove';
-    case 'lineoutJump': return 'jump';
-    case 'lineoutLift': return 'lift';
-    case 'refSignal': return 'idle';
-    default: return 'idle';
-  }
-}
-
-function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | null): Puppet {
-  /* New match (or new Director) — reset every puppet and every paper view. */
-  if (lastDirector !== d) { lastDirector = d; puppets.clear(); resetPaperViews(); }
-  const key = paperViewKey(a.team, a.num);
-  let pg = puppets.get(key);
-  if (!pg) {
-    pg = {
-      clipName: '', u: 0, pose: { ...STAND }, blendFrom: null, blendT: 0, blendDur: 0.16,
-      face: a.rf > 0 ? 0 : Math.PI, lx: a.rx, lz: a.rz, spd: 0,
-      hold: null, holdT: 0, lie: false,
-      ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
-      seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
-    };
-    puppets.set(key, pg);
-  }
-  /* velocity + true heading from the streamed positions */
-  const vx = (a.rx - pg.lx) / Math.max(dt, 1e-4);
-  const vz = (a.rz - pg.lz) / Math.max(dt, 1e-4);
-  pg.lx = a.rx; pg.lz = a.rz;
-  pg.spd = Math.hypot(vx, vz);
-  /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
-   * stationary man LOOKS AT THE BALL. The old velocity-only heading had
-   * support runners strolling back to marks staring straight at the camera
-   * ("my players are mostly facing me") and defenders square-on to their own
-   * jog instead of the play. */
-  if (pg.spd > 2.2) {
-    let target = Math.atan2(vx, vz);
-    let dy = target - pg.face;
-    while (dy > Math.PI) dy -= Math.PI * 2;
-    while (dy < -Math.PI) dy += Math.PI * 2;
-    pg.face += dy * (1 - Math.exp(-dt * 10));
-  } else if (look) {
-    let target = Math.atan2(look[0] - a.rx, look[1] - a.rz);
-    let dy = target - pg.face;
-    while (dy > Math.PI) dy -= Math.PI * 2;
-    while (dy < -Math.PI) dy += Math.PI * 2;
-    pg.face += dy * (1 - Math.exp(-dt * 6));
-  }
-
->>>>>>> theirs
-=======
 
 export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   const ddt = 1 / 60;   // the puppet pipeline only needs a stable beat for velocity
@@ -305,8 +240,26 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     const sdir = dot >= 0 ? 1 : -1;
     const perp = Math.abs(dot);
     const carried = !!d.op && !d.op.ball.live && a.team === d.op.attacking && a.num === d.op.carrierNum;
+
+    /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
+    let pose = pg.pose;
+    const GAIT = new Set(['jog', 'run', 'sprint', 'walk', 'shuffle', 'strafe', 'strafeL']);
+    if (pg.clipName === 'passSpin' && pg.spd > 3.6) {
+      // Running pass (R-03 / SM-13 / PR-04): upper/lower separation — legs keep
+      // running while the arms throw the ball.
+      const gc = actionClip(pg.spd < 6.2 ? 'run' : 'sprint', pg.spd);
+      let gait = sampleC(gc.name, pg.runU);
+      gait = pinPlantedFoot(gait, pg.ch.build, pg.spd);
+      pose = upperLowerRun(gait, pg.pose);
+    } else if (GAIT.has(pg.clipName) && pg.spd > 0.7) {
+      // No-foot-slide (SM-02 / W-07 / B-04): pin the planted foot to the turf.
+      pose = pinPlantedFoot(pose, pg.ch.build, pg.spd);
+    }
+    const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
+    const legScale = edgeLegForeshorten(perp, cam.tilt * 180 / Math.PI); // Edge Leg Foreshortening (B-14)
+
     const args: PaperDrawArgs = {
-      ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose: pg.pose,
+      ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
       num: pg.ch.num, seed: pg.seed,
       carry: carried ? 1 : 0,
@@ -314,6 +267,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
       ballSide: pg.pose.ballSide, ballSpin: ballWorld.spin,
       cap: pg.ch.cap, tape: pg.ch.tape,
       spinDir: sdir, gs, fore: 0.45 + 0.55 * perp, headDir: sdir || 1, depth: pr.f,
+      squash, legScale,
     };
     items.push({ f: pr.f, draw: () => { drawPaperShadow(args); drawPaperActor(args); } });
   }

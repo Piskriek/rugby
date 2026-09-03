@@ -1681,7 +1681,7 @@ exits have the distributor at the base).
 ---
 
 ### T-28 · Precise, considered player animation from the dataset
-**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN**
+**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: CLOSED — consolidated into SPEC_01 XL Animation Reconciliation (see IMPLEMENT_XL_ANIMATION.md)**
 
 `src/game/animation.ts` holds 1,100+ data points across nine categories —
 principles, weight, easing, timing, spacing, seamlessness, rugby motion, contact
@@ -1784,7 +1784,7 @@ sits at ~0.5-1 against a floor of 1 — the remaining gap is chance CREATION, no
 grounding; that work is tracked under T-18.
 
 ### T-31 · Full precise animation set (running, tackle, dive)
-**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: SLICE LANDED — tackle rebuilt from the recipe, dive is real; running pass still open**
+**Type:** Animation · **Effort:** XL · **Risk:** Medium · **STATUS: CLOSED — consolidated into SPEC_01 XL Animation Reconciliation (see IMPLEMENT_XL_ANIMATION.md); tackle + dive slices already landed, running pass + edge foreshorten now owned by the plan**
 
 The pipeline is un-frozen (T-29). Now the clips themselves need to match the
 `animation.ts` dataset (1,100+ points). The user's explicit list:
@@ -1873,7 +1873,7 @@ user described:
 pass; the full papercraft pass is T-34.
 
 ### T-34 · Full papercraft pass from the dataset
-**Type:** Animation/Render · **Effort:** XL · **Risk:** Medium · **STATUS: OPEN**
+**Type:** Animation/Render · **Effort:** XL · **Risk:** Medium · **STATUS: CLOSED — consolidated into SPEC_01 XL Animation Reconciliation (see IMPLEMENT_XL_ANIMATION.md); edge profile already exists, edge foreshorten now owned by the plan**
 
 `src/game/papercraft.ts` holds **109 authored data points** (≈650 countable
 facts) across billboard, turn, lying, edge, weight, depth, seamlessness and
