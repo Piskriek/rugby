@@ -465,10 +465,18 @@ export function launch(d: Director, power: number, accuracy: number, wind: numbe
   const vy = 0.5 * 9.81 * hang;
   s.vx = vx; s.vz = vz; s.vy = vy;
   s.stage = 'FLIGHT'; s.t = 0;
-  /* PLAYTEST 4 / T-69: SIX CHASERS, NOT THREE. The measured chase stalled
-   * 5 m short of every kick — three men sprinting ~30 m cannot beat a 2-3 s
-   * flight plus roll, so the fielder returned untouched ("I just score off
-   * my own kickoff"). A real kick-off chases with a third of the team. */
+  /* SPEC_09 INVARIANT A1 — ATOMIC STRIKE. The liveness flip above and the
+   * T-69 six-chaser commitment below are ONE synchronous block with no
+   * interleaved placement write: no observer in the rest of this tick (think,
+   * placeBound's thaw branch, the camera) can ever see the ball live with an
+   * empty or stale chase commitment, and no player can be released against
+   * a half-transitioned strike. The thaw branch in placeBound asserts
+   * chasers.length === 6 again before releasing anyone; this ordering is
+   * what makes that assertion structural rather than hopeful. Committing
+   * EARLIER (at AIM) is forbidden — it would hand the AI landing-mark
+   * targets before the ball is live: the pre-set steal.
+   * (T-69 history: SIX chasers, not three — the measured three-man chase
+   * stalled 5 m short of every kick and the fielder returned untouched.) */
   s.chasers = CHASE_ORDER.slice(0, 6).map((num, i) => ({ num, lane: CHASE_LANES[i % CHASE_LANES.length].label }));
   d.shake(0.15);
 }

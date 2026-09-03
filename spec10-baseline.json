@@ -1,0 +1,954 @@
+{
+  "meta": {
+    "spec": "SPEC_10 Phase 1 baseline",
+    "ruleMatrix": {
+      "diffs": [
+        0,
+        3,
+        6,
+        9
+      ],
+      "seeds": [
+        11,
+        23,
+        37,
+        51,
+        89
+      ],
+      "seconds": 90
+    },
+    "realism": {
+      "matchesPerDiff": 5
+    },
+    "health": {
+      "watchdogTrips": 0,
+      "teleports": 0,
+      "cells": 20
+    }
+  },
+  "ruleAudit": {
+    "cells": [
+      {
+        "diff": 0,
+        "seed": 11,
+        "points": 988,
+        "pass": 5320,
+        "warn": 0,
+        "fail": 15,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 0,
+        "seed": 23,
+        "points": 996,
+        "pass": 5384,
+        "warn": 3,
+        "fail": 0,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 0,
+        "seed": 37,
+        "points": 997,
+        "pass": 5409,
+        "warn": 16,
+        "fail": 3,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 0,
+        "seed": 51,
+        "points": 991,
+        "pass": 5178,
+        "warn": 1,
+        "fail": 1,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 0,
+        "seed": 89,
+        "points": 995,
+        "pass": 5271,
+        "warn": 8,
+        "fail": 9,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 3,
+        "seed": 11,
+        "points": 994,
+        "pass": 5338,
+        "warn": 6,
+        "fail": 8,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 3,
+        "seed": 23,
+        "points": 990,
+        "pass": 5157,
+        "warn": 13,
+        "fail": 22,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 3,
+        "seed": 37,
+        "points": 988,
+        "pass": 5164,
+        "warn": 0,
+        "fail": 3,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 3,
+        "seed": 51,
+        "points": 992,
+        "pass": 5134,
+        "warn": 4,
+        "fail": 8,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 3,
+        "seed": 89,
+        "points": 990,
+        "pass": 5449,
+        "warn": 1,
+        "fail": 12,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 6,
+        "seed": 11,
+        "points": 994,
+        "pass": 5334,
+        "warn": 1,
+        "fail": 29,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 6,
+        "seed": 23,
+        "points": 989,
+        "pass": 5423,
+        "warn": 14,
+        "fail": 15,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 6,
+        "seed": 37,
+        "points": 988,
+        "pass": 5268,
+        "warn": 8,
+        "fail": 3,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 6,
+        "seed": 51,
+        "points": 997,
+        "pass": 5270,
+        "warn": 5,
+        "fail": 17,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 6,
+        "seed": 89,
+        "points": 988,
+        "pass": 5086,
+        "warn": 6,
+        "fail": 1,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 9,
+        "seed": 11,
+        "points": 994,
+        "pass": 5150,
+        "warn": 0,
+        "fail": 5,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 9,
+        "seed": 23,
+        "points": 995,
+        "pass": 5444,
+        "warn": 1,
+        "fail": 8,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 9,
+        "seed": 37,
+        "points": 989,
+        "pass": 5358,
+        "warn": 1,
+        "fail": 12,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 9,
+        "seed": 51,
+        "points": 992,
+        "pass": 5349,
+        "warn": 1,
+        "fail": 21,
+        "watchdog": 0,
+        "teleports": 0
+      },
+      {
+        "diff": 9,
+        "seed": 89,
+        "points": 996,
+        "pass": 5221,
+        "warn": 7,
+        "fail": 3,
+        "watchdog": 0,
+        "teleports": 0
+      }
+    ],
+    "pointsByDiff": {
+      "0": 4967,
+      "3": 4954,
+      "6": 4956,
+      "9": 4966
+    },
+    "families": [
+      {
+        "family": "DEFENSIVE_LINE",
+        "rulesSeen": 1,
+        "fail": 162,
+        "warn": 0,
+        "failByDiff": {
+          "0": 24,
+          "3": 42,
+          "6": 51,
+          "9": 45
+        },
+        "worstRate": 10.290556900726392,
+        "worstDiff": 6,
+        "topRule": "LAW-66",
+        "exemplar": "7.4 m hole in the defensive line"
+      },
+      {
+        "family": "PLAYERS_AIRBORNE",
+        "rulesSeen": 2,
+        "fail": 22,
+        "warn": 0,
+        "failByDiff": {
+          "0": 2,
+          "3": 9,
+          "6": 10,
+          "9": 1
+        },
+        "worstRate": 2.017756255044391,
+        "worstDiff": 6,
+        "topRule": "UX-58",
+        "exemplar": "the receiving side has nobody near the drop"
+      },
+      {
+        "family": "PLAYERS_POS",
+        "rulesSeen": 4,
+        "fail": 4,
+        "warn": 94,
+        "failByDiff": {
+          "0": 2,
+          "3": 1,
+          "9": 1
+        },
+        "worstRate": 0.40265753976243207,
+        "worstDiff": 0,
+        "topRule": "LAW-17",
+        "exemplar": "2 of the kicking team ahead of the ball at the restart"
+      },
+      {
+        "family": "CAMERA",
+        "rulesSeen": 2,
+        "fail": 4,
+        "warn": 2,
+        "failByDiff": {
+          "3": 1,
+          "6": 3
+        },
+        "worstRate": 0.6053268765133172,
+        "worstDiff": 6,
+        "topRule": "UX-23",
+        "exemplar": "ball off screen — the player cannot see the ball"
+      },
+      {
+        "family": "BALL",
+        "rulesSeen": 1,
+        "fail": 3,
+        "warn": 0,
+        "failByDiff": {
+          "6": 1,
+          "9": 2
+        },
+        "worstRate": 0.4027386226339106,
+        "worstDiff": 9,
+        "topRule": "LAW-41",
+        "exemplar": "ball travelling backwards relative to the kick"
+      }
+    ],
+    "rules": [
+      {
+        "rule": "DEFENSIVE_LINE/LAW-66",
+        "family": "DEFENSIVE_LINE",
+        "standard": "LAW",
+        "fail": 162,
+        "warn": 0,
+        "why": "7.4 m hole in the defensive line",
+        "whyN": 5
+      },
+      {
+        "rule": "PLAYERS_AIRBORNE/UX-58",
+        "family": "PLAYERS_AIRBORNE",
+        "standard": "UX",
+        "fail": 19,
+        "warn": 0,
+        "why": "the receiving side has nobody near the drop",
+        "whyN": 19
+      },
+      {
+        "rule": "PLAYERS_POS/LAW-17",
+        "family": "PLAYERS_POS",
+        "standard": "LAW",
+        "fail": 4,
+        "warn": 0,
+        "why": "2 of the kicking team ahead of the ball at the restart",
+        "whyN": 1
+      },
+      {
+        "rule": "CAMERA/UX-23",
+        "family": "CAMERA",
+        "standard": "UX",
+        "fail": 4,
+        "warn": 0,
+        "why": "ball off screen — the player cannot see the ball",
+        "whyN": 4
+      },
+      {
+        "rule": "PLAYERS_AIRBORNE/LAW-57",
+        "family": "PLAYERS_AIRBORNE",
+        "standard": "LAW",
+        "fail": 3,
+        "warn": 0,
+        "why": "4 of the kicking team ahead of the kicker at the strike",
+        "whyN": 1
+      },
+      {
+        "rule": "BALL/LAW-41",
+        "family": "BALL",
+        "standard": "LAW",
+        "fail": 3,
+        "warn": 0,
+        "why": "ball travelling backwards relative to the kick",
+        "whyN": 3
+      },
+      {
+        "rule": "PLAYERS_POS/LOG-18",
+        "family": "PLAYERS_POS",
+        "standard": "LOGIC",
+        "fail": 0,
+        "warn": 44,
+        "why": "",
+        "whyN": 0
+      },
+      {
+        "rule": "PLAYERS_POS/LOG-20",
+        "family": "PLAYERS_POS",
+        "standard": "LOGIC",
+        "fail": 0,
+        "warn": 29,
+        "why": "",
+        "whyN": 0
+      },
+      {
+        "rule": "PLAYERS_POS/LOG-19",
+        "family": "PLAYERS_POS",
+        "standard": "LOGIC",
+        "fail": 0,
+        "warn": 21,
+        "why": "",
+        "whyN": 0
+      },
+      {
+        "rule": "CAMERA/UX-24",
+        "family": "CAMERA",
+        "standard": "UX",
+        "fail": 0,
+        "warn": 2,
+        "why": "",
+        "whyN": 0
+      }
+    ]
+  },
+  "realism": {
+    "byDiff": {
+      "0": [
+        {
+          "key": "points",
+          "label": "POINTS PER TEAM",
+          "value": 19.2,
+          "lo": 12,
+          "hi": 34,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tries",
+          "label": "TRIES PER TEAM",
+          "value": 2,
+          "lo": 1,
+          "hi": 6,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tackles",
+          "label": "TACKLES PER TEAM",
+          "value": 54.6,
+          "lo": 90,
+          "hi": 220,
+          "grade": "LOW"
+        },
+        {
+          "key": "rucks",
+          "label": "RUCKS PER MATCH",
+          "value": 79.8,
+          "lo": 120,
+          "hi": 200,
+          "grade": "LOW"
+        },
+        {
+          "key": "scrums",
+          "label": "SCRUMS PER MATCH",
+          "value": 8.2,
+          "lo": 14,
+          "hi": 20,
+          "grade": "LOW"
+        },
+        {
+          "key": "lineouts",
+          "label": "LINEOUTS PER MATCH",
+          "value": 9,
+          "lo": 20,
+          "hi": 28,
+          "grade": "LOW"
+        },
+        {
+          "key": "penalties",
+          "label": "PENALTIES PER MATCH",
+          "value": 22.8,
+          "lo": 14,
+          "hi": 28,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "passes",
+          "label": "PASSES PER MATCH",
+          "value": 168.2,
+          "lo": 180,
+          "hi": 340,
+          "grade": "LOW"
+        },
+        {
+          "key": "kicks",
+          "label": "KICKS FROM HAND",
+          "value": 33.4,
+          "lo": 30,
+          "hi": 70,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "metres",
+          "label": "METRES CARRIED PER TEAM",
+          "value": 382.8,
+          "lo": 250,
+          "hi": 800,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "lineBreaks",
+          "label": "LINE BREAKS PER TEAM",
+          "value": 3.8,
+          "lo": 2,
+          "hi": 16,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "turnovers",
+          "label": "TURNOVERS PER MATCH",
+          "value": 6,
+          "lo": 10,
+          "hi": 32,
+          "grade": "LOW"
+        },
+        {
+          "key": "possession",
+          "label": "POSSESSION SPLIT (% OF MAX)",
+          "value": 48.2,
+          "lo": 40,
+          "hi": 60,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offloads",
+          "label": "OFFLOADS PER MATCH",
+          "value": 4.4,
+          "lo": 4,
+          "hi": 30,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offsidePenalties",
+          "label": "OFFSIDE PENALTIES PER TEAM",
+          "value": 3.9,
+          "lo": 2,
+          "hi": 4,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "formationDriftP90",
+          "label": "P90 TARGET-SLOT DRIFT (M)",
+          "value": 0.3,
+          "lo": 0,
+          "hi": 2.5,
+          "grade": "REALISTIC"
+        }
+      ],
+      "3": [
+        {
+          "key": "points",
+          "label": "POINTS PER TEAM",
+          "value": 18.6,
+          "lo": 12,
+          "hi": 34,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tries",
+          "label": "TRIES PER TEAM",
+          "value": 1.5,
+          "lo": 1,
+          "hi": 6,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tackles",
+          "label": "TACKLES PER TEAM",
+          "value": 54.5,
+          "lo": 90,
+          "hi": 220,
+          "grade": "LOW"
+        },
+        {
+          "key": "rucks",
+          "label": "RUCKS PER MATCH",
+          "value": 81.8,
+          "lo": 120,
+          "hi": 200,
+          "grade": "LOW"
+        },
+        {
+          "key": "scrums",
+          "label": "SCRUMS PER MATCH",
+          "value": 6.8,
+          "lo": 14,
+          "hi": 20,
+          "grade": "LOW"
+        },
+        {
+          "key": "lineouts",
+          "label": "LINEOUTS PER MATCH",
+          "value": 10,
+          "lo": 20,
+          "hi": 28,
+          "grade": "LOW"
+        },
+        {
+          "key": "penalties",
+          "label": "PENALTIES PER MATCH",
+          "value": 20.8,
+          "lo": 14,
+          "hi": 28,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "passes",
+          "label": "PASSES PER MATCH",
+          "value": 151.8,
+          "lo": 180,
+          "hi": 340,
+          "grade": "LOW"
+        },
+        {
+          "key": "kicks",
+          "label": "KICKS FROM HAND",
+          "value": 36.2,
+          "lo": 30,
+          "hi": 70,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "metres",
+          "label": "METRES CARRIED PER TEAM",
+          "value": 375.1,
+          "lo": 250,
+          "hi": 800,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "lineBreaks",
+          "label": "LINE BREAKS PER TEAM",
+          "value": 4.6,
+          "lo": 2,
+          "hi": 16,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "turnovers",
+          "label": "TURNOVERS PER MATCH",
+          "value": 4.6,
+          "lo": 10,
+          "hi": 32,
+          "grade": "LOW"
+        },
+        {
+          "key": "possession",
+          "label": "POSSESSION SPLIT (% OF MAX)",
+          "value": 46.5,
+          "lo": 40,
+          "hi": 60,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offloads",
+          "label": "OFFLOADS PER MATCH",
+          "value": 4.4,
+          "lo": 4,
+          "hi": 30,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offsidePenalties",
+          "label": "OFFSIDE PENALTIES PER TEAM",
+          "value": 4.2,
+          "lo": 2,
+          "hi": 4,
+          "grade": "HIGH"
+        },
+        {
+          "key": "formationDriftP90",
+          "label": "P90 TARGET-SLOT DRIFT (M)",
+          "value": 0.3,
+          "lo": 0,
+          "hi": 2.5,
+          "grade": "REALISTIC"
+        }
+      ],
+      "6": [
+        {
+          "key": "points",
+          "label": "POINTS PER TEAM",
+          "value": 10.3,
+          "lo": 12,
+          "hi": 34,
+          "grade": "LOW"
+        },
+        {
+          "key": "tries",
+          "label": "TRIES PER TEAM",
+          "value": 0.7,
+          "lo": 1,
+          "hi": 6,
+          "grade": "LOW"
+        },
+        {
+          "key": "tackles",
+          "label": "TACKLES PER TEAM",
+          "value": 55.5,
+          "lo": 90,
+          "hi": 220,
+          "grade": "LOW"
+        },
+        {
+          "key": "rucks",
+          "label": "RUCKS PER MATCH",
+          "value": 79.8,
+          "lo": 120,
+          "hi": 200,
+          "grade": "LOW"
+        },
+        {
+          "key": "scrums",
+          "label": "SCRUMS PER MATCH",
+          "value": 8.2,
+          "lo": 14,
+          "hi": 20,
+          "grade": "LOW"
+        },
+        {
+          "key": "lineouts",
+          "label": "LINEOUTS PER MATCH",
+          "value": 14.6,
+          "lo": 20,
+          "hi": 28,
+          "grade": "LOW"
+        },
+        {
+          "key": "penalties",
+          "label": "PENALTIES PER MATCH",
+          "value": 24.2,
+          "lo": 14,
+          "hi": 28,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "passes",
+          "label": "PASSES PER MATCH",
+          "value": 143.8,
+          "lo": 180,
+          "hi": 340,
+          "grade": "LOW"
+        },
+        {
+          "key": "kicks",
+          "label": "KICKS FROM HAND",
+          "value": 33.4,
+          "lo": 30,
+          "hi": 70,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "metres",
+          "label": "METRES CARRIED PER TEAM",
+          "value": 354.9,
+          "lo": 250,
+          "hi": 800,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "lineBreaks",
+          "label": "LINE BREAKS PER TEAM",
+          "value": 3.3,
+          "lo": 2,
+          "hi": 16,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "turnovers",
+          "label": "TURNOVERS PER MATCH",
+          "value": 6.4,
+          "lo": 10,
+          "hi": 32,
+          "grade": "LOW"
+        },
+        {
+          "key": "possession",
+          "label": "POSSESSION SPLIT (% OF MAX)",
+          "value": 51.5,
+          "lo": 40,
+          "hi": 60,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offloads",
+          "label": "OFFLOADS PER MATCH",
+          "value": 6.2,
+          "lo": 4,
+          "hi": 30,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offsidePenalties",
+          "label": "OFFSIDE PENALTIES PER TEAM",
+          "value": 5,
+          "lo": 2,
+          "hi": 4,
+          "grade": "HIGH"
+        },
+        {
+          "key": "formationDriftP90",
+          "label": "P90 TARGET-SLOT DRIFT (M)",
+          "value": 0.3,
+          "lo": 0,
+          "hi": 2.5,
+          "grade": "REALISTIC"
+        }
+      ],
+      "9": [
+        {
+          "key": "points",
+          "label": "POINTS PER TEAM",
+          "value": 17.5,
+          "lo": 12,
+          "hi": 34,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tries",
+          "label": "TRIES PER TEAM",
+          "value": 1.5,
+          "lo": 1,
+          "hi": 6,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "tackles",
+          "label": "TACKLES PER TEAM",
+          "value": 52.8,
+          "lo": 90,
+          "hi": 220,
+          "grade": "LOW"
+        },
+        {
+          "key": "rucks",
+          "label": "RUCKS PER MATCH",
+          "value": 77,
+          "lo": 120,
+          "hi": 200,
+          "grade": "LOW"
+        },
+        {
+          "key": "scrums",
+          "label": "SCRUMS PER MATCH",
+          "value": 8.4,
+          "lo": 14,
+          "hi": 20,
+          "grade": "LOW"
+        },
+        {
+          "key": "lineouts",
+          "label": "LINEOUTS PER MATCH",
+          "value": 8.2,
+          "lo": 20,
+          "hi": 28,
+          "grade": "LOW"
+        },
+        {
+          "key": "penalties",
+          "label": "PENALTIES PER MATCH",
+          "value": 22.2,
+          "lo": 14,
+          "hi": 28,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "passes",
+          "label": "PASSES PER MATCH",
+          "value": 182.2,
+          "lo": 180,
+          "hi": 340,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "kicks",
+          "label": "KICKS FROM HAND",
+          "value": 31.6,
+          "lo": 30,
+          "hi": 70,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "metres",
+          "label": "METRES CARRIED PER TEAM",
+          "value": 396.3,
+          "lo": 250,
+          "hi": 800,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "lineBreaks",
+          "label": "LINE BREAKS PER TEAM",
+          "value": 4.9,
+          "lo": 2,
+          "hi": 16,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "turnovers",
+          "label": "TURNOVERS PER MATCH",
+          "value": 6.2,
+          "lo": 10,
+          "hi": 32,
+          "grade": "LOW"
+        },
+        {
+          "key": "possession",
+          "label": "POSSESSION SPLIT (% OF MAX)",
+          "value": 43.5,
+          "lo": 40,
+          "hi": 60,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offloads",
+          "label": "OFFLOADS PER MATCH",
+          "value": 4.8,
+          "lo": 4,
+          "hi": 30,
+          "grade": "REALISTIC"
+        },
+        {
+          "key": "offsidePenalties",
+          "label": "OFFSIDE PENALTIES PER TEAM",
+          "value": 5.4,
+          "lo": 2,
+          "hi": 4,
+          "grade": "HIGH"
+        },
+        {
+          "key": "formationDriftP90",
+          "label": "P90 TARGET-SLOT DRIFT (M)",
+          "value": 2.8,
+          "lo": 0,
+          "hi": 2.5,
+          "grade": "HIGH"
+        }
+      ]
+    },
+    "score": {
+      "0": {
+        "score": 60,
+        "realistic": 9,
+        "total": 15
+      },
+      "3": {
+        "score": 53,
+        "realistic": 8,
+        "total": 15
+      },
+      "6": {
+        "score": 40,
+        "realistic": 6,
+        "total": 15
+      },
+      "9": {
+        "score": 60,
+        "realistic": 9,
+        "total": 15
+      }
+    }
+  }
+}

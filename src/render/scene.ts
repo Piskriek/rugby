@@ -12,6 +12,7 @@ import {
  * paper.ts. The engine keeps its own clip vocabulary; mapAction() below is
  * the single translation point. */
 import { Pose, STAND, sampleC, lerpPose, smooth, actionClip, CLIPS } from './clips';
+import { maulUseItClock, maulUseItCall } from '../game/engine/setpieces';
 import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
 import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
@@ -515,7 +516,7 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     const spdCol = s.speed > 0.6 ? '#6ee7a0' : s.speed > 0.12 ? '#ffd76a' : '#ff6a5a';
     worldLabel(ctx, cam, v, s.x, 4.2, s.z,
       `+${s.gained.toFixed(1)} m · ${s.speed.toFixed(2)} m/s · ${toLine.toFixed(1)} m TO GO`, spdCol, jx, jy);
-    const stall = s.stallClock > 0 ? `STOPPED ${s.stallClock.toFixed(1)}s / 5.0s` : s.stoppedOnce ? 'STOPPED ONCE' : 'DRIVING';
+    const stall = s.stallClock > 0 ? `STOPPED ${s.stallClock.toFixed(1)}s` : s.stoppedOnce ? 'STOPPED ONCE' : 'DRIVING';
     const contest = s.contest === 'PENDING'
       ? `RE-GATE ${s.regateWindows.length}/4`
       : s.humanWinShare === null
@@ -524,6 +525,26 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     const exit = s.exit === 'NONE' ? '' : ` · ${s.exit.replace(/_/g, ' ')}`;
     worldLabel(ctx, cam, v, s.x, 3.5, s.z,
       `${contest}${exit} · ${stall} · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(0)}°`, s.useItCalled ? '#ff6a5a' : '#f4efe2', jx, jy);
+    /* SPEC_08 (T-65): the stall rides the RUCK-COUNTDOWN channel — the same
+     * big number, the same bands, the same stroke, drawn at the maul instead
+     * of the breakdown. Playtest 2: the number is the TIME TO ACT — the time
+     * to the real consequence for this state (the law whistle under defence
+     * control, the 6 s auto-exit under attack control), never ambient
+     * information. The old status line's "/ 5.0s" promised a whistle that
+     * never came in two of the three modes and is gone. The call itself is
+     * one persistent word: USE IT. */
+    if (maulUseItCall(s)) {
+      const remaining = maulUseItClock(s);
+      const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
+      worldLabel(ctx, cam, v, s.x, 4.9, s.z, 'USE IT', '#ff6a5a', jx, jy);
+      ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
+      ctx.strokeText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+      ctx.fillStyle = band;
+      ctx.fillText(`${remaining.toFixed(0)}`, cp.sx, cp.sy - 10);
+      ctx.textAlign = 'left';
+    }
   }
 }
 

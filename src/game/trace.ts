@@ -173,6 +173,20 @@ function maxGap(d: Director, team: 'A' | 'B'): number {
   return g;
 }
 
+/* SPEC_10 B2b (LAW-66): line integrity is a property of the men still IN the
+ * line. maxGap spans the whole team — a beaten defender who has turned to
+ * chase (beatenT > 0) has legitimately left his channel, and the hole he
+ * leaves behind IS the line break, not a defensive-line defect (LINE BREAKS
+ * grades REALISTIC). The line measurement excludes them. */
+function maxLineGap(d: Director, team: 'A' | 'B'): number {
+  const fx = d.op?.carrierX ?? d.focusPoint().x;
+  const xs = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26)
+    .map((p) => p.x).sort((a, b) => a - b);
+  let g = 0;
+  for (let i = 0; i < xs.length - 1; i++) g = Math.max(g, xs[i + 1] - xs[i]);
+  return g;
+}
+
 function inFrame(d: Director, x: number, z: number): boolean {
   const v = { w: 960, h: 540 };
   const p = project({ ...d.cam, shake: 0 }, v, x, 1, z);
@@ -205,12 +219,14 @@ function emit(d: Director, rec: Recorder) {
    * and both sides in lawful places — all of it measured AT THE KICK. The
    * old window was "the first two seconds of the kick state", which sampled
    * the AIM walk (receivers lawfully mid-retreat) and the FLIGHT itself,
-   * where kk.bz is the FLYING BALL — the audit was told kick-offs were
-   * taken from z=3.2 and z=8.9, i.e. from mid-air. The first frames of
-   * FLIGHT are exactly "at the strike": the ball has left the tee but
-   * moved only centimetres, and nobody has had time to move. */
+  /* SPEC_10 B2a: this window sampled the FLYING ball for its first 2 s — by
+   * then the mark had legally travelled (a restart leaves the tee at ~10 m/s),
+   * the receivers had legally crossed the ten, and the wide pods had legally
+   * run in to support. Law 12 legality is a property of the STRIKE TICK
+   * (SPEC_09's T0): sample the first tenth of a second of flight — the ball
+   * has moved centimetres and nobody has taken a full step yet. */
   if (d.kk && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT')
-    && d.kk.stage === 'FLIGHT' && d.kk.t < 2) {
+    && d.kk.stage === 'FLIGHT' && d.kk.t < 0.1) {
     const markOk = d.kk.type === 'RESTART' ? Math.abs(d.kk.bz) < 1.5 : Math.abs(Math.abs(d.kk.bz) - 28) < 2;
     const rec2 = all.filter((p) => p.team === d.kk!.kicker && (p.z - d.kk!.bz) * (d.kk!.kicker === 'A' ? 1 : -1) > 0.5).length;
     const other: 'A' | 'B' = d.kk.kicker === 'A' ? 'B' : 'A';
@@ -234,12 +250,26 @@ function emit(d: Director, rec: Recorder) {
     all.some((b, j) => j > i && a.team === b.team && Math.hypot(a.x - b.x, a.z - b.z) < 0.55)).length;
   const kickerZ = d.kk ? d.kk.bz : null;
   const kickTeam = d.kk?.kicker ?? null;
-  const kickerAhead = d.kk && d.kk.t < 1.5 && kickTeam
+  /* SPEC_10 B2a (LAW-17): the old window covered the first 1.5 s of the KICK
+   * phase — during AIM the thirty are still LEGALLY walking to their slots,
+   * and after the strike (SPEC_09 T0) the chase is LEGALLY allowed past the
+   * tee. "Ahead of the ball at the kick-off" is a strike-tick property. */
+  const kickerAhead = d.kk && d.kk.stage === 'FLIGHT' && d.kk.t < 0.1 && kickTeam
     ? all.filter((p) => p.team === kickTeam && (p.z - (kickerZ ?? p.z)) * (kickTeam === 'A' ? 1 : -1) > 0.4).length
     : null;
   // The contract is that forwards stay within the pod channel of the ball,
   // not that they stay near the halfway line. Measure it properly.
   const fwdWide = all.filter((p) => p.num <= 8 && Math.abs(p.x - focus.x) > 10).length;
+  /* SPEC_10 B3 (LOG-19): lateral width is the pod design (RESTART_KICK spans
+   * lat to +-18). A forward 'in the backline' is a DEPTH claim — the
+   * ATTACKING side's forwards deeper than 8 m behind the CARRIED ball, where
+   * the first receiver stands. Open play only: during a kick the focus IS
+   * the flying ball, 40 m ahead of everyone, and every forward would read
+   * as deep; at set pieces the forwards are legally in the piece. */
+  const atkT = d.op?.attacking ?? d.possession;
+  const fwdBackline = d.phase === 'OPEN_PLAY' && d.op
+    ? all.filter((p) => p.team === atkT && p.num <= 8 && (focus.z - p.z) * (atkT === 'A' ? 1 : -1) > 8).length
+    : null;
   rec.push(d, 'PLAYERS_POS', 'POSITION OF ALL THIRTY PLAYERS', {
     count: all.length,
     teamA: all.filter((p) => p.team === 'A').length,
@@ -249,6 +279,8 @@ function emit(d: Director, rec: Recorder) {
     kickingTeamAheadOfBall: kickTeam ? kickerAhead : null,
     kickType: d.kk?.type ?? null,
     forwardsWideOfPods: fwdWide,
+    forwardsInBackline: fwdBackline,
+    phase: d.phase,   // SPEC_10 B3: bundling is legal at bound set pieces
     spreadA: Math.round(maxGap(d, 'A') * 10) / 10,
     spreadB: Math.round(maxGap(d, 'B') * 10) / 10,
     minStamina: Math.round(Math.min(...all.map((p) => p.stamina))),
@@ -271,6 +303,7 @@ function emit(d: Director, rec: Recorder) {
     defendersInFrame: defLine.filter((p) => inFrame(d, p.x, p.z)).length,
     isBehindGoalLine: Math.abs(d.cam.x) < 20 && Math.abs(d.cam.z) > 44,
     cameraTracksLaterally: Math.abs(d.cam.x - FIELD.minX) > 20,
+    phase: d.phase,   // SPEC_10 B2d: framing claims are live-play claims
     lookAheadMetres: 20,
     focusX: Math.round(focus.x * 10) / 10, focusZ: Math.round(focus.z * 10) / 10,
   });
@@ -300,15 +333,17 @@ function emit(d: Director, rec: Recorder) {
   rec.push(d, 'AFFORDANCES', 'VERBS AVAILABLE TO THE PLAYER', {
     count: aff.length,
     list: aff.join(', '),
+    phase: d.phase,   // SPEC_10 B2c: holds without a movement verb are by design
     /* Movement is offered if ANY verb moves something — the array holds
      * whole labels ('RUN (A/D)', 'STEER AIM (A/D)'), so exact membership
      * against the bare word was always false outside open play. */
-    hasMovement: aff.some((a) => a.includes('RUN') || a.includes('STEER')),
+    hasMovement: aff.some((a) => a.includes('RUN') || a.includes('STEER') || a.includes('(A/D)')),
     duplicates: aff.length !== new Set(aff).size,
   });
 
   /* the shape both sides are playing */
   rec.push(d, 'SHAPE', 'ATTACKING SHAPE AND DEFENSIVE SYSTEM', {
+    attackPhase: d.op?.phase ?? null,   // SPEC_10 B3b: a call is owed off a set piece, not mid-flow
     attackShape: d.shapeOf(atk).name,
     attackReading: d.shapeOf(atk).reading,
     defenceSystem: d.defenceOf(def).name,
@@ -357,6 +392,7 @@ function emit(d: Director, rec: Recorder) {
       power: Math.round(k.power * 100) / 100,
       accuracy: Math.round(k.accuracy * 100) / 100,
       aim: Math.round(k.aim * 100) / 100,
+      bounces: k.bounces,   // SPEC_10 B3: LOG-119 judged a tee ball it never saw bounce
       kickerNum: k.kickerNum, kickerName: k.kickerName,
       designatedKicker: d.teams[k.kicker].kicker === k.kickerNum,
       goalProb: Math.round(k.goalProb * 100) / 100,
@@ -411,16 +447,30 @@ function emit(d: Director, rec: Recorder) {
     const chaserNums = k.chasers.map((c) => c.num);
     const chasing = d.live.filter((p) => p.team === k.kicker && chaserNums.includes(p.num)
       && lp && Math.hypot(p.x - lp.x, p.z - lp.z) < Math.hypot(p.x - k.bx, p.z - k.bz)).length;
+    /* SPEC_10 B3 (LOG-56): a chaser released at the strike spends seconds
+     * nearer the strike than the mark — measure his INTENT, the velocity
+     * component toward the predicted landing. */
+    const closingV = d.live.filter((p) => p.team === k.kicker && chaserNums.includes(p.num)
+      && lp && ((lp.x - p.x) * p.vx + (lp.z - p.z) * p.vz) > 0).length;
     const kw = k.kicker;
     // Offside at a kick is judged against where the ball was STRUCK, not where it
     // is now, and only in the instant before the chasers are put onside.
     const strike = k.history[0];
     const strikeZ = strike ? strike.z : k.bz;
-    const atStrike = k.t < 0.45;
-    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
+    /* SPEC_10 B2a (LAW-57): 0.45 s was too wide — a chaser sprinting from
+     * 1.5 m behind the tee legally crosses the strike line inside it. The
+     * whole kicking team is behind the ball at the strike tick itself
+     * (SPEC_09 A2 proved ≥ 1.5 m of margin); judge it there and only there. */
+    const atStrike = k.t < 0.1;    rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
       playersMoving: movers,
+      flightT: Math.round(k.t * 100) / 100,   // SPEC_10 B3b: the release frame is legitimately still
       chasersMovingTowardLanding: chasing,
+      chasersClosingVelocity: closingV,
       chasersAssigned: chaserNums.length,
+      /* SPEC_10 B2c (UX-58): territory kicks (PUNT / FIFTY_22) are DESIGNED
+       * to land in space — the T-18 touch-hunt finder. "Receivers near the
+       * drop" is a contestability claim: restarts, bombs, grubbers. */
+      kickType: k.type,
       receiverTeamSet: d.live.filter((p) => p.team !== kw && Math.abs(p.z - (lp?.z ?? p.z)) < 18).length,
       kickingTeamOnside: atStrike
         ? d.live.filter((p) => p.team === kw && (p.z - strikeZ) * (kw === 'A' ? 1 : -1) <= 0.5).length
@@ -443,11 +493,20 @@ function emit(d: Director, rec: Recorder) {
       carrierExcluded: d.passOpts.every((o) => o.player.num !== d.op!.carrierNum),
     });
     rec.push(d, 'DEFENSIVE_LINE', 'DEFENSIVE LINE INTEGRITY', {
-      maxGapMetres: Math.round(maxGap(d, def) * 10) / 10,
+      maxGapMetres: Math.round(maxLineGap(d, def) * 10) / 10,
+      /* LAW-67 reads this as the Law-3 HEADCOUNT — keep it the full side;
+       * the line-integrity population lives in maxGapMetres (B2b). */
       defenders: d.live.filter((p) => p.team === def).length,
       lineConnected: maxGap(d, def) <= 4.0,
       pressure: Math.round(d.op.pressure * 100) / 100,
       phase: d.op.phase,
+      /* SPEC_10 B2b: a line is only 'connected' once it has RE-FORMED — the
+       * first ~1.2 s after a phase change is the legal reset transition (men
+       * retiring onside, pods folding). And the spacing ceiling belongs to
+       * the DESIGN, not a universal constant: the systems' maxSpacing is
+       * 3.2 (WEDGE) to 4.0 (MAN) — audit against the played system + margin. */
+      attackT: Math.round(d.op.t * 10) / 10,
+      defSpacing: d.defenceOf(def).maxSpacing,
       metresGained: Math.round(d.op.gained * 10) / 10,
       lineBreak: d.op.lineBreak,
       metresToLine: Math.round(d.op.toLine),
@@ -507,8 +566,11 @@ function emit(d: Director, rec: Recorder) {
     rec.push(d, 'LINEOUT', 'LINEOUT STATE', {
       stage: s.stage, call: s.call.label, jumpers: s.call.jumpers,
       throwerTeam: s.thrower,
-      inLineThrowing: s.players.filter((p) => p.team === s.thrower).length,
-      inLineDefending: s.players.filter((p) => p.team !== s.thrower).length,
+      /* SPEC_10 B3 (LAW-84): the throwing population included the THROWER
+       * and the SCRUMMY — 7 in the line + 2 = '9 in the throwing line'. Law
+       * 18 counts the line itself. */
+      inLineThrowing: s.players.filter((p) => p.team === s.thrower && p.role !== 'THROWER' && p.role !== 'SCRUMMY').length,
+      inLineDefending: s.players.filter((p) => p.team !== s.thrower && p.role !== 'SCRUMMY').length,
       throwerOutsideLine: Math.abs(s.players.find((p) => p.role === 'THROWER')?.x ?? 0) > 32,
       meter: Math.round(s.meter * 100) / 100,
       meterVisible: s.stage === 'THROW',
@@ -818,6 +880,10 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun
           stateChangedWithinOneFrame: p.sig !== now,
           phaseAtPress: d.phase,
           verb: d.affordances.join(','),
+          /* SPEC_10 B2c: in the CPU-v-CPU harness (gateConfig sets cpuA and
+           * cpuB) there IS no human side — input is inert by configuration,
+           * and a one-frame-observable check is meaningless there. */
+          humanSide: d.isHuman('A') || d.isHuman('B'),
           stillLatched: p.down === false && (p.key === 'left' ? inp.left : p.key === 'right' ? inp.right : false),
           latencySeconds: 0.017,
         });

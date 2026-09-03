@@ -131,8 +131,11 @@ export class MatchAudio {
     src.stop(t + 0.25);
   }
 
-  /** The referee: two detuned squares with a downward bend. */
-  whistle(kind: 'LONG' | 'DOUBLE') {
+  /** The referee: two detuned squares with a downward bend.
+   * LONG is the law award; DOUBLE is the try; SPEC_08's SHORT is the single
+   * sharp blast that marks a persistent call engaging (USE IT at a stalled
+   * maul) — one cue, fired when the call goes live. */
+  whistle(kind: 'LONG' | 'DOUBLE' | 'SHORT') {
     if (!this.ctx || !this.master) return;
     const blast = (at: number, dur: number) => {
       const t = this.ctx!.currentTime + at;
@@ -155,6 +158,7 @@ export class MatchAudio {
       }
     };
     if (kind === 'LONG') blast(0, 0.55);
+    else if (kind === 'SHORT') blast(0, 0.22);
     else { blast(0, 0.16); blast(0.24, 0.16); }
   }
 }

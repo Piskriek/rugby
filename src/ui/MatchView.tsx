@@ -599,6 +599,29 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                 </div>
                 <CameraPanel d={d} force={force} />
                 <SpaceRemap d={d} force={force} />
+                {/* SPEC_07 (T-67 backstop): the scoreTry idempotence guard's
+                    watchdog log. A blocked duplicate score trigger is shown
+                    HERE — a silent guard-block is an unexplained score. The
+                    watchdog trip count rides along because a trip near the
+                    goal line is T-67's suspected double-score trigger. */}
+                <div className="mt-3 border border-[#26314a] p-2">
+                  <div className="font-black tracking-[0.2em] text-[#7f8ea6]">
+                    SCORE GUARD — {d.tryGuardBlocks} DUPLICATE TRIGGER{d.tryGuardBlocks === 1 ? '' : 'S'} BLOCKED
+                    {d.watchdogTrips > 0 ? ` · WATCHDOG TRIPS ${d.watchdogTrips}` : ''}
+                  </div>
+                  {d.tryGuardLog.length === 0 ? (
+                    <div className="mt-1 text-[9px] text-[#6f7f96]">TRY LOCK CLEAN — NO DUPLICATE SCORE ATTEMPTS INTERCEPTED THIS MATCH.</div>
+                  ) : (
+                    <div className="mt-1 max-h-24 space-y-0.5 overflow-auto text-[9px] text-[#ff9d8c]">
+                      {d.tryGuardLog.slice().reverse().map((l, i) => (
+                        <div key={i} className="tabular-nums">{l}</div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-1 text-[8px] tracking-[0.12em] text-[#6f7f96]">
+                    LOCK ENGAGES THE FRAME A TRY IS AWARDED · CLEARS ON RESTART KICKOFF OR WATCHDOG RESET
+                  </div>
+                </div>
                 <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-0.5 text-[9px] text-[#7f8ea6] sm:grid-cols-3">
                   {[
                     ['A/D', 'RUN'], ['SHIFT', 'SPRINT'], ['SPACE', 'CONTEXT ACTION'], ['J / K', 'PASS L / R'],

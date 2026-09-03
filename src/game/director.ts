@@ -51,7 +51,7 @@ import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
 import { situationOf, beatOf, datasetMark } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
-import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul } from './engine/setpieces';
+import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
@@ -153,6 +153,10 @@ export interface KickState {
   hangOv?: number;
   /** penalty kick to touch — an uncontested strike at full range (T-18) */
   fromPenalty?: boolean;
+  /** SPEC_09: set (once) if the thaw branch ever held the freeze because the
+   * six-chaser commitment was incomplete at the strike — the log-once flag for
+   * a structural invariant that must never fire. */
+  thawHeld?: boolean;
 }
 
 /** T-08 — one broadcast event: what happened, where, when. Presentation only. */
@@ -448,6 +452,11 @@ export class Director {
   private ruckWindowSerial = 0;
   private resetWindowSerial = 0;
   private readonly formationSampleAt = new Map<string, number>();
+  /* SPEC_10 B2d (P90 drift composition): the last target each player was
+   * sampled against. A drift sample only counts when the target has BEEN
+   * STABLE across consecutive due-samples — a man sprinting to a freshly
+   * assigned slot is executing the shape, not drifting from it. */
+  private readonly formationLastTarget = new Map<Live, { x: number; z: number }>();
   private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
@@ -728,6 +737,14 @@ export class Director {
         add('A / D', 'WHEEL AND PEEL'); add('SPACE', 'TRANSFER TO 9'); add('L', 'PICK AND GO');
       } else add('A / D', 'HOLD THE MAUL UP');
     }
+    /* SPEC_10 B1 (UX-124): several contexts built a bar that did not contain
+     * the context verb's key — kick FLIGHT (bar shows only 'A / D — RUN TO THE
+     * BALL' while contextVerb says SPACE: CHASE THE BALL), scrum ASSEMBLE/MARK,
+     * and the lineout's non-CALL/THROW stages — so `primary: key === cv.key`
+     * matched nothing and the HUD never marked the one primary action the
+     * context actually has. Whatever the phase branches added, the verb the
+     * engine will fire is always the honest primary: guarantee it is listed. */
+    if (!out.some((a) => a.primary) && cv.key) out.push({ key: cv.key, label: cv.label, primary: true });
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }
@@ -783,13 +800,29 @@ export class Director {
         };
       }
       const attackControl = m.contest === 'ATTACK_CONTROL';
+      /* SPEC_08 (T-65): the stall rides THIS channel — the same one the ruck
+       * countdown lives in. While the USE IT call is live, the line reads as
+       * the referee (one persistent word) and the number is the time to the
+       * REAL consequence (maulUseItClock) — Playtest 2: TIME TO ACT, never
+       * ambient. The old code showed `5 - stallClock` in every mode, including
+       * the two where nothing happens at 5 s. */
+      if (maulUseItCall(m)) {
+        return {
+          now: 'USE IT',
+          next: attackControl && this.isHuman(m.attacking)
+            ? 'Call your exit — A/D peels, SPACE transfers to 9, L picks and goes'
+            : 'The maul is held — the referee\'s clock decides it',
+          clock: maulUseItClock(m),
+          danger: true,
+        };
+      }
       return {
         now: `${attackControl ? 'Attack' : 'Defence'} controls the maul — ${m.speed.toFixed(1)} m/s`,
         next: attackControl && this.isHuman(m.attacking)
           ? 'A/D peels, SPACE transfers to 9, L picks and goes'
           : 'The maul is held; wait for the use-it decision',
-        clock: m.stallClock > 0 ? Math.max(0, 5 - m.stallClock) : 0,
-        danger: !attackControl && m.stallClock > 2.5,
+        clock: 0,
+        danger: false,
       };
     }
     if (this.op) {
@@ -1161,7 +1194,24 @@ export class Director {
   private observeTargetSlot(p: Live) {
     if (!Number.isFinite(p.tx) || !Number.isFinite(p.tz)) return;
     this.formationCounts.targetSlotSamples[p.team]++;
-    this.formationDriftSamples[p.team].push(Math.hypot(p.x - p.tx, p.z - p.tz));
+    /* SPEC_10 B2d: settle-gate the drift ledger. The old composition pushed
+     * every eligible player's distance at every due-sample, so a legitimate
+     * 20 m slot-run after a phase change dominated the P90 and the metric
+     * read 15-17 m against a 2.5 m ceiling (D1 flag ⚠4). A sample enters the
+     * ledger only when the target has been stable (±0.75 m) since the
+     * previous due-sample — the mark being HELD and the man not yet on it is
+     * the drift the metric exists to catch. Measurement-only: the eligible
+     * count above still records every due-sample, so the denominator keeps
+     * its meaning. */
+    const prev = this.formationLastTarget.get(p);
+    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
+    this.formationLastTarget.set(p, { x: p.tx, z: p.tz });
+    if (!stable) return;
+    const dxT = p.tx - p.x, dzT = p.tz - p.z;
+    const distT = Math.hypot(dxT, dzT);
+    const closing = distT > 0.35 ? (dxT * p.vx + dzT * p.vz) / distT : 0;
+    if (closing > 0.3) return;
+    this.formationDriftSamples[p.team].push(distT);
   }
 
   private startRuckOffsideWindow(s: BreakdownState) {
@@ -1343,6 +1393,31 @@ export class Director {
   watchdogTrips = 0;
   watchdogLog: string[] = [];
 
+  /* ======================== SPEC_07 TRY LOCK (T-67 backstop) ========================
+   *
+   * scoreTry() is reachable from five engine sites in the same physics frame
+   * (open.ts x4, setpieces.ts x1). If two of them fire for one grounding —
+   * overlapping frame checks, or a watchdog reset landing inside the try
+   * fanfare — the old code incremented the score twice. The lock engages the
+   * frame a try is awarded and rejects every further trigger from the same
+   * play sequence. It clears ONLY on a play reset: the restart/drop-out
+   * kickoff being struck (startKick) or the watchdog tearing a stuck match
+   * down (trip). Every blocked trigger is counted here and surfaced in the
+   * pause panel — a silent guard-block is an unexplained score, which is
+   * worse than the bug it fixed.
+   */
+  tryLock: { at: number; team: 'A' | 'B'; num: number } | null = null;
+  tryGuardBlocks = 0;
+  tryGuardLog: string[] = [];
+
+  private noteTryGuardBlock() {
+    this.tryGuardBlocks++;
+    const line = `${this.clockText} — BLOCKED duplicate TRY trigger (${this.teams[this.tryLock!.team].nation.short} #${this.tryLock!.num})` +
+      ` — lock held since ${this.tryLock!.at.toFixed(1)}s, score stays ${this.teams.A.score}-${this.teams.B.score}`;
+    this.tryGuardLog.push(line);
+    if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
+  }
+
   /* ======================== SPEC_02 GATE SINK ========================
    *
    * Gate functions remain pure and return data. Director is the only place
@@ -1478,6 +1553,12 @@ export class Director {
     this.say(`PLAY RESET — ${why}`);
     this.phaseAge = 0;
     this.stillFor = 0;
+    /* SPEC_07: the watchdog reset is a play reset too — the try lock clears
+     * so a legitimately re-played try after the reset can score. T-67's
+     * structural suspect was exactly a trip near the goal line followed by
+     * an instant second score: if that fires again, the pause panel now
+     * shows the trip AND whether the guard was armed for it. */
+    this.tryLock = null;
     const f = this.focusPoint();
     this.releaseAll();
     this.kk = undefined;
@@ -1869,6 +1950,18 @@ export class Director {
               p.vx = 0; p.vz = 0;
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
               p.face = p.team === s.kicker ? s.dir : -s.dir;
+              /* SPEC_09 — THE WARM-UP BEAT. A pinned man is SET, not a
+               * statue: he takes the ready stance and breathes on his own
+               * phase. Presentation ONLY — the writables are clip/clipT/face;
+               * x, z, vx, vz, tx, tz and movedBy stay absolutely immutable
+               * while pinned (the pin writes above are the same values this
+               * branch has owned since he arrived). The clipT stagger per
+               * shirt is what reads as "alive but held": thirty men
+               * breathing in sync is a chorus line, not a kick-off line. */
+              if (p.clip !== 'ready') {
+                p.clip = 'ready';
+                p.clipT = (p.num * 0.37) % 1.4;
+              }
               arrived++;
             }
           }
@@ -1889,6 +1982,22 @@ export class Director {
       // While it is genuinely airborne, chase the predicted landing point. Once
       // it has bounced, chase the ball itself: the prediction jumps around on
       // every bounce and it was whipping the camera all over the ground.
+      /* SPEC_09 — THE THAW GATE. No pin releases until the T-69 six-chaser
+       * commitment is complete. launch() writes the commitment atomically
+       * with the stage flip, so this assertion should be structurally
+       * unreachable; if it ever fires, the freeze HOLDS (players stay set —
+       * the lesser evil by far) and the watchdog log records why. Releasing
+       * a thaw without chasers is T-69 cause 1 ("they just watch it")
+       * resurrected; releasing one WITH pre-set chase positions would be the
+       * pre-set steal. The gate guarantees neither can happen. */
+      if (s.chasers.length !== 6) {
+        if (!s.thawHeld) {
+          s.thawHeld = true;
+          this.watchdogLog.push(`${this.clockText} — SPEC_09 thaw held: chaser commitment incomplete at the strike (${s.chasers.length}/6)`);
+          if (this.watchdogLog.length > 40) this.watchdogLog.shift();
+        }
+        return;   // the freeze holds; upKick's FLIGHT clock and kickLanded still resolve the episode
+      }
       const lp = s.bounces === 0 ? this.landingPrediction() : null;
       const tgt = lp ?? { x: s.bx, z: s.bz };
 
@@ -2009,6 +2118,31 @@ export class Director {
     return this.kk ? (this.kk.kicker === 'A' ? 'B' : 'A') : this.defending();
   }
 
+  /* ======================== SPEC_09 — THE PLAY-ACTIVE GATE ========================
+   *
+   * The hard "play-active" predicate from the approved thaw sequencing design
+   * (SPEC_09_RESTART_THAW_SEQUENCING.md §4). It must evaluate to true before
+   * ANY human input, AI target or physics interaction may influence the ball
+   * during a restart ritual — the pre-set steal exploit is exactly a path
+   * that granted such influence with one of these terms false:
+   *   phase KICK (not a replay presentation frame — a replay grants nothing),
+   *   a live restart-type episode (RESTART | DROP_OUT),
+   *   stage FLIGHT (the ball is legally live: struck, airborne, in play),
+   *   the T-69 six-chaser commitment initialized (atomic with the stage flip
+   *   in launch(); asserted again by the thaw branch in placeBound),
+   *   not paused, and no instant-replay freeze running.
+   */
+  restartBallLive(): boolean {
+    const k = this.kk;
+    return this.phase === 'KICK'
+      && k != null
+      && (k.type === 'RESTART' || k.type === 'DROP_OUT')
+      && k.stage === 'FLIGHT'
+      && k.chasers.length === 6
+      && !this.paused
+      && this.replayTimer <= 0;
+  }
+
   /**
    * T-02 — the single sanctioned way for a system other than `steer()` to move a
    * player. Warns in dev when a player is moved twice in one frame by two
@@ -2052,8 +2186,17 @@ export class Director {
      * control of the chasers, moving several players twice per frame. */
     const KICK = this.kk;
     if (KICK) {
+      /* SPEC_09 — the play-active gate on the human stick. For a restart
+       * ritual the full predicate must hold (ball legally live AND the T-69
+       * commitment initialized AND no presentation freeze) before input can
+       * move anyone: this is the pre-set steal's front door, shut. A kick
+       * from open play (PUNT/BOMB/…) keeps the plain FLIGHT test — the ball
+       * left the hand in open play, there is no ritual to steal. */
+      const ballLive = (KICK.type === 'RESTART' || KICK.type === 'DROP_OUT')
+        ? this.restartBallLive()
+        : KICK.stage === 'FLIGHT';
       const ch = this.ctrlPlayer;
-      if (ch && this.isHuman(ch.team) && !ch.down && KICK.stage === 'FLIGHT'
+      if (ch && this.isHuman(ch.team) && !ch.down && ballLive
         && !KICK.chasers.some((c) => c.num === ch.num)) {
         this.writeThinkPlayer(gate, `think:kick-input:${ch.team}${ch.num}`, ch,
           ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy'] as const, () => {
@@ -3059,6 +3202,13 @@ export class Director {
   /* ============================ KICK ============================ */
 
   startKick(team: 'A' | 'B', type: KickType, at?: { x: number; z: number }, carrierNum?: number) {
+    /* SPEC_07: a restart-of-play kickoff (kick-off, restart after a score,
+     * 22-metre drop-out) is THE play reset — the try lock clears here and
+     * only here on the kick path. A GOAL kick does NOT clear it: the
+     * conversion belongs to the try sequence it follows, and a duplicate
+     * trigger anywhere inside the try-fanfare-conversion window must still
+     * be rejected. */
+    if (type === 'RESTART' || type === 'DROP_OUT') this.tryLock = null;
     this.possession = team;
     const dir = team === 'A' ? 1 : -1;
     const x = at?.x ?? 0;
@@ -3230,8 +3380,19 @@ export class Director {
   /* ============================ SCORES, PENALTIES, RESTARTS ============================ */
 
   scoreTry() { /* T-03: engine-internal */
+    /* SPEC_07 Phase 1 — the idempotence guard. First trigger through the
+     * gate locks scoring for this play sequence the millisecond the award
+     * lands; any subsequent trigger (second physics check in the same frame,
+     * a replay of the same grounding, an overlapping set-piece hand-off) is
+     * rejected before a single point of state is touched. scoreTry() is
+     * therefore mathematically idempotent per play. */
+    if (this.tryLock) {
+      this.noteTryGuardBlock();
+      return;
+    }
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
+    this.tryLock = { at: this.t, team, num };
     const p = this.teams[team].players[num - 1];
     /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
      * that ends in a slide on the turf, not the grounded pose. Open play
