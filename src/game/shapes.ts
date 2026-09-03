@@ -53,6 +53,141 @@ export interface AttackShape {
   depthBias: number;
 }
 
+/* =================== SPEC_02 — FORWARD ATTACK DEPTH ===================
+ *
+ * Phase B's geometry is intentionally isolated from Live and Director. It
+ * produces a three-point plan only: where support holds to receive a legal
+ * pass, where that runner reaches the gain line, and where the ensuing carry
+ * should aim. It does not assign tx/tz, steer an actor, or alter a shape.
+ *
+ * `setup` remains behind the anchor by a positive depth. `arrival` is exactly
+ * on the anchor's gain line. `carryTarget` lies forward of it, capped before
+ * the try line. The reviewed CPU caller consumes `setup` only after validating
+ * all three points; this helper only makes the relationship measurable.
+ */
+
+export type ForwardAttackRunRole = 'POD' | 'BACKLINE' | 'WING';
+
+export interface ForwardAttackPoint {
+  readonly x: number;
+  readonly z: number;
+}
+
+export interface ForwardAttackDepthInput {
+  /** Ball/carrier point that defines the current gain line. */
+  readonly anchor: Readonly<ForwardAttackPoint>;
+  /** +1 attacks toward +z; -1 attacks toward -z. */
+  readonly attackDirection: -1 | 1;
+  /** +1 maps lateral offsets openside; -1 mirrors the shape. */
+  readonly openside: -1 | 1;
+  readonly lateralOffsetMetres: number;
+  /** Shape-slot depth before tactic and red-zone adjustments. */
+  readonly nominalSupportDepthMetres: number;
+  /** AttackShape.depthBias (normally 0.70..1.22). */
+  readonly shapeDepthBias: number;
+  /** Normalised tempo slider, 0..1. */
+  readonly tempo: number;
+  /** Positive distance remaining to the attacking try line. */
+  readonly distanceToTryLineMetres: number;
+  readonly role: ForwardAttackRunRole;
+}
+
+export interface ForwardAttackDepthPlan {
+  /** Behind the gain line: the passable support/receiving location. */
+  readonly setup: ForwardAttackPoint;
+  /** On the gain line: the runner's run-on destination. */
+  readonly arrival: ForwardAttackPoint;
+  /** Beyond the gain line: the next carry's forward-gain target. */
+  readonly carryTarget: ForwardAttackPoint;
+  readonly supportDepthMetres: number;
+  readonly forwardGainMetres: number;
+  readonly redZoneCapped: boolean;
+}
+
+export const FORWARD_ATTACK_DEPTH_LIMITS = {
+  minimumSupportDepthMetres: 0.5,
+  maximumSupportDepthMetres: 8,
+  redZoneStartsMetres: 20,
+  redZoneDepthFloorMetres: 0.5,
+  redZoneDepthPerMetre: 0.08,
+  depthBiasMinimum: 0.5,
+  depthBiasMaximum: 1.5,
+  podForwardGainMetres: 2.5,
+  backlineForwardGainMetres: 3,
+  wingForwardGainMetres: 3.5,
+  tempoForwardGainBonusMetres: 0.5,
+  tryLineSafetyMetres: 0.5,
+} as const;
+
+const clampForwardAttackDepth = (value: number, min: number, max: number): number =>
+  value < min ? min : value > max ? max : value;
+
+const finiteForwardAttackDepth = (value: number, fallback: number): number =>
+  Number.isFinite(value) ? value : fallback;
+
+function baseForwardGainFor(role: ForwardAttackRunRole): number {
+  switch (role) {
+    case 'WING': return FORWARD_ATTACK_DEPTH_LIMITS.wingForwardGainMetres;
+    case 'BACKLINE': return FORWARD_ATTACK_DEPTH_LIMITS.backlineForwardGainMetres;
+    default: return FORWARD_ATTACK_DEPTH_LIMITS.podForwardGainMetres;
+  }
+}
+
+/**
+ * Build the pure depth plan for one forward-attacking slot.
+ *
+ * The support-depth calculation preserves the existing shape formula
+ * (`nominal × depthBias × (0.7 + tempo × 0.5)`) and its close-range cap, but
+ * exposes the run-on and carry points that the current behind-the-ball mark
+ * cannot express. Coordinates are deliberately not pitch-clamped here: a
+ * the live caller's measurement gate must see an invalid requested geometry
+ * rather than silently hiding it with a mutation.
+ */
+export function forwardAttackDepth(input: Readonly<ForwardAttackDepthInput>): ForwardAttackDepthPlan {
+  const limits = FORWARD_ATTACK_DEPTH_LIMITS;
+  const direction: -1 | 1 = input.attackDirection === -1 ? -1 : 1;
+  const openside: -1 | 1 = input.openside === -1 ? -1 : 1;
+  const anchorX = finiteForwardAttackDepth(input.anchor.x, 0);
+  const anchorZ = finiteForwardAttackDepth(input.anchor.z, 0);
+  const lateralOffset = finiteForwardAttackDepth(input.lateralOffsetMetres, 0);
+  const nominalDepth = Math.max(0, finiteForwardAttackDepth(input.nominalSupportDepthMetres, 0));
+  const depthBias = clampForwardAttackDepth(
+    finiteForwardAttackDepth(input.shapeDepthBias, 1),
+    limits.depthBiasMinimum,
+    limits.depthBiasMaximum,
+  );
+  const tempo = clampForwardAttackDepth(finiteForwardAttackDepth(input.tempo, 0), 0, 1);
+  const distanceToTryLine = Math.max(0, finiteForwardAttackDepth(input.distanceToTryLineMetres, 0));
+
+  const scaledDepth = nominalDepth * depthBias * (0.7 + tempo * 0.5);
+  const uncappedDepth = clampForwardAttackDepth(
+    scaledDepth,
+    limits.minimumSupportDepthMetres,
+    limits.maximumSupportDepthMetres,
+  );
+  const inRedZone = distanceToTryLine < limits.redZoneStartsMetres;
+  const redZoneDepthCap = limits.redZoneDepthFloorMetres
+    + distanceToTryLine * limits.redZoneDepthPerMetre;
+  const supportDepthMetres = inRedZone ? Math.min(uncappedDepth, redZoneDepthCap) : uncappedDepth;
+
+  const requestedForwardGain = baseForwardGainFor(input.role)
+    + tempo * limits.tempoForwardGainBonusMetres;
+  const forwardGainMetres = Math.min(
+    requestedForwardGain,
+    Math.max(0, distanceToTryLine - limits.tryLineSafetyMetres),
+  );
+  const laneX = anchorX + lateralOffset * openside;
+
+  return {
+    setup: { x: laneX, z: anchorZ - direction * supportDepthMetres },
+    arrival: { x: laneX, z: anchorZ },
+    carryTarget: { x: laneX, z: anchorZ + direction * forwardGainMetres },
+    supportDepthMetres,
+    forwardGainMetres,
+    redZoneCapped: inRedZone && supportDepthMetres < uncappedDepth,
+  };
+}
+
 /**
  * Builds the fifteen slots for a shape definition. Group anchors are given;
  * shirt numbers are assigned to pods in a fixed order so a hooker is never

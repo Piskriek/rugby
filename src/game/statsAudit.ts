@@ -34,8 +34,8 @@ export const BENCHMARKS: Benchmark[] = [
   { key: 'tries', label: 'TRIES PER TEAM', lo: 1, hi: 6, perTeam: true, note: 'Three a side is the modern average. Six-plus means the defensive line has holes; zero means attack cannot function.' },
   { key: 'tackles', label: 'TACKLES PER TEAM', lo: 90, hi: 220, perTeam: true, note: 'The single best indicator that contact is happening at a realistic rate.' },
   { key: 'rucks', label: 'RUCKS PER MATCH', lo: 120, hi: 200, perTeam: false, note: 'Around 150-170 is normal. Too few means play is not recycling; too many means nothing else ever happens.' },
-  { key: 'scrums', label: 'SCRUMS PER MATCH', lo: 8, hi: 22, perTeam: false, note: 'Roughly 12-15. Driven by knock-ons and forward passes, so it is a direct read on handling error rates.' },
-  { key: 'lineouts', label: 'LINEOUTS PER MATCH', lo: 14, hi: 34, perTeam: false, note: 'Around 22-25. Driven by how often the ball goes to touch, which is a read on the kicking game.' },
+  { key: 'scrums', label: 'SCRUMS PER MATCH', lo: 14, hi: 20, perTeam: false, note: 'Distinct awarded scrum occurrences, read from the set-piece event ledger rather than won/lost outcome fields.' },
+  { key: 'lineouts', label: 'LINEOUTS PER MATCH', lo: 20, hi: 28, perTeam: false, note: 'Distinct awarded lineout occurrences, including a separately awarded rethrow, never a sum of outcome counters.' },
   { key: 'penalties', label: 'PENALTIES PER MATCH', lo: 14, hi: 28, perTeam: false, note: 'Around 18-22. Far too many was the old offside bug; far too few means the referee is asleep.' },
   { key: 'passes', label: 'PASSES PER MATCH', lo: 180, hi: 340, perTeam: false, note: 'Around 250. A read on whether the ball actually moves through hands.' },
   { key: 'kicks', label: 'KICKS FROM HAND', lo: 30, hi: 70, perTeam: false, note: 'Around 45-55. Under 30 means the kicking game does not exist; over 70 means nobody runs.' },
@@ -46,7 +46,28 @@ export const BENCHMARKS: Benchmark[] = [
   { key: 'offloads', label: 'OFFLOADS PER MATCH', lo: 4, hi: 30, perTeam: false, note: 'Around 12. Highly style-dependent, so the range is deliberately wide.' },
 ];
 
+/** Approved analyst thresholds for the one combined fifteenth green-board row. */
+export const OFFSIDE_PENALTIES_PER_TEAM: Benchmark = {
+  key: 'offsidePenalties', label: 'OFFSIDE PENALTIES PER TEAM', lo: 2, hi: 4, perTeam: true,
+  note: 'A mean team count from deduplicated, sustained ruck and defensive-line-reset breaches.',
+};
+export const FORMATION_DRIFT_P90: Benchmark = {
+  key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 2.5, perTeam: false,
+  note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 2.5 m.',
+};
+
 export type Grade = 'REALISTIC' | 'LOW' | 'HIGH';
+
+/** A secondary measurement in a deliberately composite green-board row. */
+export interface StatDetail {
+  key: string;
+  label: string;
+  value: number;
+  lo: number;
+  hi: number;
+  grade: Grade;
+  note: string;
+}
 
 export interface StatResult {
   key: string;
@@ -57,6 +78,8 @@ export interface StatResult {
   grade: Grade;
   note: string;
   perTeam: boolean;
+  /** Present only for the approved combined offside/formation diagnostic. */
+  details?: StatDetail[];
 }
 
 export interface StatsReport {
@@ -86,6 +109,25 @@ function simMatch(cfg: MatchConfig): Director {
   return d;
 }
 
+const roundOne = (value: number) => Number.isFinite(value) ? Math.round(value * 10) / 10 : Number.NaN;
+const gradeFor = (value: number, lo: number, hi: number): Grade => {
+  if (!Number.isFinite(value) || value < lo) return 'LOW';
+  return value > hi ? 'HIGH' : 'REALISTIC';
+};
+const metricFor = (benchmark: Benchmark, total: number, matches: number): StatDetail => {
+  const value = roundOne(total / matches);
+  return {
+    key: benchmark.key,
+    label: benchmark.label,
+    value,
+    lo: benchmark.lo,
+    hi: benchmark.hi,
+    grade: gradeFor(value, benchmark.lo, benchmark.hi),
+    note: benchmark.note,
+  };
+};
+const textValue = (value: number) => Number.isFinite(value) ? String(value) : 'no eligible samples';
+
 export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
   const totals: Record<string, number> = {};
   const add = (k: string, v: number) => { totals[k] = (totals[k] ?? 0) + v; };
@@ -94,13 +136,16 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
   for (let i = 0; i < matches; i++) {
     const d = simMatch(cfg);
     const A = d.A.stats, B = d.B.stats;
+    const formation = d.formationIntegrity;
     scoreA += d.A.score; scoreB += d.B.score;
     add('points', (d.A.score + d.B.score) / 2);
     add('tries', (d.events.filter((e) => e.kind === 'TRY').length) / 2);
     add('tackles', (A.tackles + B.tackles) / 2);
     add('rucks', A.rucks + B.rucks);
-    add('scrums', A.scrumsWon + A.scrumsLost + B.scrumsWon + B.scrumsLost);
-    add('lineouts', A.lineoutsWon + A.lineoutsLost + B.lineoutsWon + B.lineoutsLost);
+    /* SPEC_04: outcomes can be asymmetric or absent. Only an explicit set-piece
+     * award/start is a match-total scrum or lineout occurrence. */
+    add('scrums', d.setPieceEvents.scrums);
+    add('lineouts', d.setPieceEvents.lineouts);
     add('penalties', A.penaltiesConceded + B.penaltiesConceded);
     add('passes', A.passes + B.passes);
     add('kicks', A.kicks + B.kicks);
@@ -110,22 +155,47 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
     const ruckTotal = Math.max(1, A.rucks + B.rucks);
     add('possession', (A.rucks / ruckTotal) * 100);
     add('offloads', A.offloads + B.offloads);
+    add('offsidePenalties', (A.offsides + B.offsides) / 2);
+    /* Never average the two sides before checking the ceiling: one badly formed
+     * defensive line is a defect even if its opponent holds shape. */
+    const sampled = formation.targetSlotSamples.A + formation.targetSlotSamples.B;
+    add('formationDriftP90', sampled
+      ? Math.max(formation.formationDriftP90.A, formation.formationDriftP90.B)
+      : Number.POSITIVE_INFINITY);
   }
 
   const results: StatResult[] = BENCHMARKS.map((b) => {
-    const value = Math.round(((totals[b.key] ?? 0) / matches) * 10) / 10;
-    const grade: Grade = value < b.lo ? 'LOW' : value > b.hi ? 'HIGH' : 'REALISTIC';
-    return { key: b.key, label: b.label, value, lo: b.lo, hi: b.hi, grade, note: b.note, perTeam: b.perTeam };
+    const metric = metricFor(b, totals[b.key] ?? 0, matches);
+    return { ...metric, perTeam: b.perTeam };
+  });
+
+  const offside = metricFor(OFFSIDE_PENALTIES_PER_TEAM, totals.offsidePenalties ?? 0, matches);
+  const drift = metricFor(FORMATION_DRIFT_P90, totals.formationDriftP90 ?? Number.POSITIVE_INFINITY, matches);
+  /* This is intentionally one audit row, but neither dimension is hidden: a
+   * green result requires both the legal-offside target and the drift ceiling. */
+  results.push({
+    key: 'offsideFormationIntegrity',
+    label: 'OFFSIDE & FORMATION INTEGRITY',
+    value: offside.value,
+    lo: offside.lo,
+    hi: offside.hi,
+    grade: offside.grade !== 'REALISTIC' ? offside.grade : drift.grade,
+    note: 'Both the offside-penalty band and the target-slot-drift ceiling must pass; neither compensates for the other.',
+    perTeam: true,
+    details: [offside, drift],
   });
 
   const realistic = results.filter((r) => r.grade === 'REALISTIC').length;
   const verdict: string[] = [];
-  for (const r of results.filter((x) => x.grade !== 'REALISTIC')) {
-    verdict.push(
-      r.grade === 'LOW'
-        ? `${r.label} is ${r.value}, below the realistic floor of ${r.lo}. ${r.note}`
-        : `${r.label} is ${r.value}, above the realistic ceiling of ${r.hi}. ${r.note}`,
-    );
+  for (const r of results) {
+    for (const metric of r.details ?? [r]) {
+      if (metric.grade === 'REALISTIC') continue;
+      verdict.push(
+        metric.grade === 'LOW'
+          ? `${metric.label} is ${textValue(metric.value)}, below the realistic floor of ${metric.lo}. ${metric.note}`
+          : `${metric.label} is ${textValue(metric.value)}, above the realistic ceiling of ${metric.hi}. ${metric.note}`,
+      );
+    }
   }
   if (!verdict.length) verdict.push('Every measured statistic falls inside the range a real rugby match produces.');
 

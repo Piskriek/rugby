@@ -3,8 +3,8 @@
  *
  * Usage:  npx vite-node scripts/stats.ts [matches] [difficulty]
  *
- * Simulates full CPU-v-CPU matches and grades 14 box-score statistics against
- * professional ranges. Exits non-zero when the realism score is below 80
+ * Simulates full CPU-v-CPU matches and grades 15 box-score/formation diagnostics
+ * against professional and approved integrity ranges. Exits non-zero when the realism score is below 80
  * (T-18's acceptance threshold).
  */
 import { auditStats } from '../src/game/statsAudit';
@@ -19,8 +19,12 @@ console.log(`\n=== STATISTICAL REALISM AUDIT — ${matches} matches at difficult
 console.log(report.scoreline);
 console.log('');
 for (const r of report.results) {
-  const mark = r.grade === 'REALISTIC' ? 'OK  ' : r.grade === 'LOW' ? 'LOW ' : 'HIGH';
-  console.log(`${mark} ${r.label.padEnd(26)} ${String(r.value).padStart(7)}   [${r.lo} .. ${r.hi}]`);
+  if (r.details) console.log(`     ${r.label}`);
+  for (const metric of r.details ?? [r]) {
+    const mark = metric.grade === 'REALISTIC' ? 'OK  ' : metric.grade === 'LOW' ? 'LOW ' : 'HIGH';
+    const value = Number.isFinite(metric.value) ? String(metric.value) : '—';
+    console.log(`${mark} ${metric.label.padEnd(34)} ${value.padStart(7)}   [${metric.lo} .. ${metric.hi}]`);
+  }
 }
 console.log(`\nScore: ${report.score}% (${report.realistic}/${report.total} realistic)`);
 if (report.verdict.length && report.verdict[0] !== 'Every measured statistic falls inside the range a real rugby match produces.') {

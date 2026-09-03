@@ -16,6 +16,13 @@
  */
 
 import { ROLE_CONTRACTS, contractFor, PhaseName } from './jlr';
+import {
+  forwardAttackLivePurityFailures, forwardAttackPassCandidateFailures,
+  forwardAttackPassOrderFailures, forwardAttackPassSelectionFailures,
+  forwardAttackPlayerWriteFailures, snapshotForwardAttackPlayer,
+  snapshotForwardAttackPlayers,
+} from './forwardAttackGates';
+import type { ForwardAttackGateReporter, ForwardAttackGateValue } from './forwardAttackGates';
 
 export interface Live {
   /* Playtest 2: the turn beat (the cutout pivots through edge-on) */
@@ -93,7 +100,15 @@ export function maxSpeed(p: Live, carrying: boolean, sprint: boolean, fatigue: n
  * animation gate between the input and the movement.
  */
 
-export function steer(p: Live, dt: number, sprint: boolean) {
+export function steer(
+  p: Live, dt: number, sprint: boolean,
+  reportGate?: ForwardAttackGateReporter,
+  gateLabel = 'steer',
+) {
+  /* SPEC_02 GATE: the whole integration write has one labelled owner when
+   * invoked from Director.think(). Other phase callers retain the zero-cost
+   * three-argument path. */
+  const gateBefore = reportGate ? snapshotForwardAttackPlayer(p) : undefined;
   const dx = p.tx - p.x, dz = p.tz - p.z;
   const dist = Math.hypot(dx, dz);
   const want = maxSpeed(p, p.carrier, sprint, p.stamina) * p.urgency;
@@ -188,16 +203,31 @@ export function steer(p: Live, dt: number, sprint: boolean) {
   if (sp > 7.0) p.stamina = clamp(p.stamina - dt * 4.4 * (1.4 - p.attrs.STA / 200), 0, 100);
   else if (sp > 3.0) p.stamina = clamp(p.stamina - dt * 0.3, 0, 100);
   else p.stamina = clamp(p.stamina + dt * (1.6 + p.restT * 0.9), 0, 100);
+
+  if (reportGate && gateBefore) {
+    for (const gate of forwardAttackPlayerWriteFailures(gateLabel, gateBefore, snapshotForwardAttackPlayer(p), [
+      'vx', 'vz', 'x', 'z', 'movedBy', 'face', 'lastFace', 'turnT', 'clip', 'clipT', 'stamina',
+    ] as const)) reportGate(gate);
+  }
 }
 
 /** Teammates must never occupy the same metre of grass, and never block their own carrier. */
-export function separate(all: Live[], dt: number) {
+export function separate(
+  all: Live[], dt: number,
+  reportGate?: ForwardAttackGateReporter,
+  gateLabel = 'separate',
+) {
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
       const dx = b.x - a.x, dz = b.z - a.z;
       const d = Math.hypot(dx, dz);
       if (d < 0.0001) continue;
+      /* SPEC_02 GATE: each collision pair has its own before-image and label;
+       * this makes a separation shove attributable without changing T-02's
+       * existing movement-owner semantics. */
+      const beforeA = reportGate ? snapshotForwardAttackPlayer(a) : undefined;
+      const beforeB = reportGate ? snapshotForwardAttackPlayer(b) : undefined;
 
       /* T-04. Opposing players must not run through one another. Two cases:
        *
@@ -236,6 +266,11 @@ export function separate(all: Live[], dt: number) {
           a.x -= nx * push; a.z -= nz * push;
           b.x += nx * push; b.z += nz * push;
         }
+      }
+      if (reportGate && beforeA && beforeB) {
+        const pairLabel = `${gateLabel}:${a.team}${a.num}-${b.team}${b.num}`;
+        for (const gate of forwardAttackPlayerWriteFailures(pairLabel, beforeA, snapshotForwardAttackPlayer(a), ['x', 'z'] as const)) reportGate(gate);
+        for (const gate of forwardAttackPlayerWriteFailures(pairLabel, beforeB, snapshotForwardAttackPlayer(b), ['x', 'z'] as const)) reportGate(gate);
       }
       /* T-11 void audit: frozen-interface param — the collision resolve is
        * positional (separation per frame), dt is not needed here. */
@@ -307,10 +342,134 @@ export function defenceMark(num: number, s: ShapeInput): { x: number; z: number;
   return { x, z: clamp(z, -59, 59), job: c.job[phase] ?? 'DEFEND YOUR CHANNEL' };
 }
 
+/* ===================== SPEC_02 — FORWARD PRIORITY =====================
+ *
+ * Phase A lives beside the pass solver and accepts only scalar observations,
+ * rather than Live objects or Director state. The reviewed CPU integration
+ * supplies those observations through an opt-in context below; this contract
+ * itself still cannot move a player, select a play, or retain AI state.
+ *
+ * A direct gain is "guaranteed" at three metres. An uncovered true wing may
+ * override that direct option only when all of these are true:
+ *
+ *   1. the candidate is shirt 11 or 14 and is uncovered;
+ *   2. he is at least 12 m laterally available (a real wide release);
+ *   3. he still projects at least one metre forward; and
+ *   4. when a direct gain is guaranteed, he gives up no more than 1 m of it.
+ *
+ * The last condition is the explicit trade-off: width may win an equivalent
+ * attacking opportunity, but it may not discard a materially better forward
+ * gain just because the wing happens to be uncovered.
+ */
+
+export const FORWARD_ATTACK_PRIORITY_LIMITS = {
+  guaranteedForwardGainMetres: 3,
+  wingOverrideMinLateralSeparationMetres: 12,
+  wingOverrideMinimumForwardGainMetres: 1,
+  wingOverrideMaximumForwardGainConcessionMetres: 1,
+} as const;
+
+export type ForwardAttackPriority = 'FORWARD_GAIN' | 'UNCOVERED_WING' | 'NONE';
+
+/** A plain, read-only observation of a possible wide release. */
+export interface ForwardAttackWingCandidate {
+  /** Rugby wings only; a full-back does not activate the wing override. */
+  readonly shirt: number;
+  readonly uncovered: boolean;
+  /** Absolute lateral distance from the direct carrier lane, in metres. */
+  readonly lateralSeparationMetres: number;
+  /** Projected metres toward the attacking try line, never screen direction. */
+  readonly forwardGainMetres: number;
+}
+
+/** Inputs intentionally contain no mutable Live or Director state. */
+export interface ForwardAttackPriorityInput {
+  /** Projected metres toward the attacking try line for the direct option. */
+  readonly forwardGainMetres: number;
+  readonly wing: Readonly<ForwardAttackWingCandidate> | null;
+}
+
+export interface ForwardAttackPriorityResult {
+  readonly priority: ForwardAttackPriority;
+  readonly forwardGainGuaranteed: boolean;
+  /** True only when the wing has satisfied every legal override condition. */
+  readonly wingOverrideEligible: boolean;
+}
+
+export interface ForwardAttackPriorityMatrixRow {
+  readonly forwardGainGuaranteed: boolean;
+  readonly wingOverrideEligible: boolean;
+  readonly priority: ForwardAttackPriority;
+}
+
+/**
+ * The complete boolean matrix. `wingOverrideEligible` already includes the
+ * numeric conditions above, so a true value is the one lawful wing override.
+ */
+export const FORWARD_ATTACK_PRIORITY_MATRIX: readonly ForwardAttackPriorityMatrixRow[] = [
+  { forwardGainGuaranteed: false, wingOverrideEligible: false, priority: 'NONE' },
+  { forwardGainGuaranteed: false, wingOverrideEligible: true, priority: 'UNCOVERED_WING' },
+  { forwardGainGuaranteed: true, wingOverrideEligible: false, priority: 'FORWARD_GAIN' },
+  { forwardGainGuaranteed: true, wingOverrideEligible: true, priority: 'UNCOVERED_WING' },
+];
+
+/** Whether a projected direct option is worth protecting from a wide override. */
+export function hasGuaranteedForwardGain(forwardGainMetres: number): boolean {
+  return Number.isFinite(forwardGainMetres)
+    && forwardGainMetres >= FORWARD_ATTACK_PRIORITY_LIMITS.guaranteedForwardGainMetres;
+}
+
+/**
+ * The sole legal override predicate. It reads only its argument and makes no
+ * random choice, state update, or array reordering.
+ */
+export function isLegalUncoveredWingOverride(input: Readonly<ForwardAttackPriorityInput>): boolean {
+  const wing = input.wing;
+  if (!wing || !Number.isFinite(input.forwardGainMetres)
+    || !Number.isFinite(wing.lateralSeparationMetres)
+    || !Number.isFinite(wing.forwardGainMetres)) return false;
+
+  const trueWing = wing.shirt === 11 || wing.shirt === 14;
+  const wideEnough = Math.abs(wing.lateralSeparationMetres)
+    >= FORWARD_ATTACK_PRIORITY_LIMITS.wingOverrideMinLateralSeparationMetres;
+  const gainsForward = wing.forwardGainMetres
+    >= FORWARD_ATTACK_PRIORITY_LIMITS.wingOverrideMinimumForwardGainMetres;
+  const preservesDirectGain = !hasGuaranteedForwardGain(input.forwardGainMetres)
+    || wing.forwardGainMetres >= input.forwardGainMetres
+      - FORWARD_ATTACK_PRIORITY_LIMITS.wingOverrideMaximumForwardGainConcessionMetres;
+
+  return trueWing && wing.uncovered && wideEnough && gainsForward && preservesDirectGain;
+}
+
+/**
+ * Evaluate the Phase-A priority matrix without selecting or mutating anything.
+ * `NONE` deliberately means "leave the current caller's fallback alone" until
+ * a reviewed integration supplies one.
+ */
+export function evaluateForwardAttackPriority(
+  input: Readonly<ForwardAttackPriorityInput>,
+): ForwardAttackPriorityResult {
+  const forwardGainGuaranteed = hasGuaranteedForwardGain(input.forwardGainMetres);
+  const wingOverrideEligible = isLegalUncoveredWingOverride(input);
+  const priority: ForwardAttackPriority = wingOverrideEligible ? 'UNCOVERED_WING'
+    : forwardGainGuaranteed ? 'FORWARD_GAIN'
+      : 'NONE';
+  return { priority, forwardGainGuaranteed, wingOverrideEligible };
+}
+
 /* ============================ PASS SOLVER ============================
  * A pass is never thrown to a coordinate. It is thrown to a named player and
  * the flight is solved so ball and man arrive together.
  */
+
+/**
+ * Opt-in context for the approved forward-attack ranking. It is deliberately
+ * plain data so the pass solver still has no dependency on Director state.
+ */
+export interface ForwardAttackPassContext {
+  readonly enabled: boolean;
+  readonly attackDirection: -1 | 1;
+}
 
 export interface PassOption {
   player: Live;
@@ -325,14 +484,111 @@ export interface PassOption {
   risk: number;
   /** T-18: a defender is within tackling range of this receiver */
   covered: boolean;
+  /** projected progress in the attacking direction by the time the pass arrives */
+  forwardGainMetres: number;
+  /** absolute lateral separation from the carrier lane */
+  lateralSeparationMetres: number;
+  /** SPEC_02's reviewed priority result for this candidate */
+  priority: ForwardAttackPriority;
 }
 
 /** sort key: uncovered options before covered ones */
 function coveredRank(o: PassOption): number { return o.covered ? 1 : 0; }
 
+function isTrueWing(num: number): boolean { return num === 11 || num === 14; }
+
+function priorityRank(priority: ForwardAttackPriority): number {
+  return priority === 'UNCOVERED_WING' ? 0 : priority === 'FORWARD_GAIN' ? 1 : 2;
+}
+
+function defaultPassOptionCompare(a: PassOption, b: PassOption): number {
+  return (coveredRank(a) - coveredRank(b))
+    || (a.distance - b.distance)
+    || (a.player.num - b.player.num);
+}
+
+function forwardPassOptionCompare(a: PassOption, b: PassOption): number {
+  return (priorityRank(a.priority) - priorityRank(b.priority))
+    || (coveredRank(a) - coveredRank(b))
+    || (b.forwardGainMetres - a.forwardGainMetres)
+    || (a.distance - b.distance)
+    || (a.player.num - b.player.num);
+}
+
+/** The best uncovered non-wing route is the direct-gain comparator for every wing. */
+function bestDirectForwardOption(options: readonly PassOption[]): PassOption | null {
+  let best: PassOption | null = null;
+  for (const option of options) {
+    if (isTrueWing(option.player.num) || option.covered) continue;
+    if (!best || option.forwardGainMetres > best.forwardGainMetres
+      || (option.forwardGainMetres === best.forwardGainMetres && option.distance < best.distance)) {
+      best = option;
+    }
+  }
+  return best;
+}
+
+/**
+ * The wide sort is a copy-sort, never an in-place mutation of the candidate
+ * collection. The reviewed priority contract compares every wing with the
+ * best direct gain on the field, not merely the nearest route on its own side:
+ * the one-metre concession cap must protect a stronger release anywhere.
+ */
+function rankForwardPassOptions(
+  scored: readonly PassOption[],
+  context: Readonly<ForwardAttackPassContext> | undefined,
+): PassOption[] {
+  if (!context?.enabled) return [...scored].sort(defaultPassOptionCompare);
+
+  const direct = bestDirectForwardOption(scored);
+  const prioritised = scored.map((option) => {
+    if (isTrueWing(option.player.num)) {
+      const decision = evaluateForwardAttackPriority({
+        forwardGainMetres: direct?.forwardGainMetres ?? 0,
+        wing: {
+          shirt: option.player.num,
+          uncovered: !option.covered,
+          lateralSeparationMetres: option.lateralSeparationMetres,
+          forwardGainMetres: option.forwardGainMetres,
+        },
+      });
+      return { ...option, priority: decision.priority };
+    }
+    if (direct === option) {
+      return {
+        ...option,
+        priority: evaluateForwardAttackPriority({ forwardGainMetres: option.forwardGainMetres, wing: null }).priority,
+      };
+    }
+    return option;
+  });
+  return [...prioritised].sort(forwardPassOptionCompare);
+}
+
+function reportPassGate(
+  reporter: ForwardAttackGateReporter | undefined,
+  label: string,
+  reason: string,
+  values: Readonly<Record<string, ForwardAttackGateValue>>,
+): void {
+  reporter?.({ label, reason, values });
+}
+
 export function passOptions(
   carrier: Live, all: Live[], _open: number, cutOut: boolean, wet: number,
+  forwardContext?: Readonly<ForwardAttackPassContext>,
+  reportGate?: ForwardAttackGateReporter,
 ): PassOption[] {
+  /* SPEC_02 GATE: the sort must be a pure read of live players. */
+  const liveBefore = reportGate ? snapshotForwardAttackPlayers(all) : undefined;
+  const expectedDir: -1 | 1 = carrier.team === 'A' ? 1 : -1;
+  const atkDir = forwardContext?.attackDirection ?? expectedDir;
+  if (reportGate && forwardContext?.enabled && atkDir !== expectedDir) {
+    reportPassGate(reportGate, 'passOptions:context-direction', 'forward pass context disagrees with the carrier attack direction', {
+      carrier: carrier.num, team: carrier.team, expectedDir, contextDir: atkDir,
+    });
+  }
+
   const mates = all.filter((p) => p.team === carrier.team && p !== carrier && p.sinbin <= 0 && !p.down);
   const foes = all.filter((p) => p.team !== carrier.team && p.sinbin <= 0 && !p.down);
   const scored: PassOption[] = [];
@@ -346,7 +602,7 @@ export function passOptions(
     // T-18: support legitimately trails the carrier by up to 10 m (that is
     // what depth IS) — the old 6 m cutoff removed the receivers a moving
     // attack actually has, and the CPU had nobody to pass to.
-    if ((m.z - carrier.z) < -10) continue;
+    if ((m.z - carrier.z) * atkDir < -10) continue;
     const dist = Math.hypot(m.x - carrier.x, m.z - carrier.z);
     // HARD CLAMP: a pass can never exceed the widest eligible receiver
     if (dist > 26) continue;
@@ -358,7 +614,6 @@ export function passOptions(
      * A defender who is BEATEN (slipped, or already carried past — behind
      * the receiver in the direction of attack) is not coverage: drift
      * defences concede those passes all match. */
-    const atkDir = carrier.team === 'A' ? 1 : -1;
     const covered = foes.some((f) => (f.beatenT ?? 0) <= 0
       && (f.z - m.z) * atkDir >= -1.2
       && Math.hypot(f.x - m.x, f.z - m.z) < 2.2);
@@ -368,21 +623,61 @@ export function passOptions(
       0.03 + (dist / 26) * 0.16 + wet * 0.14 + (1 - skill) * 0.12 + (cutOut ? 0.05 : 0) + (covered ? 0.1 : 0),
       0.02, 0.5,
     );
-    scored.push({ player: m, rank: 0, side, cutOut, distance: dist, time, risk, covered });
+    /* Match solvePassTarget's 80%-of-top-speed run-on lead, but express it in
+     * attacking metres rather than screen Z. This is the direct gain the
+     * approved wing contract may — or may not — trade away. */
+    const projectedZ = m.z + atkDir * maxSpeed(m, false, false, m.stamina) * 0.8 * time;
+    const forwardGainMetres = Math.max(0, (projectedZ - carrier.z) * atkDir);
+    const beforePush = scored.length;
+    scored.push({
+      player: m, rank: 0, side, cutOut, distance: dist, time, risk, covered,
+      forwardGainMetres, lateralSeparationMetres: absRel, priority: 'NONE',
+    });
+    if (reportGate) {
+      const option = scored[scored.length - 1];
+      if (scored.length !== beforePush + 1) {
+        reportPassGate(reportGate, `passOptions:candidate:${m.num}`, 'candidate append changed the local collection by more than one entry', {
+          beforeCount: beforePush, afterCount: scored.length, carrier: carrier.num, target: m.num,
+        });
+      }
+      for (const gate of forwardAttackPassCandidateFailures(`passOptions:candidate:${m.num}`, carrier, option)) reportGate(gate);
+    }
   }
-  // open men first, then nearest — the old pure-distance sort is what threw
-  // every pass straight into a waiting defender
-  scored.sort((a, b) => (coveredRank(a) - coveredRank(b)) || (a.distance - b.distance));
-  // nearest on each side, skipping one if this is a cut-out pass
+
+  /* SPEC_02 GATE: snapshot before the rank write; rankForwardPassOptions copies
+   * before sorting, so all candidate membership remains attributable. */
+  const ranked = rankForwardPassOptions(scored, forwardContext);
+  if (reportGate) {
+    for (const gate of forwardAttackPassOrderFailures(
+      'passOptions:ranked', scored, ranked, forwardContext?.enabled ?? false,
+    )) reportGate(gate);
+  }
+
+  // Highest-ranked option on each side, skipping one if this is a cut-out pass.
   const out: PassOption[] = [];
   for (const side of [1, -1] as const) {
-    const list = scored.filter((o) => o.side === side);
+    const list = ranked.filter((o) => o.side === side);
     if (!list.length) continue;
     const pick = cutOut && list.length > 1 ? list[1] : list[0];
     if (cutOut && list.length === 1) continue;
-    out.push({ ...pick, rank: out.length + 1 });
+    const beforePush = out.length;
+    out.push({ ...pick, rank: 0 });
+    if (reportGate && out.length !== beforePush + 1) {
+      reportPassGate(reportGate, `passOptions:selected:${side}`, 'side selection changed the local collection by more than one entry', {
+        beforeCount: beforePush, afterCount: out.length, side, target: pick.player.num,
+      });
+    }
   }
-  return out;
+
+  const ordered = forwardContext?.enabled ? [...out].sort(forwardPassOptionCompare) : out;
+  const selected = ordered.map((option, index) => ({ ...option, rank: index + 1 }));
+  if (reportGate) {
+    for (const gate of forwardAttackPassSelectionFailures('passOptions:selected', selected)) reportGate(gate);
+    if (liveBefore) {
+      for (const gate of forwardAttackLivePurityFailures('passOptions:return', liveBefore, all)) reportGate(gate);
+    }
+  }
+  return selected;
 }
 
 /**

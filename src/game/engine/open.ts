@@ -20,6 +20,10 @@ import { REFEREE_CALLS } from '../data';
 import { wetnessOf, windOf, WEATHERS } from './weather';
 import { approach } from './approach';
 import { clamp } from './clamp';
+import {
+  forwardAttackPassDispatchFailures, forwardAttackPlayerWriteFailures,
+  forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
+} from '../forwardAttackGates';
 
 export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) {
 
@@ -232,11 +236,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * never fights it in the same frame. */
   const rb = d.releaseBeat;
   const beatOn = !!(rb && d.t < rb.until);
+  /* SPEC_04: this is a distinct defensive-line-reset opportunity. Sample the
+   * live positions before the existing human-pace retreat corrects them. */
+  if (beatOn && d.sampleDefensiveLineResetOffside(dt)) return;
   const dists: { num: number; d: number }[] = [];
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);
     if (p.team !== dTeam || p.sinbin > 0) continue;
-    if (beatOn && p !== d.ctrlPlayer) {
+    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer)) {
       const gap = (p.z - rb!.z) * rb!.dir;
       if (gap < 2.0) {
         p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;
@@ -498,9 +505,16 @@ export function doDummy(d: Director, ) {
 export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
 
   const s = d.op!;
+  const gate = d.forwardAttackGateReporter();
   const car = d.L(s.attacking, s.carrierNum);
   const wet = wetnessOf(WEATHERS[d.options.weather ?? 1]);
-  const opts = passOptions(car, d.live, s.open, cutOut, wet);
+  /* The CPU's actual pass execution receives the same reviewed context as its
+   * preview/side selection; humans keep the neutral legacy ordering. */
+  const forwardContext = !d.isHuman(s.attacking) ? {
+    enabled: true,
+    attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1,
+  } : undefined;
+  const opts = passOptions(car, d.live, s.open, cutOut, wet, forwardContext, gate);
   const opt = opts.find((o) => o.side === side);
   if (!opt) {
     d.showHint(cutOut ? 'NOBODY TO SKIP TO ON THAT SIDE' : 'NO RECEIVER ON THAT SIDE', 1.6);
@@ -534,9 +548,28 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
 
   // T-35. The receiver is already moving; the ball flies to him instead of
   // teleporting. Launch the flight — upOpen carries it to the target.
+  const receiverBefore = gate ? snapshotForwardAttackPlayer(opt.player) : undefined;
   opt.player.vz = s.dir * maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
   opt.player.face = s.dir >= 0 ? 1 : -1;
+  if (gate && receiverBefore) {
+    for (const failure of forwardAttackPlayerWriteFailures(
+      `open:pass-launch-receiver:${opt.player.team}${opt.player.num}`, receiverBefore,
+      snapshotForwardAttackPlayer(opt.player), ['vz', 'face'] as const,
+    )) gate(failure);
+  }
 
+  /* SPEC_02 GATE: snapshot the ball-flight state immediately before dispatch.
+   * The receiver selected above must be exactly the one named by this write. */
+  const flightBefore = gate ? {
+    ballLive: s.ball.live,
+    ballX: s.ball.x,
+    ballY: s.ball.y,
+    ballZ: s.ball.z,
+    pendingReceiver: s.pendingReceiver ?? null,
+    passT: s.passT,
+    passDist: s.passDist,
+    carrierNum: s.carrierNum,
+  } : undefined;
   s.ball.live = true;
   s.ball.x = car.x;
   s.ball.z = car.z;
@@ -544,6 +577,25 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   s.pendingReceiver = opt.player.num;
   s.passT = 0;
   s.passDist = Math.max(3.5, Math.hypot(opt.player.x - car.x, opt.player.z - car.z));
+  if (gate && flightBefore) {
+    const flightAfter = {
+      ballLive: s.ball.live,
+      ballX: s.ball.x,
+      ballY: s.ball.y,
+      ballZ: s.ball.z,
+      pendingReceiver: s.pendingReceiver ?? null,
+      passT: s.passT,
+      passDist: s.passDist,
+      carrierNum: s.carrierNum,
+    };
+    for (const failure of forwardAttackStateWriteFailures(
+      `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter,
+      ['ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist'],
+    )) gate(failure);
+    for (const failure of forwardAttackPassDispatchFailures(
+      `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter, opt.player.num,
+    )) gate(failure);
+  }
   if (cutOut) d.say(`CUT-OUT PASS TO ${d.L(s.attacking, opt.player.num).num}`);
 }
 
@@ -704,18 +756,59 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
     case 'PASS': {
       /* T-24d. The CPU used to pick a side at random and fail silently when
        * that side had no receiver. Pick a side that actually has an option,
-       * preferring the openside, so the CPU completes its passes instead of
-       * fumbling the button. */
+       * preferring the openside unless SPEC_02's approved gain/wing matrix
+       * has supplied a stronger ranked release. */
+      const gate = d.forwardAttackGateReporter();
       const car = d.L(s.attacking, s.carrierNum);
       const wet = wetnessOf(WEATHERS[d.options.weather ?? 1]);
-      const opts = passOptions(car, d.live, s.open, false, wet);
+      const cutOut = R() < 0.18;
+      const forwardContext = { enabled: true, attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1 };
+      const opts = passOptions(car, d.live, s.open, cutOut, wet, forwardContext, gate);
       const left = opts.find((o) => o.side === -1);
       const right = opts.find((o) => o.side === 1);
-      let side: -1 | 1 = 1;
-      if (right && (!left || s.open < 0)) side = 1;
-      else if (left) side = -1;
-      d.doPass(side, R() < 0.18);
+      const priorityPick = opts.find((option) => option.priority !== 'NONE');
+      let selected = priorityPick;
+      if (!selected && right && (!left || s.open < 0)) selected = right;
+      else if (!selected && left) selected = left;
+      const side: -1 | 1 = selected?.side ?? 1;
+
+      /* SPEC_02 GATE: this snapshot spans the dispatch and the intent reset.
+       * `doPass` owns the detailed flight write; this caller proves the CPU
+       * selected the exact receiver the priority sort surfaced. */
+      const beforeDispatch = gate ? {
+        aiIntent: s.aiIntent,
+        ballLive: s.ball.live,
+        ballX: s.ball.x,
+        ballY: s.ball.y,
+        ballZ: s.ball.z,
+        pendingReceiver: s.pendingReceiver ?? null,
+        passT: s.passT,
+        passDist: s.passDist,
+        carrierNum: s.carrierNum,
+      } : undefined;
+      d.doPass(side, cutOut);
       s.aiIntent = 'CARRY';
+      if (gate && beforeDispatch) {
+        const afterDispatch = {
+          aiIntent: s.aiIntent,
+          ballLive: s.ball.live,
+          ballX: s.ball.x,
+          ballY: s.ball.y,
+          ballZ: s.ball.z,
+          pendingReceiver: s.pendingReceiver ?? null,
+          passT: s.passT,
+          passDist: s.passDist,
+          carrierNum: s.carrierNum,
+        };
+        for (const failure of forwardAttackStateWriteFailures(
+          `open:cpu-pass-dispatch:${s.attacking}${car.num}`, beforeDispatch, afterDispatch,
+          ['aiIntent', 'ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist'],
+        )) gate(failure);
+        for (const failure of forwardAttackPassDispatchFailures(
+          `open:cpu-pass-dispatch:${s.attacking}${car.num}`, beforeDispatch, afterDispatch,
+          selected?.player.num ?? null,
+        )) gate(failure);
+      }
       return;
     }
     case 'KICK':

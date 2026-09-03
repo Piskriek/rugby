@@ -22,11 +22,11 @@ import { TutorialState, newTutorial, stepAt, TUTORIAL } from './tutorial';
 import {
   shapeById, defenceById, DEFENCE_CHANNELS, ARCHETYPE_SHAPE,
   callPlay, zoneOf, PlayCall, RESTART_RECEIVE, RESTART_KICK, CHASE_LANES,
-  AttackShape, DefenceSystem,
+  AttackShape, DefenceSystem, forwardAttackDepth,
 } from './shapes';
 import {
   Nation, TEAM_BY_ID, KITS, FORMATION_BY_ID, DIFFICULTY_TABLE, AI_ARCHETYPES,
-  POINTS, SquadPlayer,
+  POINTS, SquadPlayer, REFEREE_CALLS,
 } from './data';
 import {
   contractFor, PhaseName, RoleContract,
@@ -36,6 +36,16 @@ import {
   ruckDistributor, assignReceiver,
   maxSpeed, FORWARDS,
 } from './intelligence';
+import {
+  forwardAttackDepthPlanFailures, forwardAttackPlayerWriteFailures,
+  forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
+} from './forwardAttackGates';
+import type {
+  ForwardAttackGateFailure, ForwardAttackGateReporter, ForwardAttackGateValue,
+  ForwardAttackPlayerField,
+} from './forwardAttackGates';
+import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START } from './maulRegate';
+import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
@@ -203,14 +213,30 @@ export interface OpenPlayState {
 
 export interface MaulState {
   t: number;
-  stage: 'ENGAGE' | 'DRIVE' | 'STALL' | 'OVER';
+  /** The active, non-terminal state; the seven terminal paths live in `exit`. */
+  stage: 'RE_GATE' | 'ATTACK_CONTROL' | 'DEFENCE_HOLD' | 'EXIT' | 'OVER';
   x: number; z: number; dir: number; yaw: number;
   forceA: number; forceD: number;
   ballRank: number; ranks: number;
   speed: number; gained: number;
   stallClock: number; stoppedOnce: boolean; useItCalled: boolean; warned: boolean;
   tryLineZ: number; attacking: 'A' | 'B';
-  committed: number; transferCd: number;
+  committed: number;
+  /** Exactly one human side enables the four-window pure re-gate. */
+  humanTeam: 'A' | 'B' | null;
+  contest: MaulContestControl;
+  regateWindowT: number;
+  regateCandidate: MaulCommit | null;
+  regateWindows: MaulCommit[];
+  humanWinShare: number | null;
+  humanWon: boolean | null;
+  /** A write-once terminal route; it prevents a second hand-off in the same maul. */
+  exit: MaulExitState;
+  exitT: number;
+  exitRunner: number;
+  exitLane: 'LEFT' | 'RIGHT' | null;
+  exitX: number;
+  exitZ: number;
   /** T-18: formed off a lineout take — the pack drives as one */
   fromLineout: boolean;
 }
@@ -270,6 +296,51 @@ export interface MatchStats {
   tacklesBroke: number; offloads: number; jackals: number;
 }
 
+/** A two-side count used by set-piece and formation telemetry. */
+export interface TeamTally { A: number; B: number }
+
+/**
+ * Physical set-piece occurrences. These counters deliberately have no side:
+ * one awarded/started scrum or lineout is one event, whatever its outcome.
+ */
+export interface SetPieceEvents { scrums: number; lineouts: number }
+
+/**
+ * Awarded set-piece wins by side. This is outcome accounting, kept separate
+ * from `SetPieceEvents` so a stolen contest, a reset, or a penalty cannot make
+ * a match-total occurrence look like two events (or no event at all).
+ */
+export interface SetPieceWins { scrums: TeamTally; lineouts: TeamTally }
+
+/**
+ * Opportunity-normalised ruck/reset telemetry. All timings use engine seconds;
+ * display-clock compression is intentionally not applied to these observations.
+ */
+export interface FormationIntegrityTelemetry {
+  ruckFormationOpportunities: number;
+  defensiveLineResetOpportunities: number;
+  eligiblePositionSamples: TeamTally;
+  targetSlotSamples: TeamTally;
+  offsidePlayerSamples: TeamTally;
+  offsideEpisodes: TeamTally;
+  offsideRate: TeamTally;
+  formationDriftP50: TeamTally;
+  formationDriftP90: TeamTally;
+  recoveryEpisodes: TeamTally;
+  recoveryEngineP90: TeamTally;
+  recoveryClockP90: TeamTally;
+}
+
+interface OffsideTrack { beganAt: number; sustainedFor: number }
+interface OffsideWindow {
+  token: string;
+  kind: 'RUCK' | 'RESET';
+  openedAt: number;
+  defending: 'A' | 'B';
+  tracks: Map<number, OffsideTrack>;
+  penalised: boolean;
+}
+
 const blankStats = (): MatchStats => ({
   possession: 0, tackles: 0, missed: 0, turnovers: 0, scrumsWon: 0, scrumsLost: 0,
   lineoutsWon: 0, lineoutsLost: 0, rucks: 0, slowBall: 0, metres: 0, carries: 0,
@@ -298,6 +369,25 @@ export interface TeamRun {
 const R = () => Math.random();
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const approach = (a: number, b: number, rate: number, dt: number) => a + (b - a) * (1 - Math.exp(-rate * dt));
+const blankTally = (): TeamTally => ({ A: 0, B: 0 });
+
+/** Nearest-rank quantile keeps the reported P90 tied to observed slots. */
+const percentile = (values: readonly number[], p: number) => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))];
+};
+
+/* SPEC_04: position observations are sampled at four real-engine Hz, while a
+ * legal breach must persist for 0.30 engine seconds beyond numerical noise.
+ * Neither threshold is divided by `clockScale`: these are opportunities, not a
+ * display-clock event stream. */
+const FORMATION_SAMPLE_SECONDS = 0.25;
+/* The existing no-teleport retreat needs a real, finite settle window before
+ * normal formation observations begin. It is not display-clock scaling. */
+const FORMATION_RESET_SETTLE_SECONDS = 0.75;
+const OFFSIDE_EPSILON_METRES = 0.35;
+const OFFSIDE_SUSTAINED_SECONDS = 0.30;
 
 
 /** T-39. Per-shirt build, as a visual scale multiplier. Forwards are big, the
@@ -332,6 +422,33 @@ export class Director {
   passOpts: PassOption[] = [];
 
   teams: { A: TeamRun; B: TeamRun };
+  /** Match-total occurrence ledger; only `recordSetPieceEvent` may increment it. */
+  readonly setPieceEvents: SetPieceEvents = { scrums: 0, lineouts: 0 };
+  /** Outcome ledger; it is intentionally independent of the occurrence ledger. */
+  readonly setPieceWins: SetPieceWins = {
+    scrums: { A: 0, B: 0 },
+    lineouts: { A: 0, B: 0 },
+  };
+  /** Mutable backing fields for the snapshot exposed by `formationIntegrity`. */
+  private readonly formationCounts = {
+    ruckFormationOpportunities: 0,
+    defensiveLineResetOpportunities: 0,
+    eligiblePositionSamples: blankTally(),
+    targetSlotSamples: blankTally(),
+    offsidePlayerSamples: blankTally(),
+    offsideEpisodes: blankTally(),
+    recoveryEpisodes: blankTally(),
+  };
+  private readonly formationDriftSamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  private readonly formationRecoverySamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  private ruckOffsideWindow: OffsideWindow | null = null;
+  private resetOffsideWindow: OffsideWindow | null = null;
+  private observedRuck: BreakdownState | null = null;
+  private observedResetUntil = -1;
+  private ruckWindowSerial = 0;
+  private resetWindowSerial = 0;
+  private readonly formationSampleAt = new Map<string, number>();
+  private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
   halfLength: number;
@@ -488,7 +605,7 @@ export class Director {
       return 'THE BALL IS IN THE AIR — CONTEST IT';
     }
     if (this.bd) return `${this.bd.stage} — A / D POUND TO CLEAR OUT · SPACE COMMITS ONE MORE (${this.bd.commitA} IN)`;
-    if (this.ml) return 'A / D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT';
+    if (this.ml) return this.maulPrompt();
     if (this.op) {
       if (this.ctrlPlayer.team === this.op.attacking) {
         const l = this.passOpts.find((o) => o.side === -1);
@@ -529,7 +646,12 @@ export class Director {
       if (this.isHuman(this.bd.attacking)) return { key: 'A / D', label: 'CLEAR OUT THE RUCK', act: 'waggle' };
       return { key: 'SPACE', label: this.bd.defCrew.length > this.bd.crew.length ? 'STOLEN — NUMBERS TOLD' : 'GO FOR THE STEAL (NEED NUMBERS)', act: 'action' };
     }
-    if (this.ml) return { key: 'A / D', label: 'DRIVE THE MAUL', act: 'waggle' };
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') return { key: 'A / D', label: 'ALTERNATE TO WIN THE MAUL', act: 'waggle' };
+      if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) return { key: 'L', label: 'PICK AND GO', act: 'kick' };
+      return { key: 'A / D', label: 'HOLD THE MAUL UP', act: 'waggle' };
+    }
     if (this.op) {
       const attacking = this.ctrlPlayer.team === this.op.attacking;
       if (attacking) {
@@ -599,7 +721,13 @@ export class Director {
     if (this.scrim && this.scrim.stage !== 'ASSEMBLE') add('A / D', 'PUSH');
     if (this.lo && (this.lo.stage === 'CALL' || this.lo.stage === 'THROW')) { add('A / D', 'CHOOSE THE CALL'); add('SPACE', cv.label); }
     if (this.bd) { add('A / D', 'CLEAR OUT'); add('SPACE', 'COMMIT ONE MORE'); }
-    if (this.ml) { add('A / D', 'DRIVE'); add('SPACE', 'BALL TO THE TAIL'); }
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') add('A / D', `ALTERNATE (${m.regateWindows.length}/4)`);
+      else if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+        add('A / D', 'WHEEL AND PEEL'); add('SPACE', 'TRANSFER TO 9'); add('L', 'PICK AND GO');
+      } else add('A / D', 'HOLD THE MAUL UP');
+    }
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }
@@ -644,10 +772,24 @@ export class Director {
     if (this.lo) return { now: `Lineout — ${this.lo.call.label}`, next: this.lo.stage === 'CALL' ? 'A/D to change the call, SPACE to throw' : 'Stop the bar in the gold band', clock: 0, danger: false };
     if (this.ml) {
       const m = this.ml;
+      if (m.exit !== 'NONE') {
+        return { now: m.exit.replace(/_/g, ' '), next: 'The maul exit is committed', clock: 0, danger: false };
+      }
+      if (m.contest === 'PENDING') {
+        return {
+          now: `Maul re-gate — ${m.regateWindows.length} of 4 input beats closed`,
+          next: 'Alternate A/D once in each beat to win control',
+          clock: Math.max(0, MAUL_REGATE_WINDOW_SECONDS - m.regateWindowT), danger: false,
+        };
+      }
+      const attackControl = m.contest === 'ATTACK_CONTROL';
       return {
-        now: `Maul driving at ${m.speed.toFixed(1)} m/s, ball at rank ${m.ballRank + 1}`,
-        next: m.stallClock > 2 ? 'It has stalled — press L to use it before the whistle' : 'Pound A/D to keep it moving',
-        clock: m.stallClock > 0 ? 5 - m.stallClock : 0, danger: m.stallClock > 2.5,
+        now: `${attackControl ? 'Attack' : 'Defence'} controls the maul — ${m.speed.toFixed(1)} m/s`,
+        next: attackControl && this.isHuman(m.attacking)
+          ? 'A/D peels, SPACE transfers to 9, L picks and goes'
+          : 'The maul is held; wait for the use-it decision',
+        clock: m.stallClock > 0 ? Math.max(0, 5 - m.stallClock) : 0,
+        danger: !attackControl && m.stallClock > 2.5,
       };
     }
     if (this.op) {
@@ -688,7 +830,13 @@ export class Director {
     if (this.scrim) out.push('STEER THE PACK (A/D)');
     if (this.lo) out.push(this.lo.stage === 'CALL' ? 'STEER THE CALL (A/D)' : 'THROW (SPACE)');
     if (this.bd) out.push('STEER THE CLEAROUT (A/D)', 'COMMIT MORE (SPACE)');
-    if (this.ml) out.push('STEER THE DRIVE (A/D)', 'SHIFT BALL (SPACE)');
+    if (this.ml) {
+      const m = this.ml;
+      if (m.contest === 'PENDING') out.push('ALTERNATE THE MAUL RE-GATE (A/D)');
+      else if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+        out.push('WHEEL AND PEEL (A/D)', 'TRANSFER TO 9 (SPACE)', 'PICK AND GO (L)');
+      } else out.push('HOLD THE MAUL UP (A/D)');
+    }
     out.push('REPLAY (R)', 'PAUSE (ESC)', 'ZOOM (WHEEL)');
     return Array.from(new Set(out));
   }
@@ -721,6 +869,25 @@ export class Director {
   attack(): 'A' | 'B' { return this.possession; }
   defending(): 'A' | 'B' { return this.possession === 'A' ? 'B' : 'A'; }
   isHuman(team: 'A' | 'B') { return !this.teams[team].cpu; }
+
+  /** SPEC_03's maul instruction is shared by the HUD and trace/audit surface. */
+  maulPrompt(): string {
+    const m = this.ml;
+    if (!m) return '';
+    if (m.exit !== 'NONE') {
+      if (m.exit === 'TRANSFER_TO_9') return 'THE NINE IS TAKING IT AWAY';
+      return `${m.exit.replace(/_/g, ' ')} — PLAY CONTINUES`;
+    }
+    if (m.contest === 'PENDING') return `A / D ALTERNATE — WIN THE MAUL (${m.regateWindows.length}/4)`;
+    if (m.contest === 'ATTACK_CONTROL' && this.isHuman(m.attacking)) {
+      return 'A / D PEEL · SPACE TRANSFER TO 9 · L PICK AND GO';
+    }
+    if (m.contest === 'DEFENCE_CONTROL' && m.humanTeam !== null) {
+      return 'A / D WON THE HOLD-UP — WAIT FOR USE IT';
+    }
+    return m.contest === 'ATTACK_CONTROL' ? 'THE MAUL IS YOURS — PLAYING IT AWAY' : 'THE MAUL IS HELD UP';
+  }
+
   slider(team: 'A' | 'B', id: string) { return this.teams[team].sliders.find((s) => s.id === id)?.v ?? 50; }
   get ctrlPlayer(): Live { return this.live[this.ctrl]; }
 
@@ -873,6 +1040,9 @@ export class Director {
 
     this.watchdog(dt);
     this.think(dt, input);
+    /* SPEC_04: the formation target has now been freshly assigned by `think()`;
+     * capture target-slot drift before a phase-bound writer can take control. */
+    this.samplePendingTargetSlots();
     this.placeBound(dt);
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
@@ -929,10 +1099,310 @@ export class Director {
    * the beat, instead of letting them tackle the nine on the frame the
    * ball is out. */
   releaseBeat: { z: number; dir: number; until: number } | null = null;
+
+  /**
+   * Snapshot the sample ledger rather than exposing its mutable arrays. P50/P90
+   * are calculated from actual target-slot distances, and the rate denominator
+   * is eligible player-observations, never compressed display-clock frames.
+   */
+  get formationIntegrity(): FormationIntegrityTelemetry {
+    const c = this.formationCounts;
+    const rate = (team: 'A' | 'B') => c.eligiblePositionSamples[team]
+      ? (100 * c.offsidePlayerSamples[team]) / c.eligiblePositionSamples[team]
+      : 0;
+    const recoveryEngineP90 = {
+      A: percentile(this.formationRecoverySamples.A, 0.9),
+      B: percentile(this.formationRecoverySamples.B, 0.9),
+    };
+    return {
+      ruckFormationOpportunities: c.ruckFormationOpportunities,
+      defensiveLineResetOpportunities: c.defensiveLineResetOpportunities,
+      eligiblePositionSamples: { ...c.eligiblePositionSamples },
+      targetSlotSamples: { ...c.targetSlotSamples },
+      offsidePlayerSamples: { ...c.offsidePlayerSamples },
+      offsideEpisodes: { ...c.offsideEpisodes },
+      offsideRate: { A: rate('A'), B: rate('B') },
+      formationDriftP50: {
+        A: percentile(this.formationDriftSamples.A, 0.5),
+        B: percentile(this.formationDriftSamples.B, 0.5),
+      },
+      formationDriftP90: {
+        A: percentile(this.formationDriftSamples.A, 0.9),
+        B: percentile(this.formationDriftSamples.B, 0.9),
+      },
+      recoveryEpisodes: { ...c.recoveryEpisodes },
+      recoveryEngineP90,
+      recoveryClockP90: {
+        A: recoveryEngineP90.A * this.clockScale,
+        B: recoveryEngineP90.B * this.clockScale,
+      },
+    };
+  }
+
+  private formationSampleDue(token: string) {
+    const last = this.formationSampleAt.get(token);
+    if (last !== undefined && this.t - last < FORMATION_SAMPLE_SECONDS - 1e-9) return false;
+    this.formationSampleAt.set(token, this.t);
+    return true;
+  }
+
+  /** A player is excluded only for an active lawful/role-specific exception. */
+  private isFormationEligible(p: Live) {
+    if (p.sinbin > 0 || p.down || p.carrier || p.beatenT > 0) return false;
+    return !/(CHASE|TACKLE|FIELD THE KICK)/.test(p.job.toUpperCase());
+  }
+
+  private observeOffsidePosition(team: 'A' | 'B', penetration: number) {
+    this.formationCounts.eligiblePositionSamples[team]++;
+    if (penetration > OFFSIDE_EPSILON_METRES) this.formationCounts.offsidePlayerSamples[team]++;
+  }
+
+  /** `tx`/`tz` are the existing intelligence target mark for the live actor. */
+  private observeTargetSlot(p: Live) {
+    if (!Number.isFinite(p.tx) || !Number.isFinite(p.tz)) return;
+    this.formationCounts.targetSlotSamples[p.team]++;
+    this.formationDriftSamples[p.team].push(Math.hypot(p.x - p.tx, p.z - p.tz));
+  }
+
+  private startRuckOffsideWindow(s: BreakdownState) {
+    if (this.observedRuck !== s) {
+      this.observedRuck = s;
+      const defending: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
+      this.ruckOffsideWindow = {
+        token: `ruck-${++this.ruckWindowSerial}`,
+        kind: 'RUCK',
+        openedAt: this.t,
+        defending,
+        tracks: new Map<number, OffsideTrack>(),
+        penalised: false,
+      };
+      this.formationCounts.ruckFormationOpportunities++;
+    }
+    return this.ruckOffsideWindow!;
+  }
+
+  private startResetOffsideWindow() {
+    const rb = this.releaseBeat!;
+    if (this.observedResetUntil !== rb.until) {
+      this.observedResetUntil = rb.until;
+      const defending = this.defending();
+      this.resetOffsideWindow = {
+        token: `reset-${++this.resetWindowSerial}`,
+        kind: 'RESET',
+        openedAt: this.t,
+        defending,
+        tracks: new Map<number, OffsideTrack>(),
+        penalised: false,
+      };
+      this.formationCounts.defensiveLineResetOpportunities++;
+    }
+    return this.resetOffsideWindow!;
+  }
+
+  private ruckEligibleDefenders(s: BreakdownState, defending: 'A' | 'B') {
+    const bound = new Set(s.players.filter((q) => q.team === defending).map((q) => q.num));
+    return this.live.filter((p) => p.team === defending && !bound.has(p.num) && this.isFormationEligible(p));
+  }
+
+  private resetEligibleDefenders(defending: 'A' | 'B') {
+    return this.live.filter((p) => p.team === defending && this.isFormationEligible(p));
+  }
+
+  private closeOffsideTrack(team: 'A' | 'B', window: OffsideWindow, num: number) {
+    const track = window.tracks.get(num);
+    if (!track) return;
+    this.formationCounts.recoveryEpisodes[team]++;
+    this.formationRecoverySamples[team].push(Math.max(0, this.t - track.beganAt));
+    window.tracks.delete(num);
+  }
+
+  /**
+   * Accumulate a persistent legal breach once per formation opportunity. The
+   * caller uses a signed line whose lawful side is `(z - line) * dir >= 0`.
+   * A resulting whistle ends the current phase, so one sustained breach can
+   * never inflate into one penalty per simulation frame.
+   */
+  private evaluateOffsideWindow(
+    window: OffsideWindow,
+    attacking: 'A' | 'B',
+    legalLineZ: number,
+    direction: number,
+    candidates: Live[],
+    dt: number,
+  ) {
+    /* A newly formed ruck/reset is a real walk-back transition. Start the
+     * sustained-breach clock only after that fixed engine-time allowance. */
+    if (this.t - window.openedAt < FORMATION_RESET_SETTLE_SECONDS) return false;
+    const seen = new Set<number>();
+    let worst: { player: Live; penetration: number } | null = null;
+    for (const p of candidates) {
+      seen.add(p.num);
+      const penetration = Math.max(0, (legalLineZ - p.z) * direction);
+      if (penetration <= OFFSIDE_EPSILON_METRES) {
+        this.closeOffsideTrack(window.defending, window, p.num);
+        continue;
+      }
+      const prior = window.tracks.get(p.num);
+      const track = prior ?? { beganAt: this.t, sustainedFor: 0 };
+      track.sustainedFor += dt;
+      window.tracks.set(p.num, track);
+      if (track.sustainedFor >= OFFSIDE_SUSTAINED_SECONDS
+        && (!worst || penetration > worst.penetration)) {
+        worst = { player: p, penetration };
+      }
+    }
+    /* A player becoming down/bound/chasing is an exclusion, not evidence that
+     * he recovered to the line, so remove a stale track without fabricating a
+     * recovery duration. */
+    for (const num of window.tracks.keys()) if (!seen.has(num)) window.tracks.delete(num);
+
+    if (!worst || window.penalised) return false;
+    window.penalised = true;
+    this.formationCounts.offsideEpisodes[window.defending]++;
+    /* The option remains a genuine law switch. We still retain the observed
+     * episode for diagnostics when it is off, but must not write a penalty. */
+    if ((this.options.offside ?? 0) !== 0) return false;
+    this.teams[window.defending].stats.offsides++;
+    this.beginPenalty(attacking, REFEREE_CALLS.OFFSIDE, worst.player.num);
+    return true;
+  }
+
+  /**
+   * Writer hook for `upBreakdown`, immediately before its no-teleport retreat.
+   * The legal line is the engine's declared hindmost defending ruck slot, not
+   * the intentionally deeper 3 m defensive guard target used for positioning.
+   */
+  sampleFormedRuckOffside(s: BreakdownState, dt: number) {
+    const window = this.startRuckOffsideWindow(s);
+    const fwd = s.attacking === 'A' ? 1 : -1;
+    const defenders = s.players.filter((q) => q.team === window.defending);
+    const legalLineZ = defenders.length
+      ? (fwd > 0 ? Math.max(...defenders.map((q) => q.z)) : Math.min(...defenders.map((q) => q.z)))
+      : s.contactZ;
+    const candidates = this.ruckEligibleDefenders(s, window.defending);
+    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
+      && this.formationSampleDue(window.token)) {
+      for (const p of candidates) {
+        const penetration = Math.max(0, (legalLineZ - p.z) * fwd);
+        this.observeOffsidePosition(p.team, penetration);
+      }
+      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RUCK' };
+    }
+    const whistle = this.evaluateOffsideWindow(window, s.attacking, legalLineZ, fwd, candidates, dt);
+    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
+    return whistle;
+  }
+
+  /**
+   * Writer hook for `upOpen` while the existing ruck-release retreat applies.
+   * The contact mark is the legal boundary; the 2 m retreat target is a
+   * formation aid, not an invented offside line. Target-slot distance itself is
+   * sampled after `think()` refreshes the defenders' assigned targets.
+   */
+  sampleDefensiveLineResetOffside(dt: number) {
+    const rb = this.releaseBeat;
+    if (!rb || this.t >= rb.until) return false;
+    const window = this.startResetOffsideWindow();
+    const candidates = this.resetEligibleDefenders(window.defending);
+    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
+      && this.formationSampleDue(window.token)) {
+      for (const p of candidates) {
+        const penetration = Math.max(0, (rb.z - p.z) * rb.dir);
+        this.observeOffsidePosition(p.team, penetration);
+      }
+      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RESET' };
+    }
+    const whistle = this.evaluateOffsideWindow(window, this.possession, rb.z, rb.dir, candidates, dt);
+    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
+    return whistle;
+  }
+
+  /** Finish a settled ruck/reset sample after the regular writer has set `tx`/`tz`. */
+  private samplePendingTargetSlots() {
+    const pending = this.pendingTargetSlotSample;
+    this.pendingTargetSlotSample = null;
+    if (!pending) return;
+    if (pending.kind === 'RUCK') {
+      const s = this.bd;
+      if (!s || this.ruckOffsideWindow?.token !== pending.token || !s.ruckFormed) return;
+      for (const p of this.ruckEligibleDefenders(s, pending.defending)) this.observeTargetSlot(p);
+      return;
+    }
+    const rb = this.releaseBeat;
+    if (!rb || this.t >= rb.until || this.resetOffsideWindow?.token !== pending.token) return;
+    for (const p of this.resetEligibleDefenders(pending.defending)) {
+      /* `upOpen` owns the retreat frame; its target is intentionally stale until
+       * it returns the player to the line, so it is explicitly excluded here. */
+      if (p.job.toUpperCase() === 'RELEASE AND RETREAT') continue;
+      this.observeTargetSlot(p);
+    }
+  }
+
   private lastWatchPhase: Phase | null = null;
   private lastPhaseToken: unknown = null;
   watchdogTrips = 0;
   watchdogLog: string[] = [];
+
+  /* ======================== SPEC_02 GATE SINK ========================
+   *
+   * Gate functions remain pure and return data. Director is the only place
+   * permitted to turn a failed measurement into a visible, stop-the-match
+   * developer error. The label and scalar snapshot survive in the thrown text
+   * so a headless harness reports the precise writer instead of tuning past it.
+   */
+  private readonly reportForwardAttackGate: ForwardAttackGateReporter = (failure: ForwardAttackGateFailure): void => {
+    if (!import.meta.env.DEV) return;
+    const message = `[SPEC_02 gate] ${failure.label} :: ${failure.reason} :: ${JSON.stringify(failure.values)}`;
+    console.error(message);
+    throw new Error(message);
+  };
+
+  private forwardAttackGates(): ForwardAttackGateReporter | undefined {
+    return import.meta.env.DEV ? this.reportForwardAttackGate : undefined;
+  }
+
+  /** Engine modules use this to route their pure SPEC_02 gate results here. */
+  forwardAttackGateReporter(): ForwardAttackGateReporter | undefined {
+    return this.forwardAttackGates();
+  }
+
+  /** Snapshot immediately before one labelled direct write in `think()`. */
+  private writeThinkPlayer(
+    gate: ForwardAttackGateReporter | undefined,
+    label: string,
+    player: Live,
+    allowedFields: readonly ForwardAttackPlayerField[],
+    write: () => void,
+  ): void {
+    if (!gate) { write(); return; }
+    const before = snapshotForwardAttackPlayer(player);
+    write();
+    for (const failure of forwardAttackPlayerWriteFailures(
+      label, before, snapshotForwardAttackPlayer(player), allowedFields,
+    )) gate(failure);
+  }
+
+  private checkForwardAttackState(
+    gate: ForwardAttackGateReporter | undefined,
+    label: string,
+    before: Readonly<Record<string, ForwardAttackGateValue>>,
+    after: Readonly<Record<string, ForwardAttackGateValue>>,
+    allowedFields: readonly string[],
+  ): void {
+    if (!gate) return;
+    for (const failure of forwardAttackStateWriteFailures(label, before, after, allowedFields)) gate(failure);
+  }
+
+  /** Compute first, validate second, then let a labelled think write consume it. */
+  private planCpuForwardAttack(
+    gate: ForwardAttackGateReporter | undefined,
+    label: string,
+    input: Parameters<typeof forwardAttackDepth>[0],
+  ) {
+    const plan = forwardAttackDepth(input);
+    if (gate) for (const failure of forwardAttackDepthPlanFailures(label, input, plan)) gate(failure);
+    return plan;
+  }
 
   /** Hard ceilings, in real seconds, for how long any phase may last. */
   private static readonly PHASE_LIMIT: Record<string, number> = {
@@ -1179,6 +1649,12 @@ export class Director {
           p.face = face;
         }
       };
+      /* SPEC_03's semantic state maps only to clips already present in the
+       * renderer: maulBind/maulDrive both resolve to maulPush. The difference
+       * is useful engine vocabulary without inventing a wheel or peel asset. */
+      const attackDriving = s.stage === 'ATTACK_CONTROL'
+        || s.exit === 'WHEEL_AND_PEEL' || s.exit === 'TOUCH_LINEOUT' || s.exit === 'TRY_AWARDED';
+      const attackClip = attackDriving ? 'maulDrive' : 'maulBind';
       for (let i = 1; i <= 8; i++) {
         const rank = i % 3, col = Math.floor(i / 3);
         const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
@@ -1188,18 +1664,32 @@ export class Director {
           s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
           s.z + lz,
           s.dir >= 0 ? 1 : -1);
-        clip(a, i < 3 ? 'maulBind' : 'maulDrive');
-        a.job = i < 3 ? 'BIND AT THE FRONT AND DRIVE LOW' : 'KEEP THE LEGS GOING, STAY BOUND';
+        const runnerLeaving = (s.exit === 'PICK_AND_GO' || s.exit === 'WHEEL_AND_PEEL') && a.num === s.exitRunner;
+        clip(a, runnerLeaving ? 'carry' : attackClip);
+        a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
+          ? 'KEEP THE LEGS GOING, STAY BOUND'
+          : 'BIND TIGHT AND HOLD THE MAUL';
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
          * team. */
         const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
-        const dlx = 1.4 - (i % 2) * 2.2;
         const d = this.L(dTeam, i);
+        const dlx = 1.4 - (i % 2) * 2.2;
         settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
         clip(d, 'maulBind');
+        d.job = s.contest === 'DEFENCE_CONTROL' ? 'HOLD THE MAUL UP AND WAIT FOR USE IT' : 'BIND AND RESIST THE DRIVE';
       }
+      /* The nine has a fixed base behind the maul. It is marked bound by
+       * think(), then placed here, so TRANSFER_TO_9 can show existing idle
+       * (nineSquat) followed by passSpin (ninePass) before open play begins. */
+      const nine = this.L(s.attacking, 9);
+      const baseX = clamp(s.x + (s.x > 0 ? -1.6 : 1.6), -32, 32);
+      const baseZ = clamp(s.z - s.dir * 6.6, -58, 58);
+      settle(nine, baseX, baseZ, s.dir >= 0 ? 1 : -1);
+      if (s.exit === 'TRANSFER_TO_9') clip(nine, s.exitT < MAUL_TRANSFER_PASS_START ? 'nineSquat' : 'ninePass');
+      else clip(nine, 'ready');
+      nine.job = s.exit === 'TRANSFER_TO_9' ? 'TAKE THE BALL FROM THE MAUL AND PLAY IT' : 'HOLD THE BASE — READY FOR THE RELEASE';
       return;
     }
 
@@ -1291,7 +1781,10 @@ export class Director {
           k.tz = s.bz - s.dir * 1.1;
           /* Playtest P1.3: the walk read as five dead seconds. A kicker
            * jogs to the mark — the ritual is the REVERENCE, not the commute. */
-          k.urgency = 1.15;
+          /* SPEC_02 gate audit: `urgency` is a 0..1 state contract. The old
+           * 1.15 walk boost surfaced one frame later through `separate()`;
+           * keep the intent's requested value, but clamp it at its write site. */
+          k.urgency = clamp(1.15, 0, 1);
           k.job = 'WALK TO THE TEE';
           k.face = s.dir;
           steer(k, dt, false);
@@ -1538,6 +2031,7 @@ export class Director {
   }
 
   private think(dt: number, input: Input) {
+    const gate = this.forwardAttackGates();
     const s = this.shape();
     const atk = this.possession;
     /* T-13 — the behaviour dataset is the most specific source of positional
@@ -1561,17 +2055,20 @@ export class Director {
       const ch = this.ctrlPlayer;
       if (ch && this.isHuman(ch.team) && !ch.down && KICK.stage === 'FLIGHT'
         && !KICK.chasers.some((c) => c.num === ch.num)) {
-        ch.controlled = true;
-        const lat = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-        const dep = (input.up ? 1 : 0) - (input.down ? 1 : 0);
-        const sp = maxSpeed(ch, false, input.sprint, ch.stamina);
-        ch.vx = approach(ch.vx, lat * sp * 0.86, 9, dt);
-        ch.vz = approach(ch.vz, dep * sp * 0.94, 7, dt);
-        ch.x = clamp(ch.x + ch.vx * dt, -34, 34);
-        ch.z = clamp(ch.z + ch.vz * dt, -60, 60);
-        ch.movedBy = 'input';   // T-02: input is an integration writer
+        this.writeThinkPlayer(gate, `think:kick-input:${ch.team}${ch.num}`, ch,
+          ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy'] as const, () => {
+            ch.controlled = true;
+            const lat = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+            const dep = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+            const sp = maxSpeed(ch, false, input.sprint, ch.stamina);
+            ch.vx = approach(ch.vx, lat * sp * 0.86, 9, dt);
+            ch.vz = approach(ch.vz, dep * sp * 0.94, 7, dt);
+            ch.x = clamp(ch.x + ch.vx * dt, -34, 34);
+            ch.z = clamp(ch.z + ch.vz * dt, -60, 60);
+            ch.movedBy = 'input';   // T-02: input is an integration writer
+          });
       }
-      separate(this.live, dt);
+      separate(this.live, dt, gate, 'think:separate:kick');
       return;
     }
 
@@ -1610,6 +2107,10 @@ export class Director {
     }
     if (this.ml && (this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY')) {
       for (let i = 1; i <= 8; i++) { markBound(atk, i); markBound(def, i); }
+      /* SPEC_03: the attacking nine walks to and holds the maul base under
+       * placeBound, so a TRANSFER_TO_9 can play its existing idle/pass clip
+       * without a same-frame shape writer or a teleport at the hand-off. */
+      markBound(atk, 9);
     }
     if (this.bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY')) {
       for (const p of this.bd.players) markBound(p.team, p.num);
@@ -1631,69 +2132,84 @@ export class Director {
     const ctrlHuman = this.ctrlPlayer;
     const human = !!ctrlHuman && this.isHuman(ctrlHuman.team);
     if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down) {
-        ctrlHuman.controlled = true;
-        const lat = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-        const dep = (input.up ? 1 : 0) - (input.down ? 1 : 0);
-        const sprint = input.sprint || input.run;
-        // T-39. SHIFT is a sustained sprint (×1.24). SPACE's burst stacks a short
-        // ×1.15 on top for 0.8 s, so the two read as distinct — one you hold,
-        // one you pop to beat a man.
-        const burstMul = this.op && this.op.burst > 0 ? 1.15 : 1;
-        /* Playtest P1.4/P3.10: 95% of top speed arrived in a third of a
-         * second and lateral arrived faster than depth (rates 9 vs 7) —
-         * the game had no weight and strafing beat running. Both rates
-         * evened and lowered; a step leaves a speed debt that recovers
-         * over ~half a second, so a step is a gamble, not a teleport. */
-        const debt = this.op?.speedDebt ?? 1;
-        const sp = maxSpeed(ctrlHuman, this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul * debt;
-        // WASD is relative to the camera by default, so the stick always agrees
-        // with what the player can see whatever the rig is doing.
-        const m = mapInputToWorld(lat, dep, this.cam.yaw, dir, this.relativeControls);
-        ctrlHuman.vx = approach(ctrlHuman.vx, m.vx * sp * 0.9, 7.5, dt);
-        ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 6.8, dt);
-      ctrlHuman.x = clamp(ctrlHuman.x + ctrlHuman.vx * dt, -34.2, 34.2);
-      ctrlHuman.z = clamp(ctrlHuman.z + ctrlHuman.vz * dt, -60, 60);
-      ctrlHuman.movedBy = 'input';   // T-02: input is an integration writer
-      if (Math.abs(ctrlHuman.vz) > 0.4) ctrlHuman.face = ctrlHuman.vz > 0 ? 1 : -1;
-      /* The turn beat for the controlled man too — same pivoting cutout. */
-      if (ctrlHuman.lastFace === undefined) ctrlHuman.lastFace = ctrlHuman.face;
-      if (ctrlHuman.face !== ctrlHuman.lastFace) { ctrlHuman.turnT = 1; ctrlHuman.lastFace = ctrlHuman.face; }
-      ctrlHuman.turnT = Math.max(0, (ctrlHuman.turnT ?? 0) - dt * 5);
-      const sp2 = Math.hypot(ctrlHuman.vx, ctrlHuman.vz);
-      /* Playtest 2: the human's legs ran at authored speed regardless of
-       * actual speed — the CPU picker already scales by sp/clipSpeed; the
-       * controlled player now does too (same reference speeds). */
-      const clipRef = sp2 > 6.2 ? 8.2 : ctrlHuman.carrier ? 6.4 : 4.4;
-      ctrlHuman.clipT += dt * (sp2 > 0.7 ? sp2 / clipRef : 1);
-      /* PLAYTEST 4: the tackle dive belongs to the human too — the tackle
-       * engine sets clip='dive' on the hit; the gait picker must not stomp
-       * it in the same beat. Half a second of committed dive, then the gait
-       * resumes (or the ruck role clip takes over, which blends anyway). */
-      if (!(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
-        ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
-          : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
-            : sp2 > 0.7 ? 'jog' : 'ready';
-      }
-      if (sp2 > 7.0) ctrlHuman.stamina = clamp(ctrlHuman.stamina - dt * 4.4, 0, 100);
+      this.writeThinkPlayer(gate, `think:human-input:${ctrlHuman.team}${ctrlHuman.num}`, ctrlHuman,
+        ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy', 'face', 'lastFace', 'turnT', 'clip', 'clipT', 'stamina'] as const, () => {
+          ctrlHuman.controlled = true;
+          const lat = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+          const dep = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+          const sprint = input.sprint || input.run;
+          // T-39. SHIFT is a sustained sprint (×1.24). SPACE's burst stacks a short
+          // ×1.15 on top for 0.8 s, so the two read as distinct — one you hold,
+          // one you pop to beat a man.
+          const burstMul = this.op && this.op.burst > 0 ? 1.15 : 1;
+          /* Playtest P1.4/P3.10: 95% of top speed arrived in a third of a
+           * second and lateral arrived faster than depth (rates 9 vs 7) —
+           * the game had no weight and strafing beat running. Both rates
+           * evened and lowered; a step leaves a speed debt that recovers
+           * over ~half a second, so a step is a gamble, not a teleport. */
+          const debt = this.op?.speedDebt ?? 1;
+          const sp = maxSpeed(ctrlHuman, this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul * debt;
+          // WASD is relative to the camera by default, so the stick always agrees
+          // with what the player can see whatever the rig is doing.
+          const m = mapInputToWorld(lat, dep, this.cam.yaw, dir, this.relativeControls);
+          ctrlHuman.vx = approach(ctrlHuman.vx, m.vx * sp * 0.9, 7.5, dt);
+          ctrlHuman.vz = approach(ctrlHuman.vz, m.vz * sp * 0.9, 6.8, dt);
+        ctrlHuman.x = clamp(ctrlHuman.x + ctrlHuman.vx * dt, -34.2, 34.2);
+        ctrlHuman.z = clamp(ctrlHuman.z + ctrlHuman.vz * dt, -60, 60);
+        ctrlHuman.movedBy = 'input';   // T-02: input is an integration writer
+        if (Math.abs(ctrlHuman.vz) > 0.4) ctrlHuman.face = ctrlHuman.vz > 0 ? 1 : -1;
+        /* The turn beat for the controlled man too — same pivoting cutout. */
+        if (ctrlHuman.lastFace === undefined) ctrlHuman.lastFace = ctrlHuman.face;
+        if (ctrlHuman.face !== ctrlHuman.lastFace) { ctrlHuman.turnT = 1; ctrlHuman.lastFace = ctrlHuman.face; }
+        ctrlHuman.turnT = Math.max(0, (ctrlHuman.turnT ?? 0) - dt * 5);
+        const sp2 = Math.hypot(ctrlHuman.vx, ctrlHuman.vz);
+        /* Playtest 2: the human's legs ran at authored speed regardless of
+         * actual speed — the CPU picker already scales by sp/clipSpeed; the
+         * controlled player now does too (same reference speeds). */
+        const clipRef = sp2 > 6.2 ? 8.2 : ctrlHuman.carrier ? 6.4 : 4.4;
+        ctrlHuman.clipT += dt * (sp2 > 0.7 ? sp2 / clipRef : 1);
+        /* PLAYTEST 4: the tackle dive belongs to the human too — the tackle
+         * engine sets clip='dive' on the hit; the gait picker must not stomp
+         * it in the same beat. Half a second of committed dive, then the gait
+         * resumes (or the ruck role clip takes over, which blends anyway). */
+        if (!(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
+          ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
+            : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
+              : sp2 > 0.7 ? 'jog' : 'ready';
+        }
+        if (sp2 > 7.0) ctrlHuman.stamina = clamp(ctrlHuman.stamina - dt * 4.4, 0, 100);
+        });
     }
 
     // ---- everyone else ----
     for (const p of this.live) {
       if (p === ctrlHuman && p.controlled) continue;
-      if (p.sinbin > 0) { p.urgency = 0; continue; }
+      if (p.sinbin > 0) {
+        this.writeThinkPlayer(gate, `think:sinbin:${p.team}${p.num}`, p, ['urgency'] as const, () => { p.urgency = 0; });
+        continue;
+      }
       /* T-40. While a pass is in flight the receiver is owned by upOpen, not by
        * the shape. Skipping him here stops think() from yanking him back to his
        * support mark — which is what made him teleport onto the ball. */
       if (this.op?.ball.live && p.team === this.op.attacking && p.num === this.op.pendingReceiver) continue;
-      if (isBound(p) || p.down) { p.bound = true; continue; }
-      p.bound = false;
+      if (isBound(p) || p.down) {
+        this.writeThinkPlayer(gate, `think:bound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = true; });
+        continue;
+      }
+      this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
 
       const onAtk = p.team === atk;
       const c: RoleContract = contractFor(p.num);
 
       if (onAtk) {
         // carrier: driven by phase logic, not by shape
-        if (this.op && p.num === this.op.carrierNum) { p.carrier = true; p.urgency = 0; continue; }
+        if (this.op && p.num === this.op.carrierNum) {
+          this.writeThinkPlayer(gate, `think:carrier:${p.team}${p.num}`, p, ['carrier', 'urgency'] as const, () => {
+            p.carrier = true;
+            p.urgency = 0;
+          });
+          continue;
+        }
 
         /* T-51 — HOLD THE PODS THROUGH THE RECYCLE BEAT. At the ruck win the
          * fresh shape re-marked every attacker and the extras ran in-out all
@@ -1702,7 +2218,7 @@ export class Director {
          * arrives as a pod. The nine-with-ball and a ball in flight are the
          * exceptions above and below. */
         if (this.op && this.op.podHold > 0) {
-          steer(p, dt, false);
+          steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
 
@@ -1714,15 +2230,18 @@ export class Director {
         if (this.op && hipMan && !podFar) {
           const car = this.L(atk, this.op.carrierNum);
           const off = p.num === 7 ? 1.9 : -1.4;
-          p.tx = clamp(car.x + off, -33, 33);
-          p.tz = clamp(car.z - dir * (p.num === 7 ? 1.6 : 4.0), -59, 59);
-          /* T-18. THE SECOND WAVE. Through a broken line the support does
-           * not jog — the offload has to be at full pace or the cover
-           * meets the ball-carrier alone. 0.92 urgency left the seven
-           * trailing every break by two metres a second. */
-          p.urgency = this.op?.lineBreak ? 1 : 0.92;
-          p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
-          steer(p, dt, true);
+          this.writeThinkPlayer(gate, `think:hip-support:${p.team}${p.num}`, p,
+            ['tx', 'tz', 'urgency', 'job'] as const, () => {
+              p.tx = clamp(car.x + off, -33, 33);
+              p.tz = clamp(car.z - dir * (p.num === 7 ? 1.6 : 4.0), -59, 59);
+              /* T-18. THE SECOND WAVE. Through a broken line the support does
+               * not jog — the offload has to be at full pace or the cover
+               * meets the ball-carrier alone. 0.92 urgency left the seven
+               * trailing every break by two metres a second. */
+              p.urgency = this.op?.lineBreak ? 1 : 0.92;
+              p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
+            });
+          steer(p, dt, true, gate, `think:hip-support-steer:${p.team}${p.num}`);
           continue;
         }
 
@@ -1734,8 +2253,8 @@ export class Director {
           const sit = p.team === 'A' ? sitA : sitB;
           const dsm = sit ? datasetMark(p.team, p.num, sit, beat) : null;
           if (dsm) {
-            p.tx = clamp(dsm.x, -33, 33);
-            let z = dsm.z;
+            let targetX = clamp(dsm.x, -33, 33);
+            let targetZ = dsm.z;
             /* T-13/T-18. The authored red-zone beats march the pods to the
              * 22 and hold them 15 m out — an honest arrival, but nobody
              * threatens the line from there and tries died to zero. Inside
@@ -1748,13 +2267,41 @@ export class Director {
               const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
               if (toLine < 20) {
                 const deepest = o.carrierZ - o.dir * (0.5 + toLine * 0.08);
-                z = o.dir > 0 ? Math.max(z, deepest) : Math.min(z, deepest);
+                targetZ = o.dir > 0 ? Math.max(targetZ, deepest) : Math.min(targetZ, deepest);
               }
             }
-            p.tz = clamp(z, -59, 59);
-            p.job = dsm.job;
-            p.urgency = 0.9;
-            steer(p, dt, true);
+
+            /* SPEC_02: authored dataset marks remain the highest-priority
+             * source of lane/job/timing. CPU support nevertheless enters the
+             * same pure depth contract before committing its mark: the
+             * absolute dataset lane is preserved, while setup depth is
+             * validated and made usable for a run-on pass. */
+            if (!this.isHuman(atk) && this.op) {
+              const toLine = Math.max(0, this.op.dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
+              const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
+              const plan = this.planCpuForwardAttack(gate, `think:dataset-depth:${p.team}${p.num}:${sit}`, {
+                anchor: f,
+                attackDirection: dir < 0 ? -1 : 1,
+                /* `dsm.x` is already a world-space authored lane; do not mirror it again. */
+                openside: 1,
+                lateralOffsetMetres: dsm.x - f.x,
+                nominalSupportDepthMetres: Math.max(0.5, (f.z - targetZ) * dir),
+                shapeDepthBias: 1,
+                tempo: 0,
+                distanceToTryLineMetres: toLine,
+                role,
+              });
+              targetX = clamp(plan.setup.x, -33, 33);
+              targetZ = plan.setup.z;
+            }
+            this.writeThinkPlayer(gate, `think:dataset-mark:${p.team}${p.num}:${sit}`, p,
+              ['tx', 'tz', 'job', 'urgency'] as const, () => {
+                p.tx = targetX;
+                p.tz = clamp(targetZ, -59, 59);
+                p.job = dsm.job;
+                p.urgency = 0.9;
+              });
+            steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
         }
@@ -1762,32 +2309,67 @@ export class Director {
         // Otherwise the man stands where the shape says he stands.
         if (slot) {
           const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
-          let depth = slot.depth * atkShape.depthBias * (0.7 + (this.slider(atk, 'tempo') / 100) * 0.5);
-          /* T-18. Inside the opposition 14 the shape goes FLAT — pick and go
-           * from the base. At full depth the pod caught the ball three metres
-           * behind the ruck and every red-zone phase LOST three metres of
-           * ground: attacks entered at eight metres out and marched slowly
-           * back to halfway. */
-          const toLine = dir > 0 ? FIELD.tryZFar - s.ballZ : s.ballZ - FIELD.tryZ;
-          if (toLine < 20) depth = Math.min(depth, 0.5 + toLine * 0.08);
+          const tempo = this.slider(atk, 'tempo') / 100;
+          const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
           // Flip the shape if the attack is going the other way.
           const flip = this.op && this.op.open < 0 ? -1 : 1;
-          p.tx = clamp(f.x + lateral * s.open * flip, -33, 33);
-          p.tz = clamp(f.z - dir * depth, -59, 59);
-          p.job = slot.job;
-          /* T-18. The backline takes the ball at PACE. The old 0.66 jog meant
-           * receivers arrived at the line standing still and were tackled on
-           * the catch — the attack never crossed the gain line and there were
-           * eight phases inside the ten-metre zone per four matches. Real
-           * backlines run onto the ball; the wide man still waits a beat. */
-          p.urgency = slot.role === 'FRONT_PRONG' ? 0.86
-            : slot.role === 'INSIDE_PRONG' ? 0.9
-              : slot.role === 'WIDE_1' ? 0.7 : 0.88;
+          let targetX: number;
+          let targetZ: number;
+
+          if (!this.isHuman(atk) && this.op) {
+            /* SPEC_02 live Phase B: the CPU's ordinary shape fallback consumes
+             * the pure setup point. Arrival/carry geometry is checked before
+             * this write, while no plan helper itself mutates Live state. */
+            const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
+            const openside = s.open * flip < 0 ? -1 : 1;
+            const plan = this.planCpuForwardAttack(gate, `think:shape-depth:${p.team}${p.num}:${slot.role}`, {
+              anchor: f,
+              attackDirection: dir < 0 ? -1 : 1,
+              openside,
+              lateralOffsetMetres: lateral,
+              nominalSupportDepthMetres: slot.depth,
+              shapeDepthBias: atkShape.depthBias,
+              tempo,
+              distanceToTryLineMetres: toLine,
+              role,
+            });
+            targetX = clamp(plan.setup.x, -33, 33);
+            targetZ = clamp(plan.setup.z, -59, 59);
+          } else {
+            let depth = slot.depth * atkShape.depthBias * (0.7 + tempo * 0.5);
+            /* T-18. Inside the opposition 14 the shape goes FLAT — pick and go
+             * from the base. At full depth the pod caught the ball three metres
+             * behind the ruck and every red-zone phase LOST three metres of
+             * ground: attacks entered at eight metres out and marched slowly
+             * back to halfway. */
+            if (toLine < 20) depth = Math.min(depth, 0.5 + toLine * 0.08);
+            targetX = clamp(f.x + lateral * s.open * flip, -33, 33);
+            targetZ = clamp(f.z - dir * depth, -59, 59);
+          }
+
+          this.writeThinkPlayer(gate, `think:shape-mark:${p.team}${p.num}:${slot.role}`, p,
+            ['tx', 'tz', 'job', 'urgency'] as const, () => {
+              p.tx = targetX;
+              p.tz = targetZ;
+              p.job = slot.job;
+              /* T-18. The backline takes the ball at PACE. The old 0.66 jog meant
+               * receivers arrived at the line standing still and were tackled on
+               * the catch — the attack never crossed the gain line and there were
+               * eight phases inside the ten-metre zone per four matches. Real
+               * backlines run onto the ball; the wide man still waits a beat. */
+              p.urgency = slot.role === 'FRONT_PRONG' ? 0.86
+                : slot.role === 'INSIDE_PRONG' ? 0.9
+                  : slot.role === 'WIDE_1' ? 0.7 : 0.88;
+            });
         } else {
           const m = attackMark(p.num, s);
-          p.tx = m.x; p.tz = m.z;
-          p.job = m.job;
-          p.urgency = 0.6;
+          this.writeThinkPlayer(gate, `think:contract-mark:${p.team}${p.num}`, p,
+            ['tx', 'tz', 'job', 'urgency'] as const, () => {
+              p.tx = m.x;
+              p.tz = m.z;
+              p.job = m.job;
+              p.urgency = 0.6;
+            });
         }
       } else if (convergers.has(p.num)) {
         // CONVERGE. The defenders whose channel the carrier is running into leave
@@ -1796,28 +2378,41 @@ export class Director {
         // top of the pursuit logic every frame.
         const car = this.L(atk, this.op!.carrierNum);
         const lead = 0.4;
-        p.tx = clamp(car.x, -33, 33);
-        p.tz = clamp(car.z - this.op!.dir * lead, -58, 58);
-        p.job = defSys.job;
-        p.urgency = 1;
+        this.writeThinkPlayer(gate, `think:converge:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(car.x, -33, 33);
+            p.tz = clamp(car.z - this.op!.dir * lead, -58, 58);
+            p.job = defSys.job;
+            p.urgency = 1;
+          });
       } else if (coverChase.has(p.num)) {
         // T-13 cover chase: beaten men hunt the carrier at full tilt.
         const car = this.L(atk, this.op!.carrierNum);
-        p.tx = clamp(car.x, -33, 33);
-        p.tz = clamp(car.z, -58, 58);
-        p.job = 'COVER CHASE — RUN HIM DOWN';
-        p.urgency = 1;
+        this.writeThinkPlayer(gate, `think:cover-chase:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(car.x, -33, 33);
+            p.tz = clamp(car.z, -58, 58);
+            p.job = 'COVER CHASE — RUN HIM DOWN';
+            p.urgency = 1;
+          });
       } else if (this.kk && this.kk.stage === 'FLIGHT' && p.team === this.receivingSide()) {
         // FIELD THE KICK. The receiving side runs to where the ball will land.
         const lp = this.landingPrediction();
         const home = defenceMark(p.num, s);
-        if (lp) {
-          const mine = lp.x + (DEFENCE_CHANNELS.find((q) => q.num === p.num)?.lat ?? (home.x - f.x)) * 0.35;
-          p.tx = clamp(mine, -33, 33);
-          p.tz = clamp(lp.z - (this.kk.dir > 0 ? 1 : -1) * 1.2, -58, 58);
-          p.urgency = 0.95;
-          p.job = 'GET TO WHERE THE BALL IS GOING TO DROP';
-        } else { p.tx = home.x; p.tz = home.z; p.urgency = 0.5; }
+        this.writeThinkPlayer(gate, `think:field-kick:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            if (lp) {
+              const mine = lp.x + (DEFENCE_CHANNELS.find((q) => q.num === p.num)?.lat ?? (home.x - f.x)) * 0.35;
+              p.tx = clamp(mine, -33, 33);
+              p.tz = clamp(lp.z - (this.kk!.dir > 0 ? 1 : -1) * 1.2, -58, 58);
+              p.urgency = 0.95;
+              p.job = 'GET TO WHERE THE BALL IS GOING TO DROP';
+            } else {
+              p.tx = home.x;
+              p.tz = home.z;
+              p.urgency = 0.5;
+            }
+          });
       } else {
         /* T-13: the dataset first for the line men too — the authored fold,
          * pillar and chase beats are richer than the channel map. The
@@ -1826,10 +2421,13 @@ export class Director {
         const sitD = p.team === 'A' ? sitA : sitB;
         const dsm = sitD ? datasetMark(p.team, p.num, sitD, beat) : null;
         if (dsm) {
-          p.tx = clamp(dsm.x, -33, 33);
-          p.tz = clamp(dsm.z, -59, 59);
-          p.job = dsm.job;
-          p.urgency = 0.85;
+          this.writeThinkPlayer(gate, `think:defence-dataset:${p.team}${p.num}:${sitD}`, p,
+            ['tx', 'tz', 'job', 'urgency'] as const, () => {
+              p.tx = clamp(dsm.x, -33, 33);
+              p.tz = clamp(dsm.z, -59, 59);
+              p.job = dsm.job;
+              p.urgency = 0.85;
+            });
         } else {
         // HOLD THE LINE. Everyone else keeps the shape connected so a hole wider
         // than the system allows cannot open.
@@ -1850,9 +2448,6 @@ export class Director {
         }
         const umb = defSys.umbrella * (Math.abs(lat) / 22);
         const tz = f.z + dir * (m.z - f.z) * 0.9 + dir * umb;
-        p.tx = clamp(tx, -33, 33);
-        p.tz = clamp(tz, -59, 59);
-        p.job = defSys.job;
         const react = 1 - clamp((100 - p.attrs.AWA) / 400, 0, 0.22);
         /* T-18. THE GRIND BENDS THE LINE. A defence that has given up the
          * gain line six phases running is backpedalling: line speed decays
@@ -1862,19 +2457,31 @@ export class Director {
          * defences get it equally, and it resets the moment possession
          * turns over. */
         const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
-        p.urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
+        const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
+        this.writeThinkPlayer(gate, `think:defence-line:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(tx, -33, 33);
+            p.tz = clamp(tz, -59, 59);
+            p.job = defSys.job;
+            p.urgency = urgency;
+          });
         }
       }
 
       // CPU difficulty raises decision quality only, never speed
-      if (!this.isHuman(p.team)) p.urgency = clamp(p.urgency * (0.86 + diff.reaction * 0.18), 0, 1);
+      if (!this.isHuman(p.team)) {
+        this.writeThinkPlayer(gate, `think:cpu-reaction:${p.team}${p.num}`, p, ['urgency'] as const, () => {
+          p.urgency = clamp(p.urgency * (0.86 + diff.reaction * 0.18), 0, 1);
+        });
+      }
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
-      steer(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num));
+      steer(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num),
+        gate, `think:steer:${p.team}${p.num}`);
     }
 
-    separate(this.live, dt);
+    separate(this.live, dt, gate, 'think:separate');
   }
 
   /* ============================ CAMERA ============================ */
@@ -2136,10 +2743,28 @@ export class Director {
   }
 
   refreshPassOptions() {
-    if (!this.op) { this.passOpts = []; return; }
+    const gate = this.forwardAttackGates();
+    const signature = (options: readonly PassOption[]): string => options
+      .map((option) => `${option.player.team}${option.player.num}:${option.side}:${option.rank}:${option.priority}`)
+      .join('|');
+    /* SPEC_02 GATE: capture the derived state before its single replacement. */
+    const before = { passOpts: signature(this.passOpts) };
+    if (!this.op) {
+      this.passOpts = [];
+      this.checkForwardAttackState(gate, 'Director.refreshPassOptions:clear', before,
+        { passOpts: signature(this.passOpts) }, ['passOpts']);
+      return;
+    }
     const car = this.L(this.op.attacking, this.op.carrierNum);
     const wet = wetnessOf(WEATHERS[this.options.weather ?? 1]);
-    this.passOpts = passOptions(car, this.live, this.op.open, false, wet);
+    const forwardContext = !this.isHuman(this.op.attacking) ? {
+      enabled: true,
+      attackDirection: (this.op.dir < 0 ? -1 : 1) as -1 | 1,
+    } : undefined;
+    const next = passOptions(car, this.live, this.op.open, false, wet, forwardContext, gate);
+    this.passOpts = next;
+    this.checkForwardAttackState(gate, 'Director.refreshPassOptions:replace', before,
+      { passOpts: signature(this.passOpts) }, ['passOpts']);
   }
 
   upOpen(dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) { /* T-03: engine/open */ return upOpen(this, dt, _input, pressed, released); }
@@ -2179,6 +2804,7 @@ export class Director {
    */
   private cpuCallPlay() {
     if (!this.op) return;
+    const gate = this.forwardAttackGates();
     const t = this.op.attacking;
     const arch = AI_ARCHETYPES[this.teams[t].archetype] ?? AI_ARCHETYPES['IRONSIDE TECHNICAL'];
     const shape = this.shapeOf(t);
@@ -2199,11 +2825,27 @@ export class Director {
       kickBiasAdj, this.slider(t, 'width'),
       justFielded ? null : this.lastCall, this.lastCallSucceeded, urgency,
     );
+    /* SPEC_02 GATE: snapshot all call-state scalars before the call commit. */
+    const before = {
+      lastCall: this.lastCall ?? null,
+      lastCallZ: this.lastCallZ,
+      lastCallX: this.lastCallX,
+      cpuPlan: this.cpuPlan ? `${this.cpuPlan.label}\u0000${this.cpuPlan.instruction}` : null,
+      aiPlay: this.op.aiPlay,
+    };
+    const focus = this.focusPoint();
     this.lastCall = chosen.call;
-    this.lastCallZ = this.focusPoint().z;
-    this.lastCallX = this.focusPoint().x;
+    this.lastCallZ = focus.z;
+    this.lastCallX = focus.x;
     this.cpuPlan = chosen.plan;
     this.op.aiPlay = chosen.call;
+    this.checkForwardAttackState(gate, 'Director.cpuCallPlay:commit', before, {
+      lastCall: this.lastCall ?? null,
+      lastCallZ: this.lastCallZ,
+      lastCallX: this.lastCallX,
+      cpuPlan: this.cpuPlan ? `${this.cpuPlan.label}\u0000${this.cpuPlan.instruction}` : null,
+      aiPlay: this.op.aiPlay,
+    }, ['lastCall', 'lastCallZ', 'lastCallX', 'cpuPlan', 'aiPlay']);
     this.say(`CALL — ${chosen.plan.label}`);
   }
 
@@ -2246,25 +2888,61 @@ export class Director {
 
   startMaul(team: 'A' | 'B', x: number, z: number, ranks = 5, fromLineout = false) {
     const dir = team === 'A' ? 1 : -1;
+    const def: 'A' | 'B' = team === 'A' ? 'B' : 'A';
     this.possession = team;
     this.clearRuck();
-    for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(this.defending(), i).bound = true; }
+    for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(def, i).bound = true; }
+    /* SPEC_03. The re-gate has exactly one human contender. CPU-v-CPU and a
+     * future human-v-human match retain deterministic attacking control rather
+     * than borrowing a human result that does not exist. */
+    const exactlyOneHuman = this.isHuman(team) !== this.isHuman(def);
+    const humanTeam = exactlyOneHuman ? (this.isHuman(team) ? team : def) : null;
     this.ml = {
-      t: 0, stage: 'ENGAGE', x, z, dir, yaw: 0,
+      t: 0, stage: humanTeam ? 'RE_GATE' : 'ATTACK_CONTROL', x, z, dir, yaw: 0,
       forceA: 2600 + this.teams[team].nation.att.maul * 26,
-      forceD: 2400 + this.teams[this.defending()].nation.att.maul * 24,
+      forceD: 2400 + this.teams[def].nation.att.maul * 24,
       ballRank: 1, ranks, speed: 0, gained: 0,
       stallClock: 0, stoppedOnce: false, useItCalled: false, warned: false,
       tryLineZ: dir > 0 ? FIELD.tryZFar : FIELD.tryZ, attacking: team,
-      committed: 5, transferCd: 0, fromLineout,
+      committed: 5,
+      humanTeam, contest: humanTeam ? 'PENDING' : 'ATTACK_CONTROL',
+      regateWindowT: 0, regateCandidate: null, regateWindows: [],
+      humanWinShare: null, humanWon: null,
+      exit: 'NONE', exitT: 0, exitRunner: 0, exitLane: null, exitX: x, exitZ: z,
+      fromLineout,
     };
     this.phase = 'MAUL';
     if (fromLineout) this.say('CAUGHT, AND THE MAUL IS FORMED');
-    this.setCtrl(team, 8);
-    if (this.isHuman(team)) this.showHint('A/D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT', 3);
+    this.setCtrl(humanTeam ?? team, humanTeam === def ? 7 : 8);
+    if (humanTeam) this.showHint('A/D ALTERNATE — FOUR BEATS TO WIN THE MAUL', 3);
   }
 
   upMaul(dt: number, input: Input, pressed: Set<string>) { /* T-03: engine/setpieces */ return upMaul(this, dt, input, pressed); }
+
+
+  /* ======================== SET-PIECE LEDGERS ======================== */
+
+  /** Record one physical award/start, before any contest outcome is known. */
+  recordSetPieceEvent(piece: keyof SetPieceEvents) {
+    this.setPieceEvents[piece]++;
+  }
+
+  /**
+   * Record a result without deriving an occurrence from it. Existing team-stat
+   * win/loss fields remain the presentation-compatible mirror of this outcome
+   * ledger; `setPieceEvents` is the sole source for match-total attempts.
+   */
+  recordSetPieceOutcome(piece: keyof SetPieceEvents, winner: 'A' | 'B' | null, loser: 'A' | 'B' | null = null) {
+    if (winner) {
+      this.setPieceWins[piece][winner]++;
+      if (piece === 'scrums') this.teams[winner].stats.scrumsWon++;
+      else this.teams[winner].stats.lineoutsWon++;
+    }
+    if (loser) {
+      if (piece === 'scrums') this.teams[loser].stats.scrumsLost++;
+      else this.teams[loser].stats.lineoutsLost++;
+    }
+  }
 
 
   /* ============================ SCRUM ============================ */
@@ -2274,6 +2952,8 @@ export class Director {
 
   startScrum(feed: 'A' | 'B', x: number, z: number) {
     this.possession = feed;
+    // An award is one scrum even if it resets, ends in a penalty, or is stolen.
+    this.recordSetPieceEvent('scrums');
     const zn = clamp(z, -45, 45);
     this.scrumAnchor = { x: clamp(x, -18, 18), z: zn };
     const mk = (t: 'A' | 'B'): Pack => ({
@@ -2328,6 +3008,8 @@ export class Director {
 
   startLineout(thrower: 'A' | 'B', z: number, x: number) {
     this.possession = thrower;
+    // A not-straight rethrow earns a new call to this method and a new event.
+    this.recordSetPieceEvent('lineouts');
     const zn = clamp(z, FIELD.tryZ + 6, FIELD.tryZFar - 6);
     const side = x >= 0 ? 1 : -1;
     const players: LineoutState['players'] = [];

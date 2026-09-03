@@ -194,7 +194,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     if (d.phase === 'BREAKDOWN' && d.bd) {
       return `${d.bd.stage} — A / D POUND TO CLEAR OUT · SPACE COMMITS ONE MORE (${d.bd.commitA} IN)`;
     }
-    if (d.phase === 'MAUL' && d.ml) return 'A / D DRIVE · SPACE MOVE THE BALL TO THE TAIL · L USE IT';
+    if (d.phase === 'MAUL' && d.ml) return d.maulPrompt();
     /* Playtest P1.12: the verb strip under the commentary is gone — the
      * top-left CONTROLS widget is the one source of truth, and a second
      * copy was just noise over the feed. */
@@ -357,6 +357,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         {d.phase === 'MAUL' && d.ml && (
           <Panel title="MAUL">
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>BALL AT RANK</span><span className="text-[#f4efe2]">{d.ml.ballRank + 1}/{d.ml.ranks}</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>CONTEST</span><span className="text-[#f4efe2]">{d.ml.contest === 'PENDING' ? `RE-GATE ${d.ml.regateWindows.length}/4` : d.ml.contest.replace(/_/g, ' ')}</span></div>
+            {d.ml.humanWinShare !== null && <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>HUMAN SHARE</span><span className="text-[#e8cf46]">{(d.ml.humanWinShare * 100).toFixed(1)}%</span></div>}
+            {d.ml.exit !== 'NONE' && <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>EXIT</span><span className="text-[#6ee7a0]">{d.ml.exit.replace(/_/g, ' ')}</span></div>}
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>SPEED</span><span className="text-[#f4efe2]">{d.ml.speed.toFixed(2)} m/s</span></div>
           </Panel>
         )}
@@ -446,8 +449,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                 ['SCRUMS WON', 'scrumsWon'], ['LINEOUTS WON', 'lineoutsWon'], ['RUCKS', 'rucks'],
                 ['SLOW BALL', 'slowBall'], ['PASSES', 'passes'], ['KICKS', 'kicks'],
                 ['CARRIES', 'carries'], ['LINE BREAKS', 'lineBreaks'], ['TACKLES BEAT', 'tacklesBroke'],
-                ['OFFLOADS', 'offloads'], ['PENALTIES', 'penaltiesConceded'],
+                ['OFFLOADS', 'offloads'], ['OFFSIDES', 'offsides'], ['PENALTIES', 'penaltiesConceded'],
               ] as const).map(([label, key]) => <StatRow key={key} label={label} a={A.stats[key]} b={B.stats[key]} />)}
+            </div>
+            <div className="mt-2 border-t border-[#26314a] pt-1 text-[9px] tracking-[0.08em] text-[#7f8ea6]">
+              SET-PIECE EVENTS · SCRUMS {d.setPieceEvents.scrums} · LINEOUTS {d.setPieceEvents.lineouts}
             </div>
             <div className="mt-2 flex justify-end"><Btn small onClick={() => setShowStats(false)}>CLOSE</Btn></div>
           </Panel>
@@ -528,7 +534,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                     <div className="font-black tracking-[0.2em] text-[#e8cf46]">KEY NUMBERS</div>
                     <div className="text-[#cfd8e6]">TACKLES {A.stats.tackles}–{B.stats.tackles}</div>
                     <div className="text-[#cfd8e6]">TURNOVERS {A.stats.turnovers}–{B.stats.turnovers}</div>
-                    <div className="text-[#cfd8e6]">LINEOUTS {A.stats.lineoutsWon}–{B.stats.lineoutsWon}</div>
+                    <div className="text-[#cfd8e6]">LINEOUT WINS {A.stats.lineoutsWon}–{B.stats.lineoutsWon}</div>
+                    <div className="text-[#cfd8e6]">SET-PIECE EVENTS S {d.setPieceEvents.scrums} · L {d.setPieceEvents.lineouts}</div>
                     <div className="text-[#cfd8e6]">LINE BREAKS {A.stats.lineBreaks}–{B.stats.lineBreaks}</div>
                   </div>
                 </div>

@@ -137,21 +137,36 @@ export function AuditScreen({ onBack }: { onBack: () => void }) {
             </div>
             <div className="space-y-0.5">
               {stats.results.map((r) => (
-                <div key={r.key} className="grid grid-cols-[150px_58px_1fr_66px] items-center gap-2 border-b border-[#141b28] py-0.5 text-[9px]">
-                  <span className="text-[#cfd8e6]">{r.label}</span>
-                  <span className="text-right font-black tabular-nums" style={{ color: r.grade === 'REALISTIC' ? '#6ee7a0' : '#ff6a5a' }}>
-                    {r.value}
-                  </span>
-                  <span className="relative h-2 bg-[#0a0e16]">
-                    <span className="absolute inset-y-0 bg-[#26314a]"
-                      style={{ left: '18%', width: '64%' }} />
-                    <span className="absolute inset-y-0 w-[2px]"
-                      style={{
-                        left: `${Math.max(0, Math.min(100, 18 + ((r.value - r.lo) / Math.max(1, r.hi - r.lo)) * 64))}%`,
-                        background: r.grade === 'REALISTIC' ? '#6ee7a0' : '#ff6a5a',
-                      }} />
-                  </span>
-                  <span className="text-right text-[#6f7f96]">{r.lo}–{r.hi}</span>
+                <div key={r.key} className={r.details ? 'border-b border-[#26314a] py-1' : ''}>
+                  {r.details && (
+                    <div className="mb-0.5 text-[8px] font-black tracking-[0.16em] text-[#e8cf46]">
+                      {r.label} — BOTH REQUIRED
+                    </div>
+                  )}
+                  {(r.details ?? [r]).map((metric) => {
+                    const finite = Number.isFinite(metric.value);
+                    const marker = finite
+                      ? Math.max(0, Math.min(100, 18 + ((metric.value - metric.lo) / Math.max(1, metric.hi - metric.lo)) * 64))
+                      : 0;
+                    return (
+                      <div key={metric.key} className="grid grid-cols-[150px_58px_1fr_66px] items-center gap-2 border-b border-[#141b28] py-0.5 text-[9px]">
+                        <span className="text-[#cfd8e6]">{r.details ? metric.label : r.label}</span>
+                        <span className="text-right font-black tabular-nums" style={{ color: metric.grade === 'REALISTIC' ? '#6ee7a0' : '#ff6a5a' }}>
+                          {finite ? metric.value : '—'}
+                        </span>
+                        <span className="relative h-2 bg-[#0a0e16]">
+                          <span className="absolute inset-y-0 bg-[#26314a]"
+                            style={{ left: '18%', width: '64%' }} />
+                          <span className="absolute inset-y-0 w-[2px]"
+                            style={{
+                              left: `${marker}%`,
+                              background: metric.grade === 'REALISTIC' ? '#6ee7a0' : '#ff6a5a',
+                            }} />
+                        </span>
+                        <span className="text-right text-[#6f7f96]">{metric.lo}–{metric.hi}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </div>
