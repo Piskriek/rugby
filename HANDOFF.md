@@ -2087,3 +2087,21 @@ headline metrics before the point list.
 at the top of `think()` in `director.ts`, then run the audit. Encroachment and
 teleports will light up immediately. That is the fastest way to understand why
 that early return exists.
+
+---
+
+## 10. CURRENT QUEUE (SPECIFICATIONS)
+
+The following specification documents have been drafted for the upcoming work queue. Please process them in order:
+
+- [SPEC_01_ANIMATION.md](./SPEC_01_ANIMATION.md) (T-28, T-31, T-34)
+- [SPEC_02_T49_FORWARD_ATTACK.md](./SPEC_02_T49_FORWARD_ATTACK.md)
+- [SPEC_03_T41_MAUL_EXITS.md](./SPEC_03_T41_MAUL_EXITS.md)
+- [SPEC_04_STAGE2_REPRICE.md](./SPEC_04_STAGE2_REPRICE.md)
+- [SPEC_05_T68_HARNESS_SEEDING.md](./SPEC_05_T68_HARNESS_SEEDING.md)
+- [SPEC_06_FACING_STRAFE_V2.md](./SPEC_06_FACING_STRAFE_V2.md)
+- [SPEC_07_SCORE_INTEGRITY.md](./SPEC_07_SCORE_INTEGRITY.md)
+- [SPEC_08_T65_STALL_PRESENTATION.md](./SPEC_08_T65_STALL_PRESENTATION.md)
+- [SPEC_09_RESTART_RITUAL.md](./SPEC_09_RESTART_RITUAL.md)
+- [SPEC_10_AUDIT_FAMILIES.md](./SPEC_10_AUDIT_FAMILIES.md)
+
