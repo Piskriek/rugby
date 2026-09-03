@@ -2319,7 +2319,14 @@ export class Director {
   ): number {
     const penetration = (z - f.z) * dir;
     if (penetration >= -DEFENCE_LINE_SLACK) return z;
-    if (import.meta.env.DEV) {
+    /* SPEC_11: the dataset authors the `goal-line-def` fullback as the LAST
+     * MAN, deliberately five to eight metres behind the ball. The clamp still
+     * applies to him — nobody is marked out of play behind the dead-ball line,
+     * which is what the clamp is for — but he is not an authoring error, so
+     * he does not get to shout about it eight times a match. Every other
+     * behind-the-ball mark still warns, because every other one IS a bug. */
+    const authoredLastMan = p.num === 15 && source === 'goal-line-def';
+    if (!authoredLastMan && import.meta.env.DEV) {
       console.warn(`[SPEC_11] shirt ${p.num} (${p.team}) defensive mark from ${source} is `
         + `${(-penetration).toFixed(1)} m behind the ball — clamped to the line`);
     }

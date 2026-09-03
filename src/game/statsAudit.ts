@@ -52,8 +52,11 @@ export const OFFSIDE_PENALTIES_PER_TEAM: Benchmark = {
   note: 'A mean team count from deduplicated, sustained ruck and defensive-line-reset breaches.',
 };
 export const FORMATION_DRIFT_P90: Benchmark = {
-  key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 2.5, perTeam: false,
-  note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 2.5 m.',
+  key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 4.0, perTeam: false,
+  note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 4.0 m. '
+    + 'The ceiling was 2.5 m while the metric was an instantaneous velocity test, which forgave a man sprinting in the '
+    + 'wrong direction. SPEC_11 recalibrated it as a PROGRESS test (is the gap actually closing?) and the author re-'
+    + 'authorised the ceiling at 4.0 m rather than have the metric tuned back down to fit the old number.',
 };
 export const FORMATION_MARK_ANCHOR_P90: Benchmark = {
   key: 'formationMarkAnchorP90', label: 'P90 MARK-TO-BALL DISTANCE (M)', lo: 0, hi: 25, perTeam: false,
