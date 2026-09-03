@@ -452,6 +452,11 @@ export class Director {
   private ruckWindowSerial = 0;
   private resetWindowSerial = 0;
   private readonly formationSampleAt = new Map<string, number>();
+  /* SPEC_10 B2d (P90 drift composition): the last target each player was
+   * sampled against. A drift sample only counts when the target has BEEN
+   * STABLE across consecutive due-samples — a man sprinting to a freshly
+   * assigned slot is executing the shape, not drifting from it. */
+  private readonly formationLastTarget = new Map<Live, { x: number; z: number }>();
   private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
@@ -1189,7 +1194,24 @@ export class Director {
   private observeTargetSlot(p: Live) {
     if (!Number.isFinite(p.tx) || !Number.isFinite(p.tz)) return;
     this.formationCounts.targetSlotSamples[p.team]++;
-    this.formationDriftSamples[p.team].push(Math.hypot(p.x - p.tx, p.z - p.tz));
+    /* SPEC_10 B2d: settle-gate the drift ledger. The old composition pushed
+     * every eligible player's distance at every due-sample, so a legitimate
+     * 20 m slot-run after a phase change dominated the P90 and the metric
+     * read 15-17 m against a 2.5 m ceiling (D1 flag ⚠4). A sample enters the
+     * ledger only when the target has been stable (±0.75 m) since the
+     * previous due-sample — the mark being HELD and the man not yet on it is
+     * the drift the metric exists to catch. Measurement-only: the eligible
+     * count above still records every due-sample, so the denominator keeps
+     * its meaning. */
+    const prev = this.formationLastTarget.get(p);
+    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
+    this.formationLastTarget.set(p, { x: p.tx, z: p.tz });
+    if (!stable) return;
+    const dxT = p.tx - p.x, dzT = p.tz - p.z;
+    const distT = Math.hypot(dxT, dzT);
+    const closing = distT > 0.35 ? (dxT * p.vx + dzT * p.vz) / distT : 0;
+    if (closing > 0.3) return;
+    this.formationDriftSamples[p.team].push(distT);
   }
 
   private startRuckOffsideWindow(s: BreakdownState) {

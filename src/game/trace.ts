@@ -291,6 +291,7 @@ function emit(d: Director, rec: Recorder) {
     defendersInFrame: defLine.filter((p) => inFrame(d, p.x, p.z)).length,
     isBehindGoalLine: Math.abs(d.cam.x) < 20 && Math.abs(d.cam.z) > 44,
     cameraTracksLaterally: Math.abs(d.cam.x - FIELD.minX) > 20,
+    phase: d.phase,   // SPEC_10 B2d: framing claims are live-play claims
     lookAheadMetres: 20,
     focusX: Math.round(focus.x * 10) / 10, focusZ: Math.round(focus.z * 10) / 10,
   });

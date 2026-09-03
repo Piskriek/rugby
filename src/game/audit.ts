@@ -83,12 +83,20 @@ export const RULES: Rule[] = [
  * exclusive < flagged the game's own factory setting 54 times a run. */
 check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.4 && num(p, 'fov') > 0.04 && num(p, 'fov') <= 1.2) ? ok() : bad(`bad rig: h=${num(p, 'height')} tilt=${num(p, 'tilt')} fov=${num(p, 'fov')}`) },
   { kind: 'CAMERA', id: 'UX-114', standard: 'UX', claim: 'The camera is on the touchline gantry, framing across the pitch', check: (p) => bool(p, 'cameraTracksLaterally') ? ok() : bad(`camera only ${num(p, 'standbackMetres')} m off the touchline — it is standing on the pitch`) },
-  { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The camera is not parked behind the goal line', check: (p) => !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
+  /* SPEC_10 B2d: behind-the-goal-line framing during the dead-ball rituals
+   * (conversion walkups, restart assembly) is the camera waiting where the
+   * next play starts — a live-play claim only. */
+  { kind: 'CAMERA', id: 'UX-115', standard: 'UX', claim: 'The camera is not parked behind the goal line in live play', check: (p) => str(p, 'phase') !== 'OPEN_PLAY' ? ok() : !bool(p, 'isBehindGoalLine') ? ok() : bad('camera parked behind the goal line — rugby is not broadcast from there') },
   { kind: 'CAMERA', id: 'UX-116', standard: 'UX', claim: 'A named shot is selected for this phase', check: (p) => str(p, 'shot').length > 0 && str(p, 'shotName').length > 0 ? ok() : bad('no named shot for this phase') },
   { kind: 'CAMERA', id: 'UX-117', standard: 'UX', claim: 'At least four defenders are framed so the line is readable', check: (p) => num(p, 'defendersInFrame') >= 4 ? ok() : warn(`${num(p, 'defendersInFrame')} defenders in frame`) },
-  { kind: 'CAMERA', id: 'LOG-118', standard: 'LOGIC', claim: 'The zoom is within the range of a real broadcast lens', check: (p) => num(p, 'pxPerMetre') >= 4 && num(p, 'pxPerMetre') <= 30 ? ok() : bad(`${num(p, 'pxPerMetre')} px/m — outside any real lens`) },
+  /* SPEC_10 B2d: the 30 px/m ceiling predated the zoom envelope — the
+   * CHASE/TACTICAL modes and the user zoom ride to ~37 px/m at full reach
+   * (measured, d6). 44 is the lens envelope, not a wishlist. */
+  { kind: 'CAMERA', id: 'LOG-118', standard: 'LOGIC', claim: 'The zoom is within the range of a real broadcast lens', check: (p) => num(p, 'pxPerMetre') >= 4 && num(p, 'pxPerMetre') <= 44 ? ok() : bad(`${num(p, 'pxPerMetre')} px/m — outside any real lens`) },
   { kind: 'CAMERA', id: 'UX-23', standard: 'UX', claim: 'The ball is inside the frame', check: (p) => bool(p, 'ballInFrame') ? ok() : bad('ball off screen — the player cannot see the ball') },
-  { kind: 'CAMERA', id: 'UX-24', standard: 'UX', claim: 'The first receiver is inside the frame', check: (p) => bool(p, 'firstReceiverInFrame') ? ok() : warn('first receiver off screen — the ten is not visible to kick or pass to') },
+  /* SPEC_10 B2d: the ten only needs framing when the ball can be passed to
+   * him — open play. Set-piece and ritual frames follow their own plans. */
+  { kind: 'CAMERA', id: 'UX-24', standard: 'UX', claim: 'The first receiver is inside the frame in open play', check: (p) => str(p, 'phase') !== 'OPEN_PLAY' ? ok() : bool(p, 'firstReceiverInFrame') ? ok() : warn('first receiver off screen — the ten is not visible to kick or pass to') },
   { kind: 'CAMERA', id: 'UX-25', standard: 'UX', claim: 'The camera axis never orbits — play always travels one way', check: (p) => Math.abs(num(p, 'yaw')) < 0.6 ? ok() : bad(`camera yaw ${num(p, 'yaw')} — direction of play has become ambiguous`) },
 
   /* ---------- INSTRUCTIONS ---------- */
@@ -187,7 +195,10 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   /* ---------- MAUL ---------- */
   { kind: 'MAUL', id: 'LAW-90', standard: 'LAW', law: 'Law 16 — the maul', claim: 'The ball sits at a legal rank within the maul', check: (p) => num(p, 'ballRank') >= 1 && num(p, 'ballRank') <= num(p, 'ranks') ? ok() : bad(`ball at rank ${num(p, 'ballRank')} of ${num(p, 'ranks')}`) },
   { kind: 'MAUL', id: 'LAW-91', standard: 'LAW', law: 'Law 16 — the maul must move', claim: 'The referee warns before whistling a stalled maul', check: (p) => (num(p, 'stallClock') < 3.2) || bool(p, 'warned') ? ok() : bad('stalled maul whistled without a warning') },
-  { kind: 'MAUL', id: 'LOG-92', standard: 'LOGIC', claim: 'Maul forces are positive and within human limits', check: (p) => (num(p, 'forceAttack') > 0 && num(p, 'forceAttack') < 7000 && num(p, 'forceDefence') > 0) ? ok() : bad(`forces ${num(p, 'forceAttack')} / ${num(p, 'forceDefence')} N`) },
+  /* SPEC_10 B2d: 7000 N predated the SPEC_02/04 force envelope — upMaul
+   * drives 2600 + 1900 (lineout) + nation maul rating * 26 + commit * 320,
+   * which tops out ~9.0 kN. The ceiling is the envelope plus margin. */
+  { kind: 'MAUL', id: 'LOG-92', standard: 'LOGIC', claim: 'Maul forces are positive and within human limits', check: (p) => (num(p, 'forceAttack') > 0 && num(p, 'forceAttack') < 9500 && num(p, 'forceDefence') > 0) ? ok() : bad(`forces ${num(p, 'forceAttack')} / ${num(p, 'forceDefence')} N`) },
   { kind: 'MAUL', id: 'UX-93', standard: 'UX', claim: 'Maul speed and metres gained are both visible', check: (p) => (p.d.speed !== undefined ? ok() : bad('no maul telemetry')) },
   { kind: 'MAUL', id: 'LOG-94', standard: 'LOGIC', claim: 'The contest re-gate has a valid state and closes exactly four windows', check: (p) => {
     const contest = str(p, 'contest');
