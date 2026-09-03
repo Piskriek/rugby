@@ -205,12 +205,14 @@ function emit(d: Director, rec: Recorder) {
    * and both sides in lawful places — all of it measured AT THE KICK. The
    * old window was "the first two seconds of the kick state", which sampled
    * the AIM walk (receivers lawfully mid-retreat) and the FLIGHT itself,
-   * where kk.bz is the FLYING BALL — the audit was told kick-offs were
-   * taken from z=3.2 and z=8.9, i.e. from mid-air. The first frames of
-   * FLIGHT are exactly "at the strike": the ball has left the tee but
-   * moved only centimetres, and nobody has had time to move. */
+  /* SPEC_10 B2a: this window sampled the FLYING ball for its first 2 s — by
+   * then the mark had legally travelled (a restart leaves the tee at ~10 m/s),
+   * the receivers had legally crossed the ten, and the wide pods had legally
+   * run in to support. Law 12 legality is a property of the STRIKE TICK
+   * (SPEC_09's T0): sample the first tenth of a second of flight — the ball
+   * has moved centimetres and nobody has taken a full step yet. */
   if (d.kk && (d.kk.type === 'RESTART' || d.kk.type === 'DROP_OUT')
-    && d.kk.stage === 'FLIGHT' && d.kk.t < 2) {
+    && d.kk.stage === 'FLIGHT' && d.kk.t < 0.1) {
     const markOk = d.kk.type === 'RESTART' ? Math.abs(d.kk.bz) < 1.5 : Math.abs(Math.abs(d.kk.bz) - 28) < 2;
     const rec2 = all.filter((p) => p.team === d.kk!.kicker && (p.z - d.kk!.bz) * (d.kk!.kicker === 'A' ? 1 : -1) > 0.5).length;
     const other: 'A' | 'B' = d.kk.kicker === 'A' ? 'B' : 'A';
@@ -234,7 +236,11 @@ function emit(d: Director, rec: Recorder) {
     all.some((b, j) => j > i && a.team === b.team && Math.hypot(a.x - b.x, a.z - b.z) < 0.55)).length;
   const kickerZ = d.kk ? d.kk.bz : null;
   const kickTeam = d.kk?.kicker ?? null;
-  const kickerAhead = d.kk && d.kk.t < 1.5 && kickTeam
+  /* SPEC_10 B2a (LAW-17): the old window covered the first 1.5 s of the KICK
+   * phase — during AIM the thirty are still LEGALLY walking to their slots,
+   * and after the strike (SPEC_09 T0) the chase is LEGALLY allowed past the
+   * tee. "Ahead of the ball at the kick-off" is a strike-tick property. */
+  const kickerAhead = d.kk && d.kk.stage === 'FLIGHT' && d.kk.t < 0.1 && kickTeam
     ? all.filter((p) => p.team === kickTeam && (p.z - (kickerZ ?? p.z)) * (kickTeam === 'A' ? 1 : -1) > 0.4).length
     : null;
   // The contract is that forwards stay within the pod channel of the ball,
@@ -416,7 +422,11 @@ function emit(d: Director, rec: Recorder) {
     // is now, and only in the instant before the chasers are put onside.
     const strike = k.history[0];
     const strikeZ = strike ? strike.z : k.bz;
-    const atStrike = k.t < 0.45;
+    /* SPEC_10 B2a (LAW-57): 0.45 s was too wide — a chaser sprinting from
+     * 1.5 m behind the tee legally crosses the strike line inside it. The
+     * whole kicking team is behind the ball at the strike tick itself
+     * (SPEC_09 A2 proved ≥ 1.5 m of margin); judge it there and only there. */
+    const atStrike = k.t < 0.1;
     rec.push(d, 'PLAYERS_AIRBORNE', 'HOW THE THIRTY RESPOND IN THE AIR', {
       playersMoving: movers,
       chasersMovingTowardLanding: chasing,
