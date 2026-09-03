@@ -409,7 +409,7 @@ export const OPTION_ITEMS: OptionItem[] = [
   /* T-38 follow-up: who receives the auto-play when the ruck clock runs out.
    * Was a hardcoded 10; the 12 or the back-row pick are real calls. */
   { id: 'firstReceiver', label: 'FIRST RECEIVER', values: ['FLY-HALF 10', 'CENTRE 12', 'BACK ROW 8'], def: 0, note: 'When the ruck clock hits zero the nine releases to this man. The fly-half is the natural default.', cat: 'RULES' },
-  { id: 'maulLaw', label: 'MAUL LAW', values: ['STOP ONCE', 'STOP TWICE', 'NO LIMIT'], def: 0, note: 'A stalled maul used once is a turnover; used twice is a penalty.', cat: 'RULES' },
+  { id: 'maulLaw', label: 'MAUL LAW', values: ['STOP ONCE', 'STOP TWICE'], def: 0, note: 'A held-up maul must resolve: STOP ONCE awards the scrum after 5 s of stall; STOP TWICE warns once, then penalises. NO LIMIT was deprecated (SPEC_08) — an unplayable standstill is not a mode.', cat: 'RULES' },
   { id: 'fifty22', label: '50:22', values: ['OFF', 'ON'], def: 0, note: 'Anachronistic bonus law. Off for the authentic 1991 feel.', cat: 'RULES' },
   { id: 'sinbin', label: 'SIN BIN', values: ['OFF', 'ON'], def: 1, note: 'Yellow card, ten minutes. Original shipped with it on.', cat: 'RULES' },
   { id: 'cards', label: 'CARD FREQUENCY', values: ['RARE', 'NORMAL', 'TOUGH'], def: 1, note: 'Threshold before the referee reaches for a pocket.', cat: 'RULES' },

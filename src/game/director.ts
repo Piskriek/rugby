@@ -51,7 +51,7 @@ import { updateCamera } from './engine/camera';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
 import { situationOf, beatOf, datasetMark } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
-import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul } from './engine/setpieces';
+import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
@@ -783,13 +783,29 @@ export class Director {
         };
       }
       const attackControl = m.contest === 'ATTACK_CONTROL';
+      /* SPEC_08 (T-65): the stall rides THIS channel — the same one the ruck
+       * countdown lives in. While the USE IT call is live, the line reads as
+       * the referee (one persistent word) and the number is the time to the
+       * REAL consequence (maulUseItClock) — Playtest 2: TIME TO ACT, never
+       * ambient. The old code showed `5 - stallClock` in every mode, including
+       * the two where nothing happens at 5 s. */
+      if (maulUseItCall(m)) {
+        return {
+          now: 'USE IT',
+          next: attackControl && this.isHuman(m.attacking)
+            ? 'Call your exit — A/D peels, SPACE transfers to 9, L picks and goes'
+            : 'The maul is held — the referee\'s clock decides it',
+          clock: maulUseItClock(m),
+          danger: true,
+        };
+      }
       return {
         now: `${attackControl ? 'Attack' : 'Defence'} controls the maul — ${m.speed.toFixed(1)} m/s`,
         next: attackControl && this.isHuman(m.attacking)
           ? 'A/D peels, SPACE transfers to 9, L picks and goes'
           : 'The maul is held; wait for the use-it decision',
-        clock: m.stallClock > 0 ? Math.max(0, 5 - m.stallClock) : 0,
-        danger: !attackControl && m.stallClock > 2.5,
+        clock: 0,
+        danger: false,
       };
     }
     if (this.op) {

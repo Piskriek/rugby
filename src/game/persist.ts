@@ -50,6 +50,11 @@ export function loadSave(): SaveBlob | null {
     if (!Number.isFinite(b.kickers?.kickerA)) return null;
     if (typeof b.options !== 'object' || b.options === null) return null;
     if (b.classicProgress !== null && typeof b.classicProgress !== 'string') return null;
+    /* SPEC_08 migration: MAUL LAW "NO LIMIT" (index 2) is deprecated — a
+     * held maul that can never be whistled is an unplayable standstill, and
+     * its countdown could never mean TIME TO ACT. Saved 2s load as STOP ONCE
+     * (0); 0 and 1 are untouched. */
+    if (b.options.maulLaw === 2) b.options.maulLaw = 0;
     return b;
   } catch {
     return null;

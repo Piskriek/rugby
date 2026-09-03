@@ -382,6 +382,12 @@ const MAUL_EXIT_SECONDS: Record<Exclude<MaulExitState, 'NONE'>, number> = {
 const MAUL_CPU_PICK_AT = 4.4;
 const MAUL_AUTO_EXIT_AT = 6.0;
 const MAUL_NO_LIMIT_SAFETY_AT = 15.0;
+/* SPEC_08 (T-65): the use-it law clock thresholds, named once. The law
+ * (updateMaulStall) and the presentation (maulUseItClock, used by the HUD and
+ * the maul overlay) must quote the same numbers, or the countdown the player
+ * sees drifts from the whistle the engine blows. */
+const MAUL_USE_IT_WARN_AT = 3;    // stall seconds before the referee calls USE IT (LAW-91)
+const MAUL_USE_IT_WHISTLE_AT = 5; // laws 0/1: stalled this long under defence control = the award
 const MAUL_PICK_ORDER = [8, 7, 6, 5, 4, 3, 2, 1] as const;
 
 type MaulExit = Exclude<MaulExitState, 'NONE'>;
@@ -540,14 +546,23 @@ function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
     return false;
   }
   s.stallClock += dt;
-  if (s.stallClock > 3 && !s.warned) {
+  if (s.stallClock > MAUL_USE_IT_WARN_AT && !s.warned) {
     s.warned = true;
     s.useItCalled = true;
+    /* SPEC_08 (T-65): the warn used to be a one-shot 2.4 s hint and then the
+     * whistle "looked arbitrary". The call now PERSISTS — it rides the
+     * ruck-countdown channel (maulUseItClock/maulUseItCall below) every frame
+     * until the maul resolves — and its engagement gets exactly one short
+     * referee blast, so the stall is unavoidable in vision AND in audio. */
+    d.audio.whistle('SHORT');
     d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4);
   }
-  if (s.stallClock <= 5 || s.contest !== 'DEFENCE_CONTROL') return false;
+  if (s.stallClock <= MAUL_USE_IT_WHISTLE_AT || s.contest !== 'DEFENCE_CONTROL') return false;
 
-  const law = d.options.maulLaw ?? 0;
+  /* SPEC_08: NO LIMIT (legacy 2) is deprecated — any value ≥1 collapses to
+   * the STOP TWICE ladder, so no code path (old save, stale config, harness)
+   * can resurrect an endless standstill. */
+  const law = (d.options.maulLaw ?? 0) >= 1 ? 1 : 0;
   if (law === 1 && !s.stoppedOnce) {
     s.stoppedOnce = true;
     s.stallClock = 0;
@@ -555,14 +570,38 @@ function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
     d.showHint('STOPPED ONCE — USE IT OR LOSE IT', 2.2);
     return false;
   }
-  if (law === 2) {
-    s.stoppedOnce = true;
-    s.stallClock = 0;
-    s.warned = false;
-    return false;
-  }
   beginMaulExit(s, law === 1 ? 'PENALTY_AWARDED' : 'UNPLAYABLE_SCRUM');
   return true;
+}
+
+/* ================== SPEC_08 (T-65): THE USE-IT PRESENTATION ==================
+ *
+ * Playtest 2's rule: a countdown means TIME TO ACT, never ambient. The number
+ * shown is therefore always the time to the REAL consequence of the state the
+ * maul is in:
+ *   - ATTACK control: the 6 s auto-exit — call your own exit (A/D peel,
+ *     SPACE to 9, L pick) before the engine picks one for you;
+ *   - DEFENCE control: the 5 s use-it whistle (scrum, or the penalty on the
+ *     second stop under STOP TWICE).
+ *
+ * NO LIMIT (legacy maulLaw=2) was deprecated by human review 2026-09-03 —
+ * see SPEC_08_MAULLAW2_DECISION.md: its only honest clock was a ~12 s wait
+ * to the same scrum law 0 awards earlier, with no legal action for either
+ * side, which is exactly the ambient countdown Playtest 2 bans.
+ */
+export function maulUseItClock(s: MaulState): number {
+  if (s.contest === 'DEFENCE_CONTROL') return Math.max(0, MAUL_USE_IT_WHISTLE_AT - s.stallClock);
+  return Math.max(0, MAUL_AUTO_EXIT_AT - s.t);
+}
+
+/**
+ * The persistent USE IT call is live from the warn until the maul resolves
+ * (an exit route begins). No new UI system: it is derived state, read each
+ * frame by the same HUD `narrative` channel the ruck countdown lives in and
+ * by the maul's in-world overlay.
+ */
+export function maulUseItCall(s: MaulState): boolean {
+  return s.exit === 'NONE' && s.useItCalled && s.contest !== 'PENDING';
 }
 
 export function upMaul(d: Director, dt: number, input: Input, pressed: Set<string>) {
@@ -619,9 +658,11 @@ export function upMaul(d: Director, dt: number, input: Input, pressed: Set<strin
     beginMaulExit(s, 'TOUCH_LINEOUT');
     return;
   }
-  /* NO LIMIT still needs a deterministic safety hand-off before the 18 s
-   * watchdog ceiling. It is a fixed law-clock exit, never a force outcome. */
-  if (s.contest === 'DEFENCE_CONTROL' && (d.options.maulLaw ?? 0) === 2 && s.t >= MAUL_NO_LIMIT_SAFETY_AT) {
+  /* SPEC_08: the 15 s hand-off is a pure law-clock backstop for ANY law —
+   * under the two live modes the stall whistle resolves a defence-held maul
+   * by ~10.5 s, so this is unreachable by design, exactly what a safety net
+   * should be. It is a fixed law-clock exit, never a force outcome. */
+  if (s.contest === 'DEFENCE_CONTROL' && s.t >= MAUL_NO_LIMIT_SAFETY_AT) {
     beginMaulExit(s, 'UNPLAYABLE_SCRUM');
     return;
   }
