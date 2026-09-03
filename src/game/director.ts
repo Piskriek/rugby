@@ -732,6 +732,14 @@ export class Director {
         add('A / D', 'WHEEL AND PEEL'); add('SPACE', 'TRANSFER TO 9'); add('L', 'PICK AND GO');
       } else add('A / D', 'HOLD THE MAUL UP');
     }
+    /* SPEC_10 B1 (UX-124): several contexts built a bar that did not contain
+     * the context verb's key — kick FLIGHT (bar shows only 'A / D — RUN TO THE
+     * BALL' while contextVerb says SPACE: CHASE THE BALL), scrum ASSEMBLE/MARK,
+     * and the lineout's non-CALL/THROW stages — so `primary: key === cv.key`
+     * matched nothing and the HUD never marked the one primary action the
+     * context actually has. Whatever the phase branches added, the verb the
+     * engine will fire is always the honest primary: guarantee it is listed. */
+    if (!out.some((a) => a.primary) && cv.key) out.push({ key: cv.key, label: cv.label, primary: true });
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }
