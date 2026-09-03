@@ -18,6 +18,7 @@ import {
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
 } from './paper';
+import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
 /** Screen-right vector of the camera in world terms (handoff section 5). */
 function camRightOf(cam: Camera): [number, number] {
@@ -39,6 +40,9 @@ interface Puppet {
   holdT: number;
   lie: boolean;                 // sequenced into the lying hold
   ch: Character; seed: number;
+  /* SPEC_06 — facing/strafe debug readouts (read-only, for the overlay). */
+  lat: number;                  // lateral velocity relative to facing (m/s)
+  view: PaperView;              // paper side currently shown this frame
 }
 const puppets = new Map<string, Puppet>();
 let lastDirector: Director | null = null;
@@ -82,6 +86,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       hold: null, holdT: 0, lie: false,
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
       seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
+      lat: 0, view: 'front',   // SPEC_06 — facing/strafe debug readouts
     };
     puppets.set(key, pg);
   }
@@ -138,6 +143,8 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       lat = undefined;
     }
   }
+  /* SPEC_06 — carry the lateral stream for the debug overlay. */
+  pg.lat = lat ?? 0;
   const choice = actionClip(action, pg.spd, lat);
   if (choice.name !== pg.clipName) {
     pg.blendFrom = { ...pg.pose };
@@ -161,6 +168,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
 
 export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   const ddt = 1 / 60;   // the puppet pipeline only needs a stable beat for velocity
+  resetFacingDebug();   // SPEC_06 — fresh per-actor readout each frame
   const cam = d.cam;
   const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
   const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
@@ -236,10 +244,19 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     } else {
       view = updatePaperView(paperViewKey(a.team, a.num), fx, fz, a.rx, a.rz, cam.x, cam.z);
     }
+    pg.view = view;   // SPEC_06 — the paper side shown this frame
     const dot = fx * cr[0] + fz * cr[1];
     const sdir = dot >= 0 ? 1 : -1;
     const perp = Math.abs(dot);
     const carried = !!d.op && !d.op.ball.live && a.team === d.op.attacking && a.num === d.op.carrierNum;
+
+    /* SPEC_06 — feed the facing/strafe debug HUD (view, gait, lat). */
+    recordFacingDebug({
+      key: paperViewKey(a.team, a.num),
+      team: a.team, num: a.num,
+      view, gait: pg.clipName || (pg.lie ? 'lieF' : mapAction(a.renderClip)),
+      spd: pg.spd, lat: pg.lat,
+    });
 
     /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
     let pose = pg.pose;
