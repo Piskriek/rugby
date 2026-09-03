@@ -73,5 +73,6 @@ for (let i = 0; i < seconds * 60; i++) {
 }
 console.log('done. trips:', d.watchdogTrips, 'tackles:', d.A.stats.tackles + d.B.stats.tackles,
   'kicks:', d.A.stats.kicks + d.B.stats.kicks, 'rucks:', d.A.stats.rucks + d.B.stats.rucks,
-  'lineouts:', d.A.stats.lineoutsWon + d.A.stats.lineoutsLost + d.B.stats.lineoutsWon + d.B.stats.lineoutsLost,
+  'lineouts:', d.setPieceEvents.lineouts, 'scrums:', d.setPieceEvents.scrums,
+  'offsides:', `${d.A.stats.offsides}-${d.B.stats.offsides}`,
   'score', d.A.score, '-', d.B.score, 'minute', d.minute);

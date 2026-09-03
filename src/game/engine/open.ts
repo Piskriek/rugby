@@ -236,11 +236,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * never fights it in the same frame. */
   const rb = d.releaseBeat;
   const beatOn = !!(rb && d.t < rb.until);
+  /* SPEC_04: this is a distinct defensive-line-reset opportunity. Sample the
+   * live positions before the existing human-pace retreat corrects them. */
+  if (beatOn && d.sampleDefensiveLineResetOffside(dt)) return;
   const dists: { num: number; d: number }[] = [];
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);
     if (p.team !== dTeam || p.sinbin > 0) continue;
-    if (beatOn && p !== d.ctrlPlayer) {
+    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer)) {
       const gap = (p.z - rb!.z) * rb!.dir;
       if (gap < 2.0) {
         p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;

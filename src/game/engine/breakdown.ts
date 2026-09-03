@@ -272,6 +272,10 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
    * pace, not a teleport: the old clamp shoved a defender up to 6 m sideways
    * in one frame, which the fault hunt correctly logged as impossible. */
   if (s.ruckFormed) {
+    /* SPEC_04: sample the actual pre-retreat actor positions and whistle only a
+     * sustained breach. The writer owns the `offsides` stat; the physical
+     * walk-back below remains a no-teleport formation correction. */
+    if (d.sampleFormedRuckOffside(s, dt)) return;
     const fwd = s.attacking === 'A' ? 1 : -1;
     const atkLine = s.contactZ - fwd * 1.0;
     /* T-18. The hindmost foot is the LAW, but a defender does not set a

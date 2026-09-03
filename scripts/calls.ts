@@ -36,7 +36,7 @@ console.log('sampled intents:', Object.entries(intents).sort((a, b) => b[1] - a[
 console.log('avg pass options per sample:', (optTotal / Math.max(1, optSamples)).toFixed(2));
 console.log('passes:', d.A.stats.passes + d.B.stats.passes, 'kicks:', d.A.stats.kicks + d.B.stats.kicks,
   'tackles:', d.A.stats.tackles + d.B.stats.tackles, 'rucks:', d.A.stats.rucks + d.B.stats.rucks,
-  'lineouts:', d.A.stats.lineoutsWon + d.A.stats.lineoutsLost + d.B.stats.lineoutsWon + d.B.stats.lineoutsLost,
-  'scrums:', d.A.stats.scrumsWon + d.A.stats.scrumsLost + d.B.stats.scrumsWon + d.B.stats.scrumsLost,
+  'lineouts:', d.setPieceEvents.lineouts,
+  'scrums:', d.setPieceEvents.scrums,
   'pens:', d.A.stats.penaltiesConceded + d.B.stats.penaltiesConceded,
   'score', d.A.score, '-', d.B.score, 'min', d.minute);

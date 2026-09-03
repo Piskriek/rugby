@@ -449,8 +449,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                 ['SCRUMS WON', 'scrumsWon'], ['LINEOUTS WON', 'lineoutsWon'], ['RUCKS', 'rucks'],
                 ['SLOW BALL', 'slowBall'], ['PASSES', 'passes'], ['KICKS', 'kicks'],
                 ['CARRIES', 'carries'], ['LINE BREAKS', 'lineBreaks'], ['TACKLES BEAT', 'tacklesBroke'],
-                ['OFFLOADS', 'offloads'], ['PENALTIES', 'penaltiesConceded'],
+                ['OFFLOADS', 'offloads'], ['OFFSIDES', 'offsides'], ['PENALTIES', 'penaltiesConceded'],
               ] as const).map(([label, key]) => <StatRow key={key} label={label} a={A.stats[key]} b={B.stats[key]} />)}
+            </div>
+            <div className="mt-2 border-t border-[#26314a] pt-1 text-[9px] tracking-[0.08em] text-[#7f8ea6]">
+              SET-PIECE EVENTS · SCRUMS {d.setPieceEvents.scrums} · LINEOUTS {d.setPieceEvents.lineouts}
             </div>
             <div className="mt-2 flex justify-end"><Btn small onClick={() => setShowStats(false)}>CLOSE</Btn></div>
           </Panel>
@@ -531,7 +534,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                     <div className="font-black tracking-[0.2em] text-[#e8cf46]">KEY NUMBERS</div>
                     <div className="text-[#cfd8e6]">TACKLES {A.stats.tackles}–{B.stats.tackles}</div>
                     <div className="text-[#cfd8e6]">TURNOVERS {A.stats.turnovers}–{B.stats.turnovers}</div>
-                    <div className="text-[#cfd8e6]">LINEOUTS {A.stats.lineoutsWon}–{B.stats.lineoutsWon}</div>
+                    <div className="text-[#cfd8e6]">LINEOUT WINS {A.stats.lineoutsWon}–{B.stats.lineoutsWon}</div>
+                    <div className="text-[#cfd8e6]">SET-PIECE EVENTS S {d.setPieceEvents.scrums} · L {d.setPieceEvents.lineouts}</div>
                     <div className="text-[#cfd8e6]">LINE BREAKS {A.stats.lineBreaks}–{B.stats.lineBreaks}</div>
                   </div>
                 </div>

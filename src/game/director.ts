@@ -26,7 +26,7 @@ import {
 } from './shapes';
 import {
   Nation, TEAM_BY_ID, KITS, FORMATION_BY_ID, DIFFICULTY_TABLE, AI_ARCHETYPES,
-  POINTS, SquadPlayer,
+  POINTS, SquadPlayer, REFEREE_CALLS,
 } from './data';
 import {
   contractFor, PhaseName, RoleContract,
@@ -296,6 +296,51 @@ export interface MatchStats {
   tacklesBroke: number; offloads: number; jackals: number;
 }
 
+/** A two-side count used by set-piece and formation telemetry. */
+export interface TeamTally { A: number; B: number }
+
+/**
+ * Physical set-piece occurrences. These counters deliberately have no side:
+ * one awarded/started scrum or lineout is one event, whatever its outcome.
+ */
+export interface SetPieceEvents { scrums: number; lineouts: number }
+
+/**
+ * Awarded set-piece wins by side. This is outcome accounting, kept separate
+ * from `SetPieceEvents` so a stolen contest, a reset, or a penalty cannot make
+ * a match-total occurrence look like two events (or no event at all).
+ */
+export interface SetPieceWins { scrums: TeamTally; lineouts: TeamTally }
+
+/**
+ * Opportunity-normalised ruck/reset telemetry. All timings use engine seconds;
+ * display-clock compression is intentionally not applied to these observations.
+ */
+export interface FormationIntegrityTelemetry {
+  ruckFormationOpportunities: number;
+  defensiveLineResetOpportunities: number;
+  eligiblePositionSamples: TeamTally;
+  targetSlotSamples: TeamTally;
+  offsidePlayerSamples: TeamTally;
+  offsideEpisodes: TeamTally;
+  offsideRate: TeamTally;
+  formationDriftP50: TeamTally;
+  formationDriftP90: TeamTally;
+  recoveryEpisodes: TeamTally;
+  recoveryEngineP90: TeamTally;
+  recoveryClockP90: TeamTally;
+}
+
+interface OffsideTrack { beganAt: number; sustainedFor: number }
+interface OffsideWindow {
+  token: string;
+  kind: 'RUCK' | 'RESET';
+  openedAt: number;
+  defending: 'A' | 'B';
+  tracks: Map<number, OffsideTrack>;
+  penalised: boolean;
+}
+
 const blankStats = (): MatchStats => ({
   possession: 0, tackles: 0, missed: 0, turnovers: 0, scrumsWon: 0, scrumsLost: 0,
   lineoutsWon: 0, lineoutsLost: 0, rucks: 0, slowBall: 0, metres: 0, carries: 0,
@@ -324,6 +369,25 @@ export interface TeamRun {
 const R = () => Math.random();
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const approach = (a: number, b: number, rate: number, dt: number) => a + (b - a) * (1 - Math.exp(-rate * dt));
+const blankTally = (): TeamTally => ({ A: 0, B: 0 });
+
+/** Nearest-rank quantile keeps the reported P90 tied to observed slots. */
+const percentile = (values: readonly number[], p: number) => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))];
+};
+
+/* SPEC_04: position observations are sampled at four real-engine Hz, while a
+ * legal breach must persist for 0.30 engine seconds beyond numerical noise.
+ * Neither threshold is divided by `clockScale`: these are opportunities, not a
+ * display-clock event stream. */
+const FORMATION_SAMPLE_SECONDS = 0.25;
+/* The existing no-teleport retreat needs a real, finite settle window before
+ * normal formation observations begin. It is not display-clock scaling. */
+const FORMATION_RESET_SETTLE_SECONDS = 0.75;
+const OFFSIDE_EPSILON_METRES = 0.35;
+const OFFSIDE_SUSTAINED_SECONDS = 0.30;
 
 
 /** T-39. Per-shirt build, as a visual scale multiplier. Forwards are big, the
@@ -358,6 +422,33 @@ export class Director {
   passOpts: PassOption[] = [];
 
   teams: { A: TeamRun; B: TeamRun };
+  /** Match-total occurrence ledger; only `recordSetPieceEvent` may increment it. */
+  readonly setPieceEvents: SetPieceEvents = { scrums: 0, lineouts: 0 };
+  /** Outcome ledger; it is intentionally independent of the occurrence ledger. */
+  readonly setPieceWins: SetPieceWins = {
+    scrums: { A: 0, B: 0 },
+    lineouts: { A: 0, B: 0 },
+  };
+  /** Mutable backing fields for the snapshot exposed by `formationIntegrity`. */
+  private readonly formationCounts = {
+    ruckFormationOpportunities: 0,
+    defensiveLineResetOpportunities: 0,
+    eligiblePositionSamples: blankTally(),
+    targetSlotSamples: blankTally(),
+    offsidePlayerSamples: blankTally(),
+    offsideEpisodes: blankTally(),
+    recoveryEpisodes: blankTally(),
+  };
+  private readonly formationDriftSamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  private readonly formationRecoverySamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  private ruckOffsideWindow: OffsideWindow | null = null;
+  private resetOffsideWindow: OffsideWindow | null = null;
+  private observedRuck: BreakdownState | null = null;
+  private observedResetUntil = -1;
+  private ruckWindowSerial = 0;
+  private resetWindowSerial = 0;
+  private readonly formationSampleAt = new Map<string, number>();
+  private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
   halfLength: number;
@@ -949,6 +1040,9 @@ export class Director {
 
     this.watchdog(dt);
     this.think(dt, input);
+    /* SPEC_04: the formation target has now been freshly assigned by `think()`;
+     * capture target-slot drift before a phase-bound writer can take control. */
+    this.samplePendingTargetSlots();
     this.placeBound(dt);
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
@@ -1005,6 +1099,245 @@ export class Director {
    * the beat, instead of letting them tackle the nine on the frame the
    * ball is out. */
   releaseBeat: { z: number; dir: number; until: number } | null = null;
+
+  /**
+   * Snapshot the sample ledger rather than exposing its mutable arrays. P50/P90
+   * are calculated from actual target-slot distances, and the rate denominator
+   * is eligible player-observations, never compressed display-clock frames.
+   */
+  get formationIntegrity(): FormationIntegrityTelemetry {
+    const c = this.formationCounts;
+    const rate = (team: 'A' | 'B') => c.eligiblePositionSamples[team]
+      ? (100 * c.offsidePlayerSamples[team]) / c.eligiblePositionSamples[team]
+      : 0;
+    const recoveryEngineP90 = {
+      A: percentile(this.formationRecoverySamples.A, 0.9),
+      B: percentile(this.formationRecoverySamples.B, 0.9),
+    };
+    return {
+      ruckFormationOpportunities: c.ruckFormationOpportunities,
+      defensiveLineResetOpportunities: c.defensiveLineResetOpportunities,
+      eligiblePositionSamples: { ...c.eligiblePositionSamples },
+      targetSlotSamples: { ...c.targetSlotSamples },
+      offsidePlayerSamples: { ...c.offsidePlayerSamples },
+      offsideEpisodes: { ...c.offsideEpisodes },
+      offsideRate: { A: rate('A'), B: rate('B') },
+      formationDriftP50: {
+        A: percentile(this.formationDriftSamples.A, 0.5),
+        B: percentile(this.formationDriftSamples.B, 0.5),
+      },
+      formationDriftP90: {
+        A: percentile(this.formationDriftSamples.A, 0.9),
+        B: percentile(this.formationDriftSamples.B, 0.9),
+      },
+      recoveryEpisodes: { ...c.recoveryEpisodes },
+      recoveryEngineP90,
+      recoveryClockP90: {
+        A: recoveryEngineP90.A * this.clockScale,
+        B: recoveryEngineP90.B * this.clockScale,
+      },
+    };
+  }
+
+  private formationSampleDue(token: string) {
+    const last = this.formationSampleAt.get(token);
+    if (last !== undefined && this.t - last < FORMATION_SAMPLE_SECONDS - 1e-9) return false;
+    this.formationSampleAt.set(token, this.t);
+    return true;
+  }
+
+  /** A player is excluded only for an active lawful/role-specific exception. */
+  private isFormationEligible(p: Live) {
+    if (p.sinbin > 0 || p.down || p.carrier || p.beatenT > 0) return false;
+    return !/(CHASE|TACKLE|FIELD THE KICK)/.test(p.job.toUpperCase());
+  }
+
+  private observeOffsidePosition(team: 'A' | 'B', penetration: number) {
+    this.formationCounts.eligiblePositionSamples[team]++;
+    if (penetration > OFFSIDE_EPSILON_METRES) this.formationCounts.offsidePlayerSamples[team]++;
+  }
+
+  /** `tx`/`tz` are the existing intelligence target mark for the live actor. */
+  private observeTargetSlot(p: Live) {
+    if (!Number.isFinite(p.tx) || !Number.isFinite(p.tz)) return;
+    this.formationCounts.targetSlotSamples[p.team]++;
+    this.formationDriftSamples[p.team].push(Math.hypot(p.x - p.tx, p.z - p.tz));
+  }
+
+  private startRuckOffsideWindow(s: BreakdownState) {
+    if (this.observedRuck !== s) {
+      this.observedRuck = s;
+      const defending: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
+      this.ruckOffsideWindow = {
+        token: `ruck-${++this.ruckWindowSerial}`,
+        kind: 'RUCK',
+        openedAt: this.t,
+        defending,
+        tracks: new Map<number, OffsideTrack>(),
+        penalised: false,
+      };
+      this.formationCounts.ruckFormationOpportunities++;
+    }
+    return this.ruckOffsideWindow!;
+  }
+
+  private startResetOffsideWindow() {
+    const rb = this.releaseBeat!;
+    if (this.observedResetUntil !== rb.until) {
+      this.observedResetUntil = rb.until;
+      const defending = this.defending();
+      this.resetOffsideWindow = {
+        token: `reset-${++this.resetWindowSerial}`,
+        kind: 'RESET',
+        openedAt: this.t,
+        defending,
+        tracks: new Map<number, OffsideTrack>(),
+        penalised: false,
+      };
+      this.formationCounts.defensiveLineResetOpportunities++;
+    }
+    return this.resetOffsideWindow!;
+  }
+
+  private ruckEligibleDefenders(s: BreakdownState, defending: 'A' | 'B') {
+    const bound = new Set(s.players.filter((q) => q.team === defending).map((q) => q.num));
+    return this.live.filter((p) => p.team === defending && !bound.has(p.num) && this.isFormationEligible(p));
+  }
+
+  private resetEligibleDefenders(defending: 'A' | 'B') {
+    return this.live.filter((p) => p.team === defending && this.isFormationEligible(p));
+  }
+
+  private closeOffsideTrack(team: 'A' | 'B', window: OffsideWindow, num: number) {
+    const track = window.tracks.get(num);
+    if (!track) return;
+    this.formationCounts.recoveryEpisodes[team]++;
+    this.formationRecoverySamples[team].push(Math.max(0, this.t - track.beganAt));
+    window.tracks.delete(num);
+  }
+
+  /**
+   * Accumulate a persistent legal breach once per formation opportunity. The
+   * caller uses a signed line whose lawful side is `(z - line) * dir >= 0`.
+   * A resulting whistle ends the current phase, so one sustained breach can
+   * never inflate into one penalty per simulation frame.
+   */
+  private evaluateOffsideWindow(
+    window: OffsideWindow,
+    attacking: 'A' | 'B',
+    legalLineZ: number,
+    direction: number,
+    candidates: Live[],
+    dt: number,
+  ) {
+    /* A newly formed ruck/reset is a real walk-back transition. Start the
+     * sustained-breach clock only after that fixed engine-time allowance. */
+    if (this.t - window.openedAt < FORMATION_RESET_SETTLE_SECONDS) return false;
+    const seen = new Set<number>();
+    let worst: { player: Live; penetration: number } | null = null;
+    for (const p of candidates) {
+      seen.add(p.num);
+      const penetration = Math.max(0, (legalLineZ - p.z) * direction);
+      if (penetration <= OFFSIDE_EPSILON_METRES) {
+        this.closeOffsideTrack(window.defending, window, p.num);
+        continue;
+      }
+      const prior = window.tracks.get(p.num);
+      const track = prior ?? { beganAt: this.t, sustainedFor: 0 };
+      track.sustainedFor += dt;
+      window.tracks.set(p.num, track);
+      if (track.sustainedFor >= OFFSIDE_SUSTAINED_SECONDS
+        && (!worst || penetration > worst.penetration)) {
+        worst = { player: p, penetration };
+      }
+    }
+    /* A player becoming down/bound/chasing is an exclusion, not evidence that
+     * he recovered to the line, so remove a stale track without fabricating a
+     * recovery duration. */
+    for (const num of window.tracks.keys()) if (!seen.has(num)) window.tracks.delete(num);
+
+    if (!worst || window.penalised) return false;
+    window.penalised = true;
+    this.formationCounts.offsideEpisodes[window.defending]++;
+    /* The option remains a genuine law switch. We still retain the observed
+     * episode for diagnostics when it is off, but must not write a penalty. */
+    if ((this.options.offside ?? 0) !== 0) return false;
+    this.teams[window.defending].stats.offsides++;
+    this.beginPenalty(attacking, REFEREE_CALLS.OFFSIDE, worst.player.num);
+    return true;
+  }
+
+  /**
+   * Writer hook for `upBreakdown`, immediately before its no-teleport retreat.
+   * The legal line is the engine's declared hindmost defending ruck slot, not
+   * the intentionally deeper 3 m defensive guard target used for positioning.
+   */
+  sampleFormedRuckOffside(s: BreakdownState, dt: number) {
+    const window = this.startRuckOffsideWindow(s);
+    const fwd = s.attacking === 'A' ? 1 : -1;
+    const defenders = s.players.filter((q) => q.team === window.defending);
+    const legalLineZ = defenders.length
+      ? (fwd > 0 ? Math.max(...defenders.map((q) => q.z)) : Math.min(...defenders.map((q) => q.z)))
+      : s.contactZ;
+    const candidates = this.ruckEligibleDefenders(s, window.defending);
+    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
+      && this.formationSampleDue(window.token)) {
+      for (const p of candidates) {
+        const penetration = Math.max(0, (legalLineZ - p.z) * fwd);
+        this.observeOffsidePosition(p.team, penetration);
+      }
+      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RUCK' };
+    }
+    const whistle = this.evaluateOffsideWindow(window, s.attacking, legalLineZ, fwd, candidates, dt);
+    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
+    return whistle;
+  }
+
+  /**
+   * Writer hook for `upOpen` while the existing ruck-release retreat applies.
+   * The contact mark is the legal boundary; the 2 m retreat target is a
+   * formation aid, not an invented offside line. Target-slot distance itself is
+   * sampled after `think()` refreshes the defenders' assigned targets.
+   */
+  sampleDefensiveLineResetOffside(dt: number) {
+    const rb = this.releaseBeat;
+    if (!rb || this.t >= rb.until) return false;
+    const window = this.startResetOffsideWindow();
+    const candidates = this.resetEligibleDefenders(window.defending);
+    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
+      && this.formationSampleDue(window.token)) {
+      for (const p of candidates) {
+        const penetration = Math.max(0, (rb.z - p.z) * rb.dir);
+        this.observeOffsidePosition(p.team, penetration);
+      }
+      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RESET' };
+    }
+    const whistle = this.evaluateOffsideWindow(window, this.possession, rb.z, rb.dir, candidates, dt);
+    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
+    return whistle;
+  }
+
+  /** Finish a settled ruck/reset sample after the regular writer has set `tx`/`tz`. */
+  private samplePendingTargetSlots() {
+    const pending = this.pendingTargetSlotSample;
+    this.pendingTargetSlotSample = null;
+    if (!pending) return;
+    if (pending.kind === 'RUCK') {
+      const s = this.bd;
+      if (!s || this.ruckOffsideWindow?.token !== pending.token || !s.ruckFormed) return;
+      for (const p of this.ruckEligibleDefenders(s, pending.defending)) this.observeTargetSlot(p);
+      return;
+    }
+    const rb = this.releaseBeat;
+    if (!rb || this.t >= rb.until || this.resetOffsideWindow?.token !== pending.token) return;
+    for (const p of this.resetEligibleDefenders(pending.defending)) {
+      /* `upOpen` owns the retreat frame; its target is intentionally stale until
+       * it returns the player to the line, so it is explicitly excluded here. */
+      if (p.job.toUpperCase() === 'RELEASE AND RETREAT') continue;
+      this.observeTargetSlot(p);
+    }
+  }
+
   private lastWatchPhase: Phase | null = null;
   private lastPhaseToken: unknown = null;
   watchdogTrips = 0;
@@ -2587,6 +2920,31 @@ export class Director {
   upMaul(dt: number, input: Input, pressed: Set<string>) { /* T-03: engine/setpieces */ return upMaul(this, dt, input, pressed); }
 
 
+  /* ======================== SET-PIECE LEDGERS ======================== */
+
+  /** Record one physical award/start, before any contest outcome is known. */
+  recordSetPieceEvent(piece: keyof SetPieceEvents) {
+    this.setPieceEvents[piece]++;
+  }
+
+  /**
+   * Record a result without deriving an occurrence from it. Existing team-stat
+   * win/loss fields remain the presentation-compatible mirror of this outcome
+   * ledger; `setPieceEvents` is the sole source for match-total attempts.
+   */
+  recordSetPieceOutcome(piece: keyof SetPieceEvents, winner: 'A' | 'B' | null, loser: 'A' | 'B' | null = null) {
+    if (winner) {
+      this.setPieceWins[piece][winner]++;
+      if (piece === 'scrums') this.teams[winner].stats.scrumsWon++;
+      else this.teams[winner].stats.lineoutsWon++;
+    }
+    if (loser) {
+      if (piece === 'scrums') this.teams[loser].stats.scrumsLost++;
+      else this.teams[loser].stats.lineoutsLost++;
+    }
+  }
+
+
   /* ============================ SCRUM ============================ */
 
   scrumSlots(feed: 'A' | 'B', ax: number, az: number): ScrumSlot[] { /* T-03: engine/setpieces */ return scrumSlots(this, feed, ax, az); }
@@ -2594,6 +2952,8 @@ export class Director {
 
   startScrum(feed: 'A' | 'B', x: number, z: number) {
     this.possession = feed;
+    // An award is one scrum even if it resets, ends in a penalty, or is stolen.
+    this.recordSetPieceEvent('scrums');
     const zn = clamp(z, -45, 45);
     this.scrumAnchor = { x: clamp(x, -18, 18), z: zn };
     const mk = (t: 'A' | 'B'): Pack => ({
@@ -2648,6 +3008,8 @@ export class Director {
 
   startLineout(thrower: 'A' | 'B', z: number, x: number) {
     this.possession = thrower;
+    // A not-straight rethrow earns a new call to this method and a new event.
+    this.recordSetPieceEvent('lineouts');
     const zn = clamp(z, FIELD.tryZ + 6, FIELD.tryZFar - 6);
     const side = x >= 0 ? 1 : -1;
     const players: LineoutState['players'] = [];

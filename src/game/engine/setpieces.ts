@@ -152,11 +152,10 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
         const against = s.netDrive < -0.35 && R() < 0.42;
         const winner = against ? dTeam : feed;
         if (against) {
-          d.teams[dTeam].stats.scrumsWon++;
-          d.teams[feed].stats.scrumsLost++;
+          d.recordSetPieceOutcome('scrums', dTeam, feed);
           d.commentate('TURNOVER', '— AGAINST THE HEAD');
         } else {
-          d.teams[feed].stats.scrumsWon++;
+          d.recordSetPieceOutcome('scrums', feed);
         }
         d.scrim = undefined;
         /* PLAYTEST 4: the mark is the nine's own base slot (2.95) — he has
@@ -310,22 +309,21 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       // A badly crooked throw is a free kick regardless of who caught it.
       if (s.quality < 0.25) {
         d.lawCall('NOT_STRAIGHT', REFEREE_CALLS.NOT_STRAIGHT, thrower);
-        d.teams[thrower].stats.lineoutsLost++;
+        d.recordSetPieceOutcome('lineouts', null, thrower);
         d.lo = undefined;
         d.startLineout(dTeam, bz, bx);
         return;
       }
 
       if (!won) {
-        d.teams[dTeam].stats.lineoutsWon++;
-        d.teams[thrower].stats.lineoutsLost++;
+        d.recordSetPieceOutcome('lineouts', dTeam, thrower);
         d.commentate('LINEOUT', '— STOLEN AT THE TAIL');
         d.lo = undefined;
         d.startOpen(dTeam, bx, bz, 9, 1, 0, 0.45);
         return;
       }
 
-      d.teams[thrower].stats.lineoutsWon++;
+      d.recordSetPieceOutcome('lineouts', thrower);
       s.ball.state = 'HELD';
       const jumper = s.players.find((p) => p.team === thrower && p.role === 'JUMPER');
       if (jumper) { s.ball.heldBy = jumper.id; jumper.handY = 2.6; }
