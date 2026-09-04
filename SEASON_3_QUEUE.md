@@ -44,8 +44,8 @@ mutates nothing and is not wired into the game.
 | 1 | **SPEC_16** | Environment scale — `RENDER_SCALE` in the render layer | Render | — | **RULED, ready to execute** |
 | 2 | **SPEC_17** | Papercraft rigging — swing leg, arm Z-sort, hip pivot | Render / rig | — | **RULED (17.1–17.3), 17.4 diagnosed below** |
 | 3 | **SPEC_18** | Art style: soft edges + the 3/4 upright view | Render | 16, 17 | **SHIPPED** |
-| 4 | **SPEC_19** | AI debt: N-02 Smell Blood, T-71 offside loitering | AI | — | Unmeasured |
-| 5 | **SPEC_20** | Set piece & tuning: N-01 lineout teleport, SPEC_04 stage 2 | Law / tuning | 19 | Unmeasured |
+| 4 | **SPEC_19** | AI debt: N-02 Smell Blood, T-71 offside loitering | AI | — | Diagnostic queued |
+| 5 | **SPEC_20** | Set piece & tuning: N-01 lineout teleport, SPEC_04 stage 2 | Law / tuning | 19 | Diagnostic queued |
 
 ### Sequencing
 
@@ -1156,3 +1156,136 @@ caps respected, max discontinuity 0.0027 per 0.25° — continuous everywhere.
 
 **Halting here for review, as instructed, before the SPEC_19 / SPEC_20
 deferred debt.**
+
+
+---
+
+# SPEC_18.5 — VERDICT: SHIPPED
+
+Signal is the signed curvature of the smoothed velocity — the cross product of
+EMA velocity with its own derivative — speed-gated by smoothstep over
+1.5–3.5 m/s, EMA'd at τ=0.35 s, then `tanh(ω/2.0)`. Verified exact to three
+decimals against known circular motion. Live: bias p50 0.054, p90 0.501,
+p99 0.872, strictly bounded, 0.56% of frames saturated. Nine gates unchanged.
+
+**Two bugs the eye passed and measurement caught.**
+
+1. **The natural reading of the directive causes hyperextension.** `solveKnee`'s
+   `bend` argument is a ±1 perpendicular *selector*, not an angle, and the IK
+   preserves bone length only at exactly `|bend| = 1`:
+
+   | bend | thigh (want 0.440) | shin (want 0.400) |
+   |---|---|---|
+   | 1.00 | 0.4400 | 0.4000 |
+   | 1.30 | 0.4734 | 0.4364 |
+   | 2.00 | 0.5710 | 0.5408 |
+
+   Biasing `bend` stretches the femur up to 30%. The bias is applied to the
+   **IK foot target** instead, so bone lengths are exact by construction —
+   worst thigh error **0.0000%** across 25 600 samples.
+
+2. **The flare was applied in world x**, moving both legs the same way: the
+   stance widened or narrowed symmetrically instead of inside-tuck plus
+   outside-flare. Measured at turn = +1, *both* feet sat 0.084 m further from
+   the spine. Now applied along each limb's own outward direction, verified
+   mirror-symmetric with identity at zero.
+
+Foot reach is 1.184 of limb length at full bias against a **pre-existing 1.177
+baseline at zero bias** — the authored target already out-reaches the leg and
+`solveKnee`'s `reach*0.999` clamp absorbs it. The bias contributes +1.43pp to a
+clamp that was already load-bearing; flagged as pre-existing debt, not a new
+failure mode. Elbow flare is suppressed in proportion to `carryLock()`, which
+reuses the exact weights `carryPose` applies.
+
+---
+
+# SPEC_19 / SPEC_20 — DEFERRED DEBT DIAGNOSTIC PLAN
+
+Proposed. **No code changes yet — awaiting review.** Every item opens with a
+seeded, read-only probe that counts occurrences *before* anything is touched,
+per Measure First. Ordered by evidence strength, not by queue number.
+
+## D-1. `BALL ON SCREEN 196` — already partly diagnosed
+
+I ran the first probe. The failure is **not** diffuse noise:
+
+| difficulty | off-target frames | episodes | longest run |
+|---|---|---|---|
+| 0 | 266 | **3** | 172 frames (2.9 s) |
+| 3 | **0** | 0 | — |
+| 6 | 2 | 1 | 2 frames |
+
+97% of bad frames are the ball off the **bottom** of frame; 231 of 266 are in
+`OPEN_PLAY`, 35 in `KICK`. Three episodes at one difficulty, not a systemic
+framing fault.
+
+Two concrete hypotheses, both cheap to falsify:
+
+* **H1 — the gate's viewport is stale.** `trace.ts` hardcodes 960×540 with a
+  60 px margin. SPEC_16 changed the camera pull-back to ×1.65. If the probe's
+  assumed frame no longer matches the shipped one, the gate is measuring a
+  viewport that does not exist. **Falsify by** re-running the probe against the
+  real render viewport and margin.
+* **H2 — a genuine camera-follow stall at difficulty 0.** "Off the bottom" means
+  the ball is nearer the camera than the rig expects — consistent with a slow
+  or stalled follow during one long open-play sequence. **Falsify by** dumping
+  camera and ball tracks for the 172-frame episode and checking whether the
+  camera is easing toward the ball at all.
+
+H1 and H2 have opposite fixes — one moves a test, one fixes the rig — so this
+must be resolved before touching either. **I will not move the threshold**; if
+H1 holds, the correction is to the probe's viewport constants with written
+justification, not to the 60-frame budget.
+
+## D-2. N-01 lineout teleport
+
+**Probe:** per-actor per-frame displacement, filtered to the lineout formation
+window, reusing the existing `teleportCount` definition so the numbers are
+comparable to the `NO TELEPORTS` gate. Report the distribution of jump sizes,
+which actors jump, and the exact phase transition at which they jump.
+
+**Key question:** is this one writer snapping positions, or two writers fighting
+across a phase edge? The `NO TELEPORTS` gate passes at 0, so whatever the
+lineout does is **not currently classed as a teleport** — either it is below the
+gate's threshold or it happens in a phase the gate excludes. That discrepancy is
+the first thing to establish; it decides whether this is a new bug or a hole in
+an existing gate. `scripts/lotest.ts` already forces lineout resolution and is
+the natural harness.
+
+## D-3. T-71 offside loitering
+
+The engine already has rich instrumentation — `offsideEpisodes`,
+`offsideEpisodesByKind`, `offsidePlayerSamples`, `offsideWhistlesByKind` in
+`src/game/engine/offside.ts`. **Probe:** for each offside episode, measure the
+retreat vector after the ledger flags a player — closing speed toward the
+offside line, latency from flag to first retreating frame, and the fraction of
+episodes with *zero* retreat intent. "Does not retreat with intent" must become
+a number before it can be fixed.
+
+## D-4. N-02 "Smell Blood"
+
+The weakest-specified item, so it gets a definition step first. A "broken
+defensive line" needs a measurable predicate — candidate: a gap in the defensive
+line exceeding some width within a distance band of the carrier, sustained for
+some minimum time. **Probe:** count how often that predicate holds, and what
+attackers actually do when it does (attack the gap / hold depth / ignore).
+
+If the predicate almost never fires, the bug is the *detector*, not the
+behaviour, and repricing attacker aggression would be treating a symptom. I
+recommend agreeing the predicate before any probe is written.
+
+## D-5. SPEC_04 stage 2 volume tuning
+
+**Deliberately last, and I recommend deferring it past the others.** There is no
+`src/audio` directory in the tree — the scope is not yet locatable, and every
+other item has a measurable failure today. Tuning is also the one item where
+"before" numbers are least meaningful without an agreed target. **Needs a scope
+ruling from you** on what "volume" refers to here before I probe it.
+
+## Proposed order
+
+`D-1` (evidence in hand, and it is a red gate) → `D-2` (existing harness, tests
+a gate hole) → `D-3` (rich existing telemetry) → `D-4` (needs a predicate ruling
+first) → `D-5` (needs a scope ruling first).
+
+**Halting for review of this plan before any diagnostic code is written.**
