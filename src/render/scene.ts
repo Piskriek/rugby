@@ -21,8 +21,9 @@ import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
 import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
-  upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
-  FIGURE_SCALE, BUILDS, paperCard, type Pt,
+  upperLowerRun, squashForClip, edgeLegForeshorten,
+  newLeanState, updateLean, updateTurnBias, threeQuarter, facingAngle, updateFootSquash, combineSquash, groundedClearance, type LeanState,
+  BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
@@ -51,6 +52,12 @@ interface Puppet {
   view: PaperView;              // paper side currently shown this frame
   /* SPEC_06 — gait hysteresis state (which locomotion state is being held). */
   gait: string;
+  /* SPEC_18.3a — kinetic lean/squash filter state. */
+  lean: LeanState;
+  leanAngle: number;
+  turnBias: number;
+  footSquash: number;
+  clock: number;
 }
 const puppets = new Map<string, Puppet>();
 let lastDirector: Director | null = null;
@@ -170,14 +177,21 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
       seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
       lat: 0, view: 'front', gait: 'idle',   // SPEC_06 — facing/strafe debug + hysteresis
+      lean: newLeanState(), leanAngle: 0, turnBias: 0, footSquash: 0, clock: 0,  // SPEC_18.3a/18.5
     };
     puppets.set(key, pg);
   }
   /* velocity + true heading from the streamed positions */
   const vx = (a.rx - pg.lx) / Math.max(dt, 1e-4);
   const vz = (a.rz - pg.lz) / Math.max(dt, 1e-4);
+  const stepped = Math.hypot(a.rx - pg.lx, a.rz - pg.lz);
   pg.lx = a.rx; pg.lz = a.rz;
   pg.spd = Math.hypot(vx, vz);
+  /* SPEC_18.3a — filtered lean. Teleports are rejected inside updateLean. */
+  pg.leanAngle = updateLean(pg.lean, vx, vz, stepped, dt);
+  /* SPEC_18.5 — must run AFTER updateLean, which publishes the smoothed
+   * acceleration this reads. */
+  pg.turnBias = updateTurnBias(pg.lean, dt);
   /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
    * stationary man LOOKS AT THE BALL. The old velocity-only heading had
    * support runners strolling back to marks staring straight at the camera
@@ -265,6 +279,15 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
     pg.blendT += dt;
     pg.pose = lerpPose(pg.blendFrom, sampled, smooth(clamp01p(pg.blendT / pg.blendDur)));
   } else { pg.blendFrom = null; pg.pose = sampled; }
+
+  /* SPEC_18.3a footfall — placed AFTER the pose is sampled; reading pg.pose
+   * before this point would test last frame's legs against this frame's clock.
+   * Contact is read from the rig's own clearance helper rather than a
+   * hardcoded phase table, so it cannot drift out of sync with the clip. */
+  const [cl, cr] = groundedClearance(pg.pose.kL, pg.pose.kR);
+  pg.clock += dt;
+  pg.footSquash = updateFootSquash(pg.lean, Math.min(cl, cr) <= 0.005, pg.spd, pg.clock, dt);
+
   return pg;
 }
 
@@ -307,16 +330,19 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
        * offset from the spine have to grow with the figure or it ends up at
        * his waist. Only the CARRIED anchors scale; a ball in flight or on the
        * turf is world geometry and is untouched. */
-      const hx = (cp ? Math.sin(cp.face) * 0.26 : 0.3) * FIGURE_SCALE;
-      const hz = (cp ? Math.cos(cp.face) * 0.26 : 0) * FIGURE_SCALE;
-      ballWorld = { x: o.carrierX + hx, y: 1.14 * FIGURE_SCALE, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
+      /* SPEC_16 — chest anchors are logical metres and now draw true through
+       * RENDER_SCALE; the SPEC_14 FIGURE_SCALE inflation would put the ball
+       * 1.65x out from the spine and above the carrier's head. */
+      const hx = cp ? Math.sin(cp.face) * 0.26 : 0.3;
+      const hz = cp ? Math.cos(cp.face) * 0.26 : 0;
+      ballWorld = { x: o.carrierX + hx, y: 1.14, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
     }
   } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
     const m = d.ml;
     const yawRad = (m.yaw * Math.PI) / 180;
     const lz = -m.dir * m.ballRank * 0.78;
     ballWorld = {
-      x: m.x - lz * Math.sin(yawRad), y: 1.02 * FIGURE_SCALE,
+      x: m.x - lz * Math.sin(yawRad), y: 1.02,   // SPEC_16: logical metres
       z: m.z + lz * Math.cos(yawRad), spin: m.t * 0.6, visible: true,
     };
   } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
@@ -325,7 +351,8 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
       ballWorld = { x: b.ball.x, y: 0.16, z: b.ball.z, spin: b.t * 0.5, visible: true };
     } else if (carrier) {
-      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05 * FIGURE_SCALE, z: carrier.z, spin: b.t * 2.2, visible: true };
+      // SPEC_16: chest height in logical metres
+      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z, spin: b.t * 2.2, visible: true };
     }
   }
 
@@ -366,23 +393,46 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
 
     /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
     let pose = pg.pose;
-    const GAIT = new Set(['jog', 'run', 'sprint', 'walk', 'shuffle', 'strafe', 'strafeL']);
     if (pg.clipName === 'passSpin' && pg.spd > 3.6) {
       // Running pass (R-03 / SM-13 / PR-04): upper/lower separation — legs keep
       // running while the arms throw the ball.
       const gc = actionClip(pg.spd < 6.2 ? 'run' : 'sprint', pg.spd);
-      let gait = sampleC(gc.name, pg.runU);
-      gait = pinPlantedFoot(gait, pg.ch.build, pg.spd);
+      const gait = sampleC(gc.name, pg.runU);
       pose = upperLowerRun(gait, pg.pose);
-    } else if (GAIT.has(pg.clipName) && pg.spd > 0.7) {
-      // No-foot-slide (SM-02 / W-07 / B-04): pin the planted foot to the turf.
-      pose = pinPlantedFoot(pose, pg.ch.build, pg.spd);
     }
+    /* SPEC_17 — `pinPlantedFoot` deleted. It was dead code: its guard only
+     * corrected a foot that SANK, and measurement showed the foot never sank
+     * (lowest +0.003 m across every gait), so before/after poses were
+     * byte-identical in all five clips. Grounding is now structural — the
+     * coronal rig authors the foot on a clearance arc and pins the stance foot
+     * at y = 0 by construction, which is what that helper only pretended to
+     * do. See SEASON_3_QUEUE.md SPEC_17.1. */
+    /* SPEC_18.3b — 3/4 projection, from the same angle the view machine uses. */
+    const fa = facingAngle(fx, fz, a.rx, a.rz, cam.x, cam.z);
+    /* SPEC_21 Item 1 — `tqSign` is gone with the shear. A symmetric horizontal
+     * foreshortening has no side to pick: narrowing about the spine looks the
+     * same whichever way the actor turns away from camera. */
+    const tqProj = threeQuarter(fa.ang);
     const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
+    /* SPEC_18.3a — footfall squash, combined MULTIPLICATIVELY with the SPEC_01
+     * impact squash (ruled), so a tackle landing on a footfall compresses once
+     * rather than twice. Contact is read from the rig's own clearance helper,
+     * not from a hardcoded phase table, so it cannot drift out of sync with the
+     * clip. The debounce inside updateFootSquash absorbs the u-loop seam. */
+    const sFoot = pg.footSquash;
+    const sImpact = 1 - (squash?.sy ?? 1);
+    const sTot = combineSquash(sFoot, Math.max(0, sImpact));
+    const squash2 = sTot > 0.0005 ? { sx: 1 + 0.6 * sTot, sy: 1 - sTot } : undefined;
     const legScale = edgeLegForeshorten(perp, cam.tilt * 180 / Math.PI); // Edge Leg Foreshortening (B-14)
 
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
+      lean: pg.leanAngle, turn: pg.turnBias,
+      /* SPEC_22 — the gait flare's speed gate. Same `pg.spd` the gait chooser
+       * and footfall squash already read, so flare, clip and thud cannot
+       * disagree about how fast the man is moving. */
+      spd: pg.spd,
+      tq: tqProj,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
@@ -392,7 +442,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
       ballSide: pg.pose.ballSide, ballSpin: ballWorld.spin,
       cap: pg.ch.cap, tape: pg.ch.tape,
       spinDir: sdir, gs, fore: 0.45 + 0.55 * perp, headDir: sdir || 1, depth: pr.f,
-      squash, legScale,
+      squash: squash2, legScale,
     };
     items.push({ f: pr.f, draw: () => { drawPaperShadow(args); drawPaperActor(args); } });
   }
@@ -511,9 +561,12 @@ function drawKickOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
         s.goalProb > 0.7 ? '#6ee7a0' : s.goalProb > 0.45 ? '#ffd76a' : '#ff6a5a', jx, jy);
     } else {
       worldLabel(ctx, cam, v, s.bx, s.by + 2.6, s.bz, s.profile.label.toUpperCase(), '#f4efe2', jx, jy);
-      worldLabel(ctx, cam, v, s.bx, s.by + 1.9, s.bz,
-        `HANG ${s.hangTime.toFixed(2)}s · APEX ${s.apex.toFixed(1)} m · ${s.distance.toFixed(0)} m`,
-        '#cfcabb', jx, jy);
+      /* SPEC_21 Item 4 — FLIGHT TELEMETRY REMOVED.
+       * `HANG 2.41s · APEX 18.3 m · 42 m` was analytical readout hanging in
+       * world space over the kicker. The kick-type label above is kept: it
+       * names the kick the player chose, which is gameplay, not telemetry.
+       * The interactive power readout and control prompt live in
+       * MatchView.tsx and are deliberately untouched (ruled). */
     }
   }
 }
@@ -766,9 +819,11 @@ const BUBBLE_COLOUR: Record<string, string> = {
   NUDGE: '#ffd76a',
 };
 
-/** Above his head. SPEC_14 made the figures 1.65x, so this has to scale with
- *  them or the bubble ends up at his chest. */
-const REF_HEAD_Y = BUILDS.REF.h * FIGURE_SCALE + 0.8;
+/** Above his head. SPEC_16: the figure now draws true against a world carrying
+ *  RENDER_SCALE, so the authored build height IS the drawn height in logical
+ *  metres and the SPEC_14 FIGURE_SCALE inflation would float the bubble 1.2 m
+ *  clear of the referee. */
+const REF_HEAD_Y = BUILDS.REF.h + 0.8;
 
 /**
  * One paper card with a tail. The card is clamped inside the frame so it never

@@ -9,10 +9,15 @@ import type { Live } from '../intelligence';
 import { FIELD } from '../../render/retro';
 import { R } from './rng';
 import { wetnessOf, windOf, WEATHERS } from './weather';
-import { DIFFICULTY_TABLE } from '../data';
+import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { CHASE_ORDER, CHASE_LANES } from '../shapes';
 import { assignReceiver } from '../intelligence';
 import { clamp } from './clamp';
+
+/** RC2-3 — seconds a side may take over a restart before it is a free kick.
+ *  Generous enough that a human aiming and charging (charge alone is 1.6 s)
+ *  is never rushed; short enough that the match cannot hang. */
+export const RESTART_SHOT_CLOCK = 15;
 
 export function upKick(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
@@ -63,6 +68,45 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       return;
     }
     return;
+  }
+
+  /* RC2-3 — RESTART SHOT CLOCK.
+   *
+   * The AIM/METER stage had NO timeout on the human path: `s.t` accrued
+   * without bound, so a kickoff that was never struck hung the match forever.
+   * (Every other stage is bounded — FANFARE at 2.2/4.2 s, WALKUP at 5.0 s —
+   * so this was the one open end in the ritual.)
+   *
+   * Scoped deliberately to RESTART/DROP_OUT, per the ruling's "kickoffs": a
+   * conversion or a penalty kick at goal is a different situation with its own
+   * pace, and Law 8.19's shot clock for those is a separate matter I have not
+   * been asked to touch.
+   *
+   * The clock does NOT run while the kicker is legitimately blocked from
+   * striking — the `gapOk` gate below refuses an early release when the
+   * opposition are not back ten, and punishing a player for a delay the rules
+   * impose on him would be wrong. It also does not run before the aim stage. */
+  if ((s.stage === 'AIM' || s.stage === 'METER')
+    && (s.type === 'RESTART' || s.type === 'DROP_OUT')) {
+    let nearestGap = 99;
+    for (const p of d.live) {
+      if (p.team === s.kicker || p.sinbin > 0) continue;
+      const gap = (p.z - s.bz) * s.dir;
+      if (gap < nearestGap) nearestGap = gap;
+    }
+    const blocked = nearestGap < 9.5 || (s.formReady ?? 1) < 0.85;
+    if (!blocked) s.delayT = (s.delayT ?? 0) + dt;
+    const left = RESTART_SHOT_CLOCK - (s.delayT ?? 0);
+    if (human && left <= 3 && left > 0) d.showHint(`TAKE THE KICK — ${Math.ceil(left)}`, 0.4);
+    if ((s.delayT ?? 0) > RESTART_SHOT_CLOCK) {
+      /* Time is up: the opposition get a free kick on halfway, as Law 12.8
+       * provides for a restart not taken. `beginPenalty(..., free = true)`
+       * is the existing free-kick path — no new state machine. */
+      const opp: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
+      d.kk = undefined;
+      d.beginPenalty(opp, REFEREE_CALLS.DELAY_KICKOFF, s.kickerNum, true);
+      return;
+    }
   }
 
   if (s.stage === 'AIM' || s.stage === 'METER') {

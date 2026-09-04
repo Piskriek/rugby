@@ -90,8 +90,13 @@ export class MatchAudio {
   update(dt: number, momentum: number, in22: boolean, crowdRatio: number) {
     if (!this.bedGain || !this.bedFilter) return;
     const gate = this.level === 0 ? 0 : this.level === 1 ? 0.45 : 1;
+    /* D-5 — the quiet bed floor was 0.05 => -32.1 dBFS at master with no
+     * travelling support, effectively inaudible on normal playback. Raised to
+     * 0.11 (-25.2 dBFS) so an idle stadium is present without crowding the
+     * one-shots. The momentum/22 terms are unchanged, so the SHAPE of the
+     * swell is preserved; only the floor moves. */
     const target = this.level === 0 ? 0
-      : (0.05 + Math.abs(momentum) * 0.055 + (in22 ? 0.08 : 0) + this.spike) * gate;
+      : (0.11 + Math.abs(momentum) * 0.055 + (in22 ? 0.08 : 0) + this.spike) * gate;
     this.spike = Math.max(0, this.spike - dt * 0.2);
     this.swell += (target - this.swell) * Math.min(1, dt * 1.7);
     this.bedGain.gain.value = this.swell * (0.55 + crowdRatio * 0.55);
@@ -106,7 +111,11 @@ export class MatchAudio {
     if (type === 'TACKLE') this.impact(0.35 + force * 0.65);
     else if (type === 'KICK') this.impact(0.4);
     else if (type === 'LINE_BREAK') this.spike = Math.min(0.24, this.spike + 0.2);
-    else if (type === 'TRY') { this.spike = 0.34; this.whistle('DOUBLE'); }
+    /* D-5 — the try spike drove the bed to -4.7 dBFS which, summed with the
+     * boosted whistle and a simultaneous tackle, left only 0.2 dB of headroom
+     * against a chain that has NO limiter. Trimmed to 0.24: the try is still
+     * by far the loudest the crowd gets, with room for the whistle over it. */
+    else if (type === 'TRY') { this.spike = 0.24; this.whistle('DOUBLE'); }
     else if (type === 'CARD') this.whistle('LONG');
   }
 
@@ -124,7 +133,11 @@ export class MatchAudio {
     lp.frequency.value = 260 + force * 860;
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.22 * force + 0.03, t + 0.005);
+    /* D-5 — SUBTRACTIVE MIX. Impacts were the loudest one-shot in the game at
+     * -13.0 dBFS, 5.8 dB ABOVE the referee's whistle. Attenuated to free the
+     * headroom the whistle boost needs; the whistle is now the peak, as it
+     * should be on a rugby pitch. */
+    g.gain.exponentialRampToValueAtTime(0.125 * force + 0.02, t + 0.005);
     g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09 + force * 0.07);
     src.connect(lp).connect(g).connect(this.master);
     src.start(t);
@@ -141,8 +154,13 @@ export class MatchAudio {
       const t = this.ctx!.currentTime + at;
       const g = this.ctx!.createGain();
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.085, t + 0.012);
-      g.gain.setValueAtTime(0.085, t + dur - 0.03);
+      /* D-5 — the whistle is the highest peak in the mix (ruled). Note the
+       * envelope is NOT the true peak: two detuned squares sum through this
+       * one gain at og 1.0 and 0.5, so the real peak is up to 1.5x. 0.20
+       * envelope => 0.30 summed => 0.27 at master = -11.4 dBFS, comfortably
+       * above the attenuated tackle at -19.0 dBFS. */
+      g.gain.exponentialRampToValueAtTime(0.20, t + 0.012);
+      g.gain.setValueAtTime(0.20, t + dur - 0.03);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       g.connect(this.master!);
       for (const f of [2093, 2333]) {
@@ -160,5 +178,41 @@ export class MatchAudio {
     if (kind === 'LONG') blast(0, 0.55);
     else if (kind === 'SHORT') blast(0, 0.22);
     else { blast(0, 0.16); blast(0.24, 0.16); }
+  }
+
+  /**
+   * RC2-4 — THE REFEREE'S VOICE, not his whistle.
+   *
+   * A whistle means STOP. Using one for a live-play management call ("no more
+   * hands", "use it") teaches the player to freeze when the referee actually
+   * wants him to keep going, which is what broke immersion in QA. On a real
+   * pitch these are shouted, so this is a shout: a short filtered noise burst
+   * with a falling formant — a vocal bark rather than a tone, deliberately
+   * unlike the 2093/2333 Hz whistle so the two can never be confused.
+   *
+   * Level sits BELOW the whistle by design (D-5 ruled the whistle is the peak
+   * of the mix): ~0.085 against the whistle's 0.20 envelope, so it reads as
+   * the referee raising his voice over the noise, not as a stoppage.
+   */
+  shout() {
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(0.3);
+    if (!src.buffer) return;
+    /* Band-pass around the human vocal range, sweeping down — the contour of a
+     * barked syllable. A whistle is a steady high tone; this is neither. */
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 4.5;
+    bp.frequency.setValueAtTime(900, t);
+    bp.frequency.exponentialRampToValueAtTime(420, t + 0.22);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.085, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+    src.connect(bp).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 0.32);
   }
 }

@@ -175,6 +175,129 @@ export interface CardOpts {
   jit?: number;
   /** cut-edge highlight strength 0..1 */
   cut?: number;
+  /**
+   * SPEC_18.2 — corner radius in PIXELS. When > 0 the card is rounded by
+   * stroking the path in its own fill colour with round joins/caps, instead of
+   * carrying a hard contrast outline. No beziers: Canvas does the arcs.
+   */
+  round?: number;
+}
+
+/* ================================================================== */
+/* SPEC_18.1 — DEPTH SHADING (the outline replacement)                 */
+/* ------------------------------------------------------------------ */
+/* Removing the hard stroke removes the ONLY thing separating two      */
+/* limbs that share a fill. Measured contrast for limb-vs-limb and     */
+/* kit-vs-socks is exactly 1.00 — the same colour on both sides of the */
+/* edge. Depth shading replaces that edge with a VALUE STEP driven by  */
+/* the same per-limb depth the SPEC_17 Z-sort already computes, so the */
+/* shading can never disagree with the draw order.                     */
+/*                                                                     */
+/* Measured back-vs-front contrast with the ruled 0.70/1.14 pair:      */
+/*   palette A 2.11   palette B 1.78   palette REF 2.62                */
+/* all clear of the ~1.25 where a value step stops reading small.      */
+/* ================================================================== */
+
+/** Torso reference value. Limbs sit slightly under it so they read as limbs. */
+export const LIMB_MID = 0.92;
+/** Half-span of the limb value range: 0.92 -/+ 0.22 = 0.70 .. 1.14 (ruled). */
+export const LIMB_SPAN = 0.22;
+
+/**
+ * Shade a limb fill by its signed depth.
+ * @param z -1 = fully behind the torso, +1 = fully in front of it.
+ */
+/**
+ * SPEC_23 — WCAG relative luminance of a `#rrggbb` fill, 0 (black) to 1 (white).
+ *
+ * Needed because `shade()` is multiplicative: the same factor that darkens a
+ * white kit legibly does almost nothing to a near-black one (measured, 0.88 on
+ * the referee's #23232c shorts gives 1.068 contrast — you cannot darken black).
+ * Callers use this to pick the DIRECTION of a value step.
+ */
+export function relLuminance(fill: string): number {
+  const n = parseInt(fill.slice(1), 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+
+export function depthShade(fill: string, z: number): string {
+  const c = z < -1 ? -1 : z > 1 ? 1 : z;
+  return shade(fill, LIMB_MID + LIMB_SPAN * c);
+}
+
+/**
+ * SPEC_18.1 — PAIRED limb shading, with a guaranteed value floor.
+ *
+ * `depthShade` alone is not sufficient for a matched pair of limbs, and this is
+ * measured rather than assumed. The depth term `sin(angle)` passes through zero
+ * exactly when the two limbs cross — which is precisely when they overlap on
+ * screen and most need separating. Measured with the plain depth term, the two
+ * legs rendered at contrast 1.00 (identical colour) on 50% of walk frames and
+ * the arms at 1.00 on 39% of run frames: the hard outline was deleted and
+ * nothing replaced it at the moment of overlap.
+ *
+ * The fix is to shade the pair RELATIVE to each other rather than absolutely.
+ * Whichever limb is nearer takes the light value and the other the dark one,
+ * with a minimum separation enforced regardless of how close the depths are, so
+ * two crossing limbs can never resolve to the same fill.
+ *
+ * Returns `[shadeForA, shadeForB]`.
+ */
+/* 0.85 chosen by measurement, not taste: it is the smallest floor that clears
+ * a 1.25 contrast ratio on EVERY palette (weakest is B at 1.27). 0.55 left
+ * palette B at 1.16, and 1.00 saturates the range for no extra legibility. */
+export const LIMB_MIN_SPLIT = 0.85;
+
+/* RC2-2 — CROSS-FADE THE SPLIT THROUGH THE ZERO CROSSING.
+ *
+ * `sign` below is a step function of `d`, and the floor holds `sep` at 0.85
+ * right up to the crossing, so the two limbs never converge — they JUMP past
+ * each other. Measured on a run cycle the pair swapped #a42121 <-> #c92929 in a
+ * single frame, at the same instant the z-sort swapped layers. Two
+ * discontinuities landing on one frame is the "pop" QA reported.
+ *
+ * The floor is still required: SPEC_18.1 exists because a vanishing split let
+ * crossing limbs render in identical colour (contrast 1.00 on 50% of walk
+ * frames). So the floor is kept everywhere it matters and faded out ONLY inside
+ * a narrow band around the crossing, where the limbs genuinely are at the same
+ * depth and equal shading is the honest answer. Within the band the two shades
+ * converge continuously to the same value instead of leaping across it, and
+ * `sign` is replaced by a smooth odd ramp so there is no step at d = 0.
+ *
+ * The band is deliberately tight (LIMB_FADE_BAND) so anti-fusion is unaffected
+ * outside |d| > 0.06: at that depth the limbs are visually separated and the
+ * full floor still applies. */
+export const LIMB_FADE_BAND = 0.06;
+export function pairShade(fill: string, zA: number, zB: number): [string, string] {
+  const d = zA - zB;
+  const mag = Math.abs(d);
+  /* Blend from the enforced floor up to the true depth difference, so limbs
+   * far apart in depth still read proportionally. */
+  const sep = Math.max(LIMB_MIN_SPLIT, Math.min(1, mag));
+  /* Smooth odd ramp: -1 .. +1 across the band, exactly +/-1 outside it, and
+   * continuously 0 at d = 0. Replaces the `d >= 0 ? 1 : -1` step. */
+  const t = Math.min(1, mag / LIMB_FADE_BAND);
+  const ramp = t * t * (3 - 2 * t) * (d >= 0 ? 1 : -1);
+  const half = sep * 0.5;
+  const mid = (zA + zB) * 0.5 * 0.35;         // slight absolute bias retained
+  return [
+    depthShade(fill, mid + half * ramp),
+    depthShade(fill, mid - half * ramp),
+  ];
+}
+
+/**
+ * SPEC_18.2 — corner radius in screen pixels for a card drawn at scale `sc`.
+ * Pixels, not metres: otherwise corners round more when the camera closes in.
+ * Modelled on the existing line-width ramp at roughly two thirds of it.
+ */
+export function cornerRadius(sc: number): number {
+  const r = sc * 0.014;
+  return r < 0.8 ? 0.8 : r > 2.4 ? 2.4 : r;
 }
 
 /** A flat paper card: backing thickness, flat cel fill, cut rim, hard outline. */
@@ -207,14 +330,91 @@ export function paperCard(ctx: Ctx, pts: Pt[], fill: string, o: CardOpts = {}) {
     ctx.stroke();
     ctx.restore();
   }
-  ctx.strokeStyle = o.out ?? OUT;
-  ctx.lineWidth = lw;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(P[0][0], P[0][1]);
-  for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
-  ctx.closePath();
-  ctx.stroke();
+  /* SPEC_18.2 — ROUNDED CORNERS, NO BEZIERS.
+   *
+   * Stroking the path in its OWN fill colour with round joins/caps adds a
+   * half-width band whose outer corners are arcs of that radius; fill + stroke
+   * is one convex union, i.e. a polygon with rounded corners, for the cost of
+   * a single extra stroke() and no curve maths.
+   *
+   * The caller is responsible for having inset the geometry by `round` (see
+   * limbCard), because the stroke expands the shape outward — uncorrected,
+   * every card would silently gain 2r of width and the whole figure would
+   * fatten, which is the class of error that produced the SPEC_16 ratio bug. */
+  let round = o.round ?? 0;
+  if (round > 0.05) {
+    /* A card thinner than 2r cannot absorb the stroke: the inset would collapse
+     * past its own centre and the stroke would then widen it. Clamp the radius
+     * to a third of the card's smallest dimension. Measured: without this a
+     * narrow trim band still gained 0.41 px. */
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    for (const q of P) {
+      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0];
+      if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+    }
+    const minDim = Math.min(bx1 - bx0, by1 - by0);
+    round = Math.min(round, minDim / 3);
+  }
+  if (round > 0.05) {
+    /* Inset toward the centroid by `round` so the stroke's outward expansion is
+     * cancelled and the card keeps its authored size. Doing it HERE rather than
+     * per-call-site means no card can be rounded without also being inset —
+     * measured: without this the figure's ink grew 28.76 -> 31.68 px (+10%),
+     * the same silent-fattening class of bug as the SPEC_16 ratio error. */
+    /* Per-EDGE inset (not radial): offset every edge inward along its own
+     * normal by `round`, then intersect consecutive edges. A centroid-radial
+     * inset under-compensates thin cards badly — measured +1.18 px on a narrow
+     * trim band, because moving a point toward the centroid barely shortens the
+     * long axis. Edge offsetting is exact for convex cards, which every card
+     * here is (they are all quads or the shorts pentagon). */
+    const n = P.length;
+    const I: Pt[] = [];
+    for (let i = 0; i < n; i++) {
+      const prev = P[(i - 1 + n) % n], cur = P[i], next = P[(i + 1) % n];
+      const off = (A: Pt, B: Pt): [number, number, number, number] => {
+        const ex = B[0] - A[0], ey = B[1] - A[1];
+        const el = Math.hypot(ex, ey) || 1;
+        // inward normal for a counter-clockwise-or-clockwise quad: pick the one
+        // pointing at the centroid
+        let nx = -ey / el, ny = ex / el;
+        const mx = (A[0] + B[0]) * 0.5, my = (A[1] + B[1]) * 0.5;
+        let gx = 0, gy = 0;
+        for (const q of P) { gx += q[0]; gy += q[1]; }
+        gx /= n; gy /= n;
+        if ((gx - mx) * nx + (gy - my) * ny < 0) { nx = -nx; ny = -ny; }
+        return [A[0] + nx * round, A[1] + ny * round, ex, ey];
+      };
+      const [ax, ay, adx, ady] = off(prev, cur);
+      const [bx, by, bdx, bdy] = off(cur, next);
+      const den = adx * bdy - ady * bdx;
+      if (Math.abs(den) < 1e-6) { I.push([ax + adx, ay + ady]); continue; }
+      const t = ((bx - ax) * bdy - (by - ay) * bdx) / den;
+      I.push([ax + adx * t, ay + ady * t]);
+    }
+    for (let i = 0; i < n; i++) { P[i] = I[i]; }
+    ctx.strokeStyle = fill;
+    ctx.lineWidth = round * 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+    ctx.stroke();
+  }
+  /* A hard outline is now opt-IN. Depth shading (see depthShade) carries the
+   * silhouette separation that this stroke used to provide. */
+  if (o.out) {
+    ctx.strokeStyle = o.out;
+    ctx.lineWidth = lw;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+  }
 }
 
 /** Small trapezoid fold tab — the papercraft joint hint. */
@@ -340,6 +540,434 @@ export const BUILDS: Record<string, Build> = {
  */
 export const FIGURE_SCALE = 1.65;
 
+/* ================================================================== */
+/* SPEC_17 — SHARED RIG GEOMETRY                                       */
+/* ------------------------------------------------------------------ */
+/* One source of truth for where the legs are rooted. Before this, the */
+/* coronal path used `s * hipHalf * 0.8` and the side path used the    */
+/* literals +0.012 / -0.045, disagreeing by 2.6x on the same           */
+/* anatomical question — the measured cause of the "watermelon crotch" */
+/* (SPEC_17.4 findings 1, 2 and 4). Both drawers now call this.        */
+/* ================================================================== */
+
+export interface HipRoots {
+  /** coronal: leg root is at (side * coronalX, y) */
+  coronalX: number;
+  /** side profile: near-leg root x */
+  sideNear: number;
+  /** side profile: far-leg root x */
+  sideFar: number;
+  /** root height, in the same hip-relative space both drawers use */
+  y: number;
+  /** half-width of the side-profile shorts card, so the hem can follow */
+  sideHalf: number;
+}
+
+/**
+ * The hip joint, for every view.
+ *
+ * `y` sits at the ANATOMICAL hip. The greater trochanter is at leg-length
+ * height, so a root of `hip - 0.02` put the pivot 0.040 m low at stand and
+ * 0.160 m low at sprint (a third of a thigh), making the legs breathe by up to
+ * 0.096 m inside a single stride. Rooting at the authored `hip` channel plus a
+ * small rise puts the joint where the shorts hem can actually hinge from it.
+ */
+export function hipRoots(build: Build, hip: number): HipRoots {
+  const hipHalf = build.hipW * 0.5;
+  /* Side card is drawn at hip DEPTH, not hip width — it is a thin profile
+   * strip. Root the two legs at the same fraction of their own card that the
+   * coronal path uses (0.8 of the half-width), so neither view leaves
+   * unrooted overhang that nothing can move. */
+  const sideHalf = 0.099;
+  const sideSpread = sideHalf * 0.62;
+  return {
+    coronalX: hipHalf * 0.8,
+    sideNear: sideSpread,
+    sideFar: -sideSpread,
+    y: hip + 0.02,
+    sideHalf,
+  };
+}
+
+/**
+ * SPEC_17 — swing-foot ground clearance.
+ *
+ * The old rig computed foot height FORWARD from the hip
+ * (`footY = kneeY - cos(l-k)*shin + ...`), so a sagittal stride rendered as
+ * pure vertical shortening and the swing foot rose 0.71 m in run and 0.92 m in
+ * sprint. Both legs pulling up into the torso is the "squatting" report.
+ *
+ * Seen front-on, a stride is motion into DEPTH. The foot should stay near the
+ * turf and pass under the body. So foot height is authored directly as a
+ * shallow clearance arc driven by knee flexion — the one channel that actually
+ * distinguishes swing from stance — and the stance foot lands at exactly 0.
+ *
+ * Calibrated against the gait table: walk 0.06, jog 0.08, run 0.13,
+ * sprint 0.17 m of peak clearance.
+ */
+export const SWING_LIFT_K = 0.115;
+export const SWING_KNEE_FLOOR = 0.15;
+function rawClearance(knee: number): number {
+  const lift = SWING_LIFT_K * (knee - SWING_KNEE_FLOOR);
+  return lift < 0 ? 0 : lift > 0.34 ? 0.34 : lift;
+}
+
+/**
+ * Both feet at once, with the lower one PINNED TO THE TURF.
+ *
+ * Knee flexion alone does not guarantee contact: at mid-stride both knees are
+ * partly bent, which floated both feet ~0.075 m and simply relocated the old
+ * hover. Subtracting the lower foot's clearance makes the stance foot sit at
+ * exactly y = 0 on every frame of every gait, by construction, while the swing
+ * foot keeps its arc above it. This is the structural replacement for the
+ * deleted `pinPlantedFoot()`, and unlike that helper it is not optional and
+ * cannot silently fail to fire.
+ *
+ * Note this deliberately removes the true flight phase of a sprint — a real
+ * runner does leave the ground. A paper cut-out that floats reads as broken
+ * rather than as airborne, so the contact is held; airborne states are the
+ * jump/dive clips' job, and they drive `hip` directly.
+ */
+export function groundedClearance(kneeL: number, kneeR: number): [number, number] {
+  const l = rawClearance(kneeL), r = rawClearance(kneeR);
+  const base = Math.min(l, r);
+  return [l - base, r - base];
+}
+
+/** Single-leg clearance, already grounded against its partner. */
+export function swingClearance(knee: number, otherKnee: number): number {
+  return groundedClearance(knee, otherKnee)[0];
+}
+
+/**
+ * SPEC_17 — per-arm depth for Z-sorting.
+ *
+ * The elbow used `cos(aa)`, which is EVEN: a forward swing and a backward
+ * swing gave an identical elbow height, so the sagittal rotation was discarded
+ * and both arms stayed pinned in front of the chest ("carrying baskets").
+ * `sin` is the missing odd term. Positive = swinging toward the camera.
+ */
+export function armDepth(shoulderPitch: number): number {
+  return Math.sin(shoulderPitch);
+}
+
+/* ================================================================== */
+/* SPEC_18.3a — KINETIC LEAN AND SQUASH                                */
+/* ------------------------------------------------------------------ */
+/* "Squeeze and pop": the figure shears into its acceleration and      */
+/* compresses on impact.                                               */
+/*                                                                     */
+/* The filtering is not decoration. Measured on the live engine, the   */
+/* position stream carries 0.08% discontinuities (max 1.019 m in one   */
+/* frame = 61 m/s) and a raw acceleration p99 of 478 m/s^2 = 49 g.     */
+/* Feeding that to tan() would snap figures flat on ~20% of frames.    */
+/* Hence: reject jumps, EMA the velocity, differentiate, project along */
+/* travel, EMA again, then bound with tanh.                            */
+/* ================================================================== */
+
+/** Ruled constants. */
+export const LEAN_TAU = 0.35;          // s — the knee of the sign-flip curve
+export const SHEAR_MAX = 0.18;         // rad — 10.3 deg at saturation
+export const A_REF = 6.0;              // m/s^2 — tanh reference
+export const MAX_STEP = 0.30;          // m per frame — above this is a teleport
+export const FOOT_SQUASH = 0.06;
+/** Minimum seconds between footfall triggers — the clip loop seam re-reports
+ *  the u = 0.88 contact at u = 0.00, which would double-fire once per cycle. */
+export const FOOT_DEBOUNCE = 0.10;
+
+export interface LeanState {
+  vx: number; vz: number;        // EMA velocity
+  ax: number; az: number;        // derivative of the EMA velocity (SPEC_18.5)
+  omega: number;                 // EMA signed turn rate, rad/s (SPEC_18.5)
+  a: number;                     // EMA along-travel acceleration
+  started: boolean;
+  lastFootT: number;             // debounce clock
+  wasGrounded: boolean;
+  squash: number;                // current footfall squash, decaying
+}
+
+export function newLeanState(): LeanState {
+  return { vx: 0, vz: 0, ax: 0, az: 0, omega: 0, a: 0, started: false, lastFootT: -99, wasGrounded: true, squash: 0 };
+}
+
+/**
+ * Advance the lean filter. `rawVx/rawVz` are the per-frame finite-difference
+ * velocity; `stepped` is the distance the actor moved this frame, used to
+ * reject teleports.
+ *
+ * Returns the shear angle in radians, ready for the affine transform.
+ */
+export function updateLean(st: LeanState, rawVx: number, rawVz: number, stepped: number, dt: number): number {
+  if (dt <= 0) return SHEAR_MAX * Math.tanh(st.a / A_REF);
+  // 1 — reject discontinuities: reseed rather than differentiate a teleport
+  if (stepped > MAX_STEP) {
+    st.vx = rawVx; st.vz = rawVz; st.started = true;
+    st.ax = 0; st.az = 0;   // a teleport is not a turn
+
+    return SHEAR_MAX * Math.tanh(st.a / A_REF);
+  }
+  const av = 1 - Math.exp(-dt / LEAN_TAU);
+  if (!st.started) { st.vx = rawVx; st.vz = rawVz; st.ax = 0; st.az = 0; st.started = true; return 0; }
+  // 2 — EMA the velocity
+  const px = st.vx, pz = st.vz;
+  st.vx += (rawVx - st.vx) * av;
+  st.vz += (rawVz - st.vz) * av;
+  // 3 — differentiate the SMOOTHED velocity
+  const ax = (st.vx - px) / dt, az = (st.vz - pz) / dt;
+  st.ax = ax; st.az = az;   // SPEC_18.5 reads these for the curvature cross product
+  // 4 — project along travel (signed: + accelerating, - braking)
+  const spd = Math.hypot(st.vx, st.vz);
+  const along = spd > 0.5 ? (ax * st.vx + az * st.vz) / spd : 0;
+  // 5 — second EMA, slower
+  const aa = 1 - Math.exp(-dt / (LEAN_TAU * 1.6));
+  st.a += (along - st.a) * aa;
+  // 6 — saturate: cannot exceed SHEAR_MAX however wild the input
+  return SHEAR_MAX * Math.tanh(st.a / A_REF);
+}
+
+/**
+ * Footfall squash, debounced against the clip loop seam.
+ * `grounded` is true on the frame a foot is in contact; `spd` scales the thud
+ * so a walk does not shake the ground.
+ */
+export function updateFootSquash(st: LeanState, grounded: boolean, spd: number, t: number, dt: number): number {
+  if (grounded && !st.wasGrounded && t - st.lastFootT > FOOT_DEBOUNCE) {
+    st.lastFootT = t;
+    const w = Math.min(1, Math.max(0, (spd - 2.0) / 8.0));
+    st.squash = FOOT_SQUASH * w;
+  }
+  st.wasGrounded = grounded;
+  // spike then recover over ~6 frames at 60 Hz
+  st.squash = Math.max(0, st.squash - dt * (FOOT_SQUASH / 0.10));
+  return st.squash;
+}
+
+/* ================================================================== */
+/* SPEC_18.5 — CENTRIFUGAL SECONDARY ANIMATION                         */
+/* ------------------------------------------------------------------ */
+/* Limbs respond to angular momentum: the inside limb of a turn tucks  */
+/* toward the body, the outside limb flares out.                       */
+/*                                                                     */
+/* The turn rate is NOT taken from a heading angle. Measured, the raw  */
+/* travel heading d/dt atan2(vx,vz) has a p99 of 8091 deg/s — 22 revs  */
+/* per second — because atan2 of a near-zero velocity is undefined and */
+/* flips wildly; below the 2.2 m/s facing threshold p99 is 9763 deg/s. */
+/* Nor is it taken from the renderer's `pg.face`: that is driven by    */
+/* three different targets which switch mode 4077 times in 90 s, and   */
+/* each switch is a step change that is not real rotation. And `a.rf`  */
+/* is a +/-1 sign, not an angle at all.                                */
+/*                                                                     */
+/* Instead: signed curvature of the SMOOTHED velocity, via the cross   */
+/* product with its own derivative. No atan2, so no wrap discontinuity */
+/* and no low-speed singularity.                                       */
+/*                                                                     */
+/*     w = (vx*az - vz*ax) / |v|^2                                     */
+/*                                                                     */
+/* Verified against known circular motion, exact to 3 decimals:        */
+/* r=5 v=7 -> 1.400, r=10 v=8 -> 0.800, r=3 v=6 -> 2.000 rad/s.        */
+/* Peak on live play 4.92 rad/s, against 188 rad/s for the raw signal. */
+/* ================================================================== */
+
+/** tanh reference. 2.0 keeps a jog near 10% bias, a hard turn near 90%,
+ *  and saturates on only 0.88% of moving frames (measured). */
+export const W_REF = 2.0;
+/** Speed ramp, m/s. A hard gate chattered: 15 sign flips vs 8 for the ramp. */
+export const W_GATE_LO = 1.5;
+export const W_GATE_HI = 3.5;
+/** Max lateral bias, radians-equivalent. Bounded by tanh, so these are hard. */
+export const KNEE_GAIN = 0.10;
+export const ELBOW_GAIN = 0.14;
+
+/**
+ * The cross product below is NEGATIVE for a counter-clockwise turn. Naming the
+ * convention once, here, is the only defence against wiring the flare backwards
+ * — the sign is otherwise invisible at the call site.
+ */
+export function insideSign(omega: number): number {
+  return omega >= 0 ? -1 : 1;
+}
+
+/* ================================================================== */
+/* SPEC_22 — SILHOUETTE BREATHING (gait-driven elbow flare)            */
+/* ------------------------------------------------------------------ */
+/* MEASURED CAUSE: `abL`/`abR` are the constant 0.08 in EVERY keyframe of
+ * walk/jog/run/sprint — those clips inherit STAND and never modulate
+ * abduction. So the rig had no oscillating lateral elbow term at all outside
+ * SPEC_18.5's turn flare, which is zero in a straight line by construction.
+ * The dead silhouette was structural, not a tuning shortfall.
+ *
+ * Measured on build CENTRE, inner edge of the upper-arm card vs the torso edge
+ * at the elbow's own height (positive would be a real hole of daylight):
+ *
+ *     walk  -0.0416 .. -0.0238 m      0/240 frames with any daylight
+ *     jog   -0.0474 .. -0.0199 m      0/240
+ *     run   -0.0596 .. -0.0316 m      0/240
+ *     sprint -0.0707 .. -0.0307 m     0/240
+ *
+ * The arm defines the outer silhouette on 240/240 frames yet the outline
+ * varied only 0.60 px at sc 20 over a whole stride — below the renderer's own
+ * quantisation, i.e. frozen to the pixel grid.
+ *
+ * THE TERM GOES IN FORWARD KINEMATICS, NOT IK. Unlike the leg (solveKnee), the
+ * coronal arm is straight FK: elX = sx0 + s*(ab + bias)*upD*0.85. There is no
+ * arm IK to modify, and `ab` is the channel SPEC_18.5's turn flare already
+ * uses, so the two compose additively on the same quantity.
+ *
+ * DRIVEN BY THE ARM'S OWN ANGLE. `|sin(a_s)|` rather than a u-clock: a
+ * free-running oscillator can drift out of sync with the clip, and this
+ * codebase already ruled against phase tables for exactly that reason
+ * (SPEC_18.3a reads contact from the rig's clearance helper, not a table).
+ * `|sin|` peaks at maximum swing in EITHER direction, which is anatomically
+ * right — the shoulder abducts at the extremes and tucks at the neutral pass.
+ * Being even, it breathes TWICE per stride; the frequency falls out of the
+ * anatomy instead of being imposed by a constant. */
+
+/** Constant push-off from the torso — buys DAYLIGHT. */
+export const AB_BASE = 0.26;
+/** Gait-phase oscillation depth — buys BREATH. */
+export const AB_SWING = 0.30;
+/** Hard ceiling on total abduction. The `shuffle` clip already authors
+ *  abL/abR ~ 0.72-0.80, so this keeps the arm inside poses the art uses even
+ *  if a future ELBOW_GAIN change stacks on top. */
+export const AB_MAX = 0.72;
+
+/**
+ * Gait-driven lateral elbow flare, in the same units as the pose's `ab`.
+ *
+ * @param aa      that arm's sagittal swing angle (pose.aL / pose.aR)
+ * @param spd     actor speed, m/s — gated so a stationary player does not
+ *                stand with his elbows out (ruled, SPEC_18.5)
+ * @param carryW  1 = free arm, 0 = fully locked to the ball. Reuses the
+ *                SPEC_18.5 `carryLock` weight so a carrying arm cannot flare
+ *                away from the ball (ruled).
+ */
+export function gaitFlare(aa: number, spd: number, carryW: number): number {
+  const t = Math.min(1, Math.max(0, (spd - W_GATE_LO) / (W_GATE_HI - W_GATE_LO)));
+  const gate = t * t * (3 - 2 * t);          // same smoothstep as the turn bias
+  const swing = Math.abs(Math.sin(aa));
+  return (AB_BASE + AB_SWING * swing) * gate * Math.min(1, Math.max(0, carryW));
+}
+
+/**
+ * Advance the turn-rate filter and return the saturated bias in (-1, 1).
+ * Shares `LeanState`'s EMA velocity so the lean and the limb flare read the
+ * same motion and can never disagree about which way the player is turning.
+ */
+export function updateTurnBias(st: LeanState, dt: number): number {
+  if (dt <= 0) return Math.tanh(st.omega / W_REF);
+  const spd = Math.hypot(st.vx, st.vz);
+  // smoothstep speed gate: no centrifugal force without linear velocity
+  const t = Math.min(1, Math.max(0, (spd - W_GATE_LO) / (W_GATE_HI - W_GATE_LO)));
+  const gate = t * t * (3 - 2 * t);
+  const raw = spd > 0.5 ? ((st.vx * st.az - st.vz * st.ax) / (spd * spd)) * gate : 0;
+  const a = 1 - Math.exp(-dt / LEAN_TAU);
+  st.omega += (raw - st.omega) * a;
+  return Math.tanh(st.omega / W_REF);
+}
+
+/* ================================================================== */
+/* SPEC_18.3b — 3/4 PERSPECTIVE                                        */
+/* ------------------------------------------------------------------ */
+/* Deliberately NOT a sixth PaperView. Adding an enum state would make
+ * the hysteresis machine a 6-zone problem, needing its own dead zones and its
+ * own mirror-flip debounce, and SPEC_06 already had to be hardened once
+ * because that machine thrashed. Instead the 3/4 read is a CONTINUOUS
+ * affine applied over the existing front/back card, driven by the same
+ * angle the view machine computes. Zero new states, and it degenerates
+ * exactly to the current picture at 0 deg.
+ *
+ * SPEC_21 Item 1 — THE SHEAR IS GONE. It was the "Leaning Tower".
+ *
+ * The original transform carried an x-shear proportional to y:
+ *
+ *   | narrow   -tan(shear) |      head at (0,-h) maps to (+tan(shear)*h, -h)
+ *   |   0            1     |
+ *
+ * so the head slid sideways while the feet stayed put. Measured, that was a
+ * 0.479 m head displacement and a 14.90 deg slant at the 55 deg edge — the
+ * figure leaned instead of turning. A shear IS the right image of a 3D yaw,
+ * but only under an OBLIQUE (cavalier) projection. `project()` in retro.ts is
+ * a PERSPECTIVE projection with its own camera tilt; depth is already spent in
+ * `p.f`/`p.sc`. Shearing on top of it double-counts depth, and the slant was
+ * the visible residue.
+ *
+ * Under this projection, rotating a flat card about its own VERTICAL axis by
+ * theta does exactly one thing to the screen image: it foreshortens X by
+ * cos(theta). Vertical extent is invariant because the rotation axis IS the
+ * vertical. So the transform is now a pure scale:
+ *
+ *   | scaleX  0 |     (0,-h) -> (0,-h) exactly. Tilt is 0 by construction,
+ *   |   0     1 |     not by tuning.
+ *
+ * On the floor: literal cos(theta) reaches 0 at 90 deg. The view machine swaps
+ * to the profile card at EDGE_IN = 55 deg where cos = 0.5736, so the front card
+ * would narrow to 57% of width and POP against the profile card's natural
+ * width at the handover. TQ_NARROW = 0.86 is the already-tuned answer to that
+ * handover and is retained (ruled), tracking cos closely out to ~20 deg where
+ * the eye actually reads foreshortening, and departing only near the swap. */
+
+/** Deepest shoulder-width compression at full 3/4 (1 = none). */
+export const TQ_NARROW = 0.86;
+
+/* SPEC_21 Item 1 — `TQ_SHEAR_MAX` DELETED, not zeroed, so it cannot be
+ * re-enabled by a future reader who mistakes it for a tuning knob. The kinetic
+ * lean in coronal.ts is a DIFFERENT shear and is correct: a player leaning into
+ * acceleration genuinely does slant. Only the 3/4 shear was wrong. */
+
+export interface ThreeQuarter { narrow: number; }
+
+/**
+ * Continuous 3/4 projection for a front/back card.
+ * @param ang  degrees between actor facing and the actor->camera vector, the
+ *             same quantity `updatePaperView` thresholds on.
+ * Ramps in across the end-on zone and holds at the edge boundary, so it is
+ * fully faded in by the time the view machine would swap to the profile card
+ * and there is no pop at the handover.
+ */
+export function threeQuarter(ang: number): ThreeQuarter {
+  const a = ang > 90 ? 180 - ang : ang;         // symmetric front/back
+  const t = Math.min(1, Math.max(0, a / EDGE_IN));
+  const e = t * t * (3 - 2 * t);                 // smoothstep — no kink at 0
+  return { narrow: 1 - (1 - TQ_NARROW) * e };
+}
+
+/** Signed facing angle helper: degrees, plus the side the camera sits on. */
+export function facingAngle(fx: number, fz: number, ax: number, az: number, camX: number, camZ: number): { ang: number; sign: number } {
+  let tx = camX - ax, tz = camZ - az;
+  const tl = Math.hypot(tx, tz);
+  if (tl < 1e-4) { tx = 0; tz = 1; } else { tx /= tl; tz /= tl; }
+  const d = Math.min(1, Math.max(-1, fx * tx + fz * tz));
+  return { ang: Math.acos(d) * 180 / Math.PI, sign: fx * tz - fz * tx < 0 ? -1 : 1 };
+}
+
+/** Combine two squash sources without double-compressing (ruled). */
+export function combineSquash(a: number, b: number): number {
+  return 1 - (1 - a) * (1 - b);
+}
+
+/**
+ * Two-bone IK in the drawing plane. The foot is authored (clearance arc); the
+ * knee is solved rather than accumulated forward, which is what keeps the
+ * stance foot pinned at ground level instead of floating 1-2 cm.
+ * `bend` is the side the knee breaks toward.
+ */
+export function solveKnee(
+  hx: number, hy: number, fx: number, fy: number,
+  thigh: number, shin: number, bend: number,
+): [number, number] {
+  const dx = fx - hx, dy = fy - hy;
+  const reach = thigh + shin;
+  let d = Math.hypot(dx, dy);
+  if (d < 1e-4) d = 1e-4;
+  const dc = Math.min(d, reach * 0.999);
+  const ux = dx / d, uy = dy / d;
+  const a = (thigh * thigh - shin * shin + dc * dc) / (2 * dc);
+  const hgt = Math.sqrt(Math.max(0, thigh * thigh - a * a));
+  // perpendicular, pointing to the side the knee breaks toward
+  const px = -uy * bend, py = ux * bend;
+  return [hx + ux * a + px * hgt, hy + uy * a + py * hgt];
+}
+
 export const POS_OF_NUM: Record<number, keyof typeof BUILDS> = {
   1: 'PROP', 2: 'HOOK', 3: 'PROP', 4: 'LOCK', 5: 'LOCK', 6: 'BACKROW', 7: 'BACKROW', 8: 'BACKROW',
   9: 'HALF', 10: 'FLY', 11: 'WING', 12: 'CENTRE', 13: 'CENTRE', 14: 'WING', 15: 'FULL',
@@ -384,7 +1012,7 @@ export function makeRef(): Character {
 /* These are the four dataset demands ported onto the papercraft        */
 /* pipeline. Core logic lives here (the permitted file); the frozen     */
 /* drawer in coronal.ts only consumes the optional PaperDrawArgs fields  */
-/* (squash, legScale) and the Pose returned by pinPlantedFoot /         */
+/* (squash, legScale) and the Pose returned by upperLowerRun.           */
 /* upperLowerRun. See IMPLEMENT_XL_ANIMATION.md.                        */
 /* ================================================================== */
 
@@ -435,22 +1063,18 @@ export function edgeLegForeshorten(perp: number, camTiltDeg: number): number {
   return clampN(edge * tiltF, 0.6, 1);
 }
 
-/* ---- 2. NO-FOOT-SLIDE (SM-02 / W-07 / B-04) ----
- * Pose-level correction (zero drawer change): pin the planted foot to the
- * ground by nudging the hip so the lower (stance) foot meets y = 0. The
- * cadence lock (T-29 / S-06) already keeps feet tracking turf; this just
- * guarantees the contact foot does not float as the hip bobs. */
-export function pinPlantedFoot(pose: Pose, build: Build, speed = 1): Pose {
-  if (speed < 0.7) return pose;
-  const thigh = build.leg * 0.52, shin = build.leg * 0.48;
-  const hy = pose.hip - 0.02;
-  const fyL = hy - Math.cos(pose.lL) * thigh - Math.cos(pose.lL - pose.kL) * shin;
-  const fyR = hy - Math.cos(pose.lR) * thigh - Math.cos(pose.lR - pose.kR) * shin;
-  const stance = Math.min(fyL, fyR);
-  if (stance >= -0.005) return pose;          // already grounded
-  const corr = Math.min(0.06, -stance);        // raise hip so the foot meets the turf
-  return { ...pose, hip: pose.hip + corr };
-}
+/* ---- 2. NO-FOOT-SLIDE — REMOVED (SPEC_17.1) ----
+ * `pinPlantedFoot()` lived here. It raised the hip when a foot sank below the
+ * turf, but its guard `if (stance >= -0.005) return pose` only ever fired on a
+ * SINKING foot, and measurement across one full cycle of all five gaits found
+ * the lowest foot at +0.003 m. It never fired; before/after poses were
+ * byte-identical in every clip. It read as a working correction while doing
+ * nothing, which is worse than no code at all.
+ *
+ * Grounding is now STRUCTURAL, in the rig rather than in a post-hoc pose
+ * patch: the coronal leg authors its foot on a shallow clearance arc and the
+ * stance foot sits at exactly y = 0 by construction. See `swingClearance()`.
+ */
 
 /* ---- 3. RUNNING PASS upper/lower separation (R-03 / SM-13 / PR-04) ----
  * Keep the LOWER body on the run cycle (legs drive) while the UPPER body

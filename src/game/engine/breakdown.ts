@@ -44,7 +44,21 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       return;
     }
     s.stealWarned = true;
-    d.showHint('OUTNUMBERED AT THE BREAKDOWN — NO STEAL. GO AGAIN AND IT IS A PENALTY', 2.2);
+    /* RC2-4 — the ruck warning.
+     *
+     * Diagnosis correction: this warning never blew a whistle. It was a silent
+     * `showHint` and always has been — the only non-stoppage whistle in the
+     * game was the maul USE IT cue in setpieces.ts, which is now a shout. What
+     * this call actually lacked was any audio at all, so a defender who went in
+     * again got penalised with no audible warning that he had been told once.
+     *
+     * It now gets the referee's voice (never the whistle — play continues) and
+     * the ruled wording. The full explanation stays in the hint line: "No more
+     * hands!" is what the referee shouts, but the player still needs to be told
+     * that a second attempt concedes a penalty. */
+    d.audio.shout();
+    d.refSay('NO MORE HANDS!', 'NARRATIVE', 2.2);
+    d.showHint('NO MORE HANDS! — OUTNUMBERED AT THE BREAKDOWN. GO AGAIN AND IT IS A PENALTY', 2.2);
   }
   const limit = [1.5, 3, 5][d.options.ruckLaw ?? 1];
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
@@ -401,7 +415,13 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
    * to go to ground, not a teleport. The ruck reference (cx, cz) below is
    * taken from this bounded position, so the whole breakdown settles where
    * the carrier actually lands. */
-  const FALL_FORWARD_MAX = 0.9;   // per-frame-legal landing; keeps maxDisp < 1.15 m
+  /* D-2 — retuned from 0.9 to 0.45 for the tightened 0.80 m NO TELEPORTS gate.
+   * 0.9 was chosen against the old 1.15 m line and became the single largest
+   * remaining per-frame write once the set-piece settles were bounded: the
+   * carrier's own velocity accounts for only ~0.11 m of it, so the rest was a
+   * position snap. 0.45 m in one frame is 27 m/s — still a decisive forward
+   * fall on contact, but inside the gate with margin. */
+  const FALL_FORWARD_MAX = 0.45;
   const fall = clamp(car.vz * dir * 0.13, 0, FALL_FORWARD_MAX);
   car.z += dir * fall;
   const cx = car.x, cz = car.z;

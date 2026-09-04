@@ -58,6 +58,7 @@ import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, m
 import {
   liveOffsideLines, penetrationOf, offsideVerdict, STRICTNESS, OffsideLedger,
   legalMarkZ, legalZFor, clampPitchZ, CLEAN_MARGIN_METRES,
+  insideCorridor, clampOntoLegalSide,
   type OffsideLine, type StrictnessProfile,
 } from './engine/offside';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
@@ -135,6 +136,10 @@ export type KickType = 'PUNT' | 'GRUBBER' | 'DROP_GOAL' | 'GOAL' | 'RESTART' | '
 
 export interface KickState {
   t: number;
+  /** RC2-3 — restart shot clock. Accrues only while the kicker is free to
+   *  strike (opposition back ten, formation set), so a lawful wait is never
+   *  punished. Undefined outside RESTART/DROP_OUT. */
+  delayT?: number;
   stage: 'SETUP' | 'FANFARE' | 'WALKUP' | 'AIM' | 'METER' | 'FLIGHT' | 'RESULT';
   type: KickType;
   bx: number; by: number; bz: number;
@@ -1045,6 +1050,27 @@ export class Director {
    *
    * One function so the gate and the HUD cannot drift apart again.
    */
+
+  /* ---------------- D-2: BOUNDED SET-PIECE SETTLE ----------------
+   * The set pieces all used the same shape: walk while the gap is over a
+   * threshold, otherwise `place()` exactly on the slot. That final `place`
+   * closes the WHOLE remaining gap in one frame, so the last step was up to
+   * the threshold itself — measured at 0.87-0.91 m per frame in the lineout,
+   * an implied 51.9 m/s against a 9 m/s sprint. It never tripped NO TELEPORTS
+   * only because that gate's threshold was 1.4 m.
+   *
+   * `settleToward` closes the last gap at a bounded rate instead. It returns
+   * true once the man is genuinely on his slot, so callers can pin velocity
+   * and switch clips exactly as before. */
+  private settleToward(p: Live, wx: number, wz: number, dt: number, tag: string): boolean {
+    const gap = Math.hypot(wx - p.x, wz - p.z);
+    if (gap < 0.02) { this.place(p, wx, wz, tag); return true; }
+    /* A walking-on forward closes at about 2.6 m/s; cap the step at that. */
+    const step = Math.min(gap, 2.6 * dt);
+    this.place(p, p.x + (wx - p.x) / gap * step, p.z + (wz - p.z) / gap * step, tag);
+    return gap <= 0.12;
+  }
+
   ballPoint(): { x: number; y: number; z: number } {
     if ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && this.scrim && this.scrim.ball.state !== 'HELD') {
       return { x: this.scrumAnchor.x + this.scrim.ball.x, y: this.scrim.ball.y + 0.06, z: this.scrumAnchor.z + this.scrim.ball.z };
@@ -2078,8 +2104,9 @@ export class Director {
           p.job = 'GET TO YOUR SCRUM SLOT';
           steer(p, dt, !set);
         } else {
-          this.place(p, wx, wz, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* D-2 — bounded settle; the 1.15 m threshold here made this the
+           * biggest potential snap of the three set pieces. */
+          if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = slot.team === 'A' ? 1 : -1;
         }
@@ -2104,8 +2131,10 @@ export class Director {
           p.job = n.team === s.feed ? 'GET TO THE SCRUM BASE' : 'COVER THEIR NINE OFF THE BASE';
           steer(p, dt, true);
         } else {
-          this.place(p, wx, wz, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* D-2 — the scrum-halves settle in their own block, separate from
+           * the pack's, and kept the same 1.15 m whole-gap snap. Only exposed
+           * on seed 5 under the bot-input harness. */
+          if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           clip(p, s.stage === 'FEED' || s.stage === 'STRIKE' ? 'ninePass' : 'nineSquat');
           p.job = n.team === s.feed ? 'FEED THE BALL IN STRAIGHT' : 'DEFEND THE CHANNEL OFF THE BASE';
@@ -2131,9 +2160,9 @@ export class Director {
           steer(p, dt, true);
           continue;
         }
-        this.place(p, slot.x, slot.z, 'bound');
-        p.vx = 0; p.vz = 0;
-          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+        /* D-2 — bounded settle, no whole-gap snap on the last step. */
+        if (this.settleToward(p, slot.x, slot.z, dt, 'bound')) { p.vx = 0; p.vz = 0; }
+        p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         if (slot.role === 'THROWER') clip(p, s.stage === 'THROW' || s.stage === 'CONTEST' ? 'lineoutThrow' : 'idle');
         else if (slot.role === 'JUMPER' && contesting) clip(p, Math.abs(slot.x - s.ball.x) < 1.6 ? 'lineoutJump' : 'lineoutStand');
         else if (slot.role === 'LIFTER' && contesting) clip(p, 'lineoutLift');
@@ -2156,8 +2185,8 @@ export class Director {
           p.tx = wx; p.tz = wz; p.urgency = 1;
           steer(p, dt, true);
         } else {
-          this.place(p, wx, wz, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* D-2 — bounded settle; see settleToward. */
+          if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = face;
         }
@@ -2225,7 +2254,10 @@ export class Director {
            * pin applies from the next frame; writing him again now would be
            * the same-frame double-move the ownership contract exists to
            * prevent. The velocity still dies: he is being brought to ground. */
-          if (!p.movedBy) this.place(p, q.x, q.z, 'bound');
+          /* D-2 — bounded even for the tackled carrier. He is pinned to the
+           * slot recorded at the tackle, which can be ~0.9 m from where the
+           * physics left him on that frame. */
+          if (!p.movedBy) this.settleToward(p, q.x, q.z, dt, 'bound');
           p.vx = 0; p.vz = 0;
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         } else {
@@ -2271,8 +2303,10 @@ export class Director {
           dist9.job = 'GET TO THE BASE — YOUR BALL';
           steer(dist9, dt, true);
         } else {
-          this.place(dist9, baseX, baseZ, 'bound');
-          dist9.vx = 0; dist9.vz = 0;
+          /* D-2 — bounded; this was the last unbounded set-piece place, and it
+           * showed up as shirt 9 moving 1.12 m in one frame under the gate
+           * harness's bot input (a path NO_INPUT probing never exercised). */
+          if (this.settleToward(dist9, baseX, baseZ, dt, 'bound')) { dist9.vx = 0; dist9.vz = 0; }
           clip(dist9, 'nineSquat');
           dist9.job = 'HANDS ON THE BALL — WAIT FOR IT TO COME';
         }
@@ -2378,9 +2412,13 @@ export class Director {
               p.face = s.dir;
               steer(p, dt, true);
             } else {
-              this.place(p, f.x, f.z, 'restart');
-              p.vx = 0; p.vz = 0;
-          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+              /* D-2 — the last unbounded settle. Its 0.8 m threshold snapped
+               * the whole gap and landed at 0.7994 m, six TENTHS OF A
+               * MILLIMETRE under the new gate: passing, but balanced on the
+               * edge and certain to flake on any seed change. Bounded like the
+               * rest rather than left to luck. */
+              if (this.settleToward(p, f.x, f.z, dt, 'restart')) { p.vx = 0; p.vz = 0; }
+              p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
               p.face = p.team === s.kicker ? s.dir : -s.dir;
               /* SPEC_09 — THE WARM-UP BEAT. A pinned man is SET, not a
                * statue: he takes the ready stance and breathes on his own
@@ -2749,6 +2787,10 @@ export class Director {
      * the day it is written. */
     const aiClean = (this.options.offsideAiClean ?? 0) === 1;
     const guardLines = aiClean ? liveOffsideLines(this) : [];
+    /* D-3 — the retreat-intent pass needs the lines whether or not FORCE AI
+     * CLEAN is on, so it reuses the guard's list when available and otherwise
+     * reads them itself. One read per frame either way. */
+    const retreatLines = aiClean ? guardLines : liveOffsideLines(this);
 
     /* A KICK IS OWNED BY placeBound. If think() also assigned targets here it
      * would drag the defensive line back on top of the ball — which is exactly
@@ -3256,6 +3298,55 @@ export class Director {
           });
         }
       }
+      /* ---------------- D-3 / T-71: RETREAT INTENT ----------------
+       * Rescoped per ruling: retreat logic is NOT rebuilt. Measured, 64.9% of
+       * offside frames are ALREADY retreating and only 11.3% drift further
+       * offside, so the general behaviour is sound. Two specific defects are
+       * targeted and nothing else:
+       *
+       *   1. the 5.2% of episodes with ZERO retreating frames — a man who is
+       *      offside and simply never sets off;
+       *   2. lingering — episodes ran to 8.42 s and 37.9 m of penetration.
+       *
+       * This adjusts the MARK (tz) only, before the steer, exactly like the
+       * offside guard above: the man runs back under his own steering rather
+       * than being teleported onside. It is independent of FORCE AI CLEAN,
+       * which is a player-facing option that is off by default and projects
+       * marks outright; this is about intent, not about guaranteeing legality.
+       */
+      if (!this.isHuman(p.team) && !p.carrier && !p.bound && p.sinbin <= 0 && retreatLines.length) {
+        let worst = 0;
+        let lawfulZ = p.tz;
+        for (const line of retreatLines) {
+          if (!line.offenders.includes(p.team)) continue;
+          if (line.participants?.has(`${p.team}:${p.num}`)) continue;
+          if (!insideCorridor(p, line)) continue;
+          const tl = line.lineFor(p.team);
+          if (!tl) continue;
+          const pen = penetrationOf(p, tl);
+          if (pen > worst) {
+            worst = pen;
+            lawfulZ = clampOntoLegalSide(p.z, tl, CLEAN_MARGIN_METRES);
+          }
+        }
+        if (worst > 0.35) {
+          p.offsideT = (p.offsideT ?? 0) + dt;
+          /* Escalate with dwell time: a man a moment offside is left to his own
+           * business, one who has loitered is given an explicit retreat mark
+           * and the urgency to chase it. The 1.2 s knee sits above the measured
+           * p50 episode length (0.67 s) so ordinary play is untouched, and
+           * below the 8.42 s tail this exists to kill. */
+          if ((p.offsideT ?? 0) > 1.2 || worst > 6) {
+            this.writeThinkPlayer(gate, `think:offside-retreat:${p.team}${p.num}`, p, ['tz'] as const, () => {
+              p.tz = clampPitchZ(lawfulZ);
+            });
+            p.urgency = Math.max(p.urgency, 1);
+            p.job = 'GET BACK ONSIDE';
+          }
+        } else {
+          p.offsideT = 0;
+        }
+      }
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
@@ -3440,7 +3531,14 @@ export class Director {
      * first, so this path only handles the genuinely-off runners). */
     const CLOSE_PLACE_MAX = 1.0;
     if (Math.hypot(car.x - gx, car.z - gz) < CLOSE_PLACE_MAX) {
-      cx = gx; cz = gz;
+      /* D-2 — the close place still closed up to 1.0 m in a single frame, an
+       * implied 60 m/s, and the tightened 0.80 m gate sees it. Bound the step;
+       * the carrier's own open-play integration closes the rest over the next
+       * frames, which is what the walk-on systems upstream already assume. */
+      const cgap = Math.hypot(gx - car.x, gz - car.z);
+      const cstep = Math.min(cgap, 0.55);
+      cx = cgap > 1e-4 ? car.x + (gx - car.x) / cgap * cstep : gx;
+      cz = cgap > 1e-4 ? car.z + (gz - car.z) / cgap * cstep : gz;
       this.place(car, cx, cz, 'carrier');
     } else {
       cx = clamp(car.x, -33, 33); cz = clamp(car.z, -58, 58);

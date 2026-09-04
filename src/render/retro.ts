@@ -29,7 +29,44 @@ export interface View { w: number; h: number }
 
 export interface Proj { sx: number; sy: number; sc: number; f: number }
 
+/**
+ * SPEC_16 — RASTERISATION-ONLY WORLD SCALE.
+ *
+ * The logical physics space is, and remains, a deterministic 70 x 100 m pitch.
+ * Nothing in `src/game/` knows this constant exists. It is applied at the one
+ * choke point below — `project()` — so that EVERY world-to-screen conversion
+ * inherits it and no call site can forget: a player at x = 10 and the 10 m line
+ * both go through the same multiply and therefore cannot desync.
+ *
+ * Why it is needed: `FIGURE_SCALE = 1.65` (SPEC_14, paper.ts) grows the drawn
+ * figure in SCREEN space to buy readable contact. That left a 1.86 m man
+ * drawing as 3.07 m against a true 3.0 m crossbar — a ratio of 1.066 measured,
+ * where life is 0.62. Scaling the WORLD by the same 1.65 restores the ratio
+ * without touching a single gameplay number.
+ *
+ * Why framing does not change (SPEC_16 framing ruling): the camera rig is
+ * scaled by the same factor in `camScale()` below. Projection is a similarity
+ * transform, so scaling the world and the camera together leaves every ground
+ * feature on exactly the same pixel — measured identical to 1e-9 — while
+ * `sc` (px per logical metre) falls by exactly 1/1.65. Screen-space figure ink,
+ * which is `FIGURE_SCALE * sc`, therefore shrinks by 1.65 and the ratio lands.
+ * The 40% viewport loss the notes priced does not occur, because the loss only
+ * happens if the world is scaled and the camera is not.
+ */
+export const RENDER_SCALE = 1.65;
+
+/**
+ * Move a camera rig into scaled render space. Positions and altitude scale;
+ * angles and field of view are scale-invariant and must NOT be touched.
+ * Applied inside `project()` so callers keep building rigs in logical metres.
+ */
+function camScale(cam: Camera): Camera {
+  return { ...cam, x: cam.x * RENDER_SCALE, z: cam.z * RENDER_SCALE, h: cam.h * RENDER_SCALE };
+}
+
 export function project(cam: Camera, v: View, wx: number, wy: number, wz: number, jx = 0, jy = 0): Proj | null {
+  cam = camScale(cam);
+  wx *= RENDER_SCALE; wy *= RENDER_SCALE; wz *= RENDER_SCALE;
   const dx = wx - cam.x, dz = wz - cam.z;
   const sy_ = Math.sin(cam.yaw), cy_ = Math.cos(cam.yaw);
   const fwd = dx * sy_ + dz * cy_;
@@ -40,7 +77,9 @@ export function project(cam: Camera, v: View, wx: number, wy: number, wz: number
   /* T-55: the near plane sits at 0.6 m so a dolly-first zoom (the rig now
    * physically closes on the contest) can push pitch geometry through the
    * lens and clip it mid-polygon. 0.25 m keeps the cut off the grass. */
-  if (depth < 0.25) return null;
+  /* The near plane is authored in LOGICAL metres, so it scales with the world;
+   * otherwise SPEC_16 would silently move the clip plane 1.65x closer. */
+  if (depth < 0.25 * RENDER_SCALE) return null;
   const up = rel * ct + fwd * st;
   const focal = (v.h * 0.5) / Math.tan(cam.fov * 0.5);
   const sc = focal / depth;
@@ -438,3 +477,47 @@ export function drawCRT(ctx: Ctx, v: View, intensity = 1) {
 }
 
 void PIX; void GRASS;
+
+/* ================================================================== */
+/* D-1 — MINIMUM FOLLOW DISTANCE                                       */
+/* ------------------------------------------------------------------ */
+/* Measured cause of the BALL ON SCREEN failures: the rigs floor their
+ * ground distance at a CONSTANT (4 m touchline, 5 m cable) while the
+ * camera flies at 13-21 m. At 13 m high and 5.5 m out the ball sits
+ * 67 degrees below horizontal while the rig tilts only 30, so it drops
+ * out of the bottom of frame — 97% of failing frames were "bottom",
+ * and 239 of 266 had the camera within 8 m of the ball.
+ *
+ * A constant floor cannot be right: the safe distance is a function of
+ * how high the camera is and how much lens it has. Require the subject
+ * to sit no lower than `keep` of the way from the view axis to the
+ * bottom edge:
+ *
+ *     depression = atan((h - eye) / g)  <=  tilt + halfFov * keep
+ *
+ * Solving for g, and noting tilt itself grows as g shrinks, we floor g
+ * directly at the distance where the depression equals the widest angle
+ * the lens can still show.
+ * ================================================================== */
+
+/** Eye height of the subject used by the rigs when they solve tilt. */
+const SUBJECT_EYE = 1.2;
+/** Fraction of the half-frame the subject may use before we push back. */
+const KEEP = 0.62;
+
+/**
+ * Smallest horizontal camera-to-subject distance that still leaves the
+ * subject inside the vertical frame. Pure.
+ *
+ * @param h      camera height, metres
+ * @param fov    vertical field of view, radians
+ * @param eye    subject eye height (default 1.2 m, matching the rigs)
+ */
+export function minFollowGround(h: number, fov: number, eye = SUBJECT_EYE): number {
+  const rise = Math.max(0.1, h - eye);
+  /* The steepest the subject may sit below horizontal. Clamped below
+   * 85 deg so the expression cannot blow up, and the 0.5 floor keeps a
+   * very low camera from demanding a silly distance. */
+  const maxDep = Math.min(1.483, Math.max(0.5, fov * 0.5 * (1 + KEEP) + 0.10));
+  return rise / Math.tan(maxDep);
+}
