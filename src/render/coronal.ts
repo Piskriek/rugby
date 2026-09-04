@@ -63,6 +63,10 @@ export interface PaperDrawArgs {
   legScale?: number;
   /** SPEC_18.3a — kinetic lean, radians. Sheared about the foot anchor. */
   lean?: number;
+  /** SPEC_18.3b — 3/4 projection for the front/back card. */
+  tq?: { shear: number; narrow: number };
+  /** Which way the actor is turning away from camera, +1 / -1. */
+  tqSign?: number;
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -764,6 +768,13 @@ export function drawPaperActor(a: PaperDrawArgs) {
    * is the last transform before the card is drawn and after the squash, so the
    * two compose rather than fight. */
   if (a.lean) ctx.transform(1, 0, -Math.tan(a.lean), 1, 0, 0);
+  /* SPEC_18.3b — 3/4 perspective. Only ever applied to the front/back card;
+   * the profile card IS the 90 deg view and must not be skewed on top. The
+   * narrowing is about the spine (x = 0), which is already the card's origin. */
+  if (a.tq && (a.view === 'front' || a.view === 'back')) {
+    const sg = a.tqSign ?? 1;
+    ctx.transform(a.tq.narrow, 0, -Math.tan(a.tq.shear) * sg, 1, 0, 0);
+  }
   const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
   if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
   const falling = q.fall > 0.01 && q.fall < 0.985;

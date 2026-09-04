@@ -43,7 +43,7 @@ mutates nothing and is not wired into the game.
 |---|---|---|---|---|---|
 | 1 | **SPEC_16** | Environment scale — `RENDER_SCALE` in the render layer | Render | — | **RULED, ready to execute** |
 | 2 | **SPEC_17** | Papercraft rigging — swing leg, arm Z-sort, hip pivot | Render / rig | — | **RULED (17.1–17.3), 17.4 diagnosed below** |
-| 3 | **SPEC_18** | Art style: soft edges + the 3/4 upright view | Render | 16, 17 | Unmeasured |
+| 3 | **SPEC_18** | Art style: soft edges + the 3/4 upright view | Render | 16, 17 | **SHIPPED** |
 | 4 | **SPEC_19** | AI debt: N-02 Smell Blood, T-71 offside loitering | AI | — | Unmeasured |
 | 5 | **SPEC_20** | Set piece & tuning: N-01 lineout teleport, SPEC_04 stage 2 | Law / tuning | 19 | Unmeasured |
 
@@ -1070,3 +1070,89 @@ Same test-and-verify workflow as SPEC_16/17:
    flagged in advance above.
 
 **Halting here for review of the mathematics before any engine change.**
+
+---
+
+# SPEC_18 — VERDICT: SHIPPED
+
+Executed under the lifted halt. All three features are live. Nine gates
+unchanged throughout (8/9, the standing `BALL ON SCREEN 196` debt untouched).
+
+Proof shot: `spec18_kinetic.png` — four rows, SPEC_17 coronal and profile
+regression rows plus the two new SPEC_18 sweeps.
+
+## 18.1 Stroke removal and value separation
+
+Hard outlines are gone; `paperCard` only draws one if an explicit `out` is
+passed. Depth separation via `depthShade()` on the ruled 0.70 / 1.14
+multipliers.
+
+**Measurement changed the design.** The ruled formula shades each limb by its
+absolute depth `sin(angle)`. That term passes through zero exactly when two
+limbs cross — precisely when they overlap and most need separating. Measured
+worst-case WCAG contrast between the two legs was **1.00 — literally the same
+colour — on 32 of 64 walk frames**, and arm-vs-torso 1.00 on 50 of 128 run
+frames. The first shot looked fine, which is why the number matters more than
+the eye.
+
+Fix: `pairShade()` shades a matched pair *relative to each other* with an
+enforced floor `LIMB_MIN_SPLIT`. 0.85 is the smallest floor clearing 1.25
+contrast on every palette (weakest is B at 1.27); 0.55 left B at 1.16.
+
+| | before | after |
+|---|---|---|
+| global worst limb-pair contrast | 1.00 | **1.27** |
+| frames below 1.15 (all palettes/gaits) | 104 | **0** |
+
+## 18.2 Rounded polygons, no beziers
+
+`ctx.lineJoin/lineCap = 'round'` stroking each path in its own fill colour.
+
+The stroke expands the shape outward by `r` on every edge, silently fattening
+every figure. The inset that cancels this lives **inside `paperCard`**, so no
+card can be rounded without being compensated. A centroid-radial inset was
+tried and **rejected by measurement**: it under-compensates thin cards by
++1.18 px on a trim band, because moving a vertex toward the centroid barely
+shortens the long axis. Replaced with exact per-edge normal offsetting plus
+intersection, and a radius clamp to `minDim/3` for cards thinner than `2r`.
+Card-level growth is now `0.00 x 0.00` on torso, thin band and boot.
+
+## 18.3a Kinetics
+
+Chain as ruled: reject steps > 0.30 m → EMA velocity τ=0.35 s → differentiate
+the smoothed signal → project along travel → EMA at τ·1.6 → `θ = 0.18·tanh(a/6)`.
+The filtering is load-bearing: raw p99 acceleration is ~49 g with outright
+teleports in the stream, which fed to `tan()` would snap figures flat.
+
+| property | measured |
+|---|---|
+| peak lean accelerating | 7.84° |
+| peak lean braking | −7.62° |
+| cap (never exceeded, incl. teleport stream) | 10.31° |
+| max change per frame | 0.459° (no jitter) |
+| footfall fires over 12 cycles | **12**, not 24 — seam debounced |
+
+Squash combines multiplicatively with `squashForClip()` as ruled. Contact is
+read from the rig's own `groundedClearance` rather than a hardcoded phase
+table, so it cannot drift out of sync with the clip. The squash update is
+sequenced *after* pose sampling — before that it tested last frame's legs.
+Shear is applied about the foot anchor, so a leaning figure stays planted.
+
+## 18.3b 3/4 perspective
+
+**Deliberately not a sixth `PaperView`.** A new enum state would turn the
+hysteresis machine into a 6-zone problem needing its own dead zones and mirror
+flip debounce, and SPEC_06 already had to be hardened once because that machine
+thrashed. Instead `threeQuarter(ang)` is a continuous affine over the existing
+front/back card, driven by the same angle the view machine thresholds on:
+
+    | 1   -tan(phi)*sign  0 |
+    | 0        narrow     0 |
+
+Shear ramps 0 → 14.9° and shoulder width 1.00 → 0.86 by smoothstep across the
+end-on zone, fully faded in by the edge boundary so there is no pop when the
+view machine hands over to the profile card. Verified: exact identity at 0°,
+caps respected, max discontinuity 0.0027 per 0.25° — continuous everywhere.
+
+**Halting here for review, as instructed, before the SPEC_19 / SPEC_20
+deferred debt.**

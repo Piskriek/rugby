@@ -10,7 +10,7 @@
  * Usage: npx vite-node scripts/spec17shot.ts [clip] [out.png]
  */
 import { CLIPS, STAND, POSE_CH, type Pose } from '../src/render/clips';
-import { BUILDS, PALETTES, type Build } from '../src/render/paper';
+import { BUILDS, PALETTES, threeQuarter, type Build } from '../src/render/paper';
 import { drawPaperActor, type PaperDrawArgs } from '../src/render/coronal';
 import { type Camera, type View } from '../src/render/retro';
 import { Rec } from './spec14rec';
@@ -53,7 +53,7 @@ function sample(name: string, u: number): Pose {
 
 const cam: Camera = { x: 0, z: -12, h: 1.6, yaw: 0, tilt: 0.05, fov: 0.42, shake: 0, horizon: 0.5, roll: 0 };
 
-function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0): Poly[] {
+function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null): Poly[] {
   const rec = new Rec();
   rec.cap = [];
   const ctx = rec.asCtx();
@@ -72,6 +72,7 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, le
     carry: 0, carryStyle: 0, ballSide: 0.6, ballSpin: 0,
     cap: false, tape: false, spinDir: 1, gs: 0.6, fore: 0,
     headDir: 0, depth: 0, lean,
+    tq: tqAng === null ? undefined : threeQuarter(tqAng), tqSign: 1,
   };
   drawPaperActor(args);
   return (rec.cap ?? []).map((c) => ({
@@ -87,6 +88,10 @@ US.forEach((u, i) => { sideP.push(...cell('rightEdge', u, i * CELL.w, 0)); });
 
 /* SPEC_18.3a — lean sweep: same pose, four shear angles, so the kinetic tilt
  * can be judged against a fixed reference. Feet must stay planted. */
+const TQ = [0, 20, 35, 55];
+const tqP: Poly[] = [];
+TQ.forEach((ang, i) => { tqP.push(...cell('front', 0.25, i * CELL.w, 0, 0, ang)); });
+
 const LEANS = [-0.18, -0.09, 0.09, 0.18];
 const leanP: Poly[] = [];
 LEANS.forEach((ln, i) => { leanP.push(...cell('rightEdge', 0.25, i * CELL.w, 0, ln)); });
@@ -95,6 +100,7 @@ rasterise(
   [
     { name: `SPEC_17  ${clip.toUpperCase()}  CORONAL  (swing leg + arm z-sort)`, polys: coronalP },
     { name: `SPEC_17  ${clip.toUpperCase()}  SIDE PROFILE  (hip pivot + crotch notch)`, polys: sideP },
+    { name: 'SPEC_18.3b  3/4 PERSPECTIVE  facing angle 0 / 20 / 35 / 55 deg  (0 = identity)', polys: tqP },
     { name: 'SPEC_18.3a  KINETIC LEAN  -10.3 / -5.2 / +5.2 / +10.3 deg  (brake <-> accelerate)', polys: leanP },
   ],
   out,

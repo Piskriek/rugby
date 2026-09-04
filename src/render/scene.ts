@@ -22,7 +22,7 @@ import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten,
-  newLeanState, updateLean, updateFootSquash, combineSquash, groundedClearance, type LeanState,
+  newLeanState, updateLean, threeQuarter, facingAngle, updateFootSquash, combineSquash, groundedClearance, type LeanState,
   BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
@@ -403,6 +403,10 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
      * coronal rig authors the foot on a clearance arc and pins the stance foot
      * at y = 0 by construction, which is what that helper only pretended to
      * do. See SEASON_3_QUEUE.md SPEC_17.1. */
+    /* SPEC_18.3b — 3/4 projection, from the same angle the view machine uses. */
+    const fa = facingAngle(fx, fz, a.rx, a.rz, cam.x, cam.z);
+    const tqProj = threeQuarter(fa.ang);
+    const tqSign = fa.sign;
     const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
     /* SPEC_18.3a — footfall squash, combined MULTIPLICATIVELY with the SPEC_01
      * impact squash (ruled), so a tackle landing on a footfall compresses once
@@ -418,6 +422,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
       lean: pg.leanAngle,
+      tq: tqProj, tqSign: tqSign,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,

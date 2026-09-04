@@ -696,6 +696,55 @@ export function updateFootSquash(st: LeanState, grounded: boolean, spd: number, 
   return st.squash;
 }
 
+/* ================================================================== */
+/* SPEC_18.3b — 3/4 PERSPECTIVE                                        */
+/* ------------------------------------------------------------------ */
+/* Deliberately NOT a sixth PaperView. Adding an enum state would make
+ * the hysteresis machine a 6-zone problem, needing its own dead zones and its
+ * own mirror-flip debounce, and SPEC_06 already had to be hardened once
+ * because that machine thrashed. Instead the 3/4 read is a CONTINUOUS
+ * affine applied over the existing front/back card, driven by the same
+ * angle the view machine computes. Zero new states, and it degenerates
+ * exactly to the current picture at 0 deg.
+ *
+ *   | 1   -tan(phi)*ky   0 |     x' = x - tan(phi)*ky*y
+ *   | 0        kappa     0 |     y' = kappa*y
+ *
+ * `narrow` additionally compresses X toward the spine, which is what
+ * actually sells the turn: a body rotating away from camera loses
+ * apparent SHOULDER WIDTH by cos(angle). The shear alone only skews.  */
+
+/** Max 3/4 yaw expressed as a shear, radians. */
+export const TQ_SHEAR_MAX = 0.26;
+/** Deepest shoulder-width compression at full 3/4 (1 = none). */
+export const TQ_NARROW = 0.86;
+
+export interface ThreeQuarter { shear: number; narrow: number; }
+
+/**
+ * Continuous 3/4 projection for a front/back card.
+ * @param ang  degrees between actor facing and the actor->camera vector, the
+ *             same quantity `updatePaperView` thresholds on.
+ * Ramps in across the end-on zone and holds at the edge boundary, so it is
+ * fully faded in by the time the view machine would swap to the profile card
+ * and there is no pop at the handover.
+ */
+export function threeQuarter(ang: number): ThreeQuarter {
+  const a = ang > 90 ? 180 - ang : ang;         // symmetric front/back
+  const t = Math.min(1, Math.max(0, a / EDGE_IN));
+  const e = t * t * (3 - 2 * t);                 // smoothstep — no kink at 0
+  return { shear: TQ_SHEAR_MAX * e, narrow: 1 - (1 - TQ_NARROW) * e };
+}
+
+/** Signed facing angle helper: degrees, plus the side the camera sits on. */
+export function facingAngle(fx: number, fz: number, ax: number, az: number, camX: number, camZ: number): { ang: number; sign: number } {
+  let tx = camX - ax, tz = camZ - az;
+  const tl = Math.hypot(tx, tz);
+  if (tl < 1e-4) { tx = 0; tz = 1; } else { tx /= tl; tz /= tl; }
+  const d = Math.min(1, Math.max(-1, fx * tx + fz * tz));
+  return { ang: Math.acos(d) * 180 / Math.PI, sign: fx * tz - fz * tx < 0 ? -1 : 1 };
+}
+
 /** Combine two squash sources without double-compressing (ruled). */
 export function combineSquash(a: number, b: number): number {
   return 1 - (1 - a) * (1 - b);
