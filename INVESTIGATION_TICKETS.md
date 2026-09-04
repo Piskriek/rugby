@@ -244,6 +244,63 @@ rate (sliding metres per pass, or line-lane error at the catch)?
 
 ---
 
+## T-73 · ELIGIBLE-TACKLER SELECTION: WRITTEN, MEASURED, HELD (AI/camera) — logged by SPEC_14
+
+**Status:** the patch exists, is measured, and was reverted before commit. It is
+held, not abandoned. It needs a ruling, not more work.
+
+**The bug (SPEC_14 task 14-c).** `upOpen` takes `const nearest = dists[0]` and
+only ever offers THAT man to the tackle test. `dists` is built from every live
+defender with no filter on `beatenT` or `down`, so when the nearest man has
+slipped a tackle (`beatenT` 1.1-1.6 s) the block returns and *nobody* can
+tackle the carrier until his timer expires. A beaten man is a shield.
+
+**The patch.** Next to `nearest`, derive
+
+```ts
+const eligible = (num: number) => {
+  const p = d.L(dTeam, num);
+  return !!p && p.beatenT <= 0 && !p.down && p.sinbin <= 0;
+};
+const tackler1 = dists.find((x) => eligible(x.num)) ?? null;
+```
+
+and use `tackler1` in the human dive branch and in the tackle block. `nearest`
+stays for `pressure`, the ring count and the line-break read, which are
+deliberately "closest body" measures.
+
+**Measured, 4 seeds x 3 difficulties, 100 s each, identical RNG stream:**
+- tackles made, summed over the four seeds: **63 -> 78 (+24%)**. The SPEC_14
+  diagnosis predicted tackles would rise; they do, and by more than the ticket
+  guessed. (Seed 1 alone fell 24 -> 17; the other three rose.)
+- it also stops grounded players completing tackles: `p.down` was never
+  excluded, so a man lying on the turf could be the nearest and could finish a
+  tackle.
+- the shield it removes is small in absolute terms: 14 of 711 contact frames
+  (2.0%) had an eligible man inside 1.1 m blocked by a beaten one.
+
+**Why it is held.** It trips BALL ON SCREEN on one seed: 196 frames (seed 1;
+seeds 7/13/21 are 0). Diagnosis: the failures are OPEN_PLAY with the ball near
+the touchline (x ~ 26), where the cable rig's lateral clamp (+-30) leaves it
+almost directly above the ball at 13 m while its look-ahead keeps the tilt at
+~25 deg, so the ball sits on the bottom edge of frame. Most of the 196 are
+0-1 px past the 60 px margin; 35 are genuinely off (192 px past the left edge).
+This is a pre-existing camera weakness the new match flow simply reaches more
+often — `engine/camera.ts` is byte-identical to main, and two targeted fixes
+(rig-Z boost, anchor lead clamp) were tried and changed the count by exactly 0.
+
+**The ruling needed.** (a) Accept the framing regression and ship the tackles,
+(b) fix the lateral rig clamp / look-ahead tilt first and re-measure, or
+(c) drop the change. Do NOT tune the gate threshold — that is the thing the
+author has ruled out twice.
+
+**Already measured, do not re-derive:** the 63 -> 78 tackle figure, the
+seed-by-seed BALL ON SCREEN figures (0/1/0/0 without the patch, 196/0/0/0 with
+it), and the fact that the framing gate was measuring the CARRIER rather than
+the ball until SPEC_14 corrected it (see `Director.ballPoint()`).
+
+---
+
 ## T-72 · THE STATS HARNESS IS UNSEEDED, SO IT CANNOT COMPARE BUILDS (harness) — logged by SPEC_13
 
 **Observed:** `scripts/stats.ts` never calls `seedRng`, so it draws from ambient

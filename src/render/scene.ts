@@ -18,6 +18,7 @@ import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
+  FIGURE_SCALE,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
@@ -273,16 +274,20 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
        * paper layers occlude it correctly (handoff 8.1) */
       const ck = paperViewKey(o.attacking, o.carrierNum);
       const cp = puppets.get(ck);
-      const hx = cp ? Math.sin(cp.face) * 0.26 : 0.3;
-      const hz = cp ? Math.cos(cp.face) * 0.26 : 0;
-      ballWorld = { x: o.carrierX + hx, y: 1.14, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
+      /* SPEC_14 — the ball rides the carrier's chest, so its height and its
+       * offset from the spine have to grow with the figure or it ends up at
+       * his waist. Only the CARRIED anchors scale; a ball in flight or on the
+       * turf is world geometry and is untouched. */
+      const hx = (cp ? Math.sin(cp.face) * 0.26 : 0.3) * FIGURE_SCALE;
+      const hz = (cp ? Math.cos(cp.face) * 0.26 : 0) * FIGURE_SCALE;
+      ballWorld = { x: o.carrierX + hx, y: 1.14 * FIGURE_SCALE, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
     }
   } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
     const m = d.ml;
     const yawRad = (m.yaw * Math.PI) / 180;
     const lz = -m.dir * m.ballRank * 0.78;
     ballWorld = {
-      x: m.x - lz * Math.sin(yawRad), y: 1.02,
+      x: m.x - lz * Math.sin(yawRad), y: 1.02 * FIGURE_SCALE,
       z: m.z + lz * Math.cos(yawRad), spin: m.t * 0.6, visible: true,
     };
   } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
@@ -291,7 +296,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
       ballWorld = { x: b.ball.x, y: 0.16, z: b.ball.z, spin: b.t * 0.5, visible: true };
     } else if (carrier) {
-      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z, spin: b.t * 2.2, visible: true };
+      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05 * FIGURE_SCALE, z: carrier.z, spin: b.t * 2.2, visible: true };
     }
   }
 
@@ -349,6 +354,8 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
 
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
+      /* SPEC_14 — the shadow is projected from world geometry now. */
+      cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
       num: pg.ch.num, seed: pg.seed,
       carry: carried ? 1 : 0,

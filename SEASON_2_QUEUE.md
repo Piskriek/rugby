@@ -1,7 +1,7 @@
 # SEASON 2 QUEUE — SPEC_11 … SPEC_15
 
-**Status: ITEMS 1–3 SHIPPED (`SPEC_11`, `SPEC_12`, `SPEC_13` are live on
-`arena/01a0682b-rugby`). Item 4/5 (`SPEC_14`) is next. This document's
+**Status: ITEMS 1–5 SHIPPED (`SPEC_11`, `SPEC_12`, `SPEC_13`, `SPEC_14` are live on
+`arena/01a0682b-rugby`). Item 6 (`SPEC_15`) is next. This document's
 diagnoses were written before any code existed; each shipped spec has a
 `## VERDICT` section appended below recording what was actually built and
 measured, which supersedes the diagnosis where the two disagree.**
@@ -18,9 +18,9 @@ places.
 | 1 | Defence drifts through the offence, ends up behind it, faces the wrong way; attackers freeze and recycle instead of going forward | **SPEC_11** | Formation anchoring — the ball-relative target contract | AI / positioning | **SHIPPED** |
 | 2 | Offsides are not enforced; wants Off / Enforce / Force-AI-clean toggles | **SPEC_12** | The offside line: observation → enforcement → prevention | Law | **SHIPPED** |
 | 3 | Violently forward passes are allowed | **SPEC_13** | Law 11 — the throw-forward vector test | Law | **SHIPPED** (`cb230df`) |
-| 4 | Players are too big for the pitch; tackle visuals lie | **SPEC_14** | Figure scale and contact truth (issue 4) | Render / physics | NEXT |
-| 5 | Shadows do not anchor to the feet | **SPEC_14** | Ground truth: the shadow anchor (issue 5) | Render | NEXT |
-| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation | queued behind 4/5 |
+| 4 | Players are too big for the pitch; tackle visuals lie | **SPEC_14** | Figure scale and contact truth (issue 4) | Render / physics | **SHIPPED** |
+| 5 | Shadows do not anchor to the feet | **SPEC_14** | Ground truth: the shadow anchor (issue 5) | Render | **SHIPPED** |
+| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation | **NEXT** |
 
 Issues 4 and 5 are one specification because they are the same defect class —
 **the paper figure's relationship to the turf it stands on** — and both are
@@ -744,3 +744,74 @@ the human cannot break is a law he cannot learn.
 
 **New debt:** `T-72` — the stats harness is unseeded, so its headline score
 cannot compare builds (50% and 56% on the identical build).
+
+
+---
+
+# SPEC_14 VERDICT — shipped
+
+**The report was wrong, and the measurement proved it.** "Players are too big
+for the pitch" is not what the ink says. At the default rig the carrier occupied
+**5.7% of viewport height** (broadcast reference is 8-12%; the ticket's own
+diagnosis guessed 18%) and two silhouettes were **0.67 m** wide against a
+**1.10 m** tackle radius — so when the whistle blew for a tackle the two men
+were still **0.43 m apart on screen**. Contact was invisible because the figures
+were too SMALL to read, not too big.
+
+**The fix is a growth, not a shrink.** `FIGURE_SCALE = 1.65` (paper.ts), applied
+at draw time only. It is deliberately not `Actor.size` — that reaches
+`maxSpeed()` and would change how fast players run — and deliberately not the
+tackle radius, which the author ruled stays at 1.10 m. Art and physics now
+disagree by choice, which is the SPEC_14 contract.
+
+| | before | after |
+|---|---|---|
+| carrier, % of viewport height | 5.7% | **9.3%** (reference 8-12%) |
+| silhouette width | 0.67 m | **1.09 m** |
+| gap between the two figures when the tackle fires | 0.43 m apart | **0.01 m** |
+| drawn height / px-per-metre / FIGURE_SCALE | 1.78 m | **1.80 m** (authored 1.76-1.98) |
+
+The same multiplier fixes both complaints at once: 5.7% x 1.65 = 9.4%, inside
+the broadcast band. That is why growing beats shrinking the radius — a zoom
+would have scaled the tackle gap up by exactly as much as the figures and
+changed nothing.
+
+**The shadow float was a hard-coded constant.** `ry = 0.30 * rx` ignored the
+camera. Measured against a real circle projected onto the turf through the same
+lens, the truth is 0.61 on CABLE and 0.68 on CHASE — the ellipse was 51-56% too
+flat. It now derives `ry` from the projected ground circle, so it is exact at
+any tilt by construction:
+
+| rig | before | after | truth |
+|---|---|---|---|
+| high/steep | 0.30 | **0.90** | 0.90 |
+| mid (cable, default) | 0.30 | **0.57** | 0.56 |
+| low/shallow | 0.30 | **0.30** | 0.30 |
+
+Also fixed: the anchor now follows the stride, and the light offset is projected
+from world space instead of being a 6 cm screen-space nudge that rotated with
+the camera.
+
+**One deviation from the ruling, with evidence.** The author approved
+"anchor to the planted foot". Measured, that makes the shadow SNAP from boot to
+boot every stride — the frame-to-frame jump is worse than the old root anchor at
+every percentile (p99 9.4 px against 5.5). It now anchors at the MIDPOINT of the
+two feet: identical to the planted foot when the player is standing still, and
+smooth while running. The residual movement within a stride is an animation
+artefact (`pinPlantedFoot` caps its correction at 0.06 m) that no anchor choice
+can repair.
+
+**Held, not shipped:** the eligible-tackler selection (14-c). Written, measured
+(tackles 63 -> 78 across four seeds, +24%), and reverted before commit because
+it trips BALL ON SCREEN on one seed for a pre-existing camera reason. Full
+evidence and the patch: **T-73**.
+
+**Also retired:** the `CAMERA` option in the settings menu — nothing in `src/`
+ever read it; the live camera is set through `Director.camMode` from the UI.
+
+**Also corrected:** the BALL ON SCREEN gate measured `d.focus()`, which prefers
+the carrier, so during a kick it reported the kicker standing 22 m from the ball
+and called the ball off-screen while the camera had it centred. It now measures
+`Director.ballPoint()` — one shared read of where the ball actually is.
+
+gates 9/9 on four seeds. Stats score unchanged within its own run-to-run noise.

@@ -433,7 +433,6 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'radar', label: 'RADAR', values: ['OFF', 'ON'], def: 1, note: 'The transparent pitch map, top right.', cat: 'DISPLAY' },
   { id: 'autoReplay', label: 'AUTO REPLAY', values: ['OFF', 'SCORES', 'EVERYTHING'], def: 1, note: 'Five replay variants shipped with the original, varying in speed and dimension.', cat: 'DISPLAY' },
   { id: 'crt', label: 'CRT FILTER', values: ['OFF', 'SUBTLE', 'FULL'], def: 1, note: 'Scanline and phosphor overlay.', cat: 'DISPLAY' },
-  { id: 'camera', label: 'CAMERA', values: ['BEHIND POSTS', 'CHASE', 'TACTICAL'], def: 0, note: 'The camera never orbits — it zooms and tracks like a broadcast rig.', cat: 'DISPLAY' },
   { id: 'commentary', label: 'COMMENTARY', values: ['OFF', 'TICKER', 'FULL'], def: 2, note: 'Caption feed under the HUD.', cat: 'DISPLAY' },
   { id: 'crowd', label: 'CROWD NOISE', values: ['OFF', 'LOW', 'FULL'], def: 2, note: 'Mixed by travelling support ratio.', cat: 'DISPLAY' },
   { id: 'hud', label: 'HUD DENSITY', values: 'MINIMAL STANDARD FULL TELEMETRY'.split(' '), def: 1, note: 'From bare score to live expected-points readouts.', cat: 'DISPLAY' },

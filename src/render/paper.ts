@@ -317,6 +317,29 @@ export const BUILDS: Record<string, Build> = {
   REF:     { h: 1.84, shW: 0.48, hipW: 0.38, torso: 0.60, leg: 0.95, arm: 0.61, headR: 0.138, bulk: 1.00 },
 };
 
+/**
+ * SPEC_14 — THE FIGURE SCALE.
+ *
+ * The builds are authored at real heights (1.76-1.98 m) and the measurement in
+ * `scripts/spec14probe.ts` confirms the artwork draws them true: ink height
+ * divided by px-per-metre returns 1.78 m. The figures were therefore never too
+ * TALL. What they were was too small to read contact at: at the default rig a
+ * carrier occupies 5.7% of the viewport and his silhouette is 0.67 m wide, so
+ * when the 1.10 m tackle radius fires the two men are still 0.43 m apart on
+ * screen — a tackle you cannot see.
+ *
+ * Growing the drawn figure by 1.65 makes two silhouettes 1.11 m wide, so their
+ * edges meet exactly as the 1.10 m contact test fires, and it puts the carrier
+ * at 9.4% of the viewport — inside the 8-12% broadcast reference.
+ *
+ * This is a DRAW-TIME constant and nothing else. It deliberately does not
+ * touch the physics: it is not `Actor.size` (which reaches `maxSpeed()` and
+ * would change how fast players run) and it is not the tackle radius (which
+ * the author ruled stays at 1.10 m). Art and physics now disagree by CHOICE,
+ * which is the SPEC_14 contract.
+ */
+export const FIGURE_SCALE = 1.65;
+
 export const POS_OF_NUM: Record<number, keyof typeof BUILDS> = {
   1: 'PROP', 2: 'HOOK', 3: 'PROP', 4: 'LOCK', 5: 'LOCK', 6: 'BACKROW', 7: 'BACKROW', 8: 'BACKROW',
   9: 'HALF', 10: 'FLY', 11: 'WING', 12: 'CENTRE', 13: 'CENTRE', 14: 'WING', 15: 'FULL',

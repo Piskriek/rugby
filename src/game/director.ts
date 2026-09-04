@@ -1022,6 +1022,45 @@ export class Director {
     return { x: k.bx + k.vx * t, z: k.bz + k.vz * t, eta: Math.max(0, t) };
   }
 
+  /**
+   * SPEC_14 — WHERE THE BALL ACTUALLY IS, as a world point.
+   *
+   * `focusPoint()` answers a different question: it is the CAMERA's subject,
+   * and it prefers the carrier. Those two diverge the moment the ball leaves
+   * his hands — during a kick the camera is on the ball at the far end of the
+   * pitch while `focus()` still reports the kicker standing where he kicked
+   * from, 22 m away. The BALL ON SCREEN gate was measuring `focus()` and
+   * reporting the kicker as off-frame while the ball sat dead centre.
+   *
+   * One function so the gate and the HUD cannot drift apart again.
+   */
+  ballPoint(): { x: number; y: number; z: number } {
+    if ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && this.scrim && this.scrim.ball.state !== 'HELD') {
+      return { x: this.scrumAnchor.x + this.scrim.ball.x, y: this.scrim.ball.y + 0.06, z: this.scrumAnchor.z + this.scrim.ball.z };
+    }
+    if ((this.phase === 'LINEOUT' || this.phase === 'LINEOUT_REPLAY') && this.lo && this.lo.ball.state !== 'HELD') {
+      return { x: this.lo.ball.x, y: this.lo.ball.y + 0.05, z: this.lo.markZ };
+    }
+    if ((this.phase === 'KICK' || this.phase === 'KICK_REPLAY') && this.kk) {
+      return { x: this.kk.bx, y: this.kk.by + 0.12, z: this.kk.bz };
+    }
+    if (this.phase === 'OPEN_PLAY' && this.op) {
+      const o = this.op;
+      if (o.ball.live) return { x: o.ball.x, y: o.ball.y, z: o.ball.z };
+      const c = this.L(o.attacking, o.carrierNum);
+      return { x: c.x, y: 1.14, z: c.z };            // held at the chest
+    }
+    if ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && this.ml) return { x: this.ml.x, y: 1.02, z: this.ml.z };
+    if ((this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY') && this.bd) {
+      const b = this.bd;
+      if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') return { x: b.ball.x, y: 0.16, z: b.ball.z };
+      const carrier = b.players.find((p) => p.role === 'CARRIER');
+      if (carrier) return { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z };
+    }
+    const f = this.focusPoint();
+    return { x: f.x, y: 1, z: f.z };
+  }
+
   /** Public read on the focus point, so tests and the HUD agree on the subject. */
   focus(): { x: number; z: number } { return this.focusPoint(); }
 

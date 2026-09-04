@@ -759,13 +759,18 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
     }
     lastCamZ = d.cam.z;
 
-    const fp = d.focus();
+    /* SPEC_14 — measure the BALL, which is what this gate is named for.
+     * It used to project `d.focus()` at a fixed 1 m height. focus() prefers
+     * the carrier, so during a kick it reported the kicker standing 22 m from
+     * where the ball actually was and called the ball off-screen while the
+     * camera had it dead centre. `ballPoint()` is the one shared read. */
+    const bp = d.ballPoint();
     /* Count framing faults only while the ball is LIVE or in open play. A
      * dead ball on the tee during a set-piece walk-on is a broadcast cut —
      * the camera is framing the formation, and holding it to the tee'd ball
      * measured the edit, not the framing. */
     const ballLive = !d.kk || d.kk.stage === 'FLIGHT';
-    const pp = project({ ...d.cam, shake: 0 }, { w: 960, h: 540 }, fp.x, 1, fp.z);
+    const pp = project({ ...d.cam, shake: 0 }, { w: 960, h: 540 }, bp.x, bp.y, bp.z);
     if (ballLive && (!pp || pp.sx < 60 || pp.sx > 900 || pp.sy < 60 || pp.sy > 480)) {
       offTargetFrames++;
       if (offTargetFrames % 30 === 1 && diags.length < 300) diags.push({
