@@ -301,6 +301,23 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   }
   dists.sort((a, b) => a.d - b.d);
   const nearest = dists[0];
+  /* SPEC_14 / 14-c — THE NEAREST *ELIGIBLE* DEFENDER.
+   *
+   * A slipped tackle sets `beatenT` for 1.1-1.6 s. Only `dists[0]` was ever
+   * offered to the tackle test, so a beaten man standing closest made the
+   * carrier untouchable until his timer expired — a beaten man was a SHIELD.
+   * Measured at 3.7% of contact frames (26 of 711). It also stops a man lying
+   * on the turf from completing a tackle: `p.down` was never excluded.
+   *
+   * Net effect, four seeds x three difficulties: tackles made 63 -> 78.
+   *
+   * `nearest` is kept for pressure, the ring count and the line-break read,
+   * which are deliberately "closest body" measures. */
+  const eligible = (num: number): boolean => {
+    const p = d.L(dTeam, num);
+    return !!p && p.beatenT <= 0 && !p.down && p.sinbin <= 0;
+  };
+  const tackler1 = dists.find((x) => eligible(x.num)) ?? null;
   /* T-18. The old weights (nearest/9, +0.09 per man within 11 m) meant any
    * carrier with the regulation three convergers nearby read pressure ~0.94
    * — "a defender is physically on him" — and every downstream gate (pass,
@@ -337,9 +354,9 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     const dive = pressed.has('tackleDive');
     // honest ranges: a dive reaches 3.5 m, a smother 1.4 m
     const reach = dive ? 3.5 : 1.4;
-    const dd = nearest ? nearest.d : 9;
+    const dd = tackler1 ? tackler1.d : 9;
     if (dd <= reach) {
-      const tacklerNum = nearest!.num;
+      const tacklerNum = tackler1!.num;
       const tp = d.L(dTeam, tacklerNum);
       const safe = dive ? 0.86 : 0.95;             // smother is safer, no chase value
       const grip = tp.attrs.PWR;
@@ -360,9 +377,9 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * offside line and cannot legally touch him for the first stride. Without
    * this the nearest defender was on the new carrier inside two frames and the
    * match became one endless ruck. */
-  if (nearest && nearest.d < 1.1 && s.protect <= 0) {
+  if (tackler1 && tackler1.d < 1.1 && s.protect <= 0) {
     const carrierP = car;
-    const tackler = d.L(dTeam, nearest.num);
+    const tackler = d.L(dTeam, tackler1.num);
     const grip = tackler.attrs.PWR;
     const assist = d.isHuman(dTeam) ? d.assists.tackle : 0.5;
     const chance = clamp(0.6 + grip / 340 - carrierP.attrs.PWR / 420 + assist * 0.2, 0.35, 0.95);
@@ -373,8 +390,8 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * from. Once per defender per episode, first contact can be beaten:
      * the tackler is bounced and needs a second to reset. */
     if (!s.beatTried) s.beatTried = new Set<number>();
-    if (!s.beatTried.has(nearest.num)) {
-      s.beatTried.add(nearest.num);
+    if (!s.beatTried.has(tackler1.num)) {
+      s.beatTried.add(tackler1.num);
       const slip = clamp(0.07 + (carrierP.attrs.SKL - tackler.attrs.SKL) / 900 + (carrierP.attrs.PWR - grip) / 1000, 0.03, 0.18);
       if (R() < slip) {
         d.teams[dTeam].stats.missed++;
@@ -401,7 +418,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * roll always fired first and the red zone converted by attrition
        * only (16.5 entries a match, 3 tries). */
       if (distLine < 2.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { d.scoreTry(); return; }
-      d.startBreakdown(nearest.num);
+      d.startBreakdown(tackler1.num);
       return;
     }
     if (R() < 0.1 * dt * 10) d.commentate('BIG_HIT');

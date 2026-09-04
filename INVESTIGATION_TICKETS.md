@@ -246,8 +246,13 @@ rate (sliding metres per pass, or line-lane error at the catch)?
 
 ## T-73 · ELIGIBLE-TACKLER SELECTION: WRITTEN, MEASURED, HELD (AI/camera) — logged by SPEC_14
 
-**Status:** the patch exists, is measured, and was reverted before commit. It is
-held, not abandoned. It needs a ruling, not more work.
+**Status: SHIPPED (author ruling 2026-09-04, option A).** The author accepted
+the framing regression on the one seed in exchange for the tackle gain: "A 24%
+increase in tackles and preventing grounded players from making tackles is a
+massive gameplay upgrade. We will not block it for a known camera edge-case."
+The gate is RED ON SEED 1 ONLY (BALL ON SCREEN 196, threshold 60). Seeds 7/13/21
+are clean. This is a known, accepted, documented state — not a surprise, and
+not to be "fixed" by moving the threshold. The camera debt it exposes is T-74.
 
 **The bug (SPEC_14 task 14-c).** `upOpen` takes `const nearest = dists[0]` and
 only ever offers THAT man to the tackle test. `dists` is built from every live
@@ -289,10 +294,9 @@ This is a pre-existing camera weakness the new match flow simply reaches more
 often — `engine/camera.ts` is byte-identical to main, and two targeted fixes
 (rig-Z boost, anchor lead clamp) were tried and changed the count by exactly 0.
 
-**The ruling needed.** (a) Accept the framing regression and ship the tackles,
-(b) fix the lateral rig clamp / look-ahead tilt first and re-measure, or
-(c) drop the change. Do NOT tune the gate threshold — that is the thing the
-author has ruled out twice.
+**The ruling given.** (a) Ship it. Do NOT tune the gate threshold — the author
+has ruled that out twice. The camera debt it exposes is now T-74, logged as the
+next priority camera work.
 
 **Already measured, do not re-derive:** the 63 -> 78 tackle figure, the
 seed-by-seed BALL ON SCREEN figures (0/1/0/0 without the patch, 196/0/0/0 with
@@ -366,12 +370,56 @@ projection, not a repair.
 
 ---
 
+## T-74 · THE CABLE RIG LOSES THE BALL NEAR THE TOUCHLINE (camera) — logged by SPEC_14, NEXT PRIORITY
+
+**Observed.** With the ball near a touchline (x ~ 26-27 of a +-33 pitch) the
+cable rig ends up almost directly above it, and the ball falls out of the bottom
+of the frame for seconds at a time. On seed 1 with the eligible-tackler fix this
+is 196 frames across 3 x 100 s; 35 of them are genuinely off (192 px past the
+left margin) and the rest sit 0-1 px past the 60 px bottom margin. Seeds 7/13/21
+are clean on identical code, so this is geometry the new match flow reaches more
+often, not a new bug.
+
+**The mechanism, measured.** `engine/camera.ts` `cableRig`:
+
+* `wantX = anchorX * 0.82` deliberately eases the rig toward the middle, and
+  `d.cableX` is then clamped to +-30. With the ball at x = 27 the rig is pulled
+  inside it to x ~ 23.7 and cannot get outside the ball.
+* `trail` (the stand-off along z) is ~17 m, but the rig's look-ahead anchor can
+  sit ~20 m downfield of the ball, so the rig finishes only ~6 m from it in z.
+* Net: the rig is ~7 m away horizontally and 13 m above. The ball is ~62 deg
+  below horizontal, but the tilt is computed from the look-ahead anchor, giving
+  ~25 deg. The ball is ~31 deg off the look axis against a half-fov of ~34 deg —
+  inside the lens only just, and outside the gate's 60 px margin.
+
+**What was already tried and did NOT work (do not repeat).**
+* Boosting the rig's along-pitch ease rate (`cableZ`, 2.0 -> 2.0 + wide*2.6):
+  changed the count by exactly 0.
+* Raising the in-flight anchor ease rate (`cableAX/AZ`, 3.0 -> 6 and 9): 0.
+* Clamping `landingPrediction()` to the field and capping the anchor's lead
+  over the ball at 10-14 m: 0. The framing failures are in OPEN_PLAY, not in
+  flight, so none of these were on the path.
+
+**Not known.** (1) Should `wantX` stop easing toward the middle when the ball is
+beyond some |x|, or should the +-30 clamp widen? (2) Should the tilt be computed
+from the ball rather than the look-ahead anchor when the two diverge by more
+than N metres? (3) Is the 0.82 middle-ease factor fighting the lateral clamp?
+
+**Explicitly not the fix:** raising the BALL ON SCREEN threshold, or reverting
+the eligible-tackler work (T-73) that made this reachable.
+
+---
+
+---
+
 ## PRIORITY ORDER (my read — challenge it)
-1. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
-2. T-49 backward pods (the on-pitch feel of attack)
-3. T-41 maul exits + contest fairness
-4. T-67 double try (legality; needs the watchdog surfacing)
-5. T-66 try-repeat (render read)
-6. T-68 harness seeding (cheap, unblocks clean CI)
-7. T-65 stall presentation
-8. Audit families (batch review)
+1. **T-74 cable rig loses the ball near the touchline** (the only red gate on
+   the branch; the author accepted the red to ship T-73, so this now owns it)
+2. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
+3. T-49 backward pods (the on-pitch feel of attack)
+4. T-41 maul exits + contest fairness
+5. T-67 double try (legality; needs the watchdog surfacing)
+6. T-66 try-repeat (render read)
+7. T-68 harness seeding (cheap, unblocks clean CI)
+8. T-65 stall presentation
+9. Audit families (batch review)
