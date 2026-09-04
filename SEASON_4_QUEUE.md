@@ -330,3 +330,83 @@ the `shuffle` clip already authors.
 Two caveats carried into the review deliberately: breath is real but **modest**
 (§2.4a), and an intermediate probe of mine printed a **wrong "antiphase arms
 cancel" conclusion which is retracted** in §2.4b — its own data contradicts it.
+
+---
+
+## SPEC_22 — SHIPPED
+
+Live. `tsc --noEmit` clean. **9/9 Season 3 gates**, **15/15 seeds**, SPEC_21
+gates, SPEC_06 hysteresis all still pass. New `scripts/spec22verify.ts` adds
+seven SPEC_22 gates. Shot sheet: `spec22_shot.png` (eight rows; the last two are
+FLARE ON vs FLARE OFF over the same four frames).
+
+### Implementation
+
+`paper.ts` gains the pure helper and three constants:
+
+```
+gaitFlare(aa, spd, carryW) = (AB_BASE + AB_SWING·|sin(aa)|) · smoothstep(spd; 1.5→3.5) · carryW
+AB_BASE = 0.26   AB_SWING = 0.30   AB_MAX = 0.72
+```
+
+`coronal.ts` `drawOneArm` composes it additively with the SPEC_18.5 turn bias on
+the same `ab` channel, then clamps: `abEff = min(AB_MAX, ab + abGait + abBias)`.
+Both terms share the same `flareW = 1 − carryLock`, so a ball-locked arm is
+suppressed identically by both. `scene.ts` passes `spd: pg.spd` — the same speed
+the gait chooser and footfall squash already read, so flare, clip and thud
+cannot disagree.
+
+### Measured result (real drawn ink extent, not a re-modelled probe)
+
+| gait | breath before | breath after @20 | @34 |
+|---|---|---|---|
+| walk | 0.25 px | 3.83 px | 6.51 px |
+| jog | 0.38 px | 2.91 px | 4.95 px |
+| run | **0.60 px** | **4.50 px** | **7.66 px** |
+| sprint | 0.73 px | 5.69 px | 9.68 px |
+
+Lateral daylight, the headline defect:
+
+| gait | before | after | frames with daylight |
+|---|---|---|---|
+| jog | −0.0199 m | **+0.0388 m** | 480/480 |
+| run | −0.0316 m | **+0.0391 m** | 480/480 |
+| sprint | −0.0307 m | **+0.0398 m** | 480/480 |
+
+From **0/240 frames with any daylight** to **100% of frames on every gait above
+the speed gate**.
+
+### Two corrections to my own SPEC_22 spec
+
+**(1) The breath is 2.4x larger than I predicted.** I forecast 1.84 px @20 on
+run; measured 4.50 px. The design-sweep probe modelled only the upper-arm card's
+own outer edge, whereas the shipped gate measures the true ink extent of every
+polygon the drawer emits — which includes the forearm and hand, both carried
+further out by the flared elbow. The prediction was conservative because the
+probe was narrower than the drawing. My §2.4(a) caveat that the effect might be
+too subtle is therefore **withdrawn**: the delivered effect is comfortably
+visible, and notably it did NOT require raising the constants past the approved
+values.
+
+**(2) Two of my own proposed gates were mis-specified and were corrected, not
+worked around.**
+
+- *Smoothness.* My first Gate 5 compared raw per-frame silhouette change against
+  a flat 1.0 px budget and "failed" at 44 mm/frame. Measuring the same figure
+  with the flare DISABLED gave **53.9 mm on run and 49.3 mm on sprint — larger**.
+  The threshold was measuring limb cadence at 60 fps, not a pop. The gate now
+  asserts the property that matters: the flare must not increase the worst
+  per-frame change (it does not), plus C0/C1 continuity of `gaitFlare` in both
+  inputs (3.0e-5 and 3.8e-5 per 1e-4 step) and zero discontinuity across the
+  clip loop seam (0.0000 mm).
+- *Daylight scope.* §3.1 asked for daylight on "all four gaits". Walk is 1.6 m/s,
+  barely above `W_GATE_LO = 1.5`, so the **ruled** speed gate holds the flare at
+  ~0 there by design. Asserting daylight at walking pace would mean defeating
+  the ruling. The gate now asserts only where the speed gate is engaged and
+  reports walk for information.
+
+### Constants
+
+`AB_BASE = 0.26`, `AB_SWING = 0.30`, `AB_MAX = 0.72` — all exactly as approved.
+Worst-case total abduction with the turn flare stacked is **0.7200**, held by the
+clamp, inside the 0.72–0.80 the `shuffle` clip already authors.

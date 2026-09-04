@@ -21,7 +21,7 @@ import {
   paperCard, poly, foldTab, crease, ballPaper,
   hipRoots, groundedClearance, armDepth, solveKnee,
   depthShade, pairShade, cornerRadius,
-  insideSign, KNEE_GAIN, ELBOW_GAIN,
+  insideSign, KNEE_GAIN, ELBOW_GAIN, gaitFlare, AB_MAX,
 } from './paper';
 import { Pose } from './clips';
 import { project, type Camera, type View } from './retro';
@@ -66,6 +66,9 @@ export interface PaperDrawArgs {
   lean?: number;
   /** SPEC_18.5 — saturated centrifugal turn bias, -1..1. */
   turn?: number;
+  /** SPEC_22 — actor speed, m/s. Gates the gait-driven elbow flare so a
+   *  stationary player does not stand with his elbows abducted. */
+  spd?: number;
   /** SPEC_18.3b — 3/4 projection for the front/back card. SPEC_21 Item 1: a
    *  pure horizontal foreshortening; the shear term is gone. */
   tq?: { narrow: number };
@@ -352,13 +355,21 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     /* `ab` is already a per-side abduction (multiplied by `s` at use), so a
      * positive bias abducts and a negative one adducts — no `s` factor here. */
     const abBias = (s === armInside ? -1 : 1) * Math.abs(a.turn ?? 0) * ELBOW_GAIN * flareW;
+    /* SPEC_22 — gait-driven flare, ADDITIVE with the SPEC_18.5 turn bias on the
+     * same `ab` channel. Shares `flareW`, so a ball-locked arm is suppressed by
+     * both terms identically and the carry cannot visually disconnect. The
+     * total is clamped to AB_MAX (0.72), the low end of what the `shuffle`
+     * clip already authors, so no combination of gait + turn can reach a pose
+     * the art has never drawn. */
+    const abGait = gaitFlare(aa, a.spd ?? 0, flareW);
+    const abEff = Math.min(AB_MAX, ab + abGait + abBias);
     const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
     /* Depth foreshortening: an arm swung out of the coronal plane draws
      * shorter on the card. Front-swing and back-swing shorten alike, which is
      * correct — it is the SORT that tells them apart, not the length. */
     const fs = lerp(1, Math.abs(Math.cos(aa)), 0.42);
     const upD = upLen * fs, foreD = foreLen * fs;
-    const elX = sx0 + s * (ab + abBias) * upD * 0.85 + dep * 0.055 * s;
+    const elX = sx0 + s * abEff * upD * 0.85 + dep * 0.055 * s;
     const elY = sy0 - Math.cos(aa) * upD;
     const hdX = elX - s * Math.sin(e) * foreD * 0.5 + dep * 0.045;
     const hdY = elY - Math.cos(aa - e * 0.8) * foreD * 0.8;

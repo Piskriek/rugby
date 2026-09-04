@@ -53,7 +53,7 @@ function sample(name: string, u: number): Pose {
 
 const cam: Camera = { x: 0, z: -12, h: 1.6, yaw: 0, tilt: 0.05, fov: 0.42, shake: 0, horizon: 0.5, roll: 0 };
 
-function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null, turn = 0, fall: number | null = null, squash?: { sx: number; sy: number }): Poly[] {
+function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null, turn = 0, fall: number | null = null, squash?: { sx: number; sy: number }, spd = 0): Poly[] {
   const rec = new Rec();
   rec.cap = [];
   const ctx = rec.asCtx();
@@ -75,7 +75,7 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, le
     carry: 0, carryStyle: 0, ballSide: 0.6, ballSpin: 0,
     cap: false, tape: false, spinDir: 1, gs: 0.6, fore: 0,
     headDir: 0, depth: 0, lean,
-    tq: tqAng === null ? undefined : threeQuarter(tqAng), turn, squash,
+    tq: tqAng === null ? undefined : threeQuarter(tqAng), turn, squash, spd,
   };
   drawPaperActor(args);
   return (rec.cap ?? []).map((c) => ({
@@ -116,6 +116,17 @@ const FALLS = [0, 0.33, 0.66, 0.95];
 const diveP: Poly[] = [];
 FALLS.forEach((f, i) => { diveP.push(...cell('rightEdge', 0.5, i * CELL.w, 0, 0, null, 0, f, SQ21)); });
 
+/* SPEC_22 — SILHOUETTE BREATHING. Front view across a full run cycle at
+ * sprint speed, so the gait-driven elbow flare is fully gated in. Compare
+ * against the FLARE OFF row directly beneath: before SPEC_22 the outline
+ * varied 0.60 px at mid distance (frozen to the pixel grid) and the arm card
+ * never separated from the torso on ANY frame of ANY gait. */
+const BREATH_US = [0, 0.25, 0.5, 0.75];
+const breathOnP: Poly[] = [];
+const breathOffP: Poly[] = [];
+BREATH_US.forEach((u, i) => { breathOnP.push(...cell('front', u, i * CELL.w, 0, 0, null, 0, null, undefined, 8.0)); });
+BREATH_US.forEach((u, i) => { breathOffP.push(...cell('front', u, i * CELL.w, 0, 0, null, 0, null, undefined, 0)); });
+
 rasterise(
   [
     { name: `SPEC_17  ${clip.toUpperCase()}  CORONAL  (swing leg + arm z-sort)`, polys: coronalP },
@@ -124,6 +135,8 @@ rasterise(
     { name: 'SPEC_18.5  CENTRIFUGAL FLARE  turn bias -1 / -0.5 / +0.5 / +1  (inside tucks, outside flares)', polys: turnP },
     { name: 'SPEC_18.3a  KINETIC LEAN  -10.3 / -5.2 / +5.2 / +10.3 deg  (brake <-> accelerate)', polys: leanP },
     { name: 'SPEC_21  DIVE VOLUME  fall 0 / 0.33 / 0.66 / 0.95 at max tackle squash  (must not flatten)', polys: diveP },
+    { name: 'SPEC_22  SILHOUETTE BREATHING  FLARE ON  run cycle u=0/0.25/0.5/0.75 at 8 m/s  (elbows breathe, daylight opens)', polys: breathOnP },
+    { name: 'SPEC_22  BEFORE / FLARE OFF  same 4 frames  (dead outline: 0.60 px variation, zero daylight)', polys: breathOffP },
   ],
   out,
   { w: CELL.w * US.length, h: CELL.h },

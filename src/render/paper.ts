@@ -746,6 +746,67 @@ export function insideSign(omega: number): number {
   return omega >= 0 ? -1 : 1;
 }
 
+/* ================================================================== */
+/* SPEC_22 — SILHOUETTE BREATHING (gait-driven elbow flare)            */
+/* ------------------------------------------------------------------ */
+/* MEASURED CAUSE: `abL`/`abR` are the constant 0.08 in EVERY keyframe of
+ * walk/jog/run/sprint — those clips inherit STAND and never modulate
+ * abduction. So the rig had no oscillating lateral elbow term at all outside
+ * SPEC_18.5's turn flare, which is zero in a straight line by construction.
+ * The dead silhouette was structural, not a tuning shortfall.
+ *
+ * Measured on build CENTRE, inner edge of the upper-arm card vs the torso edge
+ * at the elbow's own height (positive would be a real hole of daylight):
+ *
+ *     walk  -0.0416 .. -0.0238 m      0/240 frames with any daylight
+ *     jog   -0.0474 .. -0.0199 m      0/240
+ *     run   -0.0596 .. -0.0316 m      0/240
+ *     sprint -0.0707 .. -0.0307 m     0/240
+ *
+ * The arm defines the outer silhouette on 240/240 frames yet the outline
+ * varied only 0.60 px at sc 20 over a whole stride — below the renderer's own
+ * quantisation, i.e. frozen to the pixel grid.
+ *
+ * THE TERM GOES IN FORWARD KINEMATICS, NOT IK. Unlike the leg (solveKnee), the
+ * coronal arm is straight FK: elX = sx0 + s*(ab + bias)*upD*0.85. There is no
+ * arm IK to modify, and `ab` is the channel SPEC_18.5's turn flare already
+ * uses, so the two compose additively on the same quantity.
+ *
+ * DRIVEN BY THE ARM'S OWN ANGLE. `|sin(a_s)|` rather than a u-clock: a
+ * free-running oscillator can drift out of sync with the clip, and this
+ * codebase already ruled against phase tables for exactly that reason
+ * (SPEC_18.3a reads contact from the rig's clearance helper, not a table).
+ * `|sin|` peaks at maximum swing in EITHER direction, which is anatomically
+ * right — the shoulder abducts at the extremes and tucks at the neutral pass.
+ * Being even, it breathes TWICE per stride; the frequency falls out of the
+ * anatomy instead of being imposed by a constant. */
+
+/** Constant push-off from the torso — buys DAYLIGHT. */
+export const AB_BASE = 0.26;
+/** Gait-phase oscillation depth — buys BREATH. */
+export const AB_SWING = 0.30;
+/** Hard ceiling on total abduction. The `shuffle` clip already authors
+ *  abL/abR ~ 0.72-0.80, so this keeps the arm inside poses the art uses even
+ *  if a future ELBOW_GAIN change stacks on top. */
+export const AB_MAX = 0.72;
+
+/**
+ * Gait-driven lateral elbow flare, in the same units as the pose's `ab`.
+ *
+ * @param aa      that arm's sagittal swing angle (pose.aL / pose.aR)
+ * @param spd     actor speed, m/s — gated so a stationary player does not
+ *                stand with his elbows out (ruled, SPEC_18.5)
+ * @param carryW  1 = free arm, 0 = fully locked to the ball. Reuses the
+ *                SPEC_18.5 `carryLock` weight so a carrying arm cannot flare
+ *                away from the ball (ruled).
+ */
+export function gaitFlare(aa: number, spd: number, carryW: number): number {
+  const t = Math.min(1, Math.max(0, (spd - W_GATE_LO) / (W_GATE_HI - W_GATE_LO)));
+  const gate = t * t * (3 - 2 * t);          // same smoothstep as the turn bias
+  const swing = Math.abs(Math.sin(aa));
+  return (AB_BASE + AB_SWING * swing) * gate * Math.min(1, Math.max(0, carryW));
+}
+
 /**
  * Advance the turn-rate filter and return the saturated bias in (-1, 1).
  * Shares `LeanState`'s EMA velocity so the lean and the limb flare read the

@@ -428,6 +428,10 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
       lean: pg.leanAngle, turn: pg.turnBias,
+      /* SPEC_22 — the gait flare's speed gate. Same `pg.spd` the gait chooser
+       * and footfall squash already read, so flare, clip and thud cannot
+       * disagree about how fast the man is moving. */
+      spd: pg.spd,
       tq: tqProj,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
