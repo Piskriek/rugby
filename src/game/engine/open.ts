@@ -246,7 +246,6 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   const beatOn = !!(rb && d.t < rb.until);
   /* SPEC_04: this is a distinct defensive-line-reset opportunity. Sample the
    * live positions before the existing human-pace retreat corrects them. */
-  if (beatOn && d.sampleDefensiveLineResetOffside(dt)) return;
   const dists: { num: number; d: number }[] = [];
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);

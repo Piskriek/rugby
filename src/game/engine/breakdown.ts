@@ -275,7 +275,9 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
     /* SPEC_04: sample the actual pre-retreat actor positions and whistle only a
      * sustained breach. The writer owns the `offsides` stat; the physical
      * walk-back below remains a no-teleport formation correction. */
-    if (d.sampleFormedRuckOffside(s, dt)) return;
+    /* SPEC_12: the referee is asked once per frame from `update()`, over every
+     * live line at once. Asking here as well would count dt twice and halve
+     * the time a breach needs to sustain. */
     const fwd = s.attacking === 'A' ? 1 : -1;
     const atkLine = s.contactZ - fwd * 1.0;
     /* T-18. The hindmost foot is the LAW, but a defender does not set a

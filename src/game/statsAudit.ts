@@ -36,7 +36,13 @@ export const BENCHMARKS: Benchmark[] = [
   { key: 'rucks', label: 'RUCKS PER MATCH', lo: 120, hi: 200, perTeam: false, note: 'Around 150-170 is normal. Too few means play is not recycling; too many means nothing else ever happens.' },
   { key: 'scrums', label: 'SCRUMS PER MATCH', lo: 14, hi: 20, perTeam: false, note: 'Distinct awarded scrum occurrences, read from the set-piece event ledger rather than won/lost outcome fields.' },
   { key: 'lineouts', label: 'LINEOUTS PER MATCH', lo: 20, hi: 28, perTeam: false, note: 'Distinct awarded lineout occurrences, including a separately awarded rethrow, never a sum of outcome counters.' },
-  { key: 'penalties', label: 'PENALTIES PER MATCH', lo: 14, hi: 28, perTeam: false, note: 'Around 18-22. Far too many was the old offside bug; far too few means the referee is asleep.' },
+  /* SPEC_12: this row now means PENALTIES. It used to count every whistle, so
+   * a knock-on and a forward pass — scrum restarts, which cost the offender
+   * nothing like a penalty — were spending the match's penalty budget. Those
+   * moved to the row below. The band is unchanged: a real Test still produces
+   * roughly 18-22 penalties, and the claim was always about penalties. */
+  { key: 'penalties', label: 'PENALTIES PER MATCH', lo: 14, hi: 28, perTeam: false, note: 'Around 18-22. Far too many was the old offside bug; far too few means the referee is asleep. Set-piece restarts are counted separately below, not here.' },
+  { key: 'restarts', label: 'SCRUM RESTARTS PER MATCH', lo: 8, hi: 28, perTeam: false, note: 'Knock-ons, forward passes, free kicks and turnover scrums — the whistles that are NOT penalties. Real rugby concedes 12-18 handling errors a match plus a handful of free kicks, so the band is deliberately wide. A very low count means handling errors are going unexamined, which is exactly what SPEC_13 reports about the pass.' },
   { key: 'passes', label: 'PASSES PER MATCH', lo: 180, hi: 340, perTeam: false, note: 'Around 250. A read on whether the ball actually moves through hands.' },
   { key: 'kicks', label: 'KICKS FROM HAND', lo: 30, hi: 70, perTeam: false, note: 'Around 45-55. Under 30 means the kicking game does not exist; over 70 means nobody runs.' },
   { key: 'metres', label: 'METRES CARRIED PER TEAM', lo: 250, hi: 800, perTeam: true, note: 'Around 400-600. A direct read on whether carries actually gain ground.' },
@@ -157,6 +163,7 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
     add('scrums', d.setPieceEvents.scrums);
     add('lineouts', d.setPieceEvents.lineouts);
     add('penalties', A.penaltiesConceded + B.penaltiesConceded);
+    add('restarts', A.restarts + B.restarts);
     add('passes', A.passes + B.passes);
     add('kicks', A.kicks + B.kicks);
     add('metres', (A.metres + B.metres) / 2);

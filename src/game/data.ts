@@ -400,8 +400,13 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'pitch', label: 'PITCH', values: ['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'], def: 1, note: 'Footing alters acceleration, sidestep success and maul traction.', cat: 'CONDITIONS' },
   { id: 'wind', label: 'WIND', values: ['CALM', 'LIGHT', 'BREEZY', 'STRONG', 'GUSTING'], def: 1, note: 'Cross-wind pushes the ball off line on every kick and restart.', cat: 'CONDITIONS' },
   { id: 'timeofday', label: 'KICK-OFF', values: ['MIDDAY', 'AFTERNOON', 'TWILIGHT', 'FLOODLIT'], def: 2, note: 'Changes crowd shading and the vignette weight.', cat: 'CONDITIONS' },
-  { id: 'referee', label: 'REFEREE', values: ['THE WHISTLER', 'THE BALANCED', 'LET IT FLOW', 'THE TECHNICAL'], def: 1, note: 'Strictness drives penalty frequency, card threshold and advantage length.', cat: 'RULES' },
-  { id: 'offside', label: 'OFFSIDE', values: ['ON', 'OFF'], def: 0, note: 'The original let you turn the law off entirely. Defenders then stand anywhere.', cat: 'RULES' },
+  /* SPEC_12. The REFEREE slider is RETIRED. It promised to drive "penalty
+   * frequency, card threshold and advantage length" and was read by nothing in
+   * the engine — a control that advertised an effect it did not have. Vague
+   * legacy strictness is replaced by explicit, deterministic toggles: the two
+   * below say exactly what they do, and the engine reads both. */
+  { id: 'offside', label: 'OFFSIDE', values: ['STRICT', 'LENIENT', 'OFF'], def: 1, cat: 'RULES', note: 'How fussy the referee is about the offside line. STRICT polices every line including the set pieces; LENIENT ignores a man who is retiring or more than ten metres from the ball, and leaves the technical set-piece lines alone; OFF observes and counts the law but never blows. Defaults to LENIENT so the whistle arrives without ambushing a muscle memory built without one.' },
+  { id: 'offsideAiClean', label: 'FORCE AI CLEAN', values: ['NO', 'YES'], def: 0, cat: 'RULES', note: 'The CPU is never allowed to infringe: every CPU mark is projected onto the legal side of the live line before it is steered to, and a separation shove can no longer push a man across it. The AI whistle can then never sound. The human is never constrained — only prevented from being cheated.' },
   { id: 'knockOn', label: 'KNOCK-ON', values: ['STRICT', 'NORMAL', 'LENIENT'], def: 1, note: 'Loose ball spill probability and whether the whistle goes.', cat: 'RULES' },
   { id: 'fwdPass', label: 'FORWARD PASS', values: ['STRICT', 'NORMAL', 'LENIENT'], def: 1, note: 'Judged against the pass vector, not the receiver.', cat: 'RULES' },
   { id: 'advantage', label: 'ADVANTAGE', values: ['SHORT', 'NORMAL', 'LONG'], def: 1, note: 'How long play runs before the referee comes back.', cat: 'RULES' },
@@ -640,7 +645,7 @@ export const MANUAL: ManualSection[] = [
     entries: [
       { k: 'BOOT', v: 'Title card, attract-mode palette cycle, press fire' },
       { k: 'MAIN MENU', v: 'Friendly, League, World Cup, Five Nations, Skills Clinic, Replay Theatre, Options, Media Guide' },
-      { k: 'MATCH SETUP', v: 'Choose side, opponent, kit, weather, pitch, referee and match length' },
+      { k: 'MATCH SETUP', v: 'Choose side, opponent, kit, weather, pitch, laws and match length' },
       { k: 'SQUAD SCREEN', v: 'Fifteen starters plus bench; swap, view six rated stats per man' },
       { k: 'TACTICS SCREEN', v: 'Ten sliders, five presets, backline and defensive formations' },
       { k: 'KICK-OFF', v: 'Coin toss, direction, then the kick-o-meter for the restart' },
@@ -710,7 +715,7 @@ export const MANUAL: ManualSection[] = [
       { k: 'RUCK SPEED', v: '0.9 s for a one-man cleanout to 4.6 s for an uncontested ball' },
       { k: 'TACKLE SUCCESS', v: 'Grip strength against carrier power, ± 18 percent for the angle of entry' },
       { k: 'HANDLING ERROR', v: '4 percent base, rising to 19 percent in rain with a wet ball' },
-      { k: 'PENALTY RATE', v: 'One penalty every 3.1 minutes on the Balanced referee, 1.7 on the Whistler' },
+      { k: 'PENALTY RATE', v: 'One penalty every 3.1 minutes with the whistle on; the offside law adds its own on the STRICT setting' },
       { k: 'EXPECTED POINTS', v: '0.12 from your own 22 rising to 4.30 under the posts' },
       { k: 'CLOCK COMPRESSION', v: 'Every half resolves in about 150 seconds of real time; the 40-minute option preserves the authentic scoreline scale' },
       { k: 'STAMINA DRAIN', v: '1.1 per minute at jogging load, 4.6 per minute in a sprint' },

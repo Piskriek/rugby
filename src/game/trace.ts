@@ -14,6 +14,7 @@
 
 import { Director, Input, NO_INPUT, MatchConfig } from './director';
 import { FIELD, project } from '../render/retro';
+import { sanctionOf } from './engine/laws';
 
 
 export type Val = number | string | boolean | null;
@@ -901,6 +902,9 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun
       if (d.refSignal > 0) {
         rec.push(d, 'LAW_CALL', 'REFEREE DECISION', {
           call: d.refSignalText,
+          /* SPEC_12: a whistle is not automatically a penalty. The audit needs
+           * to be able to say "penalty" and mean it. */
+          sanction: sanctionOf(d.refSignalText),
           explained: true,
           firstOccurrence: !d.lawsExplained.size,
           penaltiesA: d.teams.A.stats.penaltiesConceded,

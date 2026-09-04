@@ -80,13 +80,43 @@ export function resolvePenalty(d: Director, ) {
   d.penaltyChoices(p.team, p.x, p.z, p.free);
 }
 
+/* SPEC_12 — THE SANCTION LEDGER.
+ *
+ * `REFEREE_CALLS` names the sanction in the text of the call itself
+ * ("PENALTY — OFFSIDE", "SCRUM — KNOCK ON", "FREE KICK — NOT IN STRAIGHT"),
+ * and one call site passes a bare string of its own
+ * ("PENALTY — WHEELED PAST 90°"), so the sanction is read from the text and
+ * there is exactly one place that decides what a whistle costs.
+ *
+ * The old code counted EVERY call as a penalty conceded. A knock-on is not a
+ * penalty: it is a scrum, it costs the offender nothing like a penalty does,
+ * and counting it meant the PENALTIES box-score row was measuring handling
+ * errors. Worse, it spent the match's penalty BUDGET — the realism board's
+ * 14..28 — on restarts, so a real increase in actual penalties looked like a
+ * balance regression and a real decrease hid inside the noise.
+ *
+ * An unlabelled call defaults to a restart, never to a penalty: an unlabelled
+ * call inflating the penalty budget is the failure this exists to prevent. */
+export type Sanction = 'PENALTY' | 'FREE_KICK' | 'SCRUM' | 'TURNOVER';
+
+export function sanctionOf(call: string): Sanction {
+  if (call.startsWith('PENALTY')) return 'PENALTY';
+  if (call.startsWith('FREE KICK')) return 'FREE_KICK';
+  if (call.startsWith('TURNOVER')) return 'TURNOVER';
+  return 'SCRUM';
+}
+
+/** True when a call is one of the offences that costs a penalty, not a restart. */
+export const isPenaltyCall = (call: string) => sanctionOf(call) === 'PENALTY';
+
 export function lawCall(d: Director, key: string, call: string, team: 'A' | 'B') {
 
   d.refSignal = 1.8;
   d.refSignalText = call;
   /* T-10 — every law call has a whistle. */
   d.audio.whistle('LONG');
-  d.teams[team].stats.penaltiesConceded++;
+  if (isPenaltyCall(call)) d.teams[team].stats.penaltiesConceded++;
+  else d.teams[team].stats.restarts++;
   d.say(call);
   if (!d.lawsExplained.has(key)) {
     d.lawsExplained.add(key);
