@@ -34,6 +34,12 @@ for (let i = 0; i < secs * 60 && !d.over; i++) {
       if (!insideCorridor(p, line)) continue;
       const pen = penetrationOf(p, tl);
       if (pen <= 0) continue;
+      /* D-3 — exclude the men the retreat fix deliberately does not own: the
+       * ball carrier (he cannot be "loitering offside" — he IS the ball) and a
+       * man bound into the contest. Measured, the 8.83 s "episode" in the
+       * first pass was the CARRIER sitting 0.15 m over an OPEN line. Counting
+       * him made the tail look like a loitering defect when it is not one. */
+      if (p.carrier || p.bound || p.sinbin > 0) continue;
       const key = `${p.team}${p.num}`;
       seen.add(key);
       const st = open.get(key);

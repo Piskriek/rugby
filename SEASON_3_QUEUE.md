@@ -1435,3 +1435,93 @@ Two findings worth a ruling:
    near inaudible over typical playback; the try spike is 4× the loudest tackle.
 
 **Halting for review of all five diagnostics.**
+
+---
+
+# SPEC_19 / SPEC_20 — FIXES SHIPPED
+
+**All 9 gates pass**, including the tightened `NO TELEPORTS` (0.80 m) and the
+previously-failing `BALL ON SCREEN`. Verified across **5 seeds x 3 difficulties
+= 15 combinations, all clean** — not just the default seed.
+
+| gate | before | after |
+|---|---|---|
+| `BALL ON SCREEN` | **196** (fail, limit 60) | **0** |
+| `NO TELEPORTS` | 0 at a 1.4 m threshold | **0 at 0.80 m** |
+| worst per-frame displacement | 1.14 m | **0.70 m** |
+
+## D-1 camera
+
+`minFollowGround(h, fov, eye)` in `retro.ts`. The rigs floored their ground
+distance at a **constant** (4 m touchline, 5 m cable) while flying at 13–46 m.
+
+**Two failed attempts, both instructive:**
+1. *Flattening the tilt inside the rig* — no effect. If the camera is 5.5 m from
+   a ball 13 m below it, **any** tilt that frames the ball aims past it. The rig
+   has to physically back off.
+2. *Pushing the rig back inside `cableRig`* — no effect either (543 of 545
+   offending frames unchanged). The rigs only produce a `target`; every axis is
+   then **eased** toward it, so an upstream correction is undone within a frame.
+
+The floor is therefore applied to the **eased `d.cam`**, sliding it back along
+its own view axis — the yaw is unchanged by construction, so `CAMERA STABLE` is
+untouched.
+
+## D-2 lineout / teleport gate
+
+Threshold 1.4 m → **0.80 m** as ruled. Six unbounded writes had to be fixed,
+each found by measurement:
+
+1. **Set-piece settle** (lineout, scrum pack, maul) — walked while the gap
+   exceeded a threshold, then `place()`d the **whole remaining gap** in one
+   frame. `settleToward()` bounds it at 2.6 m/s. Lineout max/frame
+   0.906 → 0.275 m; scrum 0.909 → 0.162 m.
+2. **`startOpen` close-place** — up to 1.0 m in one frame.
+3. **`FALL_FORWARD_MAX` 0.9 → 0.45** — explicitly tuned against the *old* 1.15 m
+   line. The carrier's own velocity accounted for only ~0.11 m of a 0.90 m move.
+4. **`separate()` shove accumulation** — no single shove looked wrong; a man
+   with **zero velocity** moved 0.878 m via four writes (+0.012, −0.383, −0.508).
+   Only the *sum* was unbounded. Budgeted at 0.22 m/frame, direction preserved.
+5. **Scrum-half base placement** and **restart formation** — the last two
+   whole-gap snaps. The restart landed at **0.7994 m**, six tenths of a
+   millimetre under the new gate: technically passing, but balanced on the edge.
+   Bounded rather than left to luck.
+6. The scrum-half **scrum** settle, in its own block — only exposed on seed 5
+   under the bot-input harness, which `NO_INPUT` probing never reached.
+
+## D-3 offside (rescoped, retreat logic NOT rebuilt)
+
+Targets only the two measured defects. Adjusts the **mark** before the steer, so
+the player runs back under his own steering; independent of `FORCE AI CLEAN`
+(a player-facing option, off by default).
+
+| | before | after |
+|---|---|---|
+| retreating frame share | 64.9% | **86.5%** |
+| loitering | 21.7% | **3.7%** |
+| episodes with **zero** retreat | 5.2% | **0.4%** |
+| max lingering | 8.42 s | **3.15 s** |
+
+**A probe correction:** the original 8.42 s "episode" was the **ball carrier**
+sitting 0.15 m over an OPEN line — he cannot be loitering offside, he *is* the
+ball. The probe now excludes carrier/bound/sinbin players, which is also exactly
+who the fix excludes. The residual 53.9 m peak is a `RESET` line snapping in
+behind players, a transient, not loitering.
+
+## D-4 — aborted per ruling
+
+No AI tuning. Predicate retained for telemetry only (`scripts/d4smellblood.ts`).
+
+## D-5 audio subtractive mix
+
+| source | before | after |
+|---|---|---|
+| tackle (force 1) | −13.0 dBFS | **−17.7** |
+| whistle (true peak) | −18.8 dBFS | **−11.4** ← now the loudest |
+| quiet bed floor | −32.1 dBFS | **−25.3** |
+| worst-case sum | −1.3 dBFS | **−1.1** |
+
+The whistle is now the highest peak, as ruled. Note its true peak is **1.5× the
+envelope** — two detuned squares sum through one gain. The try spike was trimmed
+0.34 → 0.24 because the boosted whistle left only **0.2 dB** of headroom against
+a chain with **no limiter**.

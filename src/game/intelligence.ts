@@ -56,6 +56,9 @@ export interface Live {
   controlled: boolean;
   /** yellow card timer in match seconds, 0 when fit */
   sinbin: number;
+  /** D-3/T-71 — seconds this man has been continuously offside, for the
+   *  retreat-intent escalation. Reset the moment he is legal. */
+  offsideT?: number;
   /** T-18: seconds left of being BEATEN — a slipped tackle. A beaten defender
    *  recovers (steers back into the line) but cannot tackle while the timer
    *  runs; this is where line breaks come from. */
@@ -225,7 +228,12 @@ export function steer(
  * 0.35 m/frame is 21 m/s of pure shunt, far more than any real jostle needs,
  * and it preserves the DIRECTION of the resolution exactly — only the
  * magnitude is clipped, so bodies still stop overlapping. */
-const MAX_SHOVE_PER_FRAME = 0.35;
+/* Note the budget must leave room for the player's OWN legitimate movement in
+ * the same frame: steer() integrates velocity first (a sprint is ~0.15 m) and
+ * the shove is added on top. 0.35 + a sprint stride sat just over the 0.80 m
+ * gate; 0.22 leaves clear margin while still resolving overlaps in one or two
+ * frames. */
+const MAX_SHOVE_PER_FRAME = 0.22;
 
 export function separate(
   all: Live[], dt: number,

@@ -20,7 +20,7 @@ console.log('  bedGain      = swell * (0.55 + crowdRatio*0.55)');
 console.log('  level gate: OFF=0, LOW=0.45, FULL=1\n');
 console.log('  scenario                                   swell   bedGain   at master   dBFS');
 const bed = (mom: number, in22: boolean, spike: number, crowd: number, gate: number) => {
-  const swell = (0.05 + Math.abs(mom) * 0.055 + (in22 ? 0.08 : 0) + spike) * gate;
+  const swell = (0.11 + Math.abs(mom) * 0.055 + (in22 ? 0.08 : 0) + spike) * gate;
   const bg = swell * (0.55 + crowd * 0.55);
   return { swell, bg, at: bg * MASTER };
 };
@@ -28,8 +28,8 @@ const rows: [string, number, boolean, number, number, number][] = [
   ['idle, neutral, no travelling support', 0, false, 0, 0, 1],
   ['idle, neutral, full support', 0, false, 0, 1, 1],
   ['big momentum, in the 22, full support', 1, true, 0, 1, 1],
-  ['TRY spike (0.34), in 22, full support', 1, true, 0.34, 1, 1],
-  ['TRY spike, LOW level gate', 1, true, 0.34, 1, 0.45],
+  ['TRY spike (0.24), in 22, full support', 1, true, 0.24, 1, 1],
+  ['TRY spike, LOW level gate', 1, true, 0.24, 1, 0.45],
 ];
 for (const [label, m, i22, sp, cr, g] of rows) {
   const r = bed(m, i22, sp, cr, g);
@@ -40,12 +40,12 @@ for (const [label, m, i22, sp, cr, g] of rows) {
 /* ---- one-shots ---- */
 console.log('\n--- ONE-SHOTS (peak) ---');
 console.log('  source            force   peak gain   at master   dBFS');
-const impact = (f: number) => 0.22 * f + 0.03;
+const impact = (f: number) => 0.125 * f + 0.02;
 const shots: [string, number, number][] = [
   ['TACKLE (force 0)', 0, impact(0.35)],
   ['TACKLE (force 1)', 1, impact(1.0)],
   ['KICK', 0.4, impact(0.4)],
-  ['WHISTLE blast', 1, 0.085],
+  ['WHISTLE blast', 1, 0.20],
 ];
 for (const [label, f, g] of shots) {
   console.log('  %s %s  %s  %s  %s', label.padEnd(17), String(f).padStart(5),
@@ -53,14 +53,14 @@ for (const [label, f, g] of shots) {
 }
 console.log('\n  NOTE: the whistle sums TWO detuned oscillators through one gain');
 console.log('  (og 1.0 and 0.5), so its true peak is up to 1.5x the envelope:');
-console.log('  %s at master = %s dBFS', (0.085 * 1.5 * MASTER).toFixed(4), f2(db(0.085 * 1.5 * MASTER)));
+console.log('  %s at master = %s dBFS', (0.20 * 1.5 * MASTER).toFixed(4), f2(db(0.20 * 1.5 * MASTER)));
 console.log('  DOUBLE fires two blasts 0.24 s apart — no overlap (dur 0.16).');
 
 /* ---- collisions ---- */
 console.log('\n--- WORST-CASE SUM (a try: bed spike + whistle x2) ---');
-const worst = bed(1, true, 0.34, 1, 1).at + 0.085 * 1.5 * MASTER;
+const worst = bed(1, true, 0.24, 1, 1).at + 0.20 * 1.5 * MASTER;
 console.log('  bed %s + whistle %s = %s  (%s dBFS)  clipping: %s',
-  bed(1, true, 0.34, 1, 1).at.toFixed(3), (0.085 * 1.5 * MASTER).toFixed(3),
+  bed(1, true, 0.24, 1, 1).at.toFixed(3), (0.20 * 1.5 * MASTER).toFixed(3),
   worst.toFixed(3), f2(db(worst)), worst > 1 ? 'YES' : 'no');
 const worst2 = worst + impact(1.0) * MASTER;
 console.log('  + a max-force TACKLE in the same instant = %s  (%s dBFS)  clipping: %s',
@@ -69,7 +69,7 @@ console.log('  + a max-force TACKLE in the same instant = %s  (%s dBFS)  clippin
 /* ---- dynamic range ---- */
 console.log('\n--- DYNAMIC RANGE ---');
 const quiet = bed(0, false, 0, 0, 1).at;
-const loud = bed(1, true, 0.34, 1, 1).at;
+const loud = bed(1, true, 0.24, 1, 1).at;
 console.log('  quietest bed %s dBFS -> loudest bed %s dBFS = %s dB of range',
   f2(db(quiet)), f2(db(loud)), (db(loud) - db(quiet)).toFixed(1));
 console.log('  loudest one-shot (tackle f=1) is %s dB above the quiet bed',
