@@ -401,7 +401,13 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
    * to go to ground, not a teleport. The ruck reference (cx, cz) below is
    * taken from this bounded position, so the whole breakdown settles where
    * the carrier actually lands. */
-  const FALL_FORWARD_MAX = 0.9;   // per-frame-legal landing; keeps maxDisp < 1.15 m
+  /* D-2 — retuned from 0.9 to 0.45 for the tightened 0.80 m NO TELEPORTS gate.
+   * 0.9 was chosen against the old 1.15 m line and became the single largest
+   * remaining per-frame write once the set-piece settles were bounded: the
+   * carrier's own velocity accounts for only ~0.11 m of it, so the rest was a
+   * position snap. 0.45 m in one frame is 27 m/s — still a decisive forward
+   * fall on contact, but inside the gate with margin. */
+  const FALL_FORWARD_MAX = 0.45;
   const fall = clamp(car.vz * dir * 0.13, 0, FALL_FORWARD_MAX);
   car.z += dir * fall;
   const cx = car.x, cz = car.z;

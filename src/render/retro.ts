@@ -477,3 +477,47 @@ export function drawCRT(ctx: Ctx, v: View, intensity = 1) {
 }
 
 void PIX; void GRASS;
+
+/* ================================================================== */
+/* D-1 — MINIMUM FOLLOW DISTANCE                                       */
+/* ------------------------------------------------------------------ */
+/* Measured cause of the BALL ON SCREEN failures: the rigs floor their
+ * ground distance at a CONSTANT (4 m touchline, 5 m cable) while the
+ * camera flies at 13-21 m. At 13 m high and 5.5 m out the ball sits
+ * 67 degrees below horizontal while the rig tilts only 30, so it drops
+ * out of the bottom of frame — 97% of failing frames were "bottom",
+ * and 239 of 266 had the camera within 8 m of the ball.
+ *
+ * A constant floor cannot be right: the safe distance is a function of
+ * how high the camera is and how much lens it has. Require the subject
+ * to sit no lower than `keep` of the way from the view axis to the
+ * bottom edge:
+ *
+ *     depression = atan((h - eye) / g)  <=  tilt + halfFov * keep
+ *
+ * Solving for g, and noting tilt itself grows as g shrinks, we floor g
+ * directly at the distance where the depression equals the widest angle
+ * the lens can still show.
+ * ================================================================== */
+
+/** Eye height of the subject used by the rigs when they solve tilt. */
+const SUBJECT_EYE = 1.2;
+/** Fraction of the half-frame the subject may use before we push back. */
+const KEEP = 0.62;
+
+/**
+ * Smallest horizontal camera-to-subject distance that still leaves the
+ * subject inside the vertical frame. Pure.
+ *
+ * @param h      camera height, metres
+ * @param fov    vertical field of view, radians
+ * @param eye    subject eye height (default 1.2 m, matching the rigs)
+ */
+export function minFollowGround(h: number, fov: number, eye = SUBJECT_EYE): number {
+  const rise = Math.max(0.1, h - eye);
+  /* The steepest the subject may sit below horizontal. Clamped below
+   * 85 deg so the expression cannot blow up, and the 0.5 floor keeps a
+   * very low camera from demanding a silly distance. */
+  const maxDep = Math.min(1.483, Math.max(0.5, fov * 0.5 * (1 + KEEP) + 0.10));
+  return rise / Math.tan(maxDep);
+}

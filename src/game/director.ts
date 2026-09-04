@@ -1045,6 +1045,27 @@ export class Director {
    *
    * One function so the gate and the HUD cannot drift apart again.
    */
+
+  /* ---------------- D-2: BOUNDED SET-PIECE SETTLE ----------------
+   * The set pieces all used the same shape: walk while the gap is over a
+   * threshold, otherwise `place()` exactly on the slot. That final `place`
+   * closes the WHOLE remaining gap in one frame, so the last step was up to
+   * the threshold itself — measured at 0.87-0.91 m per frame in the lineout,
+   * an implied 51.9 m/s against a 9 m/s sprint. It never tripped NO TELEPORTS
+   * only because that gate's threshold was 1.4 m.
+   *
+   * `settleToward` closes the last gap at a bounded rate instead. It returns
+   * true once the man is genuinely on his slot, so callers can pin velocity
+   * and switch clips exactly as before. */
+  private settleToward(p: Live, wx: number, wz: number, dt: number, tag: string): boolean {
+    const gap = Math.hypot(wx - p.x, wz - p.z);
+    if (gap < 0.02) { this.place(p, wx, wz, tag); return true; }
+    /* A walking-on forward closes at about 2.6 m/s; cap the step at that. */
+    const step = Math.min(gap, 2.6 * dt);
+    this.place(p, p.x + (wx - p.x) / gap * step, p.z + (wz - p.z) / gap * step, tag);
+    return gap <= 0.12;
+  }
+
   ballPoint(): { x: number; y: number; z: number } {
     if ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && this.scrim && this.scrim.ball.state !== 'HELD') {
       return { x: this.scrumAnchor.x + this.scrim.ball.x, y: this.scrim.ball.y + 0.06, z: this.scrumAnchor.z + this.scrim.ball.z };
@@ -2078,8 +2099,9 @@ export class Director {
           p.job = 'GET TO YOUR SCRUM SLOT';
           steer(p, dt, !set);
         } else {
-          this.place(p, wx, wz, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* D-2 — bounded settle; the 1.15 m threshold here made this the
+           * biggest potential snap of the three set pieces. */
+          if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = slot.team === 'A' ? 1 : -1;
         }
@@ -2131,9 +2153,9 @@ export class Director {
           steer(p, dt, true);
           continue;
         }
-        this.place(p, slot.x, slot.z, 'bound');
-        p.vx = 0; p.vz = 0;
-          p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+        /* D-2 — bounded settle, no whole-gap snap on the last step. */
+        if (this.settleToward(p, slot.x, slot.z, dt, 'bound')) { p.vx = 0; p.vz = 0; }
+        p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         if (slot.role === 'THROWER') clip(p, s.stage === 'THROW' || s.stage === 'CONTEST' ? 'lineoutThrow' : 'idle');
         else if (slot.role === 'JUMPER' && contesting) clip(p, Math.abs(slot.x - s.ball.x) < 1.6 ? 'lineoutJump' : 'lineoutStand');
         else if (slot.role === 'LIFTER' && contesting) clip(p, 'lineoutLift');
@@ -2156,8 +2178,8 @@ export class Director {
           p.tx = wx; p.tz = wz; p.urgency = 1;
           steer(p, dt, true);
         } else {
-          this.place(p, wx, wz, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* D-2 — bounded settle; see settleToward. */
+          if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
           p.face = face;
         }
@@ -2225,7 +2247,10 @@ export class Director {
            * pin applies from the next frame; writing him again now would be
            * the same-frame double-move the ownership contract exists to
            * prevent. The velocity still dies: he is being brought to ground. */
-          if (!p.movedBy) this.place(p, q.x, q.z, 'bound');
+          /* D-2 — bounded even for the tackled carrier. He is pinned to the
+           * slot recorded at the tackle, which can be ~0.9 m from where the
+           * physics left him on that frame. */
+          if (!p.movedBy) this.settleToward(p, q.x, q.z, dt, 'bound');
           p.vx = 0; p.vz = 0;
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
         } else {
@@ -3440,7 +3465,14 @@ export class Director {
      * first, so this path only handles the genuinely-off runners). */
     const CLOSE_PLACE_MAX = 1.0;
     if (Math.hypot(car.x - gx, car.z - gz) < CLOSE_PLACE_MAX) {
-      cx = gx; cz = gz;
+      /* D-2 — the close place still closed up to 1.0 m in a single frame, an
+       * implied 60 m/s, and the tightened 0.80 m gate sees it. Bound the step;
+       * the carrier's own open-play integration closes the rest over the next
+       * frames, which is what the walk-on systems upstream already assume. */
+      const cgap = Math.hypot(gx - car.x, gz - car.z);
+      const cstep = Math.min(cgap, 0.55);
+      cx = cgap > 1e-4 ? car.x + (gx - car.x) / cgap * cstep : gx;
+      cz = cgap > 1e-4 ? car.z + (gz - car.z) / cgap * cstep : gz;
       this.place(car, cx, cz, 'carrier');
     } else {
       cx = clamp(car.x, -33, 33); cz = clamp(car.z, -58, 58);

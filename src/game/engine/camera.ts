@@ -10,7 +10,7 @@
  */
 
 import type { Director } from '../director';
-import { Camera, View, FIELD } from '../../render/retro';
+import { Camera, View, FIELD, minFollowGround } from '../../render/retro';
 import { CamModeSpec, camModeSpec, resolveZoom } from '../camera';
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
@@ -91,7 +91,9 @@ export function updateCamera(d: Director, dt: number) {
     const aimZ = kicking ? (d.kk?.landZ ?? tz) : tz + dir * 14;
     const dx = aimX - rigX;
     const dz = aimZ - rigZ;
-    const ground = Math.max(4, Math.hypot(dx, dz));
+    /* D-1 — height-scaled follow floor, see minFollowGround. */
+    const fovE = clamp(2 * Math.atan((view.h * 0.5) / Math.max(1, px * Math.hypot(Math.max(4, Math.hypot(dx, dz)), height - 1.4))), 0.06, 1.2);
+    const ground = Math.max(minFollowGround(height, fovE, 1.4), Math.hypot(dx, dz));
     const tilt = Math.atan2(height - 1.4, ground);
     const slant = Math.hypot(ground, height - 1.4);
     const focal = Math.max(1, px * slant);
@@ -125,7 +127,12 @@ export function updateCamera(d: Director, dt: number) {
 
     const dx = tx - rigX;
     const dz = subjectZ - d.rigZ;
-    const ground = Math.max(4, Math.hypot(dx, dz));
+    /* D-1 — the floor must scale with camera height, not be a constant.
+     * A flat 4 m floor at a 13 m rig height put the ball 67 deg below
+     * horizontal against a ~30 deg tilt and it fell out of the bottom of
+     * frame. See minFollowGround in retro.ts. */
+    const fovT = clamp(2 * Math.atan((view.h * 0.5) / Math.max(1, px * Math.hypot(Math.max(4, Math.hypot(dx, dz)), height - 1.4))), 0.06, 1.2);
+    const ground = Math.max(minFollowGround(height, fovT, 1.4), Math.hypot(dx, dz));
     const tiltT = Math.atan2(height - 1.4, ground);
     const slant = Math.hypot(ground, height - 1.4);
     const focal = Math.max(1, px * slant);
@@ -183,6 +190,33 @@ export function updateCamera(d: Director, dt: number) {
    * clip through the ground even mid-swing. */
   d.cam.h = Math.max(5.5, d.cam.h);
   if (!Number.isFinite(d.cam.h)) d.cam.h = 14;
+
+  /* ---------------- D-1: MINIMUM FOLLOW DISTANCE ----------------
+   * Applied HERE, on the eased camera, and not inside the rigs. The rigs only
+   * produce a `target`; every axis is then eased toward it, so a correction
+   * made upstream is silently undone within a frame or two. Measured: pushing
+   * the rig back inside cableRig left 543 of 545 offending frames untouched.
+   *
+   * The measured fault was geometric, not a tracking failure — 239 of 266
+   * failing frames had the camera WITHIN 8 m of the ball while flying 13 m
+   * above it, putting the ball ~67 degrees down against a ~30 degree tilt. The
+   * rig was too CLOSE, so it is slid straight back along its own view axis:
+   * the yaw is unchanged by construction, which keeps the CAMERA STABLE gate
+   * out of this entirely, and only the distance moves. */
+  const bpD1 = d.ballPoint();
+  const gx = bpD1.x - d.cam.x, gz = bpD1.z - d.cam.z;
+  const gLen = Math.hypot(gx, gz);
+  const needD1 = minFollowGround(d.cam.h, d.cam.fov, Math.max(0.4, bpD1.y));
+  if (gLen > 0.01 && gLen < needD1) {
+    const ux = gx / gLen, uz = gz / gLen;
+    const push = needD1 - gLen;
+    d.cam.x -= ux * push;
+    d.cam.z -= uz * push;
+    /* Re-solve the pitch for the distance the camera actually ended up at.
+     * Leaving the old tilt would aim the flatter rig past the ball. */
+    const rise = d.cam.h - Math.max(0.4, bpD1.y);
+    d.cam.tilt = Math.atan2(rise, needD1);
+  }
 }
 
 /**
@@ -282,14 +316,14 @@ export function cableRig(
   const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
-  const ground = Math.max(5, Math.hypot(dx, dz));
+  const pxC = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28 * rollK);
+  const ground = Math.max(4, Math.hypot(dx, dz));
 
   // Tilt down onto the play. Extra downward angle when wide, so a kick reads
   // as an aerial view of the whole contest.
   const tilt = Math.atan2(d.cableH - 1.2, ground) * (1 + wide * 0.10);
   const slant = Math.hypot(ground, d.cableH - 1.2);
-  const px = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28 * rollK);
-  const focal = Math.max(1, px * slant);
+  const focal = Math.max(1, pxC * slant);
 
   return {
     x: d.cableX, z: d.cableZ, h: d.cableH,

@@ -213,11 +213,28 @@ export function steer(
 }
 
 /** Teammates must never occupy the same metre of grass, and never block their own carrier. */
+/* D-2 — TOTAL SHOVE BUDGET PER FRAME.
+ *
+ * Each individual shove here is small and legitimate, but a player caught
+ * between several bodies receives one per overlapping pair and they ACCUMULATE.
+ * Measured: a man with zero velocity moved 0.878 m in a single frame via four
+ * separate() writes of +0.012, -0.383 and -0.508 — no single write was large
+ * enough to look wrong, only their sum. That is the last thing standing between
+ * the engine and the tightened 0.80 m NO TELEPORTS gate.
+ *
+ * 0.35 m/frame is 21 m/s of pure shunt, far more than any real jostle needs,
+ * and it preserves the DIRECTION of the resolution exactly — only the
+ * magnitude is clipped, so bodies still stop overlapping. */
+const MAX_SHOVE_PER_FRAME = 0.35;
+
 export function separate(
   all: Live[], dt: number,
   reportGate?: ForwardAttackGateReporter,
   gateLabel = 'separate',
 ) {
+  /* Snapshot the pre-shove positions so the budget is measured against where
+   * each man started the frame, not against the running total. */
+  const shoveOrigin = all.map((p) => ({ x: p.x, z: p.z }));
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
@@ -276,6 +293,19 @@ export function separate(
       /* T-11 void audit: frozen-interface param — the collision resolve is
        * positional (separation per frame), dt is not needed here. */
       void dt;
+    }
+  }
+
+  /* D-2 — clip each man's TOTAL displacement for this frame. Direction is
+   * preserved; only the magnitude is bounded. */
+  for (let i = 0; i < all.length; i++) {
+    const p = all[i], o = shoveOrigin[i];
+    const mx = p.x - o.x, mz = p.z - o.z;
+    const m = Math.hypot(mx, mz);
+    if (m > MAX_SHOVE_PER_FRAME) {
+      const k = MAX_SHOVE_PER_FRAME / m;
+      p.x = o.x + mx * k;
+      p.z = o.z + mz * k;
     }
   }
 }

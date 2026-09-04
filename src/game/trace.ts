@@ -654,6 +654,13 @@ export interface DeepReport {
   summary: string[];
 }
 
+/* D-2 — tightened from 1.4 m to 0.80 m per ruling. The old threshold was a
+ * blind spot: every lineout settle-snap landed at 0.87-0.91 m/frame, an implied
+ * 51.9 m/s, and passed the gate untouched. 0.80 m/frame is 48 m/s at 60 Hz,
+ * still far above any legitimate sprint (~9 m/s = 0.15 m/frame), so it catches
+ * position writes without flagging honest running. */
+export const TELEPORT_METRES = 0.80;
+
 export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
   const d = new Director(cfg);
   const st: BotState = { wait: 0.3, flip: 0, presses: 0, releases: 0 };
@@ -688,7 +695,7 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
       if (!was) continue;
       const disp = Math.hypot(p.x - was.x, p.z - was.z);
       if (disp > maxDisp) maxDisp = disp;
-      if (disp > 1.4) {
+      if (disp > TELEPORT_METRES) {
         teleports++;
         if (diags.length < 300) diags.push({
           kind: 'TELEPORT', t: Math.round(d.t * 100) / 100, severity: 'CRITICAL',
