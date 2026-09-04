@@ -48,6 +48,9 @@ import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START } from './maulRega
 import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
+import {
+  RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
+} from './engine/referee';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
 import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
@@ -613,6 +616,14 @@ export class Director {
   replayTimer = 0;
   refSignal = 0;
   refSignalText = '';
+  /* SPEC_15 — the referee is an actor. His body is integrated in
+   * engine/referee.ts, deliberately outside `d.live`: putting him in the
+   * thirty-one would make every defence, offside, passing, separation and
+   * tackle loop count him as a defender. */
+  ref: RefState = newReferee();
+  /** SPEC_15 — the world-space speech queue. One bubble shows at a time; a big
+   *  call preempts a nudge and the queue drains in priority order. */
+  refBubbles: RefBubble[] = [];
   banner = '';
   bannerAt = -99;
   difficulty: number;
@@ -1126,6 +1137,77 @@ export class Director {
   private commentarySequencer() { commentarySequencer(this); }
 
   say(text: string) { this.feed.unshift({ text, at: this.t }); if (this.feed.length > 30) this.feed.pop(); }
+
+  /* ---- SPEC_15 — the referee speaks in the world, not in the HUD ---- */
+
+  /**
+   * Push a world-space line, anchored above the referee's head. The four
+   * control affordances do NOT come through here — they are a state of the
+   * ruck and the maul, and `refPrompt()` derives them at the point of
+   * interaction every frame instead of queueing one per frame.
+   */
+  refSay(text: string, kind: BubbleKind = 'LAW_CALL', ttl = 3.2) {
+    const last = this.refBubbles[this.refBubbles.length - 1];
+    /* Do not stack the same words inside a third of a second — a law call can
+     * be re-issued on consecutive frames while a phase resolves. */
+    if (last && last.text === text && this.t - last.at < 0.35) { last.at = this.t; last.ttl = ttl; return; }
+    this.refBubbles.push({ text, kind, at: this.t, ttl });
+    if (this.refBubbles.length > 6) this.refBubbles.shift();
+  }
+
+  /**
+   * The one bubble on screen.
+   *
+   * Recency wins, not priority. The first cut ranked strictly by kind and a
+   * measurement caught it: a scrum call issued 1.9 s after a penalty was
+   * swallowed by the penalty still on screen, and the audit's "every call
+   * produced a bubble" failed at a 2.8 s delay. A referee says the newest
+   * thing, so the newest thing is what shows. The one exception is a card —
+   * it owns the screen for its first beat, because the walk of shame is the
+   * story and a routine restart must not talk over it.
+   */
+  refBubbleHead(): RefBubble | null {
+    let newest: RefBubble | null = null;
+    let top: RefBubble | null = null;
+    for (const b of this.refBubbles) {
+      if (this.t - b.at > b.ttl) continue;
+      if (!newest || b.at > newest.at) newest = b;
+      if (!top) { top = b; continue; }
+      const pb = BUBBLE_PRIORITY[b.kind], pa = BUBBLE_PRIORITY[top.kind];
+      if (pb > pa || (pb === pa && b.at > top.at)) top = b;
+    }
+    if (!newest) return null;
+    if (top && top !== newest && top.kind === 'CARD' && this.t - top.at < 1.5) return top;
+    return newest;
+  }
+
+  /** Drop expired bubbles. Called once per frame; a replay freezes them. */
+  private expireRefBubbles() {
+    if (!this.refBubbles.length) return;
+    this.refBubbles = this.refBubbles.filter((b) => this.t - b.at <= b.ttl);
+  }
+
+  /**
+   * The live control affordance, as a SITE bubble at the point of interaction.
+   * Derived, not queued: these are a state of the breakdown and the maul, not
+   * events, and pushing one per frame would flood the queue. Returns null when
+   * there is nothing for the player to press.
+   */
+  refPrompt(): { text: string; colour: string; x: number; z: number; y: number } | null {
+    if (this.ml && (this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY')) {
+      const s = this.ml;
+      if (maulUseItCall(s)) return { text: 'USE IT', colour: '#ff6a5a', x: s.x, z: s.z, y: 4.9 };
+    }
+    if (this.bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY')) {
+      const s = this.bd;
+      if (s.groundAt >= 0) {
+        if (s.stage === 'RECYCLE') return { text: 'SECURED', colour: '#6ee7a0', x: s.contactX, z: s.contactZ, y: 4.9 };
+        if (s.jackalActive) return { text: 'COMMIT - SPACE', colour: '#ffd76a', x: s.contactX, z: s.contactZ, y: 4.9 };
+        return { text: 'A/D - CLEAROUT', colour: '#6ee7a0', x: s.contactX, z: s.contactZ, y: 4.9 };
+      }
+    }
+    return null;
+  }
   banner_(text: string) { this.banner = text; this.bannerAt = this.t; }
   showHint(text: string, secs = 4) { this.hint = text; this.hintUntil = this.t + secs; }
 
@@ -1274,6 +1356,10 @@ export class Director {
         this.audio.event(ev.type, ev.type === 'TACKLE' ? ev.force : 0.5);
       }
     }
+    /* SPEC_15 — the referee runs on his own integration, before the actor
+     * stream is written, so the render sees the position he moved to. */
+    stepReferee(this, this.ref, dt);
+    this.expireRefBubbles();
     this.syncActors();
     this.t += dt;
 
@@ -1614,6 +1700,8 @@ export class Director {
             this.refSignal = 1.8;
             this.refSignalText = `${REFEREE_CALLS.OFFSIDE} — WARNING`;
             this.say(this.refSignalText);
+            /* SPEC_15 — he says it in the world too. */
+            this.refSay(this.refSignalText, 'NARRATIVE', 3);
             break;
           }
           if (verdict === 'SUPPRESS') {
@@ -4115,13 +4203,16 @@ export class Director {
       a.num = p.num; a.team = p.team;
       a.ring = p.controlled ? 1 : (this.passOpts.some((o) => o.player === p) ? 2 : 0);
     }
-    // referee shadows the ball at a constant officious distance
-    const f = this.focusPoint();
-    const dir = this.possession === 'A' ? 1 : -1;
+    /* SPEC_15 — the referee is streamed like any other actor, from state that
+     * engine/referee.ts integrated. `rf` is the ±1 the puppet pipeline reads
+     * for its initial bearing; the referee's true facing is the ball's, and
+     * the renderer holds it there while his legs do something else. */
     const ref = this.actors[30];
-    ref.rx = f.x * 0.4 + 8;
-    ref.rz = f.z - dir * 11;
-    ref.renderClip = this.refSignal > 0 ? 'refSignal' : 'refReady';
+    const r = this.ref;
+    ref.rx = r.x; ref.rz = r.z;
+    ref.rf = Math.cos(r.face) >= 0 ? 1 : -1;
+    ref.renderClip = r.clip;
+    ref.clipT = 0;
   }
 
   /* ============================ SUBS & KITS ============================ */

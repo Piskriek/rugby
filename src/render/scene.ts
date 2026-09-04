@@ -12,13 +12,17 @@ import {
  * paper.ts. The engine keeps its own clip vocabulary; mapAction() below is
  * the single translation point. */
 import { Pose, STAND, sampleC, lerpPose, smooth, actionClip, CLIPS } from './clips';
+/* SPEC_15 — the referee's one-shots. clips.ts is a verbatim handoff file, so
+ * his signals are authored alongside it and merged in at load. */
+import { REF_SIGNALS, registerRefClips, refActionClip } from './refClips';
+registerRefClips();
 import { maulUseItClock, maulUseItCall } from '../game/engine/setpieces';
 import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
 import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
-  FIGURE_SCALE,
+  FIGURE_SCALE, BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
@@ -122,7 +126,14 @@ export function resolveGait(prev: string, spd: number, latRaw: number): { action
 /** Engine clip vocabulary -> the system's action strings. */
 function mapAction(clip: string): string {
   switch (clip) {
-    case 'ready': case 'nineSquat': case 'refReady': return 'idle';
+    case 'ready': case 'nineSquat': return 'idle';
+    /* SPEC_15 — the referee's gaits are the existing ones; the two dead
+     * `refReady`/`refSignal` cases that both returned 'idle' are gone, which is
+     * what let him animate at all. */
+    case 'refIdle': return 'idle';
+    case 'refWalk': return 'walk';
+    case 'refJog': return 'jog';
+    case 'refRun': return 'run';
     case 'jog': return 'jog';
     case 'sprint': return 'sprint';
     case 'carry': return 'run';
@@ -139,8 +150,10 @@ function mapAction(clip: string): string {
     case 'scrumDrive': return 'scrumShove';
     case 'lineoutJump': return 'jump';
     case 'lineoutLift': return 'lift';
-    case 'refSignal': return 'idle';
-    default: return 'idle';
+    default:
+      /* SPEC_15 — a referee one-shot names its own action; any other unknown
+       * clip still falls back to the idle stance. */
+      return REF_SIGNALS.has(clip) ? clip : 'idle';
   }
 }
 
@@ -170,7 +183,21 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
    * support runners strolling back to marks staring straight at the camera
    * ("my players are mostly facing me") and defenders square-on to their own
    * jog instead of the play. */
-  if (pg.spd > 2.2) {
+  if (a.team === 'REF') {
+    /* SPEC_15 — THE REFEREE WATCHES THE BALL, WHATEVER HIS LEGS ARE DOING.
+     * He is the one man on the pitch whose job is looking, so the
+     * speed-threshold rule that turns a moving player toward his travel does
+     * not apply to him. The engine already holds `ref.face` on the ball's
+     * bearing; this keeps the puppet's facing on it and lets the lateral read
+     * below turn a sideways-travelling official into a side-step on its own. */
+    if (look) {
+      let target = Math.atan2(look[0] - a.rx, look[1] - a.rz);
+      let dy = target - pg.face;
+      while (dy > Math.PI) dy -= Math.PI * 2;
+      while (dy < -Math.PI) dy += Math.PI * 2;
+      pg.face += dy * (1 - Math.exp(-dt * 7));
+    }
+  } else if (pg.spd > 2.2) {
     let target = Math.atan2(vx, vz);
     let dy = target - pg.face;
     while (dy > Math.PI) dy -= Math.PI * 2;
@@ -218,7 +245,9 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
   } else {
     pg.lat = 0;         // not a moving gait — no lateral carry
   }
-  const choice = actionClip(action, pg.spd, lat);
+  /* SPEC_15 — a referee signal runs at its authored duration, not at a
+   * speed-derived cadence, and is resolved before the handoff's actionClip(). */
+  const choice = refActionClip(action) ?? actionClip(action, pg.spd, lat);
   if (choice.name !== pg.clipName) {
     pg.blendFrom = { ...pg.pose };
     pg.blendT = 0;
@@ -394,6 +423,10 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   if (d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') drawMaulOverlay(ctx, d, v, cam2, jx, jy);
   if (d.phase === 'OPEN_PLAY') drawOpenPlayOverlay(ctx, d, v, cam2, jx, jy);
   if (d.phase === 'KICK' || d.phase === 'KICK_REPLAY') drawKickOverlay(ctx, d, v, cam2, jx, jy);
+
+  /* SPEC_15 — the referee speaks last, on top of everything, so a call is
+   * never buried under an overlay. */
+  drawRefBubbles(ctx, d, v, cam2, jx, jy);
 }
 
 function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
@@ -543,7 +576,7 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     if (maulUseItCall(s)) {
       const remaining = maulUseItClock(s);
       const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
-      worldLabel(ctx, cam, v, s.x, 4.9, s.z, 'USE IT', '#ff6a5a', jx, jy);
+      /* SPEC_15 — 'USE IT' is a SITE bubble now; see drawRefBubbles(). */
       ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
@@ -630,13 +663,9 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
     const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
     const cp = project(cam, v, s.contactX, 0, s.contactZ, jx, jy);
     if (cp) {
-      if (s.stage === 'RECYCLE') {
-        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'SECURED', '#6ee7a0', jx, jy);
-      } else if (s.jackalActive) {
-        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'COMMIT - SPACE', '#ffd76a', jx, jy);
-      } else {
-        worldLabel(ctx, cam, v, s.contactX, 4.9, s.contactZ, 'A/D - CLEAROUT', '#6ee7a0', jx, jy);
-      }
+      /* SPEC_15 — the read is a SITE bubble now, drawn by drawRefBubbles() at
+       * this exact world point. The prompt stays where the player is looking;
+       * only the bare floating text is gone. */
       /* Playtest 2: the big number is the TIME TO PASS — it belongs to the
        * secured ball (RECYCLE window), not the shove. Over the fight it just
        * covered the two men on the ground. */
@@ -713,6 +742,96 @@ function drawLineoutOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View,
   if (s.stage === 'CONTEST' || s.stage === 'CATCH') {
     worldLabel(ctx, cam, v, -26, 5.6, s.markZ,
       `APEX ${s.ball.apexY.toFixed(2)} m · MARGIN ${(s.contestMargin * 100).toFixed(0)} cm`, '#f4efe2', jx, jy);
+  }
+}
+
+/* ==================== SPEC_15 — THE REFEREE'S SPEECH BUBBLE ====================
+ *
+ * Two anchor modes, one renderer:
+ *   REF  — law calls, cards, warnings. Anchored above the official's head.
+ *   SITE — the four control affordances (USE IT / SECURED / COMMIT - SPACE /
+ *          A/D - CLEAROUT), pinned to the ruck or the maul where the player is
+ *          already looking.
+ *
+ * The card is the papercraft `paperCard()` from the handoff material, so a
+ * bubble is unmistakably the same paper language as the figures rather than a
+ * UI rectangle pasted over the pitch.
+ */
+
+const BUBBLE_COLOUR: Record<string, string> = {
+  CARD: '#ff6a5a',
+  PENALTY: '#ffd76a',
+  LAW_CALL: '#f4efe2',
+  NARRATIVE: '#9db8ec',
+  NUDGE: '#ffd76a',
+};
+
+/** Above his head. SPEC_14 made the figures 1.65x, so this has to scale with
+ *  them or the bubble ends up at his chest. */
+const REF_HEAD_Y = BUILDS.REF.h * FIGURE_SCALE + 0.8;
+
+/**
+ * One paper card with a tail. The card is clamped inside the frame so it never
+ * rides off the edge, but the tail keeps pointing at the TRUE world point — a
+ * bubble that detaches from the thing it belongs to is worse than no bubble.
+ */
+function drawBubble(
+  ctx: CanvasRenderingContext2D, v: View,
+  sx: number, sy: number, sc: number,
+  text: string, colour: string,
+) {
+  const size = Math.max(10, Math.min(17, sc * 0.26));
+  ctx.font = `900 ${size}px ui-sans-serif, system-ui, sans-serif`;
+  const pad = size * 0.9;
+  const w = Math.min(v.w - 28, ctx.measureText(text).width + pad * 2);
+  const h = size * 2.0;
+  const gap = size * 0.95;
+
+  /* Above the head by preference; flip below when there is no room up there. */
+  let cy = sy - gap - h / 2;
+  const below = cy - h / 2 < 8;
+  if (below) cy = sy + gap + h / 2;
+
+  const m = 10;
+  const cx = Math.max(m + w / 2, Math.min(v.w - m - w / 2, sx));
+  cy = Math.max(m + h / 2, Math.min(v.h - m - h / 2, cy));
+
+  const x0 = cx - w / 2, y0 = cy - h / 2, x1 = cx + w / 2, y1 = cy + h / 2;
+  const c = Math.min(9, h * 0.3);
+  const pts: Pt[] = [
+    [x0 + c, y0], [x1 - c, y0], [x1, y0 + c], [x1, y1 - c],
+    [x1 - c, y1], [x0 + c, y1], [x0, y1 - c], [x0, y0 + c],
+  ];
+  const ty = below ? y0 : y1;
+  const tw = Math.min(12, w * 0.18);
+  const tail: Pt[] = [[cx - tw, ty], [cx + tw, ty], [sx, sy]];
+
+  /* Tail first: the card's own outline covers where they meet. */
+  paperCard(ctx, tail, 'rgba(14,14,20,0.92)', { lw: 2, out: colour, back: 0, jit: 0.35, cut: 0 });
+  paperCard(ctx, pts, 'rgba(14,14,20,0.92)', { lw: 2.4, out: colour, back: 1.6, jit: 0.6, seed: 7 });
+
+  ctx.font = `900 ${size}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = colour;
+  ctx.fillText(text, cx, cy + 1);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+}
+
+/** Exported for the SPEC_15 unit check: a pure function of the director and
+ *  the lens, no side effects, so the probe can measure the bubble's ink
+ *  without having to render a whole frame twice. */
+export function drawRefBubbles(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
+  const head = d.refBubbleHead();
+  if (head) {
+    const p = project(cam, v, d.ref.x, REF_HEAD_Y, d.ref.z, jx, jy);
+    if (p) drawBubble(ctx, v, p.sx, p.sy, p.sc, head.text, BUBBLE_COLOUR[head.kind] ?? '#f4efe2');
+  }
+  const prompt = d.refPrompt();
+  if (prompt) {
+    const p = project(cam, v, prompt.x, prompt.y, prompt.z, jx, jy);
+    if (p) drawBubble(ctx, v, p.sx, p.sy, p.sc, prompt.text, prompt.colour);
   }
 }
 

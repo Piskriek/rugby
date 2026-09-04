@@ -1,7 +1,8 @@
 # SEASON 2 QUEUE — SPEC_11 … SPEC_15
 
-**Status: ITEMS 1–5 SHIPPED (`SPEC_11`, `SPEC_12`, `SPEC_13`, `SPEC_14` are live on
-`arena/01a0682b-rugby`). Item 6 (`SPEC_15`) is next. This document's
+**Status: SEASON 2 COMPLETE. ITEMS 1–6 SHIPPED (`SPEC_11`, `SPEC_12`,
+`SPEC_13`, `SPEC_14`, `SPEC_15` are live on `arena/01a0682b-rugby`). This
+document's
 diagnoses were written before any code existed; each shipped spec has a
 `## VERDICT` section appended below recording what was actually built and
 measured, which supersedes the diagnosis where the two disagree.**
@@ -20,7 +21,7 @@ places.
 | 3 | Violently forward passes are allowed | **SPEC_13** | Law 11 — the throw-forward vector test | Law | **SHIPPED** (`cb230df`) |
 | 4 | Players are too big for the pitch; tackle visuals lie | **SPEC_14** | Figure scale and contact truth (issue 4) | Render / physics | **SHIPPED** |
 | 5 | Shadows do not anchor to the feet | **SPEC_14** | Ground truth: the shadow anchor (issue 5) | Render | **SHIPPED** |
-| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation | **NEXT** |
+| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation | **SHIPPED** |
 
 Issues 4 and 5 are one specification because they are the same defect class —
 **the paper figure's relationship to the turf it stands on** — and both are
@@ -815,3 +816,95 @@ and called the ball off-screen while the camera had it centred. It now measures
 `Director.ballPoint()` — one shared read of where the ball actually is.
 
 gates 9/9 on four seeds. Stats score unchanged within its own run-to-run noise.
+
+## VERDICT — SPEC_15 (shipped)
+
+**The referee is an actor now.** `engine/referee.ts` owns him; he is integrated
+there and nowhere else. He is deliberately NOT a `Live`: `steer()` takes a
+`Live`, and `d.live` is the array every defensive, offside, passing, separation
+and tackle loop iterates. Adding a thirty-first body to it would have made every
+one of those loops count the match official as a defender. He carries the T-02
+`movedBy = 'ref'` tag like everyone else.
+
+**Why that mattered — measured.** The regression gates are byte-identical to the
+pre-SPEC_15 baseline across four seeds (TACKLES 17/21/18/22, CHASE
+396/134/253/205, BALL ON SCREEN 196/0/0/0). He is a presentation actor with
+exactly zero gameplay blast radius, which is the whole point of keeping him out
+of `d.live`.
+
+### What he does now, measured over three 150 s matches (`scripts/spec15probe.ts`)
+
+| | before | after |
+|---|---|---|
+| clips | `refReady`/`refSignal`, both `return 'idle'` | walk 41% · run 31% · jog 21% · penalty signal 3% · scrum signal 1% · idle 2.5% |
+| per-frame displacement | teleport (assignment) | p50 0.07 m, **max 0.17 m** — no frame above the run-speed bound |
+| facing | `rf` never written, pinned at 0 forever | **p50 1.5°** from the ball's bearing |
+| distance to the ball | n/a (chained to the camera focus) | **p50 8.8 m**, p90 17.5 m |
+| nearest of the thirty | n/a | p50 3.5 m |
+| off the pitch | n/a | 0 frames |
+
+Three findings from the first measurement, all fixed:
+
+1. **He could not hold station** — a median 7.6 m and p90 24 m from where he
+   wanted to be, because a carrier runs at 8 m/s and he was capped under it. He
+   now aims where the ball is GOING (a 0.7 s lead, capped by his own standoff so
+   anticipation can never carry him upfield of it).
+2. **He ran back through the ball.** Getting caught upfield on a turnover put
+   the match official in the middle of play. He now clears the corridor: the
+   further upfield he is, the wider he goes.
+3. **He stood in the defensive line** — inside 1.5 m of a player on 18.7% of
+   frames. A soft one-directional repulsion (he yields, they never do) took
+   that to 8.8%.
+
+**Honest number that is not zero:** he is upfield of the ball on 23.7% of
+frames. Inside the 10 m corridor the ball is travelling down — the measure that
+actually means "in the way" — it is 7.8%, and the phase breakdown shows most of
+it is a scrum feed emerging past a correctly-placed official and a kick passing
+over him, not a referee loitering in front of play. He is behind the ball at
+p50 7.5 m.
+
+### The bubble
+
+Two anchor modes, one renderer, both drawn as `paperCard()` so a bubble is the
+same papercraft language as the figures:
+
+* **REF** — law calls, cards, warnings. Anchored at `BUILDS.REF.h * FIGURE_SCALE
+  + 0.8 ≈ 3.84 m`, which scales with SPEC_14 or it lands on his chest.
+* **SITE** — the four control affordances, pinned to the ruck and the maul.
+
+**Four `worldLabel` calls deleted, not fourteen.** Of the 14 in `scene.ts`, ten
+are telemetry (`HANG 3.2s · APEX 21 m`, `DRIVE 40 cm · WHEEL 6°`, metres gained)
+and stay in the world. The four that moved are instructions. Verified: the SITE
+prompt fires on **exactly** the same 7 379 frames the deleted labels did, with
+zero mismatches.
+
+**The audit rule holds and it is not a tautology.** Every whistle edge
+(18 of 18) produced a bubble within 0.2 s, and it was on screen at the moment
+of the call. Measuring it caught a real defect: the first cut ranked the queue
+strictly by kind, and a scrum call issued 1.9 s after a penalty was swallowed
+by the penalty still on screen — a 2.8 s delay. Recency wins now; a card alone
+holds the stage for its first beat.
+
+**Personality: dropped, by ruling.** The ticket's `referee` option (THE WHISTLER
+/ THE BALANCED / LET IT FLOW / THE TECHNICAL) never existed, and the author
+ruled against creating it: SPEC_12 killed the vague strictness slider in favour
+of deterministic orthogonal toggles, and a personality system conflicts with
+that. He enforces the game exactly as the toggles dictate.
+
+**Clips:** `render/refClips.ts` holds the six one-shots (whistle, penalty,
+advantage, scrum, try, card) and merges them into `CLIPS` at load. The verbatim
+handoff file `clips.ts` is untouched. Locomotion needed no new clips at all —
+`walk`/`jog`/`run`/`strafe`/`shuffle`/`idle` already existed; deleting the two
+dead `case … return 'idle'` lines is what let him animate on day one.
+
+### Instrument bug found and fixed (affects the SPEC_14 sheets too)
+
+`spec14rec.ts` — the recording canvas — had two fidelity bugs: it tagged every
+stroke with `fillStyle` instead of `strokeStyle`, and its `save()`/`restore()`
+saved only the transform, so `paperCard()`'s `globalAlpha = cut * 0.5` leaked
+into everything drawn afterwards. **Every sign-off sheet so far was rasterised
+at a quarter strength.** Both are fixed; the SPEC_14 measurements are unchanged
+(the bugs touched colour, not geometry — re-verified: shadow flatness
+0.90/0.58/0.31 against ground truth, tackle band overlap 96–100%), and both
+SPEC_14 sheets have been regenerated so the pictures now match what the game
+draws.

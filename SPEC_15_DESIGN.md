@@ -1,8 +1,27 @@
 # SPEC_15 — The referee: design for review
 
-**Status: DESIGN ONLY. No AI steering written, no bubble built.** This document
-answers the two questions asked and stops for a human ruling on three points
-flagged below.
+> **STATUS: REVIEWED, RULED ON, AND SHIPPED.**
+> This document is the design as submitted for review on `d850031`; it is kept
+> verbatim below as the record of what was proposed. The three rulings are:
+>
+> 1. **Clips** — approved as proposed: a new `render/refClips.ts`, merged at
+>    load, handoff file untouched.
+> 2. **Anchor modes** — approved as proposed: one renderer, `REF` for law calls
+>    and `SITE` for the control affordances.
+> 3. **Personality** — **dropped entirely.** SPEC_12 killed the vague referee
+>    strictness slider in favour of deterministic orthogonal toggles, and a
+>    personality system conflicts with that. He enforces the game exactly as the
+>    toggles dictate.
+>
+> What was actually built and measured — including three defects the
+> measurements caught and the one number that is honestly not zero — is in
+> `SEASON_2_QUEUE.md`, `## VERDICT — SPEC_15`.
+
+---
+
+**Status at time of writing: DESIGN ONLY. No AI steering written, no bubble
+built.** This document answers the two questions asked and stops for a human
+ruling on three points flagged below.
 
 Everything here is measured against the code as it stands on `2a02f9e`, not
 against the ticket's assumptions. Two of those assumptions turn out to be wrong.

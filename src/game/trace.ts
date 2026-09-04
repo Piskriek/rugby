@@ -369,6 +369,15 @@ function emit(d: Director, rec: Recorder) {
     ticker: d.feed[0]?.text ?? '',
     ticker2: d.feed[0]?.text2 ?? '',
     refereeSignal: d.refSignal > 0 ? d.refSignalText : '',
+    /* SPEC_15 — what the referee is saying in the world, and where he is
+     * standing while he says it. `refPrompt` is the control affordance, which
+     * is anchored to the ruck rather than to him. */
+    refBubble: d.refBubbleHead()?.text ?? '',
+    refBubbleKind: d.refBubbleHead()?.kind ?? '',
+    refPrompt: d.refPrompt()?.text ?? '',
+    refX: Math.round(d.ref.x * 10) / 10,
+    refZ: Math.round(d.ref.z * 10) / 10,
+    refClip: d.ref.clip,
     controlled: d.ctrlPlayer.num,
     controlledJob: d.ctrlPlayer.job,
     controlledStamina: Math.round(d.ctrlPlayer.stamina),

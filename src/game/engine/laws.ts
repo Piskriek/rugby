@@ -118,6 +118,10 @@ export function lawCall(d: Director, key: string, call: string, team: 'A' | 'B')
   if (isPenaltyCall(call)) d.teams[team].stats.penaltiesConceded++;
   else d.teams[team].stats.restarts++;
   d.say(call);
+  /* SPEC_15 — the call is spoken by the man on the field, not printed over the
+   * ruck. The audit rule ("every lawCall produced a bubble within 0.2 s") is
+   * true here by construction: there is no path to a whistle that skips it. */
+  d.refSay(call, isPenaltyCall(call) ? 'PENALTY' : 'LAW_CALL', 3.2);
   if (!d.lawsExplained.has(key)) {
     d.lawsExplained.add(key);
     d.showHint(`LAW — ${call}`, 5);
@@ -134,4 +138,8 @@ export function card(d: Director, team: 'A' | 'B', num: number, reason: string) 
   d.banner_(`YELLOW CARD — ${num} ${name}`);
   d.say(`YELLOW CARD — ${num} ${name} — ${reason}`);
   d.showHint(`YELLOW CARD ${num} (${name}) — DOWN TO 14 FOR TEN MINUTES`, 5);
+  /* SPEC_15 — the card is the highest-priority thing he can say. */
+  d.refSignal = 1.8;
+  d.refSignalText = `YELLOW CARD — ${num}`;
+  d.refSay(`YELLOW CARD — ${num}`, 'CARD', 4.5);
 }

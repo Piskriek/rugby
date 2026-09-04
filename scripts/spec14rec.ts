@@ -23,6 +23,7 @@ interface Op {
 export class Rec {
   a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
   private stack: number[][] = [];
+  private styleStack: (string | number)[][] = [];
   private path: number[][] = [];
   private lastEllipse: { cx: number; cy: number; rx: number; ry: number } | null = null;
   ops: Op[] = [];
@@ -35,8 +36,22 @@ export class Rec {
   fillStyle = ''; strokeStyle = ''; lineWidth = 1; globalAlpha = 1;
   lineJoin = ''; font = ''; textAlign = ''; textBaseline = '';
 
-  save() { this.stack.push([this.a, this.b, this.c, this.d, this.e, this.f]); }
-  restore() { const s = this.stack.pop(); if (s) [this.a, this.b, this.c, this.d, this.e, this.f] = s; }
+  /* SPEC_15: a real ctx.save() pushes the STYLE state too, not just the
+   * transform. Until now only the matrix was saved, so paperCard()'s
+   * `save(); globalAlpha = cut*0.5; ...; restore()` left globalAlpha at 0.25
+   * for everything drawn afterwards — the speech bubble's coloured rim was
+   * rasterised at a quarter strength and vanished into the card. Bounding
+   * boxes and style identity are untouched by this, so no measurement moves. */
+  save() {
+    this.stack.push([this.a, this.b, this.c, this.d, this.e, this.f]);
+    this.styleStack.push([String(this.fillStyle), String(this.strokeStyle), this.lineWidth, this.globalAlpha]);
+  }
+  restore() {
+    const s = this.stack.pop();
+    if (s) [this.a, this.b, this.c, this.d, this.e, this.f] = s;
+    const st = this.styleStack.pop();
+    if (st) { this.fillStyle = st[0]; this.strokeStyle = st[1]; this.lineWidth = st[2]; this.globalAlpha = st[3]; }
+  }
   translate(x: number, y: number) { this.e += this.a * x + this.c * y; this.f += this.b * x + this.d * y; }
   scale(x: number, y: number) { this.a *= x; this.b *= x; this.c *= y; this.d *= y; }
   rotate(r: number) {
@@ -73,6 +88,9 @@ export class Rec {
   fillRect(x: number, y: number, w: number, h: number) { this.beginPath(); this.rect(x, y, w, h); this.fill(); }
   clip() { this.clips++; }
   fillText() { } strokeText() { }
+  /** Bold condensed caps run about 0.62 em per glyph. Only the bubble layout
+   *  asks for metrics (SPEC_15); nothing in the SPEC_14 ink measurement does. */
+  measureText(t: string) { return { width: String(t).length * 13 * 0.62 }; }
 
   private record(grow: number) {
     if (!this.path.length) return;
@@ -81,12 +99,22 @@ export class Rec {
       if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
       if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
     }
+    /* SPEC_15: a stroke carries its OWN colour. Until now every op was tagged
+     * with fillStyle, so the papercraft outlines — including the speech
+     * bubble's coloured rim — were rasterised in the fill colour and the
+     * sheet showed a rimless dark card. `grow > 0` is exactly the stroke path
+     * (fill() records with grow 0), so this cannot move any fill's identity. */
     this.ops.push({
-      style: String(this.fillStyle),
+      style: grow > 0 ? String(this.strokeStyle) : String(this.fillStyle),
       x0: x0 - grow, y0: y0 - grow, x1: x1 + grow, y1: y1 + grow,
       ...(this.lastEllipse ?? {}),
     });
-    if (this.cap) this.cap.push({ pts: this.path.map((q) => [q[0], q[1]]), fill: String(this.fillStyle), alpha: this.globalAlpha, isStroke: grow > 0 });
+    /* as above: the captured polygon takes the stroke colour on a stroke. */
+    if (this.cap) this.cap.push({
+      pts: this.path.map((q) => [q[0], q[1]]),
+      fill: grow > 0 ? String(this.strokeStyle) : String(this.fillStyle),
+      alpha: this.globalAlpha, isStroke: grow > 0,
+    });
   }
   fill() { this.record(0); }
   stroke() { this.record(this.lineWidth * 0.5); }
