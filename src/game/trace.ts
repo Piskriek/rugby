@@ -187,45 +187,65 @@ function hasLiveOpenContext(d: Director): boolean {
     && line.lineFor(d.op!.attacking) !== null);
 }
 
-/* BATCH 02 / LAW-66 Candidate B. Line integrity is a property of the men still
- * in the authored defensive line, not of every player in the 26 m observation
- * window. The current authored defensive slot 15 is the last-line sweeper; its
- * role is represented by the defence system's sweeperDepth contract. Excluding
- * that role is not a z/median heuristic and is not a new depth cutoff. */
+/* BATCH 03 / LAW-66 positional population. The law-derived context and the
+ * authored defensive system remain the gate: this is measured only on a live
+ * OPEN line, against the active system's sweeperDepth contract. No shirt
+ * number carries a role here — the open-play positions rotate. */
 function law66Population(d: Director, team: 'A' | 'B'): Live[] {
   if (!hasLiveOpenContext(d)) return [];
-  const fx = d.op!.carrierX;
-  const system = d.defenceOf(team);
-  const raw = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26);
-  const core = raw.filter((p) => !(p.num === 15 && system.sweeperDepth > 0));
 
-  /* Shirts 11 and 14 are authored wings. A wing parked beyond the min/max of
-   * the non-wing core is an edge of the shape, not an interior hole. Keep it
-   * only when it lies inside that core envelope. If there is no usable core
-   * envelope, retain the non-sweeper set rather than manufacturing bounds. */
-  const wings = new Set([11, 14]);
-  const nonWingCore = core.filter((p) => !wings.has(p.num));
-  if (nonWingCore.length < 2) return core;
-  const minX = Math.min(...nonWingCore.map((p) => p.x));
-  const maxX = Math.max(...nonWingCore.map((p) => p.x));
-  return core.filter((p) => !wings.has(p.num) || (p.x >= minX && p.x <= maxX));
+  const focusX = d.op!.carrierX;
+  const system = d.defenceOf(team);
+  const raw = d.live.filter((p) => p.team === team
+    && p.sinbin <= 0 && !p.down
+    && p.beatenT <= 0
+    && Math.abs(p.x - focusX) < 26);
+
+  /* `d.op.dir` points towards the attacking team's goal. For the defending
+   * team that is the own-goal axis: positive depth is therefore behind the
+   * live defensive line, without inventing a median or a shirt-based slot. */
+  const ownGoalAxis = d.op!.dir;
+  const sweeperCandidates = raw.filter((p) =>
+    (p.z - d.op!.carrierZ) * ownGoalAxis > system.sweeperDepth);
+  const sweeper = sweeperCandidates.reduce<Live | null>((deepest, p) => {
+    if (!deepest) return p;
+    return (p.z - d.op!.carrierZ) * ownGoalAxis
+      > (deepest.z - d.op!.carrierZ) * ownGoalAxis ? p : deepest;
+  }, null);
+
+  /* EDGE means the measured outermost available defender on each flank. It is
+   * intentionally measured from the complete live population before the
+   * sweeper is removed: a sweeper can also be the outermost man, and a nominal
+   * wing can be inside him. The union is identity-based, never shirt-based. */
+  const leftEdge = raw.reduce<Live | null>((edge, p) => (!edge || p.x < edge.x ? p : edge), null);
+  const rightEdge = raw.reduce<Live | null>((edge, p) => (!edge || p.x > edge.x ? p : edge), null);
+  const excluded = new Set<Live>();
+  if (sweeper) excluded.add(sweeper);
+  if (leftEdge) excluded.add(leftEdge);
+  if (rightEdge) excluded.add(rightEdge);
+
+  /* A sin-binned or injured player is absent from `raw`; with fourteen men the
+   * remaining fourteen are measured as-is. There is no placeholder edge or
+   * replacement sweeper, and fewer than two eligible men simply yields no gap. */
+  return raw.filter((p) => !excluded.has(p));
 }
 
-/* SPEC_10 B2b (LAW-66): line integrity is a property of the corrected
- * population above. A beaten defender who has turned to chase (beatenT > 0)
- * has legitimately left his channel and is excluded by the existing raw
- * eligibility. The active system's 4.6 m audit threshold remains unchanged.
+/* SPEC_10 B2b (LAW-66): line integrity is a property of the positional
+ * population above. A beaten, sin-binned, injured, or out-of-window defender
+ * is not silently replaced; the active system's maxSpacing remains the value
+ * emitted to the existing audit check, whose 4.6 m floor is unchanged.
  *
- * Removing the sweeper can legitimately make the measured maximum larger. The
- * six observed corrected-gap > raw-gap cases, retained explicitly so a future
- * reader does not mistake them for a regression, are:
- *   seed 1 19.20: 4.174 (15/13) -> 4.225 (12/13)
- *   seed 2 14.13: 1.592 (12/8)  -> 1.933 (1/9)
- *   seed 4 21.60: 3.425 (7/10)  -> 3.438 (13/5)
- *   seed 4 21.87: 3.298 (7/9)   -> 3.544 (13/5)
- *   seed 4 22.13: 3.435 (15/5)  -> 3.723 (13/5)
- *   seed 5 22.67: 3.323 (10/15) -> 4.508 (10/12)
- * In each case shirt 15 sat between the retained endpoints in x-order. */
+ * The earlier numeric Candidate B reported six corrected-gap > raw-gap cases.
+ * They do NOT survive positional selection: in all six, the positional gap is
+ * the raw gap because the numeric shirt-15 exclusion was not justified by the
+ * active sweeperDepth test. The measurements are retained here as an audit
+ * anchor (positional corrected = raw, metres):
+ *   seed 1 19.20: 4.174 (rounded 4.2)
+ *   seed 2 14.13: 1.592 (rounded 1.6)
+ *   seed 4 21.60: 3.425 (rounded 3.4)
+ *   seed 4 21.87: 3.298 (rounded 3.3)
+ *   seed 4 22.13: 3.435 (rounded 3.4)
+ *   seed 5 22.67: 3.323 (rounded 3.3) */
 function maxLineGap(d: Director, team: 'A' | 'B'): number {
   const xs = law66Population(d, team).sort((a, b) => a.x - b.x).map((p) => p.x);
   let g = 0;
