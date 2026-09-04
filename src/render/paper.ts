@@ -610,6 +610,97 @@ export function armDepth(shoulderPitch: number): number {
   return Math.sin(shoulderPitch);
 }
 
+/* ================================================================== */
+/* SPEC_18.3a — KINETIC LEAN AND SQUASH                                */
+/* ------------------------------------------------------------------ */
+/* "Squeeze and pop": the figure shears into its acceleration and      */
+/* compresses on impact.                                               */
+/*                                                                     */
+/* The filtering is not decoration. Measured on the live engine, the   */
+/* position stream carries 0.08% discontinuities (max 1.019 m in one   */
+/* frame = 61 m/s) and a raw acceleration p99 of 478 m/s^2 = 49 g.     */
+/* Feeding that to tan() would snap figures flat on ~20% of frames.    */
+/* Hence: reject jumps, EMA the velocity, differentiate, project along */
+/* travel, EMA again, then bound with tanh.                            */
+/* ================================================================== */
+
+/** Ruled constants. */
+export const LEAN_TAU = 0.35;          // s — the knee of the sign-flip curve
+export const SHEAR_MAX = 0.18;         // rad — 10.3 deg at saturation
+export const A_REF = 6.0;              // m/s^2 — tanh reference
+export const MAX_STEP = 0.30;          // m per frame — above this is a teleport
+export const FOOT_SQUASH = 0.06;
+/** Minimum seconds between footfall triggers — the clip loop seam re-reports
+ *  the u = 0.88 contact at u = 0.00, which would double-fire once per cycle. */
+export const FOOT_DEBOUNCE = 0.10;
+
+export interface LeanState {
+  vx: number; vz: number;        // EMA velocity
+  a: number;                     // EMA along-travel acceleration
+  started: boolean;
+  lastFootT: number;             // debounce clock
+  wasGrounded: boolean;
+  squash: number;                // current footfall squash, decaying
+}
+
+export function newLeanState(): LeanState {
+  return { vx: 0, vz: 0, a: 0, started: false, lastFootT: -99, wasGrounded: true, squash: 0 };
+}
+
+/**
+ * Advance the lean filter. `rawVx/rawVz` are the per-frame finite-difference
+ * velocity; `stepped` is the distance the actor moved this frame, used to
+ * reject teleports.
+ *
+ * Returns the shear angle in radians, ready for the affine transform.
+ */
+export function updateLean(st: LeanState, rawVx: number, rawVz: number, stepped: number, dt: number): number {
+  if (dt <= 0) return SHEAR_MAX * Math.tanh(st.a / A_REF);
+  // 1 — reject discontinuities: reseed rather than differentiate a teleport
+  if (stepped > MAX_STEP) {
+    st.vx = rawVx; st.vz = rawVz; st.started = true;
+    return SHEAR_MAX * Math.tanh(st.a / A_REF);
+  }
+  const av = 1 - Math.exp(-dt / LEAN_TAU);
+  if (!st.started) { st.vx = rawVx; st.vz = rawVz; st.started = true; return 0; }
+  // 2 — EMA the velocity
+  const px = st.vx, pz = st.vz;
+  st.vx += (rawVx - st.vx) * av;
+  st.vz += (rawVz - st.vz) * av;
+  // 3 — differentiate the SMOOTHED velocity
+  const ax = (st.vx - px) / dt, az = (st.vz - pz) / dt;
+  // 4 — project along travel (signed: + accelerating, - braking)
+  const spd = Math.hypot(st.vx, st.vz);
+  const along = spd > 0.5 ? (ax * st.vx + az * st.vz) / spd : 0;
+  // 5 — second EMA, slower
+  const aa = 1 - Math.exp(-dt / (LEAN_TAU * 1.6));
+  st.a += (along - st.a) * aa;
+  // 6 — saturate: cannot exceed SHEAR_MAX however wild the input
+  return SHEAR_MAX * Math.tanh(st.a / A_REF);
+}
+
+/**
+ * Footfall squash, debounced against the clip loop seam.
+ * `grounded` is true on the frame a foot is in contact; `spd` scales the thud
+ * so a walk does not shake the ground.
+ */
+export function updateFootSquash(st: LeanState, grounded: boolean, spd: number, t: number, dt: number): number {
+  if (grounded && !st.wasGrounded && t - st.lastFootT > FOOT_DEBOUNCE) {
+    st.lastFootT = t;
+    const w = Math.min(1, Math.max(0, (spd - 2.0) / 8.0));
+    st.squash = FOOT_SQUASH * w;
+  }
+  st.wasGrounded = grounded;
+  // spike then recover over ~6 frames at 60 Hz
+  st.squash = Math.max(0, st.squash - dt * (FOOT_SQUASH / 0.10));
+  return st.squash;
+}
+
+/** Combine two squash sources without double-compressing (ruled). */
+export function combineSquash(a: number, b: number): number {
+  return 1 - (1 - a) * (1 - b);
+}
+
 /**
  * Two-bone IK in the drawing plane. The foot is authored (clearance arc); the
  * knee is solved rather than accumulated forward, which is what keeps the

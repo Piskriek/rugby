@@ -22,6 +22,7 @@ import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten,
+  newLeanState, updateLean, updateFootSquash, combineSquash, groundedClearance, type LeanState,
   BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
@@ -51,6 +52,11 @@ interface Puppet {
   view: PaperView;              // paper side currently shown this frame
   /* SPEC_06 — gait hysteresis state (which locomotion state is being held). */
   gait: string;
+  /* SPEC_18.3a — kinetic lean/squash filter state. */
+  lean: LeanState;
+  leanAngle: number;
+  footSquash: number;
+  clock: number;
 }
 const puppets = new Map<string, Puppet>();
 let lastDirector: Director | null = null;
@@ -170,14 +176,18 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
       seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
       lat: 0, view: 'front', gait: 'idle',   // SPEC_06 — facing/strafe debug + hysteresis
+      lean: newLeanState(), leanAngle: 0, footSquash: 0, clock: 0,  // SPEC_18.3a
     };
     puppets.set(key, pg);
   }
   /* velocity + true heading from the streamed positions */
   const vx = (a.rx - pg.lx) / Math.max(dt, 1e-4);
   const vz = (a.rz - pg.lz) / Math.max(dt, 1e-4);
+  const stepped = Math.hypot(a.rx - pg.lx, a.rz - pg.lz);
   pg.lx = a.rx; pg.lz = a.rz;
   pg.spd = Math.hypot(vx, vz);
+  /* SPEC_18.3a — filtered lean. Teleports are rejected inside updateLean. */
+  pg.leanAngle = updateLean(pg.lean, vx, vz, stepped, dt);
   /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
    * stationary man LOOKS AT THE BALL. The old velocity-only heading had
    * support runners strolling back to marks staring straight at the camera
@@ -265,6 +275,15 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
     pg.blendT += dt;
     pg.pose = lerpPose(pg.blendFrom, sampled, smooth(clamp01p(pg.blendT / pg.blendDur)));
   } else { pg.blendFrom = null; pg.pose = sampled; }
+
+  /* SPEC_18.3a footfall — placed AFTER the pose is sampled; reading pg.pose
+   * before this point would test last frame's legs against this frame's clock.
+   * Contact is read from the rig's own clearance helper rather than a
+   * hardcoded phase table, so it cannot drift out of sync with the clip. */
+  const [cl, cr] = groundedClearance(pg.pose.kL, pg.pose.kR);
+  pg.clock += dt;
+  pg.footSquash = updateFootSquash(pg.lean, Math.min(cl, cr) <= 0.005, pg.spd, pg.clock, dt);
+
   return pg;
 }
 
@@ -385,10 +404,20 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
      * at y = 0 by construction, which is what that helper only pretended to
      * do. See SEASON_3_QUEUE.md SPEC_17.1. */
     const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
+    /* SPEC_18.3a — footfall squash, combined MULTIPLICATIVELY with the SPEC_01
+     * impact squash (ruled), so a tackle landing on a footfall compresses once
+     * rather than twice. Contact is read from the rig's own clearance helper,
+     * not from a hardcoded phase table, so it cannot drift out of sync with the
+     * clip. The debounce inside updateFootSquash absorbs the u-loop seam. */
+    const sFoot = pg.footSquash;
+    const sImpact = 1 - (squash?.sy ?? 1);
+    const sTot = combineSquash(sFoot, Math.max(0, sImpact));
+    const squash2 = sTot > 0.0005 ? { sx: 1 + 0.6 * sTot, sy: 1 - sTot } : undefined;
     const legScale = edgeLegForeshorten(perp, cam.tilt * 180 / Math.PI); // Edge Leg Foreshortening (B-14)
 
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
+      lean: pg.leanAngle,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
@@ -398,7 +427,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
       ballSide: pg.pose.ballSide, ballSpin: ballWorld.spin,
       cap: pg.ch.cap, tape: pg.ch.tape,
       spinDir: sdir, gs, fore: 0.45 + 0.55 * perp, headDir: sdir || 1, depth: pr.f,
-      squash, legScale,
+      squash: squash2, legScale,
     };
     items.push({ f: pr.f, draw: () => { drawPaperShadow(args); drawPaperActor(args); } });
   }

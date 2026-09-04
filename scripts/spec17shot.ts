@@ -53,7 +53,7 @@ function sample(name: string, u: number): Pose {
 
 const cam: Camera = { x: 0, z: -12, h: 1.6, yaw: 0, tilt: 0.05, fov: 0.42, shake: 0, horizon: 0.5, roll: 0 };
 
-function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number): Poly[] {
+function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0): Poly[] {
   const rec = new Rec();
   rec.cap = [];
   const ctx = rec.asCtx();
@@ -71,7 +71,7 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number): P
     skin: '#c99468', hair: '#2a1c14', num: 12, seed: 5,
     carry: 0, carryStyle: 0, ballSide: 0.6, ballSpin: 0,
     cap: false, tape: false, spinDir: 1, gs: 0.6, fore: 0,
-    headDir: 0, depth: 0,
+    headDir: 0, depth: 0, lean,
   };
   drawPaperActor(args);
   return (rec.cap ?? []).map((c) => ({
@@ -85,10 +85,17 @@ const sideP: Poly[] = [];
 US.forEach((u, i) => { coronalP.push(...cell('front', u, i * CELL.w, 0)); });
 US.forEach((u, i) => { sideP.push(...cell('rightEdge', u, i * CELL.w, 0)); });
 
+/* SPEC_18.3a — lean sweep: same pose, four shear angles, so the kinetic tilt
+ * can be judged against a fixed reference. Feet must stay planted. */
+const LEANS = [-0.18, -0.09, 0.09, 0.18];
+const leanP: Poly[] = [];
+LEANS.forEach((ln, i) => { leanP.push(...cell('rightEdge', 0.25, i * CELL.w, 0, ln)); });
+
 rasterise(
   [
     { name: `SPEC_17  ${clip.toUpperCase()}  CORONAL  (swing leg + arm z-sort)`, polys: coronalP },
     { name: `SPEC_17  ${clip.toUpperCase()}  SIDE PROFILE  (hip pivot + crotch notch)`, polys: sideP },
+    { name: 'SPEC_18.3a  KINETIC LEAN  -10.3 / -5.2 / +5.2 / +10.3 deg  (brake <-> accelerate)', polys: leanP },
   ],
   out,
   { w: CELL.w * US.length, h: CELL.h },

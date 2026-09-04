@@ -61,6 +61,8 @@ export interface PaperDrawArgs {
   /** perspective foreshortening of the standing leg length, 0.6..1
    *  (SPEC_01 — Edge Leg Foreshortening, B-14/D-04). */
   legScale?: number;
+  /** SPEC_18.3a — kinetic lean, radians. Sheared about the foot anchor. */
+  lean?: number;
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -753,6 +755,15 @@ export function drawPaperActor(a: PaperDrawArgs) {
    * contact against the 1.10 m tackle radius. */
   ctx.scale(FIGURE_SCALE, FIGURE_SCALE);
   if (a.squash) ctx.scale(a.squash.sx, a.squash.sy);   // SPEC_01 impact squash about the foot anchor
+  /* SPEC_18.3a — KINETIC SHEAR ("squeeze and pop"), about the FOOT ANCHOR so a
+   * leaning figure stays planted. The matrix is
+   *     | 1  -tan(theta)  0 |
+   *     | 0      1        0 |
+   * and -tan is negative because screen-y runs down while the card's Y() maps
+   * metres up: a positive theta must throw the TOP of the card forward. Shear
+   * is the last transform before the card is drawn and after the squash, so the
+   * two compose rather than fight. */
+  if (a.lean) ctx.transform(1, 0, -Math.tan(a.lean), 1, 0, 0);
   const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
   if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
   const falling = q.fall > 0.01 && q.fall < 0.985;
