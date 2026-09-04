@@ -20,7 +20,10 @@
 
 import { Director } from '../director';
 import { FIELD } from '../../render/retro';
-import { behaviourBeat, hasBehaviour, SituationId, Beat } from '../behaviour';
+import {
+  behaviourBeat, hasBehaviour, BEHAVIOUR_POINTS, SITUATIONS, SITUATION_META,
+  SituationId, Beat,
+} from '../behaviour';
 
 /** The dataset's situation for a team's view of the live match state, or
  *  null when think() must fall through to shapes/jlr (set pieces, kicks,
@@ -69,6 +72,12 @@ export function beatOf(d: Director): Beat {
  * authored run stops early (the last position is held, never invented).
  * `expand()` authors the world frame for team A (our try line −50); team B
  * is the point mirror through the middle of the park.
+ *
+ * SPEC_11: retained for tooling and the media guide. It answers "where was
+ * this point authored?" — an absolute place. `datasetOffset()` below answers
+ * the question the engine must ask: "where does this shirt stand RELATIVE TO
+ * THE BALL?" Steering by this function is the formation-drift bug; the engine
+ * now uses the offset form and re-anchors it on the live focus point.
  */
 export function datasetMark(
   team: 'A' | 'B', num: number, situation: SituationId, beat: Beat,
@@ -86,3 +95,79 @@ export function datasetMark(
   const z = team === 'B' ? -pt.wz : pt.wz;
   return { x, z, job: pt.instruction.slice(0, 64).toUpperCase() };
 }
+
+/* ==================== SPEC_11 — THE BALL-RELATIVE MARK ====================
+ *
+ * The dataset draws a FORMATION around a ball that was in one fixed place
+ * when the author drew it (`SITUATION_META[situation].ball` — β). The engine
+ * wants the shape, not the patch of grass, so the mark is returned as an
+ * offset from that anchor and the caller re-anchors it on the live focus
+ * point:
+ *
+ *   target.z = F.z + σ · along
+ *   target.x = F.x + σ · across        (σ = +1 for team A, −1 for team B)
+ *
+ * σ is the point mirror through the middle of the park: team A attacks +z,
+ * team B attacks −z, and the authored frame is "0 is OUR try line". Both
+ * offsets come back UNMIRRORED, in the authoring team's frame, so that the
+ * caller can apply the mirror exactly once — together with the lateral
+ * squeeze, which acts on the same sign.
+ */
+
+export interface DatasetOffset {
+  /** metres along the pitch from the ball; + = toward the opposition line */
+  along: number;
+  /** metres across the pitch from the ball; + = dataset right */
+  across: number;
+  /** the authored instruction, as the job string */
+  job: string;
+}
+
+/**
+ * The dataset's mark for a shirt as an OFFSET FROM THE SITUATION'S BALL.
+ * Pure: no live state, no players moved. Falls back to the previous beat
+ * when the authored run stops early (the last position is held, never
+ * invented).
+ */
+export function datasetOffset(
+  num: number, situation: SituationId, beat: Beat,
+): DatasetOffset | null {
+  if (!hasBehaviour(num, situation)) return null;
+  const beta = SITUATION_META[situation]?.ball;
+  if (!beta) return null;
+  let pt = behaviourBeat(num, situation, beat);
+  if (!pt) {
+    for (let i = (beat as number) - 1; i >= 1 && !pt; i--) {
+      pt = behaviourBeat(num, situation, i as Beat);
+    }
+  }
+  if (!pt) return null;
+  return {
+    along: pt.x - beta.x,                    // dataset units along are metres
+    across: (pt.y - beta.y) * ACROSS_METRES, // 0..100 across → −35..+35 m
+    job: pt.instruction.slice(0, 64).toUpperCase(),
+  };
+}
+
+/** Dataset `y` (0..100 across the pitch) to metres. Matches `toWorldX`. */
+const ACROSS_METRES = 0.70;
+
+/**
+ * The lateral extent of each situation's authored formation, in metres from
+ * the ball anchor. SPEC_11/D11-a: when the ball is pinned against a
+ * touchline there is not room for the full spread, so the formation is
+ * squeezed by the factor this extent implies rather than spilling into
+ * touch. Derived from the dataset, never hand-tuned.
+ */
+export const SITUATION_LATERAL: Record<SituationId, { min: number; max: number }> =
+  SITUATIONS.reduce((acc, situation) => {
+    let min = 0, max = 0;
+    for (const p of BEHAVIOUR_POINTS) {
+      if (p.situation !== situation) continue;
+      const across = (p.y - SITUATION_META[situation].ball.y) * ACROSS_METRES;
+      if (across < min) min = across;
+      if (across > max) max = across;
+    }
+    acc[situation] = { min, max };
+    return acc;
+  }, {} as Record<SituationId, { min: number; max: number }>);

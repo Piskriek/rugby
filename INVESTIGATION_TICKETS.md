@@ -195,12 +195,231 @@ by-design? (2) Which have user-visible symptoms worth a playtest probe?
 
 ---
 
+## T-69 · DYNAMIC FACING (render/AI) — logged by SPEC_11, deferred
+
+**Observed:** a player's facing is his velocity vector and nothing else, so a
+man stopped dead keeps whatever heading he arrived with, and a man shunted
+sideways by `separate()` snaps to face the shunt. There is no turn rate and no
+hysteresis: the heading is a pure function of the current frame's velocity.
+**Known:** `steer()` writes `p.face` straight from velocity in
+`Director.think()` (`director.ts`, the `a.rf` field); the only consumer is the
+renderer, `src/render/scene.ts` (`face: a.rf > 0 ? 0 : Math.PI`) — the
+papercraft puppet flips between two poses on the sign of that one number. The
+game therefore has NO facing model at all: no `lastFace`, no `turnT`, no
+maximum angular rate. Tackle and contact reads use position and velocity, not
+facing, so nothing in the law or physics layer depends on it yet.
+**Not known:** what a realistic turn rate is for a forward carrying vs a back
+braking at speed; whether facing should lead or lag the velocity vector during
+a step or a fend; how a grounded or tackled man should hold his heading.
+**Questions:** (1) Should facing be a rate-limited follower of velocity (with
+a faster rate when sprinting, slower when braked), or an independent intent
+channel the AI writes? (2) Does the two-pose papercraft renderer need more
+poses before a real turn rate is visible, or is a sampled heading enough?
+(3) What is the measurement — mean angular velocity per clip, or "frames where
+the heading changed more than X degrees in one frame"?
+
+## T-70 · THE PASS-DRIFT TERM IS IDENTICALLY ZERO (AI) — logged by SPEC_11, deferred
+
+**Observed:** the defensive line never drifts on the pass. T-18's drift term
+exists in the code, is computed every frame, and can only ever evaluate to
+zero, so the behaviour it describes has never happened in a match.
+**Known:** the line-drift write in `Director.think()` is
+`tx += (this.op.carrierX - f.x) * dw`, where `dw` is the system's drift weight
+scaled by whether the ball is in flight. `f` is `focusPoint()`, and
+`focusPoint()` returns `{ x: op.carrierX, z: op.carrierZ }` when `op` exists —
+which is exactly the branch this code is in. So `op.carrierX - f.x === 0` and
+the term vanishes. The intent (T-18) was for the line to slide WHILE THE BALL
+IS IN FLIGHT, i.e. toward where the ball is going, not toward where the
+carrier is. The live ball during flight is a separate object: `op.ball.x/z`.
+**Not known:** whether the line should track the flying ball, the receiver, or
+the projected catch point; what drift weight is right once the term is live
+(the old weights were priced against a term that was always zero, so they are
+not evidence); how this interacts with the converger and cover-chase branches,
+which pull individual defenders out of the line on other terms.
+**Questions:** (1) Is the drift target the ball, the receiver's current
+position, or the predicted catch? (2) Once live, does the line over-slide and
+open the very holes LAW-66 measures — i.e. does this need a spacing clamp?
+(3) What is the measurement that proves the drift is happening at the right
+rate (sliding metres per pass, or line-lane error at the catch)?
+
+---
+
+## T-73 · ELIGIBLE-TACKLER SELECTION: WRITTEN, MEASURED, HELD (AI/camera) — logged by SPEC_14
+
+**Status: SHIPPED (author ruling 2026-09-04, option A).** The author accepted
+the framing regression on the one seed in exchange for the tackle gain: "A 24%
+increase in tackles and preventing grounded players from making tackles is a
+massive gameplay upgrade. We will not block it for a known camera edge-case."
+The gate is RED ON SEED 1 ONLY (BALL ON SCREEN 196, threshold 60). Seeds 7/13/21
+are clean. This is a known, accepted, documented state — not a surprise, and
+not to be "fixed" by moving the threshold. The camera debt it exposes is T-74.
+
+**The bug (SPEC_14 task 14-c).** `upOpen` takes `const nearest = dists[0]` and
+only ever offers THAT man to the tackle test. `dists` is built from every live
+defender with no filter on `beatenT` or `down`, so when the nearest man has
+slipped a tackle (`beatenT` 1.1-1.6 s) the block returns and *nobody* can
+tackle the carrier until his timer expires. A beaten man is a shield.
+
+**The patch.** Next to `nearest`, derive
+
+```ts
+const eligible = (num: number) => {
+  const p = d.L(dTeam, num);
+  return !!p && p.beatenT <= 0 && !p.down && p.sinbin <= 0;
+};
+const tackler1 = dists.find((x) => eligible(x.num)) ?? null;
+```
+
+and use `tackler1` in the human dive branch and in the tackle block. `nearest`
+stays for `pressure`, the ring count and the line-break read, which are
+deliberately "closest body" measures.
+
+**Measured, 4 seeds x 3 difficulties, 100 s each, identical RNG stream:**
+- tackles made, summed over the four seeds: **63 -> 78 (+24%)**. The SPEC_14
+  diagnosis predicted tackles would rise; they do, and by more than the ticket
+  guessed. (Seed 1 alone fell 24 -> 17; the other three rose.)
+- it also stops grounded players completing tackles: `p.down` was never
+  excluded, so a man lying on the turf could be the nearest and could finish a
+  tackle.
+- the shield it removes is small in absolute terms: 14 of 711 contact frames
+  (2.0%) had an eligible man inside 1.1 m blocked by a beaten one.
+
+**Why it is held.** It trips BALL ON SCREEN on one seed: 196 frames (seed 1;
+seeds 7/13/21 are 0). Diagnosis: the failures are OPEN_PLAY with the ball near
+the touchline (x ~ 26), where the cable rig's lateral clamp (+-30) leaves it
+almost directly above the ball at 13 m while its look-ahead keeps the tilt at
+~25 deg, so the ball sits on the bottom edge of frame. Most of the 196 are
+0-1 px past the 60 px margin; 35 are genuinely off (192 px past the left edge).
+This is a pre-existing camera weakness the new match flow simply reaches more
+often — `engine/camera.ts` is byte-identical to main, and two targeted fixes
+(rig-Z boost, anchor lead clamp) were tried and changed the count by exactly 0.
+
+**The ruling given.** (a) Ship it. Do NOT tune the gate threshold — the author
+has ruled that out twice. The camera debt it exposes is now T-74, logged as the
+next priority camera work.
+
+**Already measured, do not re-derive:** the 63 -> 78 tackle figure, the
+seed-by-seed BALL ON SCREEN figures (0/1/0/0 without the patch, 196/0/0/0 with
+it), and the fact that the framing gate was measuring the CARRIER rather than
+the ball until SPEC_14 corrected it (see `Director.ballPoint()`).
+
+---
+
+## T-72 · THE STATS HARNESS IS UNSEEDED, SO IT CANNOT COMPARE BUILDS (harness) — logged by SPEC_13
+
+**Observed:** `scripts/stats.ts` never calls `seedRng`, so it draws from ambient
+`Math.random()`. Two consecutive runs of the identical command on the identical
+build (`npx vite-node scripts/stats.ts 5 3`) scored 50% (8/16) and 56% (9/16),
+with OFFSIDE PENALTIES PER TEAM reading 4.2 then 4.0. `scripts/gates.ts` is
+seeded (`seedRng(seed)`) and is bit-reproducible.
+
+**Why it matters:** the audit score is the project's headline metric. At this
+variance a one-row move is indistinguishable from noise, which invites two
+opposite errors — claiming a win that was luck, and chasing a regression that
+was never there. SPEC_13 nearly reported the 50% -> 56% move as an improvement;
+it was not.
+
+**Already measured:** run-to-run spread on one row is ~0.2 penalties and the
+score moves by one row (6%). Not measured: the spread of every row, or whether
+seeding changes the mean.
+
+**Not known:** (1) Is the harness unseeded by design (a deliberate broader
+sample) or by omission? (2) Should `stats.ts` take a seed argument the way
+`gates.ts` does, and should the reported score be a mean over N seeds rather
+than one sample? (3) Does `statsAudit.ts` own RNG at all, or does it inherit
+whatever `Director` leaves lying around?
+
+**Explicitly not the fix:** changing any band or ceiling to make the score
+settle down. This is a measurement-instrument question, not a game question.
+
+---
+
+## T-71 · AI LOITERING / RETREAT DEBT (AI) — logged by SPEC_12, deferred to the AI behaviour pass
+
+**Observed:** the CPU is offside roughly ten times as often as a real team. Over
+nine fixtures (3 difficulties × 3 seeds, 200 s each) with Force AI Clean off,
+the CPU side committed **1200 sustained episodes**; with it on, **0** — the
+projection is carrying the whole load. What reaches the whistle is not
+technical: the LENIENT referee's residual offences have a median depth of about
+**3 m past the line, held for 2 seconds**. That is the honest reason
+`OFFSIDE PENALTIES PER TEAM` reads 5.6 against a 2..4 band.
+**Known:** the offences are dominated by the RESET line — defenders who have
+not got back behind the contact mark by the end of the release beat — and by
+the `CURVE` defensive job. Instrumenting the tail made it concrete: of the
+thirty samples beyond 8 m in one match, **twenty-nine were the CURVE job at a
+breakdown**, sprinting at ~5 m/s with the gap to their mark *growing*
+(progress negative), not closing. So it is not a man who has not started
+running; it is a man running and losing ground, which points at the mark
+moving faster than he can, at an anchor that is wrong for the wide channel, or
+at a retreat instruction that is too shallow.
+**Not known:** which of those three it is. Specifically — whether the release
+beat (1.2 s) is long enough for the current acceleration model to cover the
+ground the law requires; whether the retreat needs to be a distinct locomotion
+state with its own top speed rather than an ordinary steer to a mark; and how
+much of the CURVE tail is a systematic anchor error on the wide channel versus
+a legitimate defender being dragged across by the ball.
+**Questions:** (1) Is the retreat target the right distance behind the mark, or
+is it being clamped by something else? (2) Should `RELEASE AND RETREAT` own
+the player's velocity rather than compete with the shape? (3) What is the
+measurement that proves a fix — metres behind the line at the end of the beat,
+or time-to-legal?
+**Explicitly not the fix:** widening the referee's tolerance. The author's
+ruling is that the referee is working and the numbers are real; the debt is in
+the AI. Force AI Clean (`offsideAiClean`) is the shipped mitigation and is a
+projection, not a repair.
+
+---
+
+## T-74 · THE CABLE RIG LOSES THE BALL NEAR THE TOUCHLINE (camera) — logged by SPEC_14, NEXT PRIORITY
+
+**Observed.** With the ball near a touchline (x ~ 26-27 of a +-33 pitch) the
+cable rig ends up almost directly above it, and the ball falls out of the bottom
+of the frame for seconds at a time. On seed 1 with the eligible-tackler fix this
+is 196 frames across 3 x 100 s; 35 of them are genuinely off (192 px past the
+left margin) and the rest sit 0-1 px past the 60 px bottom margin. Seeds 7/13/21
+are clean on identical code, so this is geometry the new match flow reaches more
+often, not a new bug.
+
+**The mechanism, measured.** `engine/camera.ts` `cableRig`:
+
+* `wantX = anchorX * 0.82` deliberately eases the rig toward the middle, and
+  `d.cableX` is then clamped to +-30. With the ball at x = 27 the rig is pulled
+  inside it to x ~ 23.7 and cannot get outside the ball.
+* `trail` (the stand-off along z) is ~17 m, but the rig's look-ahead anchor can
+  sit ~20 m downfield of the ball, so the rig finishes only ~6 m from it in z.
+* Net: the rig is ~7 m away horizontally and 13 m above. The ball is ~62 deg
+  below horizontal, but the tilt is computed from the look-ahead anchor, giving
+  ~25 deg. The ball is ~31 deg off the look axis against a half-fov of ~34 deg —
+  inside the lens only just, and outside the gate's 60 px margin.
+
+**What was already tried and did NOT work (do not repeat).**
+* Boosting the rig's along-pitch ease rate (`cableZ`, 2.0 -> 2.0 + wide*2.6):
+  changed the count by exactly 0.
+* Raising the in-flight anchor ease rate (`cableAX/AZ`, 3.0 -> 6 and 9): 0.
+* Clamping `landingPrediction()` to the field and capping the anchor's lead
+  over the ball at 10-14 m: 0. The framing failures are in OPEN_PLAY, not in
+  flight, so none of these were on the path.
+
+**Not known.** (1) Should `wantX` stop easing toward the middle when the ball is
+beyond some |x|, or should the +-30 clamp widen? (2) Should the tilt be computed
+from the ball rather than the look-ahead anchor when the two diverge by more
+than N metres? (3) Is the 0.82 middle-ease factor fighting the lateral clamp?
+
+**Explicitly not the fix:** raising the BALL ON SCREEN threshold, or reverting
+the eligible-tackler work (T-73) that made this reachable.
+
+---
+
+---
+
 ## PRIORITY ORDER (my read — challenge it)
-1. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
-2. T-49 backward pods (the on-pitch feel of attack)
-3. T-41 maul exits + contest fairness
-4. T-67 double try (legality; needs the watchdog surfacing)
-5. T-66 try-repeat (render read)
-6. T-68 harness seeding (cheap, unblocks clean CI)
-7. T-65 stall presentation
-8. Audit families (batch review)
+1. **T-74 cable rig loses the ball near the touchline** (the only red gate on
+   the branch; the author accepted the red to ship T-73, so this now owns it)
+2. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
+3. T-49 backward pods (the on-pitch feel of attack)
+4. T-41 maul exits + contest fairness
+5. T-67 double try (legality; needs the watchdog surfacing)
+6. T-66 try-repeat (render read)
+7. T-68 harness seeding (cheap, unblocks clean CI)
+8. T-65 stall presentation
+9. Audit families (batch review)

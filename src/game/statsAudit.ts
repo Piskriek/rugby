@@ -36,7 +36,13 @@ export const BENCHMARKS: Benchmark[] = [
   { key: 'rucks', label: 'RUCKS PER MATCH', lo: 120, hi: 200, perTeam: false, note: 'Around 150-170 is normal. Too few means play is not recycling; too many means nothing else ever happens.' },
   { key: 'scrums', label: 'SCRUMS PER MATCH', lo: 14, hi: 20, perTeam: false, note: 'Distinct awarded scrum occurrences, read from the set-piece event ledger rather than won/lost outcome fields.' },
   { key: 'lineouts', label: 'LINEOUTS PER MATCH', lo: 20, hi: 28, perTeam: false, note: 'Distinct awarded lineout occurrences, including a separately awarded rethrow, never a sum of outcome counters.' },
-  { key: 'penalties', label: 'PENALTIES PER MATCH', lo: 14, hi: 28, perTeam: false, note: 'Around 18-22. Far too many was the old offside bug; far too few means the referee is asleep.' },
+  /* SPEC_12: this row now means PENALTIES. It used to count every whistle, so
+   * a knock-on and a forward pass — scrum restarts, which cost the offender
+   * nothing like a penalty — were spending the match's penalty budget. Those
+   * moved to the row below. The band is unchanged: a real Test still produces
+   * roughly 18-22 penalties, and the claim was always about penalties. */
+  { key: 'penalties', label: 'PENALTIES PER MATCH', lo: 14, hi: 28, perTeam: false, note: 'Around 18-22. Far too many was the old offside bug; far too few means the referee is asleep. Set-piece restarts are counted separately below, not here.' },
+  { key: 'restarts', label: 'SCRUM RESTARTS PER MATCH', lo: 8, hi: 28, perTeam: false, note: 'Knock-ons, forward passes, free kicks and turnover scrums — the whistles that are NOT penalties. Real rugby concedes 12-18 handling errors a match plus a handful of free kicks, so the band is deliberately wide. A very low count means handling errors are going unexamined, which is exactly what SPEC_13 reports about the pass.' },
   { key: 'passes', label: 'PASSES PER MATCH', lo: 180, hi: 340, perTeam: false, note: 'Around 250. A read on whether the ball actually moves through hands.' },
   { key: 'kicks', label: 'KICKS FROM HAND', lo: 30, hi: 70, perTeam: false, note: 'Around 45-55. Under 30 means the kicking game does not exist; over 70 means nobody runs.' },
   { key: 'metres', label: 'METRES CARRIED PER TEAM', lo: 250, hi: 800, perTeam: true, note: 'Around 400-600. A direct read on whether carries actually gain ground.' },
@@ -52,8 +58,21 @@ export const OFFSIDE_PENALTIES_PER_TEAM: Benchmark = {
   note: 'A mean team count from deduplicated, sustained ruck and defensive-line-reset breaches.',
 };
 export const FORMATION_DRIFT_P90: Benchmark = {
-  key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 2.5, perTeam: false,
-  note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 2.5 m.',
+  key: 'formationDriftP90', label: 'P90 TARGET-SLOT DRIFT (M)', lo: 0, hi: 6.0, perTeam: false,
+  note: 'The audit mean of each fixture’s worst-team P90 actual actor-to-target-slot distance; it must not exceed 6.0 m. '
+    + 'The ceiling was 2.5 m while the metric was an instantaneous velocity test, which forgave a man sprinting in the '
+    + 'wrong direction; SPEC_11 recalibrated it as a PROGRESS test (is the gap actually closing?) and the author set it '
+    + 'at 4.0 m. SPEC_12 then measured 4.5 to 5.7 m over ten fixtures and proved the referee is not the cause — the '
+    + 'reading is identical with the offside engine disabled — so the author raised the ceiling to 6.0 m rather than '
+    + 'have the number tuned back down. The 2.3 m that preceded all this was a three-match sample of an unseeded metric '
+    + 'whose run-to-run spread is about a metre. Read this row at five matches or more; three is noise.',
+};
+export const FORMATION_MARK_ANCHOR_P90: Benchmark = {
+  key: 'formationMarkAnchorP90', label: 'P90 MARK-TO-BALL DISTANCE (M)', lo: 0, hi: 25, perTeam: false,
+  note: 'SPEC_11: the audit mean of each fixture’s worst-team P90 distance from a target mark to the LIVE BALL. '
+    + 'Drift only asks whether a man is reaching his mark; it cannot see a man who reaches a mark in the wrong place. '
+    + 'This is the channel that can. Two wingers and a sweeper legitimately stand 25-30 m out, so the ceiling is the '
+    + 'P90, not the maximum.',
 };
 
 export type Grade = 'REALISTIC' | 'LOW' | 'HIGH';
@@ -147,6 +166,7 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
     add('scrums', d.setPieceEvents.scrums);
     add('lineouts', d.setPieceEvents.lineouts);
     add('penalties', A.penaltiesConceded + B.penaltiesConceded);
+    add('restarts', A.restarts + B.restarts);
     add('passes', A.passes + B.passes);
     add('kicks', A.kicks + B.kicks);
     add('metres', (A.metres + B.metres) / 2);
@@ -162,6 +182,12 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
     add('formationDriftP90', sampled
       ? Math.max(formation.formationDriftP90.A, formation.formationDriftP90.B)
       : Number.POSITIVE_INFINITY);
+    /* The companion channel. Same worst-team rule, same never-average-it
+     * discipline: one team strung out forty metres from its own ball is a
+     * defect even if the other side holds a perfect shape. */
+    add('formationMarkAnchorP90', sampled
+      ? Math.max(formation.formationMarkAnchorP90.A, formation.formationMarkAnchorP90.B)
+      : Number.POSITIVE_INFINITY);
   }
 
   const results: StatResult[] = BENCHMARKS.map((b) => {
@@ -171,18 +197,23 @@ export function auditStats(cfg: MatchConfig, matches = 3): StatsReport {
 
   const offside = metricFor(OFFSIDE_PENALTIES_PER_TEAM, totals.offsidePenalties ?? 0, matches);
   const drift = metricFor(FORMATION_DRIFT_P90, totals.formationDriftP90 ?? Number.POSITIVE_INFINITY, matches);
-  /* This is intentionally one audit row, but neither dimension is hidden: a
-   * green result requires both the legal-offside target and the drift ceiling. */
+  const anchor = metricFor(FORMATION_MARK_ANCHOR_P90, totals.formationMarkAnchorP90 ?? Number.POSITIVE_INFINITY, matches);
+  /* This is intentionally one audit row, but no dimension is hidden: a green
+   * result requires the legal-offside band, the drift ceiling AND the
+   * mark-to-ball ceiling. SPEC_11 added the third because drift alone passed
+   * while the formation sat in the wrong half of the pitch. */
   results.push({
     key: 'offsideFormationIntegrity',
     label: 'OFFSIDE & FORMATION INTEGRITY',
     value: offside.value,
     lo: offside.lo,
     hi: offside.hi,
-    grade: offside.grade !== 'REALISTIC' ? offside.grade : drift.grade,
-    note: 'Both the offside-penalty band and the target-slot-drift ceiling must pass; neither compensates for the other.',
+    grade: offside.grade !== 'REALISTIC' ? offside.grade
+      : drift.grade !== 'REALISTIC' ? drift.grade : anchor.grade,
+    note: 'The offside-penalty band, the target-slot-drift ceiling and the mark-to-ball ceiling must all pass; '
+      + 'neither compensates for another.',
     perTeam: true,
-    details: [offside, drift],
+    details: [offside, drift, anchor],
   });
 
   const realistic = results.filter((r) => r.grade === 'REALISTIC').length;

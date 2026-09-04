@@ -16,7 +16,7 @@ import { CamModeSpec, camModeSpec, resolveZoom } from '../camera';
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
 export function updateCamera(d: Director, dt: number) {
-  const f = d.focusPoint();
+  const f = d.cameraFocus();
   const dir = d.possession === 'A' ? 1 : -1;
 
   for (const ev of d.frameEvents) {

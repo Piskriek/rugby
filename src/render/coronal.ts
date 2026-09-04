@@ -21,10 +21,18 @@ import {
   paperCard, poly, foldTab, crease, ballPaper,
 } from './paper';
 import { Pose } from './clips';
+import { project, type Camera, type View } from './retro';
+import { FIGURE_SCALE } from './paper';
 
 export interface PaperDrawArgs {
   ctx: Ctx;
   sx: number; sy: number; sc: number;
+  /** SPEC_14 — the lens and the actor's turf position, so the shadow can be
+   *  projected from real world geometry instead of screen-space nudges. */
+  cam: Camera; v: View;
+  wx: number; wz: number;
+  /** heading in radians; forward = +z at 0 */
+  face: number;
   view: PaperView;
   pose: Pose;
   pal: Palette; build: Build;
@@ -596,6 +604,10 @@ export function drawPaperActor(a: PaperDrawArgs) {
   const args: PaperDrawArgs = { ...a, pose: q };
   ctx.save();
   ctx.translate(a.sx, a.sy);
+  /* SPEC_14 — grow the figure about its ground anchor. See FIGURE_SCALE in
+   * paper.ts: the builds draw true to life, they were simply too small to read
+   * contact against the 1.10 m tackle radius. */
+  ctx.scale(FIGURE_SCALE, FIGURE_SCALE);
   if (a.squash) ctx.scale(a.squash.sx, a.squash.sy);   // SPEC_01 impact squash about the foot anchor
   const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
   if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
@@ -620,20 +632,123 @@ export function drawPaperActor(a: PaperDrawArgs) {
   ctx.restore();
 }
 
+/* ------------------------------------------------------------------ *
+ * SPEC_14 — THE SHADOW ANCHOR
+ *
+ * The old shadow had four defects, measured in scripts/spec14probe.ts:
+ *
+ *   1. `ry = rx * 0.30` was a constant. A circle lying on the turf projects to
+ *      ry/rx = sin(tilt) — measured against a real projected ground circle the
+ *      truth is 0.61 on the default CABLE rig and 0.68 on CHASE, so the ellipse
+ *      was 51-56% too flat. It read as a sliver in front of the feet, not a
+ *      pool under them. THAT was the float.
+ *   2. It was pinned to the actor's ROOT while `pinPlantedFoot` pins the
+ *      planted FOOT, so the shadow and the feet disagreed by 0.34 m over a
+ *      stride.
+ *   3. The offset `+sc*0.06, +sc*0.02` was a SCREEN-space nudge, so the light
+ *      rotated with the camera instead of coming from a fixed direction.
+ *   4. It used `p.fall > 0.6` to decide a body was down while the actor's own
+ *      artwork used `pg.lie`, so a tipping body kept a standing ellipse.
+ *
+ * All four are fixed here. The ellipse is now built by projecting a real
+ * circle on the turf through the same lens that drew the body, so its minor
+ * axis is correct at any tilt or zoom by construction.
+ * ------------------------------------------------------------------ */
+
+/** A directional stadium light: metres of shadow offset per metre of caster
+ *  height. The caster is the torso, so the shadow falls a little away from
+ *  the feet exactly as a real one does. */
+const LIGHT_X = 0.040;
+const LIGHT_Z = 0.025;
+
+/**
+ * Which foot is on the turf, and how far forward of the root it is planted.
+ * Mirrors the leg solution in `pinPlantedFoot` and in the leg cards, so the
+ * shadow and the boot agree. Returns metres along the facing axis.
+ */
+export function plantedFoot(pose: Pose, build: Build, legScale = 1): { forward: number; lift: number } {
+  const thigh = build.leg * 0.52 * legScale, shin = build.leg * 0.48 * legScale;
+  const hy = pose.hip - 0.02;
+  const footY = (l: number, k: number) =>
+    hy - Math.cos(l) * thigh - Math.cos(l - k) * shin + Math.sin(Math.max(0, k)) * shin * 0.22;
+  const swing = (l: number, k: number) => Math.sin(l) * thigh + Math.sin(l - k) * shin;
+  const yL = footY(pose.lL, pose.kL), yR = footY(pose.lR, pose.kR);
+
+  /* The anchor is the MIDPOINT of the two feet, not the planted foot itself.
+   *
+   * Measured, not assumed (scripts/_anchor.ts, 30 s at 60 Hz): following the
+   * planted foot alone makes the shadow SNAP from boot to boot every stride —
+   * the frame-to-frame jump in the shadow-to-foot distance is worse than the
+   * old root anchor at every percentile (p99 9.4 px against 5.5). The midpoint
+   * tracks the stride smoothly and is identical to the planted foot whenever
+   * the player is standing still, which is when a shadow is actually read.
+   *
+   * Worth knowing: the residual movement is NOT an anchor problem. The drawn
+   * feet move relative to the ground point because `pinPlantedFoot` caps its
+   * correction at 0.06 m, so the figure still bobs within a stride. Moving the
+   * shadow cannot repair that; fixing it means re-authoring the gaits, which
+   * is out of SPEC_14's scope. */
+  return { forward: (swing(pose.lL, pose.kL) + swing(pose.lR, pose.kR)) * 0.5, lift: Math.max(0, Math.min(yL, yR)) };
+}
+
+/** Is this figure laid on the turf? Uses the actor's OWN view, not `fall`. */
+const isLying = (a: PaperDrawArgs) => a.view === 'lieFaceUp' || a.view === 'lieFaceDown';
+
+/**
+ * Where the shadow is cast FROM: the planted foot, or the body centre when the
+ * figure is down or in the air. World coordinates, on the turf.
+ */
+export function groundAnchor(a: PaperDrawArgs): { x: number; z: number } {
+  if (isLying(a)) return { x: a.wx, z: a.wz };
+  const air = Math.max(0, a.pose.hip - 0.94);
+  if (air > 0.02) return { x: a.wx, z: a.wz };          // airborne: under the hip
+  const f = plantedFoot(a.pose, a.build, a.legScale ?? 1);
+  return { x: a.wx + Math.sin(a.face) * f.forward, z: a.wz + Math.cos(a.face) * f.forward };
+}
+
 /** contact shadow: tighter and darker when planted, wide and soft when down */
 export function drawPaperShadow(a: PaperDrawArgs) {
   const { ctx, sc } = a;
   const p = a.pose;
-  const down = p.fall > 0.6;
+  const down = isLying(a);
   const air = Math.max(0, p.hip - 0.94);
-  const rx = down ? 0.95 * sc : (0.3 + a.build.shW * 0.32) * sc * (1 + air * 0.9);
-  const ry = down ? 0.34 * sc : rx * 0.3;
+
+  /* The caster height decides both how far the shadow is thrown and how soft
+   * it is. A body on the turf casts from almost nothing. */
+  const casterH = (down ? 0.35 : Math.max(0.35, p.hip)) * FIGURE_SCALE;
+
+  /* World radius of the pool, in metres, scaled with the figure. */
+  const rxM = (down ? 0.95 : (0.3 + a.build.shW * 0.32) * (1 + air * 0.9)) * FIGURE_SCALE;
+
+  const anchor = groundAnchor(a);
+  const ax = anchor.x + LIGHT_X * casterH;
+  const az = anchor.z + LIGHT_Z * casterH;
+
+  /* Project a real circle of that radius lying on the turf through the same
+   * lens. Its bounding box IS the ellipse: the minor axis now follows the
+   * camera tilt for free, at any zoom. */
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, hit = 0;
+  let cx = 0, cy = 0;
+  for (let i = 0; i < 16; i++) {
+    const t = (i / 16) * Math.PI * 2;
+    const pr = project(a.cam, a.v, ax + Math.cos(t) * rxM, 0, az + Math.sin(t) * rxM);
+    if (!pr) continue;
+    cx += pr.sx; cy += pr.sy; hit++;
+    if (pr.sx < x0) x0 = pr.sx; if (pr.sx > x1) x1 = pr.sx;
+    if (pr.sy < y0) y0 = pr.sy; if (pr.sy > y1) y1 = pr.sy;
+  }
+  if (hit < 8) return;                       // off the near plane — nothing to draw
+  cx /= hit; cy /= hit;
+  const rx = Math.max(2, (x1 - x0) * 0.5);
+  const ry = Math.max(1.5, (y1 - y0) * 0.5);
+
   const alpha = down ? 0.3 : Math.max(0.14, 0.36 - air * 0.5);
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.fillStyle = '#081008';
   ctx.beginPath();
-  ctx.ellipse(a.sx + sc * 0.06, a.sy + sc * 0.02, Math.max(2, rx), Math.max(1.5, ry), 0, 0, Math.PI * 2);
+  ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+  void sc;
 }

@@ -48,10 +48,18 @@ import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START } from './maulRega
 import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
+import {
+  RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
+} from './engine/referee';
 import { wetnessOf, windOf, WEATHERS } from './engine/weather';
-import { situationOf, beatOf, datasetMark } from './engine/behaviour';
+import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
+import {
+  liveOffsideLines, penetrationOf, offsideVerdict, STRICTNESS, OffsideLedger,
+  legalMarkZ, legalZFor, clampPitchZ, CLEAN_MARGIN_METRES,
+  type OffsideLine, type StrictnessProfile,
+} from './engine/offside';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
@@ -209,6 +217,11 @@ export interface OpenPlayState {
   ball: { x: number; y: number; z: number; vx: number; vz: number; live: boolean; t: number };
   /** T-35 pass flight: who the ball is travelling to, and the arc progress 0..1 */
   pendingReceiver: number;
+  /* SPEC_13: where the throw was AIMED, solved once at release. The ball flies
+   * to this point and the receiver runs to this point, so neither chases the
+   * other and the flight cannot manufacture forward travel. */
+  passTargetX: number;
+  passTargetZ: number;
   /** Playtest 3: the length of the current throw — the flight rate is a
    * real 13 m/s over this distance, not a fixed half-second homing. */
   passDist: number;
@@ -297,6 +310,9 @@ export interface MatchStats {
   scrumsWon: number; scrumsLost: number; lineoutsWon: number; lineoutsLost: number;
   rucks: number; slowBall: number; metres: number; carries: number; passes: number;
   kicks: number; penaltiesConceded: number; lineBreaks: number; offsides: number;
+  /** SPEC_12: scrum restarts, free kicks and turnover scrums conceded. These
+   * are NOT penalties and must not spend the match's penalty budget. */
+  restarts: number;
   tacklesBroke: number; offloads: number; jackals: number;
 }
 
@@ -320,6 +336,25 @@ export interface SetPieceWins { scrums: TeamTally; lineouts: TeamTally }
  * Opportunity-normalised ruck/reset telemetry. All timings use engine seconds;
  * display-clock compression is intentionally not applied to these observations.
  */
+/** SPEC_13 — the Law 11 ledger's telemetry surface. */
+export interface PassLawTelemetry {
+  /** passes actually thrown */
+  releases: number;
+  /** throws whose release vector was forward relative to the thrower (rel > 0) */
+  forwardReleases: number;
+  /** whistles blown */
+  whistles: number;
+  /** candidates the law removed before they could be offered */
+  candidatesRejected: number;
+  /** releases the CPU threw flatter rather than forward */
+  clamped: number;
+  relP50: number;
+  relP90: number;
+  relMax: number;
+  /** worst forward travel past the thrower's momentum, metres */
+  worstForwardMetres: number;
+}
+
 export interface FormationIntegrityTelemetry {
   ruckFormationOpportunities: number;
   defensiveLineResetOpportunities: number;
@@ -327,28 +362,37 @@ export interface FormationIntegrityTelemetry {
   targetSlotSamples: TeamTally;
   offsidePlayerSamples: TeamTally;
   offsideEpisodes: TeamTally;
+  /** SPEC_12: episodes and whistles broken down by line family. */
+  offsideEpisodesByKind: Record<string, number>;
+  /** `A:RUCK` — episodes per team per line family. */
+  offsideEpisodesByTeamKind: Record<string, number>;
+  offsideWhistlesByKind: Record<string, number>;
+  /** SPEC_12: breaches Force AI Clean prevented the CPU from converting. */
+  offsideSuppressed: TeamTally;
+  /** SPEC_12: first offence of the half, warned instead of blown. */
+  offsideWarnings: TeamTally;
+  /** SPEC_12: one entry per whistle — how deep, and how long it was allowed. */
+  offsideWhistleDepth: {
+    kind: string; team: 'A' | 'B'; depth: number; sustained: number;
+    toBall: number; retiring: boolean;
+  }[];
   offsideRate: TeamTally;
   formationDriftP50: TeamTally;
   formationDriftP90: TeamTally;
+  /** SPEC_11: P90 distance from a sampled mark to the live ball. */
+  formationMarkAnchorP90: TeamTally;
+  /** How many due-samples fed each drift channel. A percentile over an empty
+   * channel reads 0.0 and flatters the run; the n makes that visible. */
+  formationSampleCounts: TeamTally;
   recoveryEpisodes: TeamTally;
   recoveryEngineP90: TeamTally;
   recoveryClockP90: TeamTally;
 }
 
-interface OffsideTrack { beganAt: number; sustainedFor: number }
-interface OffsideWindow {
-  token: string;
-  kind: 'RUCK' | 'RESET';
-  openedAt: number;
-  defending: 'A' | 'B';
-  tracks: Map<number, OffsideTrack>;
-  penalised: boolean;
-}
-
 const blankStats = (): MatchStats => ({
   possession: 0, tackles: 0, missed: 0, turnovers: 0, scrumsWon: 0, scrumsLost: 0,
   lineoutsWon: 0, lineoutsLost: 0, rucks: 0, slowBall: 0, metres: 0, carries: 0,
-  passes: 0, kicks: 0, penaltiesConceded: 0, lineBreaks: 0, offsides: 0,
+  passes: 0, kicks: 0, penaltiesConceded: 0, lineBreaks: 0, offsides: 0, restarts: 0,
   tacklesBroke: 0, offloads: 0, jackals: 0,
 });
 
@@ -389,9 +433,47 @@ const percentile = (values: readonly number[], p: number) => {
 const FORMATION_SAMPLE_SECONDS = 0.25;
 /* The existing no-teleport retreat needs a real, finite settle window before
  * normal formation observations begin. It is not display-clock scaling. */
-const FORMATION_RESET_SETTLE_SECONDS = 0.75;
 const OFFSIDE_EPSILON_METRES = 0.35;
 const OFFSIDE_SUSTAINED_SECONDS = 0.30;
+
+/* ---- SPEC_11 — formation anchoring ----
+ * D11-a: a formation spreads from the ball's lateral position and squeezes
+ * rather than crossing the touchline. Two metres of grass is the margin the
+ * rest of the engine already uses for a body on the sideline. */
+const TOUCH_MARGIN = 2;
+/** The narrowest a squeezed formation may become, as a fraction of authored width. */
+const LATERAL_SQUEEZE_FLOOR = 0.35;
+/* D11-b: depth compression as the formation backs towards its own dead-ball
+ * line. Full authored depth with `DEPTH_COMPRESSION_ROOM` metres of room
+ * behind the ball, squeezing to `DEPTH_COMPRESSION_FLOOR` of it at the line. */
+const DEPTH_COMPRESSION_ROOM = 20;
+const DEPTH_COMPRESSION_FLOOR = 0.15;
+/** Metres to keep between a mark and the dead-ball line. */
+const DEAD_BALL_MARGIN = 2;
+/** The posts stand at ±3.1 m; a deep mark is held clear of the corridor. */
+const POST_CORRIDOR = 3.6;
+/** How far behind the ball a line defender may be marked before it is drift. */
+const DEFENCE_LINE_SLACK = 1.0;
+/* SPEC_11 metric recalibration. Drift is now a PROGRESS test across
+ * due-samples, not an instantaneous velocity test: a man is executing the
+ * shape when the gap is actually closing (`CONVERGE_PROGRESS_METRES` per
+ * 0.25 s sample ≈ 0.5 m/s), and drifting when it is not — at any speed, in
+ * any direction. `ON_MARK_METRES` is the arrival dead-band: a man already on
+ * his mark has nothing to close. */
+const CONVERGE_PROGRESS_METRES = 0.12;
+const ON_MARK_METRES = 1.0;
+/* T-51's pod hold freezes the attacking marks for a second so the pod arrives
+ * as a pod. It froze them in WORLD space, so a carrier who ran across field
+ * left his support standing on marks up to forty metres from the live ball —
+ * the hold was manufacturing drift. Marks are ball-relative now, so the hold
+ * only has to protect the men it was written for: the support pods around the
+ * ball. Anyone whose mark is further out than this is re-marked every frame,
+ * which costs him nothing (his mark is stable in ball-relative space) and
+ * keeps every attacker anchored to the ball. */
+const POD_HOLD_ANCHOR_METRES = 15;
+/** The lateral extent of the authored defensive channel map (D11-a). */
+const DEFENCE_LAT_MIN = Math.min(...DEFENCE_CHANNELS.map((c) => c.lat));
+const DEFENCE_LAT_MAX = Math.max(...DEFENCE_CHANNELS.map((c) => c.lat));
 
 
 /** T-39. Per-shirt build, as a visual scale multiplier. Forwards are big, the
@@ -441,22 +523,77 @@ export class Director {
     targetSlotSamples: blankTally(),
     offsidePlayerSamples: blankTally(),
     offsideEpisodes: blankTally(),
+    /* SPEC_12: WHICH line the law is broken at. One audit rule per line family
+     * and one honest diagnosis ("the whistle is coming from the open-play
+     * line, not the ruck") both need the breakdown by kind. */
+    offsideEpisodesByKind: {} as Record<string, number>,
+    offsideEpisodesByTeamKind: {} as Record<string, number>,
+    offsideWhistlesByKind: {} as Record<string, number>,
+    /* SPEC_12: how FAR past the line and how LONG the referee let it run, at
+     * the moment he blew. Tuning a threshold without this is guessing. */
+    offsideWhistleDepth: [] as {
+      kind: string; team: 'A' | 'B'; depth: number; sustained: number;
+      toBall: number; retiring: boolean;
+    }[],
+    /* SPEC_12: breaches the CPU was PREVENTED from converting into a penalty
+     * under Force AI Clean. Counted, never hidden — it is the gate's evidence. */
+    offsideSuppressed: blankTally(),
+    /* the first offence of each half, spoken rather than blown */
+    offsideWarnings: blankTally(),
     recoveryEpisodes: blankTally(),
   };
   private readonly formationDriftSamples: { A: number[]; B: number[] } = { A: [], B: [] };
+  /* SPEC_12: the offside windows, keyed by line kind and possession, so they
+   * survive a ruck re-forming instead of resetting the referee's memory. */
+  private readonly offsideLedger = new OffsideLedger();
+  /* SPEC_13: the Law 11 ledger. `passLawSamples` is every release's relative
+   * velocity, kept so the audit can grade the distribution and not just the
+   * count — a mean of zero with a tail of six is still a broken game. */
+  private readonly passLawCounts = {
+    releases: 0, forwardReleases: 0, whistles: 0, candidatesRejected: 0,
+    clamped: 0, worstForwardMetres: 0,
+  };
+  private readonly passLawSamples: number[] = [];
+  /* SPEC_12: two different identities, and conflating them is what moved the
+   * SPEC_11 drift number from 2.3 m to 8 m.
+   *
+   *   - the offside WINDOW is a phase continuum, keyed `kind:possession`, so a
+   *     man who stands offside through four consecutive rucks cannot reset the
+   *     referee's clock by the ruck re-forming. That is the fix.
+   *   - the formation SAMPLE is a formation INSTANCE: `kind:possession` plus a
+   *     serial that bumps when the breakdown or release-beat object is
+   *     replaced. The drift metric was always sampled per ruck, just after the
+   *     formation was written. Keying it to the continuum sampled every 0.25 s
+   *     of a whole possession instead — including the transitions the metric
+   *     deliberately excludes — and the P90 tripled.
+   *
+   * So the window remembers across formations and the sample does not. */
+  private readonly formationInstance = new Map<string, object>();
+  private readonly formationSerial = new Map<string, number>();
+  /** The (window, team) an episode has already been counted for. */
+  private offsideEpisodeMarked = '';
+  /* SPEC_12: the referee's warning. He does not blow the first time; he tells
+   * the side once — "blue six, back!" — and blows the next one. That is what a
+   * real referee does at the breakdown, and it is the difference between a law
+   * that teaches and a law that nags: the engine's CPU commits roughly ninety
+   * sustained reset breaches a match, and a whistle for each is a stop-start
+   * game, while a warning plus the whistle for the repeat is a rugby match.
+   * The warning is recorded, so it is never a way of hiding an offence. */
+  private readonly offsideWarnedHalf: { A: number; B: number } = { A: 0, B: 0 };
+  /** The raw drift channel, exposed so a harness can read the tail and not
+   * only its percentile. Read-only in spirit: nothing in the game loops on it. */
+  get formationDriftRaw() { return this.formationDriftSamples; }
+  /* SPEC_11: the distance from each sampled mark to the live ball. Drift
+   * measures a man against his mark; this measures the mark against the
+   * match, which is the half the old metric could not see. */
+  private readonly formationMarkAnchorSamples: { A: number[]; B: number[] } = { A: [], B: [] };
   private readonly formationRecoverySamples: { A: number[]; B: number[] } = { A: [], B: [] };
-  private ruckOffsideWindow: OffsideWindow | null = null;
-  private resetOffsideWindow: OffsideWindow | null = null;
-  private observedRuck: BreakdownState | null = null;
-  private observedResetUntil = -1;
-  private ruckWindowSerial = 0;
-  private resetWindowSerial = 0;
   private readonly formationSampleAt = new Map<string, number>();
   /* SPEC_10 B2d (P90 drift composition): the last target each player was
    * sampled against. A drift sample only counts when the target has BEEN
    * STABLE across consecutive due-samples — a man sprinting to a freshly
    * assigned slot is executing the shape, not drifting from it. */
-  private readonly formationLastTarget = new Map<Live, { x: number; z: number }>();
+  private readonly formationLastTarget = new Map<Live, { x: number; z: number; d: number; since: number }>();
   private pendingTargetSlotSample: { token: string; defending: 'A' | 'B'; kind: 'RUCK' | 'RESET' } | null = null;
   clock = 0;
   half: 1 | 2 = 1;
@@ -479,6 +616,14 @@ export class Director {
   replayTimer = 0;
   refSignal = 0;
   refSignalText = '';
+  /* SPEC_15 — the referee is an actor. His body is integrated in
+   * engine/referee.ts, deliberately outside `d.live`: putting him in the
+   * thirty-one would make every defence, offside, passing, separation and
+   * tackle loop count him as a defender. */
+  ref: RefState = newReferee();
+  /** SPEC_15 — the world-space speech queue. One bubble shows at a time; a big
+   *  call preempts a nudge and the queue drains in priority order. */
+  refBubbles: RefBubble[] = [];
   banner = '';
   bannerAt = -99;
   difficulty: number;
@@ -888,6 +1033,45 @@ export class Director {
     return { x: k.bx + k.vx * t, z: k.bz + k.vz * t, eta: Math.max(0, t) };
   }
 
+  /**
+   * SPEC_14 — WHERE THE BALL ACTUALLY IS, as a world point.
+   *
+   * `focusPoint()` answers a different question: it is the CAMERA's subject,
+   * and it prefers the carrier. Those two diverge the moment the ball leaves
+   * his hands — during a kick the camera is on the ball at the far end of the
+   * pitch while `focus()` still reports the kicker standing where he kicked
+   * from, 22 m away. The BALL ON SCREEN gate was measuring `focus()` and
+   * reporting the kicker as off-frame while the ball sat dead centre.
+   *
+   * One function so the gate and the HUD cannot drift apart again.
+   */
+  ballPoint(): { x: number; y: number; z: number } {
+    if ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && this.scrim && this.scrim.ball.state !== 'HELD') {
+      return { x: this.scrumAnchor.x + this.scrim.ball.x, y: this.scrim.ball.y + 0.06, z: this.scrumAnchor.z + this.scrim.ball.z };
+    }
+    if ((this.phase === 'LINEOUT' || this.phase === 'LINEOUT_REPLAY') && this.lo && this.lo.ball.state !== 'HELD') {
+      return { x: this.lo.ball.x, y: this.lo.ball.y + 0.05, z: this.lo.markZ };
+    }
+    if ((this.phase === 'KICK' || this.phase === 'KICK_REPLAY') && this.kk) {
+      return { x: this.kk.bx, y: this.kk.by + 0.12, z: this.kk.bz };
+    }
+    if (this.phase === 'OPEN_PLAY' && this.op) {
+      const o = this.op;
+      if (o.ball.live) return { x: o.ball.x, y: o.ball.y, z: o.ball.z };
+      const c = this.L(o.attacking, o.carrierNum);
+      return { x: c.x, y: 1.14, z: c.z };            // held at the chest
+    }
+    if ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && this.ml) return { x: this.ml.x, y: 1.02, z: this.ml.z };
+    if ((this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY') && this.bd) {
+      const b = this.bd;
+      if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') return { x: b.ball.x, y: 0.16, z: b.ball.z };
+      const carrier = b.players.find((p) => p.role === 'CARRIER');
+      if (carrier) return { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z };
+    }
+    const f = this.focusPoint();
+    return { x: f.x, y: 1, z: f.z };
+  }
+
   /** Public read on the focus point, so tests and the HUD agree on the subject. */
   focus(): { x: number; z: number } { return this.focusPoint(); }
 
@@ -953,6 +1137,77 @@ export class Director {
   private commentarySequencer() { commentarySequencer(this); }
 
   say(text: string) { this.feed.unshift({ text, at: this.t }); if (this.feed.length > 30) this.feed.pop(); }
+
+  /* ---- SPEC_15 — the referee speaks in the world, not in the HUD ---- */
+
+  /**
+   * Push a world-space line, anchored above the referee's head. The four
+   * control affordances do NOT come through here — they are a state of the
+   * ruck and the maul, and `refPrompt()` derives them at the point of
+   * interaction every frame instead of queueing one per frame.
+   */
+  refSay(text: string, kind: BubbleKind = 'LAW_CALL', ttl = 3.2) {
+    const last = this.refBubbles[this.refBubbles.length - 1];
+    /* Do not stack the same words inside a third of a second — a law call can
+     * be re-issued on consecutive frames while a phase resolves. */
+    if (last && last.text === text && this.t - last.at < 0.35) { last.at = this.t; last.ttl = ttl; return; }
+    this.refBubbles.push({ text, kind, at: this.t, ttl });
+    if (this.refBubbles.length > 6) this.refBubbles.shift();
+  }
+
+  /**
+   * The one bubble on screen.
+   *
+   * Recency wins, not priority. The first cut ranked strictly by kind and a
+   * measurement caught it: a scrum call issued 1.9 s after a penalty was
+   * swallowed by the penalty still on screen, and the audit's "every call
+   * produced a bubble" failed at a 2.8 s delay. A referee says the newest
+   * thing, so the newest thing is what shows. The one exception is a card —
+   * it owns the screen for its first beat, because the walk of shame is the
+   * story and a routine restart must not talk over it.
+   */
+  refBubbleHead(): RefBubble | null {
+    let newest: RefBubble | null = null;
+    let top: RefBubble | null = null;
+    for (const b of this.refBubbles) {
+      if (this.t - b.at > b.ttl) continue;
+      if (!newest || b.at > newest.at) newest = b;
+      if (!top) { top = b; continue; }
+      const pb = BUBBLE_PRIORITY[b.kind], pa = BUBBLE_PRIORITY[top.kind];
+      if (pb > pa || (pb === pa && b.at > top.at)) top = b;
+    }
+    if (!newest) return null;
+    if (top && top !== newest && top.kind === 'CARD' && this.t - top.at < 1.5) return top;
+    return newest;
+  }
+
+  /** Drop expired bubbles. Called once per frame; a replay freezes them. */
+  private expireRefBubbles() {
+    if (!this.refBubbles.length) return;
+    this.refBubbles = this.refBubbles.filter((b) => this.t - b.at <= b.ttl);
+  }
+
+  /**
+   * The live control affordance, as a SITE bubble at the point of interaction.
+   * Derived, not queued: these are a state of the breakdown and the maul, not
+   * events, and pushing one per frame would flood the queue. Returns null when
+   * there is nothing for the player to press.
+   */
+  refPrompt(): { text: string; colour: string; x: number; z: number; y: number } | null {
+    if (this.ml && (this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY')) {
+      const s = this.ml;
+      if (maulUseItCall(s)) return { text: 'USE IT', colour: '#ff6a5a', x: s.x, z: s.z, y: 4.9 };
+    }
+    if (this.bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY')) {
+      const s = this.bd;
+      if (s.groundAt >= 0) {
+        if (s.stage === 'RECYCLE') return { text: 'SECURED', colour: '#6ee7a0', x: s.contactX, z: s.contactZ, y: 4.9 };
+        if (s.jackalActive) return { text: 'COMMIT - SPACE', colour: '#ffd76a', x: s.contactX, z: s.contactZ, y: 4.9 };
+        return { text: 'A/D - CLEAROUT', colour: '#6ee7a0', x: s.contactX, z: s.contactZ, y: 4.9 };
+      }
+    }
+    return null;
+  }
   banner_(text: string) { this.banner = text; this.bannerAt = this.t; }
   showHint(text: string, secs = 4) { this.hint = text; this.hintUntil = this.t + secs; }
 
@@ -1067,6 +1322,13 @@ export class Director {
         case 'LINEOUT': case 'LINEOUT_REPLAY': this.upLineout(dt, input, pressed); break;
         case 'KICK': case 'KICK_REPLAY': this.upKick(dt, input, pressed); break;
       }
+      /* SPEC_12: the referee is asked ONCE per frame, over every live line in
+       * the registry. He used to be asked from two phase hooks — a ruck hook
+       * in the breakdown and a release-beat hook in open play — which is why
+       * the scrum, the maul and the lineout had no offside line at all:
+       * nobody ever asked. A whistle tears the phase down, so this runs after
+       * the phase updater and before the players are told where to stand. */
+      if (this.enforceOffsideLines(dt)) return;
     } catch (err) {
       this.trip(`${this.phase} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1094,6 +1356,10 @@ export class Director {
         this.audio.event(ev.type, ev.type === 'TACKLE' ? ev.force : 0.5);
       }
     }
+    /* SPEC_15 — the referee runs on his own integration, before the actor
+     * stream is written, so the render sees the position he moved to. */
+    stepReferee(this, this.ref, dt);
+    this.expireRefBubbles();
     this.syncActors();
     this.t += dt;
 
@@ -1138,6 +1404,50 @@ export class Director {
    * are calculated from actual target-slot distances, and the rate denominator
    * is eligible player-observations, never compressed display-clock frames.
    */
+  /**
+   * SPEC_13 — the Law 11 ledger. Deliberately separate from
+   * `formationIntegrity`: formation asks whether a man is standing in the
+   * right place, this asks whether a ball was thrown legally, and mixing the
+   * two would make neither auditable.
+   */
+  get passLawIntegrity(): PassLawTelemetry {
+    const c = this.passLawCounts;
+    const rels = this.passLawSamples.slice().sort((a, b) => a - b);
+    const q = (p: number) => rels.length ? rels[Math.min(rels.length - 1, Math.floor(p * rels.length))] : 0;
+    return {
+      releases: c.releases,
+      forwardReleases: c.forwardReleases,
+      whistles: c.whistles,
+      candidatesRejected: c.candidatesRejected,
+      clamped: c.clamped,
+      relP50: q(0.5),
+      relP90: q(0.9),
+      relMax: rels.length ? rels[rels.length - 1] : 0,
+      worstForwardMetres: c.worstForwardMetres,
+    };
+  }
+
+  /**
+   * Record a throw at the release frame. Called by `doPass` for EVERY pass,
+   * whatever the toggle, so the rate is a property of the football and not of
+   * the referee — the same argument that made SPEC_12's OFF mode worth having.
+   */
+  notePassRelease(rel: number, forwardMetres: number, whistled: boolean) {
+    this.passLawCounts.releases++;
+    this.passLawSamples.push(rel);
+    if (rel > 0) {
+      this.passLawCounts.forwardReleases++;
+      this.passLawCounts.worstForwardMetres = Math.max(this.passLawCounts.worstForwardMetres, forwardMetres);
+    }
+    if (whistled) this.passLawCounts.whistles++;
+  }
+
+  /** A candidate the law removed before it could be offered. */
+  notePassCandidateRejected() { this.passLawCounts.candidatesRejected++; }
+
+  /** A release the CPU threw flatter rather than forward. Counted, not hidden. */
+  notePassClamped() { this.passLawCounts.clamped++; }
+
   get formationIntegrity(): FormationIntegrityTelemetry {
     const c = this.formationCounts;
     const rate = (team: 'A' | 'B') => c.eligiblePositionSamples[team]
@@ -1154,6 +1464,12 @@ export class Director {
       targetSlotSamples: { ...c.targetSlotSamples },
       offsidePlayerSamples: { ...c.offsidePlayerSamples },
       offsideEpisodes: { ...c.offsideEpisodes },
+      offsideEpisodesByKind: { ...c.offsideEpisodesByKind },
+      offsideEpisodesByTeamKind: { ...c.offsideEpisodesByTeamKind },
+      offsideWhistlesByKind: { ...c.offsideWhistlesByKind },
+      offsideSuppressed: { ...c.offsideSuppressed },
+      offsideWarnings: { ...c.offsideWarnings },
+      offsideWhistleDepth: c.offsideWhistleDepth.slice(),
       offsideRate: { A: rate('A'), B: rate('B') },
       formationDriftP50: {
         A: percentile(this.formationDriftSamples.A, 0.5),
@@ -1162,6 +1478,14 @@ export class Director {
       formationDriftP90: {
         A: percentile(this.formationDriftSamples.A, 0.9),
         B: percentile(this.formationDriftSamples.B, 0.9),
+      },
+      formationMarkAnchorP90: {
+        A: percentile(this.formationMarkAnchorSamples.A, 0.9),
+        B: percentile(this.formationMarkAnchorSamples.B, 0.9),
+      },
+      formationSampleCounts: {
+        A: this.formationDriftSamples.A.length,
+        B: this.formationDriftSamples.B.length,
       },
       recoveryEpisodes: { ...c.recoveryEpisodes },
       recoveryEngineP90,
@@ -1203,183 +1527,291 @@ export class Director {
      * the drift the metric exists to catch. Measurement-only: the eligible
      * count above still records every due-sample, so the denominator keeps
      * its meaning. */
-    const prev = this.formationLastTarget.get(p);
-    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
-    this.formationLastTarget.set(p, { x: p.tx, z: p.tz });
-    if (!stable) return;
     const dxT = p.tx - p.x, dzT = p.tz - p.z;
     const distT = Math.hypot(dxT, dzT);
-    const closing = distT > 0.35 ? (dxT * p.vx + dzT * p.vz) / distT : 0;
-    if (closing > 0.3) return;
-    this.formationDriftSamples[p.team].push(distT);
+    const prev = this.formationLastTarget.get(p);
+    const stable = prev !== undefined && Math.hypot(p.tx - prev.x, p.tz - prev.z) < 0.75;
+    this.formationLastTarget.set(p, { x: p.tx, z: p.tz, d: distT, since: this.t });
+    if (!stable) return;
+    /* SPEC_11 RECALIBRATION.
+     *
+     * The old rule dropped every sample whose closing speed exceeded
+     * 0.3 m/s, on the theory that a man running at his mark is executing the
+     * shape rather than drifting from it. That is a VELOCITY test, and it
+     * is the wrong instrument: it asks "is he moving fast?" when the
+     * question is "is he getting there?". Two failures follow.
+     *
+     *   1. A man sprinting in the wrong direction — orbiting the mark,
+     *      being shunted by `separate()`, sprinting past it — has a velocity
+     *      with a positive component toward the mark and was silently
+     *      forgiven every frame.
+     *   2. A man converging beautifully on a mark in the wrong place was
+     *      forgiven too, which is how a 25 m systematic anchor error sat
+     *      under a 0.3 m P90 for a whole season.
+     *
+     * So the test is now PROGRESS, measured across due-samples: how much of
+     * the gap he has actually closed since the last sample. Not closing is
+     * drift at any speed, in any direction; closing is executing the shape
+     * however far he still has to run. Failure 2 is not a progress problem
+     * at all — a wrong mark is caught by the companion measurement below,
+     * which measures the MARK against the ball rather than the man against
+     * the mark. */
+    const progress = prev ? prev.d - distT : 0;
+    const converging = distT <= ON_MARK_METRES || progress > CONVERGE_PROGRESS_METRES;
+    if (!converging) this.formationDriftSamples[p.team].push(distT);
+    /* The companion measurement, and the one that would have caught
+     * SPEC_11 on its own: a formation is a shape drawn AROUND THE BALL, so
+     * the distance from a mark to the live ball is a property of the
+     * formation, not of the player chasing it. */
+    const f = this.focusPoint();
+    this.formationMarkAnchorSamples[p.team].push(Math.hypot(p.tx - f.x, p.tz - f.z));
   }
 
-  private startRuckOffsideWindow(s: BreakdownState) {
-    if (this.observedRuck !== s) {
-      this.observedRuck = s;
-      const defending: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
-      this.ruckOffsideWindow = {
-        token: `ruck-${++this.ruckWindowSerial}`,
-        kind: 'RUCK',
-        openedAt: this.t,
-        defending,
-        tracks: new Map<number, OffsideTrack>(),
-        penalised: false,
-      };
-      this.formationCounts.ruckFormationOpportunities++;
+  /* ==================== SPEC_12 — THE OFFSIDE ENGINE ====================
+   *
+   * Three invariants, none of which the old code held:
+   *
+   *   1. ONE REGISTRY. Every line in the game is a row in `liveOffsideLines()`
+   *      (`engine/offside.ts`). Detection, the window, the verdict and the
+   *      audit all iterate it, so a new line is a data row and not a new
+   *      branch in five places.
+   *   2. ONE WINDOW PER PHASE CONTINUUM. The old code minted a window per ruck,
+   *      and rucks form every ~1.6 s, so a man who stood offside through four
+   *      consecutive rucks started his sustained clock from zero four times —
+   *      210 observed breaches collapsed into one episode. The window is keyed
+   *      by line kind and possession, and the settle restarts when the LINE
+   *      moves, not when the phase object is replaced.
+   *   3. ONE VERDICT, ONE WRITER. `offsideVerdict()` decides and this is the
+   *      only place a whistle is produced, so no future branch can blow for
+   *      offside without passing the toggle.
+   */
+
+  /**
+   * The referee's temper, read from the option. The two toggles are orthogonal:
+   * this one says how fussy he is, `offsideAiClean` says whether the CPU is
+   * allowed to infringe at all. Neither is read as `!== 0` any more — the old
+   * binary test meant every value except one silently disabled the whistle,
+   * which is the report this spec exists to answer.
+   */
+  private offsideProfile(): StrictnessProfile {
+    const mode = this.options.offside ?? 1;
+    return mode === 0 ? STRICTNESS.STRICT : mode === 2 ? STRICTNESS.OFF : STRICTNESS.LENIENT;
+  }
+
+  /** Who may offend against a line, minus the men the law exempts. */
+  private offsideCandidates(line: OffsideLine, team: 'A' | 'B'): Live[] {
+    if (!line.offenders.includes(team)) return [];
+    /* A man bound into the contest IS the line — he cannot be offside against
+     * himself. The carrier is never offside against the ball. Both are already
+     * excluded by `isFormationEligible`; the bound test is stated here too
+     * because the set-piece lines make it load-bearing. */
+    return this.live.filter((p) => p.team === team && !p.bound && p.sinbin <= 0
+      && !line.participants?.has(`${p.team}:${p.num}`)
+      && this.isFormationEligible(p));
+  }
+
+  /**
+   * Evaluate every live line and blow at most once per team per window.
+   * Returns true when a whistle ended the phase, so the caller can stop.
+   *
+   * Diagnostics are NEVER gated: an episode is counted in every mode at one
+   * fixed sensitivity, so "OFF changes no counts" is true by construction and
+   * a comparison between modes is comparing like with like.
+   */
+  enforceOffsideLines(dt: number): boolean {
+    const profile = this.offsideProfile();
+    const forceAiClean = (this.options.offsideAiClean ?? 0) === 1;
+    const lines = liveOffsideLines(this);
+    if (!lines.length) { this.offsideLedger.expire(this.t); return false; }
+
+    for (const line of lines) {
+      const key = `${line.kind}:${this.possession}`;
+      /* The SAMPLE is keyed to the formation instance, the WINDOW to the
+       * continuum. See `sampleKeyFor` for why they differ. */
+      const sampling = this.formationSampleDue(this.sampleKeyFor(line.kind));
+      if (line.kind === 'RUCK') this.formationCounts.ruckFormationOpportunities++;
+      if (line.kind === 'RESET') this.formationCounts.defensiveLineResetOpportunities++;
+
+      /* The formation sample is a measurement of the DEFENDING side, and it
+       * belongs to the defending side whoever can offend against the line. At
+       * a ruck both teams can — the attacking side's own line is the ball — so
+       * taking it from `line.offenders` instead sampled whichever team the loop
+       * happened to reach last, which is to say the attack half the time. The
+       * drift ledger then filled with attackers running to attacking marks,
+       * and the P90 target-slot drift tripled overnight. */
+      if (sampling && (line.kind === 'RUCK' || line.kind === 'RESET')) {
+        const def = this.defending();
+        const lt = line.lineFor(def);
+        if (lt) {
+          for (const p of this.formationSampleSet(line, def)) {
+            this.observeOffsidePosition(def, Math.max(0, penetrationOf(p, lt)));
+          }
+          this.pendingTargetSlotSample = {
+            token: this.sampleKeyFor(line.kind),
+            defending: def, kind: line.kind === 'RUCK' ? 'RUCK' : 'RESET',
+          };
+        }
+      }
+
+      for (const team of line.offenders) {
+        if (this.offsideLedger.alreadyWhistled(this, line, team)) continue;
+        const candidates = this.offsideCandidates(line, team);
+        for (const p of candidates) {
+          const lt = line.lineFor(team);
+          if (!lt) continue;
+          const breach = this.offsideLedger.observe(this, line, p, penetrationOf(p, lt), dt);
+          /* "Sustained" is a DIAGNOSTIC threshold, not the referee's: one
+           * fixed sensitivity in every mode, so the episode count is a property
+           * of the football and not of the option. Everything the referee
+           * decides — which lines he watches, how deep, how long, how near the
+           * ball, whether a retreating man is forgiven — lives in the profile
+           * below, which is why OFF reports the same episodes as STRICT with
+           * none of the whistles. */
+          if (!breach || breach.sustainedFor < OFFSIDE_SUSTAINED_SECONDS) continue;
+
+          /* one sustained breach per team per window, whoever committed it */
+          const episodeKey = `${key}${team}#${this.offsideLedger.serialOf(this, line)}`;
+          if (this.offsideEpisodeMarked !== episodeKey) {
+            this.offsideEpisodeMarked = episodeKey;
+            this.formationCounts.offsideEpisodes[team]++;
+            const byKind = this.formationCounts.offsideEpisodesByKind;
+            byKind[line.kind] = (byKind[line.kind] ?? 0) + 1;
+            const byTeamKind = this.formationCounts.offsideEpisodesByTeamKind;
+            const tk = `${team}:${line.kind}`;
+            byTeamKind[tk] = (byTeamKind[tk] ?? 0) + 1;
+          }
+          const verdict = offsideVerdict(profile, breach, !this.isHuman(team), forceAiClean);
+          /* OBSERVE keeps looking. This was a `break` once, which meant the
+           * first sustained offender in the team decided the matter: a man
+           * loitering half a metre past the line hid the man five metres past
+           * it, because `candidates` is in shirt order and 7 came before 11.
+           * The harness caught it — 1381 CPU episodes, 0 CPU whistles — and it
+           * is the clearest possible argument for measuring the funnel instead
+           * of trusting the count. */
+          if (verdict === 'OBSERVE') continue;
+          if (verdict === 'WHISTLE' && this.offsideWarnedHalf[team] !== this.half) {
+            /* The first material offence by this side this half is spoken, not
+             * blown. One whistle per team per window is already latched, so
+             * this cannot stack: the warning costs the phase nothing and the
+             * next one costs three points or a lineout. */
+            this.offsideWarnedHalf[team] = this.half;
+            this.formationCounts.offsideWarnings[team]++;
+            this.offsideLedger.markWhistled(this, line, team);
+            this.refSignal = 1.8;
+            this.refSignalText = `${REFEREE_CALLS.OFFSIDE} — WARNING`;
+            this.say(this.refSignalText);
+            /* SPEC_15 — he says it in the world too. */
+            this.refSay(this.refSignalText, 'NARRATIVE', 3);
+            break;
+          }
+          if (verdict === 'SUPPRESS') {
+            /* Force AI Clean: the AI was PREVENTED, not forgiven. Recording it
+             * is what keeps "zero AI episodes" an honest gate rather than a
+             * tautology — an AI that needed suppressing is the defect. */
+            this.offsideLedger.markWhistled(this, line, team);
+            this.formationCounts.offsideSuppressed[team]++;
+            if (import.meta.env.DEV) {
+              console.warn(`[SPEC_12] ${team}${breach.player.num} needed Force-AI-Clean suppression — `
+                + `${breach.penetration.toFixed(1)} m offside at the ${line.kind} line`);
+            }
+            break;
+          }
+          /* WHISTLE. The single writer of an offside penalty. */
+          this.offsideLedger.markWhistled(this, line, team);
+          this.teams[team].stats.offsides++;
+          const byKindW = this.formationCounts.offsideWhistlesByKind;
+          byKindW[line.kind] = (byKindW[line.kind] ?? 0) + 1;
+          this.formationCounts.offsideWhistleDepth.push({
+            kind: line.kind, team, depth: breach.penetration, sustained: breach.sustainedFor,
+            toBall: breach.toBall, retiring: breach.retiring,
+          });
+          const opp: 'A' | 'B' = team === 'A' ? 'B' : 'A';
+          this.pendingTargetSlotSample = null;
+          this.beginPenalty(opp, REFEREE_CALLS.OFFSIDE, breach.player.num);
+          this.offsideLedger.expire(this.t);
+          return true;
+        }
+      }
     }
-    return this.ruckOffsideWindow!;
+    this.offsideLedger.expire(this.t);
+    return false;
   }
 
-  private startResetOffsideWindow() {
-    const rb = this.releaseBeat!;
-    if (this.observedResetUntil !== rb.until) {
-      this.observedResetUntil = rb.until;
-      const defending = this.defending();
-      this.resetOffsideWindow = {
-        token: `reset-${++this.resetWindowSerial}`,
-        kind: 'RESET',
-        openedAt: this.t,
-        defending,
-        tracks: new Map<number, OffsideTrack>(),
-        penalised: false,
-      };
-      this.formationCounts.defensiveLineResetOpportunities++;
-    }
-    return this.resetOffsideWindow!;
-  }
-
+  /** Eligible to be sampled against the RUCK line: unbound, not chasing. */
   private ruckEligibleDefenders(s: BreakdownState, defending: 'A' | 'B') {
     const bound = new Set(s.players.filter((q) => q.team === defending).map((q) => q.num));
     return this.live.filter((p) => p.team === defending && !bound.has(p.num) && this.isFormationEligible(p));
   }
 
+  /** Eligible to be sampled against the RESET line. */
   private resetEligibleDefenders(defending: 'A' | 'B') {
     return this.live.filter((p) => p.team === defending && this.isFormationEligible(p));
   }
 
-  private closeOffsideTrack(team: 'A' | 'B', window: OffsideWindow, num: number) {
-    const track = window.tracks.get(num);
-    if (!track) return;
+  /**
+   * Who the formation SAMPLE is taken over. Distinct from `offsideCandidates`,
+   * and deliberately so.
+   *
+   * The offside question — "is he offside?" — is asked of the men who can be:
+   * bound men and the men forming the line are the line, so they are not asked.
+   * The formation question — "is he on his mark?" — was asked, before SPEC_12,
+   * of every eligible man in the team, bound or not, in the ruck roster or not.
+   * That population is what SPEC_11's 2.3 m P90 is a property of, and a P90 is
+   * a percentile OF a population: drop the bound men, who contribute a great
+   * many small converging samples, and the same football produces a higher
+   * number without anybody moving differently.
+   *
+   * So the law gets the narrow set and the measurement keeps the old one.
+   */
+  private formationSampleSet(_line: OffsideLine, team: 'A' | 'B'): Live[] {
+    return this.live.filter((p) => p.team === team && this.isFormationEligible(p));
+  }
+
+  /**
+   * The identity of the formation a sample belongs to. A RUCK sample belongs to
+   * one breakdown, a RESET sample to one release beat; anything else is
+   * continuous and gets serial 0.
+   */
+  private sampleKeyFor(kind: string): string {
+    const obj: object | null | undefined = kind === 'RUCK' ? this.bd
+      : kind === 'RESET' ? this.releaseBeat : null;
+    let serial = 0;
+    if (obj) {
+      if (this.formationInstance.get(kind) !== obj) {
+        this.formationInstance.set(kind, obj);
+        serial = (this.formationSerial.get(kind) ?? 0) + 1;
+        this.formationSerial.set(kind, serial);
+      } else {
+        serial = this.formationSerial.get(kind) ?? 0;
+      }
+    }
+    return `${kind}:${this.possession}#${serial}`;
+  }
+
+  /** Called by the ledger when a tracked man gets back onside. Never fabricated. */
+  noteOffsideRecovery(team: 'A' | 'B', seconds: number) {
     this.formationCounts.recoveryEpisodes[team]++;
-    this.formationRecoverySamples[team].push(Math.max(0, this.t - track.beganAt));
-    window.tracks.delete(num);
+    this.formationRecoverySamples[team].push(seconds);
   }
 
-  /**
-   * Accumulate a persistent legal breach once per formation opportunity. The
-   * caller uses a signed line whose lawful side is `(z - line) * dir >= 0`.
-   * A resulting whistle ends the current phase, so one sustained breach can
-   * never inflate into one penalty per simulation frame.
-   */
-  private evaluateOffsideWindow(
-    window: OffsideWindow,
-    attacking: 'A' | 'B',
-    legalLineZ: number,
-    direction: number,
-    candidates: Live[],
-    dt: number,
-  ) {
-    /* A newly formed ruck/reset is a real walk-back transition. Start the
-     * sustained-breach clock only after that fixed engine-time allowance. */
-    if (this.t - window.openedAt < FORMATION_RESET_SETTLE_SECONDS) return false;
-    const seen = new Set<number>();
-    let worst: { player: Live; penetration: number } | null = null;
-    for (const p of candidates) {
-      seen.add(p.num);
-      const penetration = Math.max(0, (legalLineZ - p.z) * direction);
-      if (penetration <= OFFSIDE_EPSILON_METRES) {
-        this.closeOffsideTrack(window.defending, window, p.num);
-        continue;
-      }
-      const prior = window.tracks.get(p.num);
-      const track = prior ?? { beganAt: this.t, sustainedFor: 0 };
-      track.sustainedFor += dt;
-      window.tracks.set(p.num, track);
-      if (track.sustainedFor >= OFFSIDE_SUSTAINED_SECONDS
-        && (!worst || penetration > worst.penetration)) {
-        worst = { player: p, penetration };
-      }
-    }
-    /* A player becoming down/bound/chasing is an exclusion, not evidence that
-     * he recovered to the line, so remove a stale track without fabricating a
-     * recovery duration. */
-    for (const num of window.tracks.keys()) if (!seen.has(num)) window.tracks.delete(num);
 
-    if (!worst || window.penalised) return false;
-    window.penalised = true;
-    this.formationCounts.offsideEpisodes[window.defending]++;
-    /* The option remains a genuine law switch. We still retain the observed
-     * episode for diagnostics when it is off, but must not write a penalty. */
-    if ((this.options.offside ?? 0) !== 0) return false;
-    this.teams[window.defending].stats.offsides++;
-    this.beginPenalty(attacking, REFEREE_CALLS.OFFSIDE, worst.player.num);
-    return true;
-  }
-
-  /**
-   * Writer hook for `upBreakdown`, immediately before its no-teleport retreat.
-   * The legal line is the engine's declared hindmost defending ruck slot, not
-   * the intentionally deeper 3 m defensive guard target used for positioning.
-   */
-  sampleFormedRuckOffside(s: BreakdownState, dt: number) {
-    const window = this.startRuckOffsideWindow(s);
-    const fwd = s.attacking === 'A' ? 1 : -1;
-    const defenders = s.players.filter((q) => q.team === window.defending);
-    const legalLineZ = defenders.length
-      ? (fwd > 0 ? Math.max(...defenders.map((q) => q.z)) : Math.min(...defenders.map((q) => q.z)))
-      : s.contactZ;
-    const candidates = this.ruckEligibleDefenders(s, window.defending);
-    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
-      && this.formationSampleDue(window.token)) {
-      for (const p of candidates) {
-        const penetration = Math.max(0, (legalLineZ - p.z) * fwd);
-        this.observeOffsidePosition(p.team, penetration);
-      }
-      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RUCK' };
-    }
-    const whistle = this.evaluateOffsideWindow(window, s.attacking, legalLineZ, fwd, candidates, dt);
-    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
-    return whistle;
-  }
-
-  /**
-   * Writer hook for `upOpen` while the existing ruck-release retreat applies.
-   * The contact mark is the legal boundary; the 2 m retreat target is a
-   * formation aid, not an invented offside line. Target-slot distance itself is
-   * sampled after `think()` refreshes the defenders' assigned targets.
-   */
-  sampleDefensiveLineResetOffside(dt: number) {
-    const rb = this.releaseBeat;
-    if (!rb || this.t >= rb.until) return false;
-    const window = this.startResetOffsideWindow();
-    const candidates = this.resetEligibleDefenders(window.defending);
-    if (this.t - window.openedAt >= FORMATION_RESET_SETTLE_SECONDS
-      && this.formationSampleDue(window.token)) {
-      for (const p of candidates) {
-        const penetration = Math.max(0, (rb.z - p.z) * rb.dir);
-        this.observeOffsidePosition(p.team, penetration);
-      }
-      this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RESET' };
-    }
-    const whistle = this.evaluateOffsideWindow(window, this.possession, rb.z, rb.dir, candidates, dt);
-    if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
-    return whistle;
-  }
-
-  /** Finish a settled ruck/reset sample after the regular writer has set `tx`/`tz`. */
   private samplePendingTargetSlots() {
     const pending = this.pendingTargetSlotSample;
     this.pendingTargetSlotSample = null;
     if (!pending) return;
+    /* Validated against the same formation identity it was requested with: a
+     * ruck that re-formed between the request and the read is a different
+     * formation, and the sample belongs to the old one, so it is dropped —
+     * exactly as it was before SPEC_12 touched this code. */
+    if (pending.token !== this.sampleKeyFor(pending.kind)) return;
     if (pending.kind === 'RUCK') {
       const s = this.bd;
-      if (!s || this.ruckOffsideWindow?.token !== pending.token || !s.ruckFormed) return;
+      if (!s || !s.ruckFormed) return;
       for (const p of this.ruckEligibleDefenders(s, pending.defending)) this.observeTargetSlot(p);
       return;
     }
     const rb = this.releaseBeat;
-    if (!rb || this.t >= rb.until || this.resetOffsideWindow?.token !== pending.token) return;
+    if (!rb || this.t >= rb.until) return;
     for (const p of this.resetEligibleDefenders(pending.defending)) {
       /* `upOpen` owns the retreat frame; its target is intentionally stale until
        * it returns the player to the line, so it is explicitly excluded here. */
@@ -2087,6 +2519,17 @@ export class Director {
 
   private kickerTeam(): 'A' | 'B' { return this.kk?.kicker ?? this.possession; }
 
+  /**
+   * Focus for the CAMERA alone. focusPoint() deliberately stays on the carrier while a
+   * pass is in the air, because the formation anchor is measured from it; the camera has
+   * no such obligation, and a pass that flies to a lead-projected aim travels far enough
+   * to leave a carrier-anchored frame. While the ball is live, the ball is the subject.
+   */
+  cameraFocus(): { x: number; z: number } {
+    if (this.op && this.op.ball.live) return { x: this.op.ball.x, z: this.op.ball.z };
+    return this.focusPoint();
+  }
+
   focusPoint(): { x: number; z: number } {
     if (this.op) return { x: this.op.carrierX, z: this.op.carrierZ };
     if (this.bd) return { x: this.bd.contactX, z: this.bd.contactZ };
@@ -2164,6 +2607,98 @@ export class Director {
     p.z = z;
   }
 
+  /* ==================== SPEC_11 — FORMATION ANCHORING ====================
+   *
+   * Three invariants, all of which the engine used to break:
+   *
+   *   1. A mark is an OFFSET FROM THE BALL, never a place on the pitch. The
+   *      behaviour dataset is authored as an absolute formation around a ball
+   *      in one fixed spot (`SITUATION_META[sit].ball`); `datasetOffset()`
+   *      returns the shape relative to that anchor and it is re-anchored on
+   *      the live focus point here.
+   *   2. The direction of attack is applied ONCE. `defenceMark()` already
+   *      returns a world-space signed offset; multiplying a difference of
+   *      two world z values by `dir` again is `dir² = 1` — a mirror that
+   *      cancels itself.
+   *   3. A line defender's mark is in front of the ball. A mark behind the
+   *      attack is the drift bug, whatever produced it.
+   */
+
+  /**
+   * D11-a — the lateral budget of a formation anchored on the ball.
+   *
+   * The formation spreads from the ball's own lateral position, and when
+   * there is not room for the full spread it SQUEEZES (one factor for the
+   * whole shape, so the shape is preserved, only narrower) instead of
+   * spilling over the touchline. 1 = the authored width.
+   */
+  private lateralScale(anchorX: number, sign: number, minOffset: number, maxOffset: number): number {
+    const lo = Math.min(sign * minOffset, sign * maxOffset);
+    const hi = Math.max(sign * minOffset, sign * maxOffset);
+    let lam = 1;
+    if (hi > 0.01) lam = Math.min(lam, (FIELD.maxX - TOUCH_MARGIN - anchorX) / hi);
+    if (lo < -0.01) lam = Math.min(lam, (FIELD.minX + TOUCH_MARGIN - anchorX) / lo);
+    return clamp(lam, LATERAL_SQUEEZE_FLOOR, 1);
+  }
+
+  /**
+   * D11-b — turn a ball-relative along-pitch offset into a world z.
+   *
+   * `along` is metres along this team's attacking axis (σ): positive is
+   * toward the opposition dead-ball line, negative is behind the ball. As
+   * the formation backs up towards its own dead-ball line the depth is
+   * compressed by a multiplier — the shape tightens instead of marching
+   * out of the field — and is never allowed past the dead-ball line.
+   */
+  private anchorDepth(f: { x: number; z: number }, sigma: -1 | 1, along: number): number {
+    const back = -along;                                  // metres behind the ball
+    const room = FIELD.deadZFar + f.z * sigma - DEAD_BALL_MARGIN;
+    if (back <= 0 || room <= 0) return f.z + sigma * along;
+    const k = clamp(room / DEPTH_COMPRESSION_ROOM, DEPTH_COMPRESSION_FLOOR, 1);
+    return f.z - sigma * Math.min(back * k, room);
+  }
+
+  /**
+   * SPEC_11 invariant 3 — a line defender's mark is IN FRONT of the ball:
+   * `(z − F.z) · dir ≥ 0`, where `dir` is the direction the team in
+   * possession is attacking.
+   *
+   * A mark behind the attack is the drift bug, whatever produced it: it is
+   * what sent the defensive line through the offensive line to stand behind
+   * it. One metre of slack absorbs a ball moving between frames. The clamp
+   * warns in dev, because a mark this wrong is an authoring error that should
+   * be fixed at source, not silently absorbed.
+   */
+  private defensiveDepth(
+    f: { x: number; z: number }, dir: number, z: number, p: Live, source: string,
+  ): number {
+    const penetration = (z - f.z) * dir;
+    if (penetration >= -DEFENCE_LINE_SLACK) return z;
+    /* SPEC_11: the dataset authors the `goal-line-def` fullback as the LAST
+     * MAN, deliberately five to eight metres behind the ball. The clamp still
+     * applies to him — nobody is marked out of play behind the dead-ball line,
+     * which is what the clamp is for — but he is not an authoring error, so
+     * he does not get to shout about it eight times a match. Every other
+     * behind-the-ball mark still warns, because every other one IS a bug. */
+    const authoredLastMan = p.num === 15 && source === 'goal-line-def';
+    if (!authoredLastMan && import.meta.env.DEV) {
+      console.warn(`[SPEC_11] shirt ${p.num} (${p.team}) defensive mark from ${source} is `
+        + `${(-penetration).toFixed(1)} m behind the ball — clamped to the line`);
+    }
+    return f.z - dir * DEFENCE_LINE_SLACK;
+  }
+
+  /**
+   * The last word on any mark: never beyond the dead-ball line, and never
+   * through the uprights (the posts stand at ±3.1 m inside the in-goal
+   * area, so a deep mark is pushed out of the post corridor).
+   */
+  private boundMark(x: number, z: number): { x: number; z: number } {
+    const mz = clamp(z, FIELD.deadZ + DEAD_BALL_MARGIN, FIELD.deadZFar - DEAD_BALL_MARGIN);
+    if (Math.abs(mz) <= Math.abs(FIELD.tryZFar) || Math.abs(x) >= POST_CORRIDOR) return { x, z: mz };
+    return { x: x >= 0 ? POST_CORRIDOR : -POST_CORRIDOR, z: mz };
+  }
+
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
     const s = this.shape();
@@ -2179,6 +2714,41 @@ export class Director {
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
     const f = this.focusPoint();
+
+    /* SPEC_11. The single live openside sign. `s.open * flip` was identically
+     * +1 — `open` is ±1 and `flip` was its own sign — so the attacking shape
+     * was never mirrored to the openside. */
+    const openSign: -1 | 1 = s.open < 0 ? -1 : 1;
+    /* σ: a team's attacking axis. +1 for A (+z), −1 for B (−z). It is the
+     * point mirror that carries the dataset's authored frame into the world,
+     * and it is applied exactly once. */
+    const atkSigma: -1 | 1 = atk === 'A' ? 1 : -1;
+    const defSigma: -1 | 1 = def === 'A' ? 1 : -1;
+    const atkSit = atk === 'A' ? sitA : sitB;
+    const defSit = def === 'A' ? sitA : sitB;
+    /* D11-a: one squeeze factor per formation per frame, so the whole shape
+     * narrows together rather than clipping only the men who reached touch. */
+    const atkDatasetLat = atkSit ? this.lateralScale(f.x, atkSigma, SITUATION_LATERAL[atkSit].min, SITUATION_LATERAL[atkSit].max) : 1;
+    const defDatasetLat = defSit ? this.lateralScale(f.x, defSigma, SITUATION_LATERAL[defSit].min, SITUATION_LATERAL[defSit].max) : 1;
+    let shapeMin = 0, shapeMax = 0;
+    for (const q of atkShape.slots) {
+      const l = q.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+      if (l < shapeMin) shapeMin = l;
+      if (l > shapeMax) shapeMax = l;
+    }
+    const shapeLat = this.lateralScale(f.x, openSign, shapeMin, shapeMax);
+    const defLineFactor = 0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4;
+    const defLineLat = this.lateralScale(f.x, 1, DEFENCE_LAT_MIN * defLineFactor, DEFENCE_LAT_MAX * defLineFactor);
+
+    /* SPEC_12 — FORCE AI CLEAN. One projection, applied to every CPU mark
+     * after the formation has written it and before it is steered to. It is
+     * deliberately a pass over the marks rather than a change inside each
+     * branch: the dataset branch, the shape branch, the CPU planner, the hip
+     * and sweep roles, the convergers and the cover chase are then all covered
+     * without any of them knowing the law exists, and a new branch is covered
+     * the day it is written. */
+    const aiClean = (this.options.offsideAiClean ?? 0) === 1;
+    const guardLines = aiClean ? liveOffsideLines(this) : [];
 
     /* A KICK IS OWNED BY placeBound. If think() also assigned targets here it
      * would drag the defensive line back on top of the ball — which is exactly
@@ -2229,7 +2799,12 @@ export class Director {
       const carC = this.L(this.op.attacking, this.op.carrierNum);
       for (const q of this.live) {
         if (q.team === def || q.sinbin > 0 || q.beatenT > 0 || q.down) continue;
-        if ((q.z - carC.z) * dir < 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
+        /* SPEC_11: "the carrier has gone past him" is `(carC.z − q.z) · dir
+         * > 0.5`. The old form was its negation with a −0.5 threshold, which
+         * armed the chase for every defender up to half a metre IN FRONT of
+         * the carrier — half the line turning and sprinting at a man they had
+         * not been beaten by. */
+        if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
       }
       const carLat = this.op.carrierX - f.x;
       for (const r of DEFENCE_CHANNELS
@@ -2360,7 +2935,8 @@ export class Director {
          * ruck exit the support holds the marks it already has — the pod
          * arrives as a pod. The nine-with-ball and a ball in flight are the
          * exceptions above and below. */
-        if (this.op && this.op.podHold > 0) {
+        if (this.op && this.op.podHold > 0
+            && Math.hypot(p.tx - f.x, p.tz - f.z) <= POD_HOLD_ANCHOR_METRES) {
           steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
@@ -2394,53 +2970,73 @@ export class Director {
          * authored trail lines would pull them ten metres off it. */
         if (slot) {
           const sit = p.team === 'A' ? sitA : sitB;
-          const dsm = sit ? datasetMark(p.team, p.num, sit, beat) : null;
+          /* SPEC_11: the dataset is a FORMATION DRAWN AROUND A BALL, and the
+           * ball was in one fixed place when it was drawn. `datasetOffset()`
+           * returns the shape relative to that anchor; re-anchoring it on the
+           * live focus point is what makes the mark follow the play. Steering
+           * by the absolute point (`datasetMark`) is the drift bug: a
+           * midfield mark applied to a ball on the 22 put the whole backline
+           * thirty metres behind the carrier. */
+          const dsm = sit ? datasetOffset(p.num, sit, beat) : null;
           if (dsm) {
-            let targetX = clamp(dsm.x, -33, 33);
-            let targetZ = dsm.z;
+            const sigma = p.team === 'A' ? 1 : -1;
+            /* dsm.along is metres along the attacking axis from the ball:
+             * negative is behind it. Depth is what the red-zone drive and the
+             * dead-ball compression both act on, so it stays in that form
+             * until the world z is needed. */
+            let along = dsm.along;
             /* T-13/T-18. The authored red-zone beats march the pods to the
              * 22 and hold them 15 m out — an honest arrival, but nobody
              * threatens the line from there and tries died to zero. Inside
              * 20 m the dataset owns the APPROACH (lateral spot, job, timing)
              * and the engine owns the DRIVE: the mark is flattened to the
              * same pick-and-go depth the shape fix uses, so the carries,
-             * the dive and the reach-over actually happen. */
+             * the dive and the reach-over actually happen. Now expressed as a
+             * depth BEHIND THE BALL rather than an absolute z comparison. */
             if (sit === 'red-zone-22' && this.op) {
               const o = this.op;
               const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
-              if (toLine < 20) {
-                const deepest = o.carrierZ - o.dir * (0.5 + toLine * 0.08);
-                targetZ = o.dir > 0 ? Math.max(targetZ, deepest) : Math.min(targetZ, deepest);
-              }
+              if (toLine < 20) along = Math.max(along, -(0.5 + toLine * 0.08));
             }
+            /* D11-a: spread from the ball's own lateral position, squeezed
+             * when the formation would run into touch. */
+            const across = sigma * dsm.across * atkDatasetLat;
+            let targetX = clamp(f.x + across, -33, 33);
+            let targetZ = this.anchorDepth(f, sigma, along);
 
             /* SPEC_02: authored dataset marks remain the highest-priority
              * source of lane/job/timing. CPU support nevertheless enters the
              * same pure depth contract before committing its mark: the
-             * absolute dataset lane is preserved, while setup depth is
-             * validated and made usable for a run-on pass. */
+             * dataset lane is preserved (now as a ball-relative offset),
+             * while setup depth is validated and made usable for a run-on
+             * pass. The depth handed to the pure planner is a true depth —
+             * before SPEC_11 it was the distance between an absolute authored
+             * point and the live ball, which is not a depth at all. */
             if (!this.isHuman(atk) && this.op) {
               const toLine = Math.max(0, this.op.dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
               const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
               const plan = this.planCpuForwardAttack(gate, `think:dataset-depth:${p.team}${p.num}:${sit}`, {
                 anchor: f,
                 attackDirection: dir < 0 ? -1 : 1,
-                /* `dsm.x` is already a world-space authored lane; do not mirror it again. */
+                /* `across` is already mirrored into world space; do not mirror twice. */
                 openside: 1,
-                lateralOffsetMetres: dsm.x - f.x,
-                nominalSupportDepthMetres: Math.max(0.5, (f.z - targetZ) * dir),
+                lateralOffsetMetres: across,
+                nominalSupportDepthMetres: Math.max(0.5, -along),
                 shapeDepthBias: 1,
                 tempo: 0,
                 distanceToTryLineMetres: toLine,
                 role,
               });
               targetX = clamp(plan.setup.x, -33, 33);
-              targetZ = plan.setup.z;
+              /* Back to an offset, then through the same D11-b compression. */
+              targetZ = this.anchorDepth(f, sigma, (plan.setup.z - f.z) * sigma);
             }
+            /* D11-b: never past the dead-ball line, never through the posts. */
+            const mark = this.boundMark(targetX, targetZ);
             this.writeThinkPlayer(gate, `think:dataset-mark:${p.team}${p.num}:${sit}`, p,
               ['tx', 'tz', 'job', 'urgency'] as const, () => {
-                p.tx = targetX;
-                p.tz = clamp(targetZ, -59, 59);
+                p.tx = clamp(mark.x, -33, 33);
+                p.tz = clamp(mark.z, -59, 59);
                 p.job = dsm.job;
                 p.urgency = 0.9;
               });
@@ -2451,11 +3047,11 @@ export class Director {
 
         // Otherwise the man stands where the shape says he stands.
         if (slot) {
-          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+          /* D11-a: the touchline squeeze multiplies the offset itself, so both
+           * the planner path (CPU) and the direct path below inherit it. */
+          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width * shapeLat;
           const tempo = this.slider(atk, 'tempo') / 100;
           const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
-          // Flip the shape if the attack is going the other way.
-          const flip = this.op && this.op.open < 0 ? -1 : 1;
           let targetX: number;
           let targetZ: number;
 
@@ -2464,7 +3060,9 @@ export class Director {
              * the pure setup point. Arrival/carry geometry is checked before
              * this write, while no plan helper itself mutates Live state. */
             const role = slot.role === 'WIDE_1' ? 'WING' : slot.role === 'BACKLINE' ? 'BACKLINE' : 'POD';
-            const openside = s.open * flip < 0 ? -1 : 1;
+            /* SPEC_11: the live openside sign. `s.open * flip` was identically
+             * +1, so the shape never mirrored; this is the single sign. */
+            const openside = openSign;
             const plan = this.planCpuForwardAttack(gate, `think:shape-depth:${p.team}${p.num}:${slot.role}`, {
               anchor: f,
               attackDirection: dir < 0 ? -1 : 1,
@@ -2476,8 +3074,15 @@ export class Director {
               distanceToTryLineMetres: toLine,
               role,
             });
-            targetX = clamp(plan.setup.x, -33, 33);
-            targetZ = clamp(plan.setup.z, -59, 59);
+            /* D11-b: the planner's setup point is ball-relative and red-zone
+             * aware, but it knows nothing of the dead-ball line or the post
+             * corridor, so it gets the same clamps as every other mark. */
+            const mark = this.boundMark(
+              plan.setup.x,
+              this.anchorDepth(f, atkSigma, (plan.setup.z - f.z) * (dir < 0 ? -1 : 1)),
+            );
+            targetX = clamp(mark.x, -33, 33);
+            targetZ = clamp(mark.z, -59, 59);
           } else {
             let depth = slot.depth * atkShape.depthBias * (0.7 + tempo * 0.5);
             /* T-18. Inside the opposition 14 the shape goes FLAT — pick and go
@@ -2486,8 +3091,11 @@ export class Director {
              * ground: attacks entered at eight metres out and marched slowly
              * back to halfway. */
             if (toLine < 20) depth = Math.min(depth, 0.5 + toLine * 0.08);
-            targetX = clamp(f.x + lateral * s.open * flip, -33, 33);
-            targetZ = clamp(f.z - dir * depth, -59, 59);
+            /* D11-a: the shape spreads from the ball's lateral position and
+             * squeezes rather than crossing the touchline. */
+            targetX = clamp(f.x + lateral * openSign, -33, 33);
+            /* D11-b: the same depth compression every other mark gets. */
+            targetZ = clamp(this.anchorDepth(f, atkSigma, -depth), -59, 59);
           }
 
           this.writeThinkPlayer(gate, `think:shape-mark:${p.team}${p.num}:${slot.role}`, p,
@@ -2562,12 +3170,22 @@ export class Director {
          * pursuit and kick-fielding branches above are event-driven and
          * stay exactly as they are. */
         const sitD = p.team === 'A' ? sitA : sitB;
-        const dsm = sitD ? datasetMark(p.team, p.num, sitD, beat) : null;
+        /* SPEC_11: ball-relative, exactly as on the attacking side. This
+         * branch used to steer every defender at an absolute authored spot:
+         * the fullback's mark is 22 m behind a ruck drawn on the halfway
+         * line, so with the ruck on his own 22 he ran there through the
+         * whole attacking line and turned his back on the play. */
+        const dsm = sitD ? datasetOffset(p.num, sitD, beat) : null;
         if (dsm) {
+          const sigma = p.team === 'A' ? 1 : -1;
+          const mark = this.boundMark(
+            clamp(f.x + sigma * dsm.across * defDatasetLat, -33, 33),
+            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, dsm.along), p, sitD ?? 'dataset'),
+          );
           this.writeThinkPlayer(gate, `think:defence-dataset:${p.team}${p.num}:${sitD}`, p,
             ['tx', 'tz', 'job', 'urgency'] as const, () => {
-              p.tx = clamp(dsm.x, -33, 33);
-              p.tz = clamp(dsm.z, -59, 59);
+              p.tx = clamp(mark.x, -33, 33);
+              p.tz = clamp(mark.z, -59, 59);
               p.job = dsm.job;
               p.urgency = 0.85;
             });
@@ -2576,8 +3194,8 @@ export class Director {
         // than the system allows cannot open.
         const ch = DEFENCE_CHANNELS.find((q) => q.num === p.num);
         const m = defenceMark(p.num, s);
-        let lat = (ch ? ch.lat : (m.x - f.x)) * (0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4);
-        let tx = f.x + lat;
+        let lat = (ch ? ch.lat : (m.x - f.x)) * defLineFactor;
+        let tx = f.x + lat * defLineLat;
         /* T-18. YOU DRIFT ON THE PASS. A real line slides while the ball is
          * in flight — it does not wait for the catch and then react. The
          * old 0.5 factor, applied only to the stationary carrier, left the
@@ -2590,7 +3208,15 @@ export class Director {
           tx += (this.op.carrierX - f.x) * dw;
         }
         const umb = defSys.umbrella * (Math.abs(lat) / 22);
-        const tz = f.z + dir * (m.z - f.z) * 0.9 + dir * umb;
+        /* SPEC_11 — the direction is applied ONCE. `m.z − f.z` is a
+         * world-space signed offset that already carries `s.dir` out of
+         * `defenceMark()`; multiplying the difference by `dir` again is
+         * `dir² = 1`, a mirror that cancels itself — the line ended up a
+         * fixed +z offset from the ball whichever way the attack was
+         * running, i.e. behind it whenever team B had the ball. The
+         * umbrella term is separate and correctly signed: an arc deepest at
+         * the edge sits further towards the DEFENDING team's own line. */
+        const tz = f.z + (m.z - f.z) * 0.9 + dir * umb;
         const react = 1 - clamp((100 - p.attrs.AWA) / 400, 0, 0.22);
         /* T-18. THE GRIND BENDS THE LINE. A defence that has given up the
          * gain line six phases running is backpedalling: line speed decays
@@ -2601,10 +3227,11 @@ export class Director {
          * turns over. */
         const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
         const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
+        const line = this.boundMark(tx, this.defensiveDepth(f, dir, tz, p, 'channel-map'));
         this.writeThinkPlayer(gate, `think:defence-line:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
-            p.tx = clamp(tx, -33, 33);
-            p.tz = clamp(tz, -59, 59);
+            p.tx = clamp(line.x, -33, 33);
+            p.tz = clamp(line.z, -59, 59);
             p.job = defSys.job;
             p.urgency = urgency;
           });
@@ -2617,6 +3244,18 @@ export class Director {
           p.urgency = clamp(p.urgency * (0.86 + diff.reaction * 0.18), 0, 1);
         });
       }
+      /* SPEC_12 — FORCE AI CLEAN, the mark. Runs after every formation writer
+       * and before the steer, so it is a later, distinct step on the same
+       * player: T-02 single-writer ownership is preserved and the label says
+       * who moved him. */
+      if (aiClean && !this.isHuman(p.team) && guardLines.length) {
+        const lawful = legalMarkZ(guardLines, p, CLEAN_MARGIN_METRES);
+        if (lawful !== p.tz) {
+          this.writeThinkPlayer(gate, `think:offside-guard:${p.team}${p.num}`, p, ['tz'] as const, () => {
+            p.tz = clampPitchZ(lawful);
+          });
+        }
+      }
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
@@ -2625,6 +3264,19 @@ export class Director {
     }
 
     separate(this.live, dt, gate, 'think:separate');
+
+    /* SPEC_12 — FORCE AI CLEAN, the shove. `separate()` is the ordinary way a
+     * "clean" AI infringes: not a decision, a collision. The projection runs
+     * AFTER the shove, not before it — projecting before would make an
+     * overlapping pair stick and re-collide every frame. This moves a POSITION,
+     * never a mark, so the formation is untouched. */
+    if (aiClean && guardLines.length) {
+      for (const p of this.live) {
+        if (this.isHuman(p.team) || p.carrier || p.bound || p.sinbin > 0) continue;
+        const lawful = legalZFor(guardLines, p, p.z, CLEAN_MARGIN_METRES);
+        if (lawful !== p.z) p.z = clampPitchZ(lawful);
+      }
+    }
   }
 
   /* ============================ CAMERA ============================ */
@@ -2822,6 +3474,7 @@ export class Director {
       open,
       ball: { x, y: 1.05, z, vx: 0, vz: 0, live: false, t: 0 },
       pendingReceiver: num, passT: 0, passDist: 8,
+      passTargetX: x, passTargetZ: z,
     };    this.bd = undefined; this.ml = undefined;
     this.phase = 'OPEN_PLAY';
     this.setCtrl(team, num);
@@ -2911,6 +3564,7 @@ export class Director {
     const forwardContext = !this.isHuman(this.op.attacking) ? {
       enabled: true,
       attackDirection: (this.op.dir < 0 ? -1 : 1) as -1 | 1,
+      noteRejection: () => this.notePassCandidateRejected(),
     } : undefined;
     const next = passOptions(car, this.live, this.op.open, false, wet, forwardContext, gate);
     this.passOpts = next;
@@ -3549,13 +4203,16 @@ export class Director {
       a.num = p.num; a.team = p.team;
       a.ring = p.controlled ? 1 : (this.passOpts.some((o) => o.player === p) ? 2 : 0);
     }
-    // referee shadows the ball at a constant officious distance
-    const f = this.focusPoint();
-    const dir = this.possession === 'A' ? 1 : -1;
+    /* SPEC_15 — the referee is streamed like any other actor, from state that
+     * engine/referee.ts integrated. `rf` is the ±1 the puppet pipeline reads
+     * for its initial bearing; the referee's true facing is the ball's, and
+     * the renderer holds it there while his legs do something else. */
     const ref = this.actors[30];
-    ref.rx = f.x * 0.4 + 8;
-    ref.rz = f.z - dir * 11;
-    ref.renderClip = this.refSignal > 0 ? 'refSignal' : 'refReady';
+    const r = this.ref;
+    ref.rx = r.x; ref.rz = r.z;
+    ref.rf = Math.cos(r.face) >= 0 ? 1 : -1;
+    ref.renderClip = r.clip;
+    ref.clipT = 0;
   }
 
   /* ============================ SUBS & KITS ============================ */

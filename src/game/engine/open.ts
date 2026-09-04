@@ -18,6 +18,7 @@ import { steer } from '../intelligence';
 import { PlayCall } from '../shapes';
 import { REFEREE_CALLS } from '../data';
 import { wetnessOf, windOf, WEATHERS } from './weather';
+import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal, PASS_SPEED } from './throwforward';
 import { approach } from './approach';
 import { clamp } from './clamp';
 import {
@@ -42,34 +43,54 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
      * made every pass feel like a teleport. */
     s.passT += dt * (13 / s.passDist);
-    /* T-40. The receiver runs onto the pass; the ball flies to where he is.
-     * Nobody is snapped — the receiver was teleporting because the old code
-     * set `rec.x/z = ball.x/z` on arrival while `think()` kept steering him
-     * back toward his support mark. Now he runs at the ball, the ball homes
-     * to him, and the catch happens where he actually stands. */
-    rec.tx = clamp(s.ball.x, -33, 33);
-    rec.tz = clamp(s.ball.z + s.dir * 1.0, -58, 58);
+    /* T-40, REWRITTEN BY SPEC_13.
+     *
+     * The receiver was steered to `ball.z + dir * 1.0` — a point one metre in
+     * FRONT of the ball, every frame — while the ball flew at the receiver's
+     * live position. That is a pursuit curve, and it is a physics violation:
+     * the ball was dragged forward up the pitch by the man it was chasing.
+     * Measured, it took six to eight passes per 600 s that had left the
+     * thrower's hands perfectly legally and landed them up to 2.9 m forward.
+     *
+     * Now the ball flies to a FIXED aim point, solved once at release, and the
+     * receiver runs to that same point. Nobody chases anybody. The flight is
+     * a straight line, so the release vector, the average flight velocity and
+     * the landing point are all the same fact — which is what lets one law be
+     * written once and tested at any of the three. */
+    rec.tx = clamp(s.passTargetX, -33, 33);
+    rec.tz = clamp(s.passTargetZ, -58, 58);
     rec.urgency = 1;
     rec.job = 'TAKE THE PASS';
     steer(rec, dt, true);
 
-    /* PLAYTEST 4: THE FLASH. The old flight lerped the ball toward the
-     * receiver at an exponential rate — ~0.2 s flat, whatever the distance —
-     * so every pass read as a teleport. The ball now flies at its TRUE
-     * 13 m/s ground speed toward where the receiver actually is (a light
-     * track, no snap), the arc peaks on the expected arrival, and the catch
-     * is proximity. A 6 m pop takes 0.46 s; a 20 m cut-out 1.5 s — visible
-     * flights, at the dataset speed. */
-    const dx = rec.x - s.ball.x, dz = rec.z - s.ball.z;
+    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at its TRUE 13 m/s
+     * ground speed over its own length — a 6 m pop takes 0.46 s, a 20 m
+     * cut-out 1.5 s. The difference is WHAT it flies at: a fixed point
+     * solved at release, not a man who is being pushed forward to meet it. */
+    const dx = s.passTargetX - s.ball.x, dz = s.passTargetZ - s.ball.z;
     const dd = Math.max(0.01, Math.hypot(dx, dz));
-    const step = Math.min(dd, 13 * dt);
+    const step = Math.min(dd, PASS_SPEED * dt);
     s.ball.x += (dx / dd) * step;
     s.ball.z += (dz / dd) * step;
     s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
-    const dist = dd;
-    if (dist <= Math.max(0.55, 13 * dt * 1.05) || s.passT >= 1.35) {
+    /* SPEC_13: the catch is PROXIMITY TO THE RECEIVER, not arrival at the
+     * target. Flying to a fixed point means the ball can reach the aim with
+     * the receiver two metres away, and snapping it to him there is the
+     * teleport T-40 was written to prevent — and it turned a legal throw into
+     * a ball that jumped forward at the moment of the catch. */
+    const toRec = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
+    const arrived = dd <= step;
+    if (toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) || arrived || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
+      /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
+       * `op.carrierX/Z`. Those are synced by the carry path below, which
+       * this branch returns before reaching — so for the whole frame the
+       * catch lands, the anchor still sat on the PASSER, up to eight metres
+       * behind the new carrier. Every mark in the formation was written
+       * against a stale ball for that frame, and the camera and the HUD
+       * pointed at a man who no longer had it. */
+      s.carrierX = rec.x; s.carrierZ = rec.z;
       rec.carrier = true;
       // catch where the receiver actually is — no snap.
       s.ball.x = rec.x; s.ball.z = rec.z;
@@ -238,7 +259,6 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   const beatOn = !!(rb && d.t < rb.until);
   /* SPEC_04: this is a distinct defensive-line-reset opportunity. Sample the
    * live positions before the existing human-pace retreat corrects them. */
-  if (beatOn && d.sampleDefensiveLineResetOffside(dt)) return;
   const dists: { num: number; d: number }[] = [];
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);
@@ -281,6 +301,23 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   }
   dists.sort((a, b) => a.d - b.d);
   const nearest = dists[0];
+  /* SPEC_14 / 14-c — THE NEAREST *ELIGIBLE* DEFENDER.
+   *
+   * A slipped tackle sets `beatenT` for 1.1-1.6 s. Only `dists[0]` was ever
+   * offered to the tackle test, so a beaten man standing closest made the
+   * carrier untouchable until his timer expired — a beaten man was a SHIELD.
+   * Measured at 3.7% of contact frames (26 of 711). It also stops a man lying
+   * on the turf from completing a tackle: `p.down` was never excluded.
+   *
+   * Net effect, four seeds x three difficulties: tackles made 63 -> 78.
+   *
+   * `nearest` is kept for pressure, the ring count and the line-break read,
+   * which are deliberately "closest body" measures. */
+  const eligible = (num: number): boolean => {
+    const p = d.L(dTeam, num);
+    return !!p && p.beatenT <= 0 && !p.down && p.sinbin <= 0;
+  };
+  const tackler1 = dists.find((x) => eligible(x.num)) ?? null;
   /* T-18. The old weights (nearest/9, +0.09 per man within 11 m) meant any
    * carrier with the regulation three convergers nearby read pressure ~0.94
    * — "a defender is physically on him" — and every downstream gate (pass,
@@ -317,9 +354,9 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     const dive = pressed.has('tackleDive');
     // honest ranges: a dive reaches 3.5 m, a smother 1.4 m
     const reach = dive ? 3.5 : 1.4;
-    const dd = nearest ? nearest.d : 9;
+    const dd = tackler1 ? tackler1.d : 9;
     if (dd <= reach) {
-      const tacklerNum = nearest!.num;
+      const tacklerNum = tackler1!.num;
       const tp = d.L(dTeam, tacklerNum);
       const safe = dive ? 0.86 : 0.95;             // smother is safer, no chase value
       const grip = tp.attrs.PWR;
@@ -340,9 +377,9 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * offside line and cannot legally touch him for the first stride. Without
    * this the nearest defender was on the new carrier inside two frames and the
    * match became one endless ruck. */
-  if (nearest && nearest.d < 1.1 && s.protect <= 0) {
+  if (tackler1 && tackler1.d < 1.1 && s.protect <= 0) {
     const carrierP = car;
-    const tackler = d.L(dTeam, nearest.num);
+    const tackler = d.L(dTeam, tackler1.num);
     const grip = tackler.attrs.PWR;
     const assist = d.isHuman(dTeam) ? d.assists.tackle : 0.5;
     const chance = clamp(0.6 + grip / 340 - carrierP.attrs.PWR / 420 + assist * 0.2, 0.35, 0.95);
@@ -353,8 +390,8 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * from. Once per defender per episode, first contact can be beaten:
      * the tackler is bounced and needs a second to reset. */
     if (!s.beatTried) s.beatTried = new Set<number>();
-    if (!s.beatTried.has(nearest.num)) {
-      s.beatTried.add(nearest.num);
+    if (!s.beatTried.has(tackler1.num)) {
+      s.beatTried.add(tackler1.num);
       const slip = clamp(0.07 + (carrierP.attrs.SKL - tackler.attrs.SKL) / 900 + (carrierP.attrs.PWR - grip) / 1000, 0.03, 0.18);
       if (R() < slip) {
         d.teams[dTeam].stats.missed++;
@@ -381,7 +418,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * roll always fired first and the red zone converted by attrition
        * only (16.5 entries a match, 3 tries). */
       if (distLine < 2.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { d.scoreTry(); return; }
-      d.startBreakdown(nearest.num);
+      d.startBreakdown(tackler1.num);
       return;
     }
     if (R() < 0.1 * dt * 10) d.commentate('BIG_HIT');
@@ -513,6 +550,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   const forwardContext = !d.isHuman(s.attacking) ? {
     enabled: true,
     attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1,
+    noteRejection: () => d.notePassCandidateRejected(),
   } : undefined;
   const opts = passOptions(car, d.live, s.open, cutOut, wet, forwardContext, gate);
   const opt = opts.find((o) => o.side === side);
@@ -546,6 +584,47 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
     return;
   }
 
+  /* SPEC_13 — LAW 11, THE THROW-FORWARD TEST.
+   *
+   * Taken here, at the release frame, because that is the only place the law
+   * is answerable: `s.ball.x/z` is the release point, `s.carrierNum` is still
+   * the thrower, and the receiver has not yet been steered anywhere. One frame
+   * later the ball has moved ~0.22 m and the receiver has been told to run,
+   * and the test starts measuring the chase instead of the throw.
+   *
+   * The aim is solved ONCE here and the ball flies to it for the whole
+   * flight, so the release vector, the average flight velocity and the
+   * landing point are all the same fact. */
+  const dir = s.dir >= 0 ? 1 : -1;
+  const solvedAim = solvePassAim(car, opt.player);
+  const rel = passReleaseRel(car, solvedAim, car.vz, dir);
+  const fwdProf = fwdProfile(d.options.fwdPass ?? 1);
+  const blown = rel > fwdProf.tol;
+  /* A CPU pass can still read forward at release even though the selection
+   * filter cleared it: the receiver runs between the two solves, a fifth of
+   * a second of movement. The CPU therefore throws the SAME pass flatter
+   * rather than illegally — the lateral line is kept, the depth is pulled
+   * back. The whistle is left free to be about the HUMAN, which is what a
+   * referee is for, and the correction is counted so it cannot quietly
+   * become the way the CPU passes. */
+  const clamped = blown && !d.isHuman(s.attacking)
+    ? clampAimLegal(car, solvedAim, car.vz, dir, fwdProf.tol)
+    : null;
+  if (clamped) d.notePassClamped();
+  const aim = clamped ?? solvedAim;
+  /* Ordering matters for the ledger: a corrected pass is not a whistled one,
+   * and counting it as both would flatter the referee and hide the CPU's
+   * debt. The rate is counted before the verdict, the whistle after it. */
+  const whistled = blown && !clamped && fwdProf.blows;
+  d.notePassRelease(rel, forwardMetres(rel, solvedAim.flight), whistled);
+  if (whistled) {
+    /* Scrum WHERE THE BALL WAS THROWN, not where it was caught — that is the
+     * law, and it is also what the old error branch already did. */
+    d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
+    d.startScrum(d.defending(), car.x, car.z);
+    return;
+  }
+
   // T-35. The receiver is already moving; the ball flies to him instead of
   // teleporting. Launch the flight — upOpen carries it to the target.
   const receiverBefore = gate ? snapshotForwardAttackPlayer(opt.player) : undefined;
@@ -576,7 +655,9 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   s.ball.y = 1.05;
   s.pendingReceiver = opt.player.num;
   s.passT = 0;
-  s.passDist = Math.max(3.5, Math.hypot(opt.player.x - car.x, opt.player.z - car.z));
+  s.passTargetX = aim.x;
+  s.passTargetZ = aim.z;
+  s.passDist = Math.max(3.5, aim.dist);
   if (gate && flightBefore) {
     const flightAfter = {
       ballLive: s.ball.live,
