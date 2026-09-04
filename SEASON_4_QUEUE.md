@@ -291,3 +291,42 @@ expectation *invariantly with fall angle*.
 The T-16 sweep row `diff 3 teleport = 1` is **pre-existing**: `git stash` +
 re-run produced a byte-identical table. It sits in the unseeded fault-hunt
 sweep, not the seeded gate run, and all 15 seeded combinations are clean.
+
+---
+
+## SPEC_22 — SILHOUETTE BREATHING & ARM FLARING (DRAFT, awaiting review)
+
+Diagnosis complete, math proposed, **no live engine code written**. Full detail
+in `SPEC_22_MATH.md`.
+
+**Root cause found: `abL`/`abR` are the constant `0.08` in every keyframe of
+`walk`/`jog`/`run`/`sprint`.** The straight-line gaits inherit `STAND` and never
+modulate abduction, so there is no oscillating lateral elbow term in the rig at
+all. The stiffness is structural, not a tuning shortfall.
+
+Measured, build `CENTRE`:
+
+| metric | measured |
+|---|---|
+| frames with ANY elbow/torso daylight | **0 / 240**, all four gaits |
+| best case (run) | **−0.0316 m** — still 3 cm of overlap |
+| silhouette breath, run @ sc 20 | **0.60 px** over a full stride |
+| frames where the arm defines the outline | 240 / 240 |
+
+So the outline is arm-driven but frozen: at mid distance it varies by 0.60 px,
+below the renderer's own quantisation.
+
+**Proposal:** add `gaitFlare = (AB_BASE + AB_SWING·|sin(a_s)|) · speedGate ·
+carryWeight_s` to `ab` in the coronal draw path — not the IK, because the coronal
+arm is forward-kinematic and has none. Driven by the arm's own authored angle so
+it cannot desync from the clip; `|sin|` is even, so it breathes twice per stride.
+Reuses SPEC_18.5's speed gate and `carryLock` suppression.
+
+Recommended `AB_BASE = 0.26`, `AB_SWING = 0.30`: daylight goes to **≥1.28 px on
+every frame of every gait**, breath to **1.84 px @ sc 20 / 3.13 px @ sc 34** on
+run. Worst-case total abduction 0.640 with the turn flare, inside the 0.72–0.80
+the `shuffle` clip already authors.
+
+Two caveats carried into the review deliberately: breath is real but **modest**
+(§2.4a), and an intermediate probe of mine printed a **wrong "antiphase arms
+cancel" conclusion which is retracted** in §2.4b — its own data contradicts it.
