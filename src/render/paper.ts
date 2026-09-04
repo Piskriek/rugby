@@ -207,6 +207,23 @@ export const LIMB_SPAN = 0.22;
  * Shade a limb fill by its signed depth.
  * @param z -1 = fully behind the torso, +1 = fully in front of it.
  */
+/**
+ * SPEC_23 — WCAG relative luminance of a `#rrggbb` fill, 0 (black) to 1 (white).
+ *
+ * Needed because `shade()` is multiplicative: the same factor that darkens a
+ * white kit legibly does almost nothing to a near-black one (measured, 0.88 on
+ * the referee's #23232c shorts gives 1.068 contrast — you cannot darken black).
+ * Callers use this to pick the DIRECTION of a value step.
+ */
+export function relLuminance(fill: string): number {
+  const n = parseInt(fill.slice(1), 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+
 export function depthShade(fill: string, z: number): string {
   const c = z < -1 ? -1 : z > 1 ? 1 : z;
   return shade(fill, LIMB_MID + LIMB_SPAN * c);

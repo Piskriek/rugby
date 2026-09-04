@@ -513,3 +513,89 @@ the table — and `strafe` carried its own 0.5 floor.
 Verified structurally: stride length now invariant at every speed for every
 gait; `rate(0) === 0` exactly for all seven moving clips; and
 `rate(2v) === 2·rate(v)` to `0.0e+0`.
+
+---
+
+## SPEC_23 — SIDE-PROFILE RE-SEGMENTATION (RC3) — SHIPPED
+
+`tsc --noEmit` clean. **9/9 Season 3 gates**, **15/15 seeds**, SPEC_21, SPEC_22
+and SPEC_06 hysteresis all still pass. New `scripts/spec23verify.ts` adds five
+gates. Shot sheets: `rc3_sprint.png` (worst case), `rc3_run.png`.
+
+### Root cause: my own RC2-1 fix. The card STRETCHED instead of TRANSLATING.
+
+RC2-1 lifted the shorts card's BOTTOM onto the lifted root but left its TOP at
+the unlifted `rtS.y + 0.07`, so the height grew 1:1 with `sideLift`:
+
+```
+cardH = 0.165 + sideLift
+```
+
+| gait | drawn shorts block | shorts / (shorts + thigh) |
+|---|---|---|
+| walk | 0.154 m | 28% |
+| run | 0.349 m | 50% |
+| **sprint** | **0.459 m** | **60%** |
+
+A 2.98x range on a block that should be rigid — that elongated white rectangle
+IS the "long crotch". A pelvis is a rigid body: when the hips drop, the whole
+garment drops. Both edges now take the lift and the height is **exactly constant
+(0.1650 m, 0.000 mm variation)** at every gait.
+
+### Second, independent cause: the thigh had no value of its own.
+
+The thigh `limbCard` was `depthShade(pal.shorts, 1)` — byte-identical to the
+shorts card beside it (palette A shorts are `#f0ece0`). Waist-to-knee was **one
+unbroken white mass**, so the only edge in it was the stretched card bottom
+floating at mid-thigh. That is precisely the "artificial seam at mid-thigh" QA
+described, and it explains why the seam sat nowhere near a joint.
+
+`thighShade()` now steps the thigh off the garment, so the hem reads where cloth
+ends and the geometry's only other break is the knee — which `legChain` already
+computes from the same `thighLen` the kinematics use, so seam and joint coincide
+by construction (ruling 4) rather than by tuning.
+
+### A trap this fix had to avoid
+
+Making the card rigid re-opened the defect at the other end: with the top no
+longer stretching, a constant height left the **waist** bare once `sideLift`
+exceeded 0.145 m — measured **0.186 m of daylight at PROP/sprint**. Fixing one
+edge of a garment while leaving the other pinned is exactly the mistake that
+produced this ticket. The jersey hem now follows the waistband too (shoulders
+stay anchored; cloth hangs), with `JERSEY_OVERLAP` so it overlaps rather than
+butts. Verified: **−0.020 m worst case, i.e. always overlapping.**
+
+### Results
+
+| gate | result |
+|---|---|
+| 1 — card height constant | 0.1650 m, **0.000 mm** variation, all gaits |
+| 2 — anatomical ratio vs true thigh | **25%** flat (ref ~27%; was 60%) |
+| 3 — RC2-1 not regressed (crotch daylight) | −0.095 m worst — still zero daylight |
+| 4 — no new waist gap | −0.020 m worst — jersey always overlaps |
+| 5 — thigh distinct from shorts | 1.32 / 1.32 / **1.31** contrast (A / B / REF) |
+
+Ruling 1 verified **structurally, not by inspection**: a diff-range check
+confirms **zero changed lines inside `drawCoronal`** (lines 231-523). Every edit
+is inside `drawSidePaper` or a module-level constant.
+
+### Two corrections to my own work
+
+1. **`PELVIS_H` 0.165 -> 0.12.** The card also carries `CROTCH_OVERLAP` (0.045)
+   below the hem, so the drawn block is `PELVIS_H + 0.045`. My first value
+   reproduced RC2-1's rest height and left sprint at 49%.
+2. **`THIGH_STEP` constant -> `thighShade()`.** `shade()` is multiplicative, so
+   one factor cannot serve every kit: 0.88 gave 1.32 contrast on white shorts
+   but only **1.068** on the referee's near-black `#23232c` — you cannot darken
+   black. The step is now chosen by the garment's own luminance (new pure
+   helper `relLuminance` in `paper.ts`), landing all three palettes at ~1.31.
+
+### A third mis-specified gate, corrected
+
+My first Gate 2 divided the rigid card by the **projected** thigh and failed
+sprint at 43%. Bad comparison: at u = 0.50 the near thigh is swung **51°** out
+of the drawing plane, so `cos(51°) = 0.624` shortens it to 62% of its length. A
+thigh pointing at the camera *must* draw shorter — that is SPEC_17 depth
+foreshortening working correctly. Measuring a rigid card against a foreshortened
+limb makes correct perspective look like a defect. The gate now compares against
+the thigh's true length and reports the projected figure for information.

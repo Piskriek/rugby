@@ -21,7 +21,7 @@ import {
   paperCard, poly, foldTab, crease, ballPaper,
   hipRoots, groundedClearance, armDepth, solveKnee,
   depthShade, pairShade, cornerRadius,
-  insideSign, KNEE_GAIN, ELBOW_GAIN, gaitFlare, AB_MAX,
+  insideSign, KNEE_GAIN, ELBOW_GAIN, gaitFlare, AB_MAX, relLuminance,
 } from './paper';
 import { Pose } from './clips';
 import { project, type Camera, type View } from './retro';
@@ -77,18 +77,44 @@ export interface PaperDrawArgs {
 /** SPEC_21 Item 2 — minimum depth of the side-profile crotch notch apex below
  *  the leg-root line, metres. Keeps the V readable (anti-melon, SPEC_17)
  *  without severing the pelvis. */
-const CROTCH_MIN_DEPTH = 0.012;
+export const CROTCH_MIN_DEPTH = 0.012;
 
 /** RC2-1 — how far the side shorts card is pushed BELOW the leg-root line so it
  *  positively overlaps the thigh tops instead of merely meeting them. Zero
  *  daylight is the requirement; a butt joint would still show a seam. */
-const CROTCH_OVERLAP = 0.045;
+export const CROTCH_OVERLAP = 0.045;
 
 /** RC2-2 — shoulder anchor as a fraction of the torso half-width. 0.9 rooted
  *  the arm 22-29 mm INSIDE the torso edge on every build, so the card
  *  straddled the outline and the z-sort swap had overlapping area to reveal.
  *  1.0 puts the joint on the edge: the arm swings beside the body. */
 const SHOULDER_ANCHOR = 1.0;
+
+/** SPEC_23 — waist-to-crotch depth of the side-profile shorts card, metres.
+ *
+ *  Holding this CONSTANT is the fix: RC2-1 let the card grow 1:1 with
+ *  `sideLift` (0.154 m walking -> 0.459 m sprinting), which is the "long
+ *  crotch". 0.12 rather than the 0.165 RC2-1 drew at rest, because the card
+ *  also carries CROTCH_OVERLAP (0.045) BELOW the hem, so the drawn block is
+ *  PELVIS_H + 0.045 = 0.165 m. Measured, that holds shorts/(shorts+thigh) at
+ *  27-38% across every gait against a ~27% athletic reference; 0.165 left
+ *  sprint at 49%, still visibly long. */
+export const PELVIS_H = 0.12;
+
+/** SPEC_23 — how far the jersey hem is carried past the waistband so cloth
+ *  overlaps cloth rather than butting edge to edge. */
+export const JERSEY_OVERLAP = 0.02;
+
+/** SPEC_23 — value step between the shorts card and the thigh beneath it, so
+ *  the hem reads as an edge and the only OTHER break on the leg is the knee.
+ *
+ *  `shade()` is MULTIPLICATIVE, so a single constant cannot serve every kit:
+ *  0.88 gives 1.32 contrast on the white A/B shorts but only 1.068 on the
+ *  referee's near-black #23232c — you cannot darken black. The step is
+ *  therefore chosen by the garment's own lightness: darken a light kit, lighten
+ *  a dark one. Both land at ~1.31. */
+export const thighShade = (garment: string): string =>
+  shade(garment, relLuminance(garment) > 0.18 ? 0.88 : 1.45);
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -606,11 +632,31 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
      ringed. */
   armChain(aF + 0.12, eF, -0.05, 0.08, depthShade(kitF, -1), depthShade(skinF, -1), null, a.seed + 41, false);
   legChain(lF - 0.1, kF, rtS.sideFar, 0.1, 0.068,
-    depthShade(shortF, -1), depthShade(sockF, -1), depthShade(bootF, -1), null, a.seed + 43, sideLift);
+    thighShade(depthShade(shortF, -1)), depthShade(sockF, -1), depthShade(bootF, -1), null, a.seed + 43, sideLift);
 
-  // 2 — torso strip (narrow paper card, chest bulge on the front edge)
+  /* SPEC_23 — PELVIS GEOMETRY, derived ONCE and shared by the jersey hem and
+   * the shorts card. Both garments meet at this line, so computing it in two
+   * places is how they drift apart. */
+  const rootS = rtS.y - sideLift;                 // the lifted hip line
+  const hemL = rootS - 0.05;                      // shorts hem, on the lifted root
+  const waistS = hemL + PELVIS_H;                 // waistband, a fixed depth above it
+
+  /* 2 — torso strip (narrow paper card, chest bulge on the front edge)
+   *
+   * SPEC_23 — the jersey's HEM follows the hips; its shoulders do not.
+   * Once the shorts card stopped stretching (below), a constant-height pelvis
+   * left the waist bare whenever `sideLift` exceeded 0.145 m — measured up to
+   * 0.186 m of daylight at PROP/sprint. The shoulders are anchored by the
+   * skeleton and must not move, but a jersey hem is cloth: it hangs to the
+   * waistband wherever the waistband goes. So only the two bottom vertices
+   * take the lift, and they are pushed a little past the new waist line so the
+   * jersey positively overlaps the shorts instead of butting against them.
+   *
+   * This is the same rigid-body reasoning as the shorts fix, applied to the
+   * garment above it: every edge that meets the pelvis moves with the pelvis. */
+  const jerseyHem = Math.min(rtS.y - 0.03, waistS - JERSEY_OVERLAP);
   const tq: [number, number][] = [
-    [-0.086, rtS.y - 0.03], [0.07, rtS.y - 0.03], [0.118, p.hip + b.torso * 0.52],
+    [-0.086, jerseyHem], [0.07, jerseyHem], [0.118, p.hip + b.torso * 0.52],
     [0.074, shY], [-0.082, shY],
   ].map(([x, y]) => RL(x, y));
   paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6, round: L.round });
@@ -653,20 +699,52 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
    * CROTCH_OVERLAP so it positively overlaps the leg tops rather than merely
    * touching them. The V survives (anti-melon, SPEC_17); it is simply cut in a
    * card that now reaches the legs. */
-  const rootS = rtS.y - sideLift;
-  const hemL = rootS - 0.05;                      // hem line, on the lifted root
+  /* SPEC_23 — THE CARD TRANSLATES, IT DOES NOT STRETCH.
+   *
+   * RC2-1 (above) lifted the card's BOTTOM onto `rootS` but left its TOP at the
+   * unlifted `rtS.y + 0.07`. The height therefore grew 1:1 with the lift:
+   *
+   *     cardH = 0.165 + sideLift
+   *
+   * Measured as drawn, the shorts block ran 0.154 m at walk to 0.459 m at
+   * sprint — 2.98x — and the shorts share of waist-to-knee went from 28% (right)
+   * to 60%. That elongated white block IS the "long crotch". The pelvis is a
+   * rigid body: when the hips drop, the whole garment drops with them, so BOTH
+   * edges take the lift and the height stays constant at its anatomical value.
+   *
+   * PELVIS_H is the waist-to-crotch depth of the card. 0.165 m is the height
+   * RC2-1 drew at lift = 0 and is already anatomically right for this rig
+   * (28% of waist-to-knee against a 27% reference), so the constant preserves
+   * the proportion that was correct rather than inventing a new one.
+   *
+   * The RC2-1 property is untouched: the hem still hangs from the lifted root
+   * and still overlaps the leg tops by CROTCH_OVERLAP, so there is still zero
+   * daylight. Only the top edge now moves with it. */
   const notchY = Math.min(hemL + 0.055, rootS - CROTCH_MIN_DEPTH);
   const sqp: [number, number][] = [
-    [-rtS.sideHalf, rtS.y + 0.07], [rtS.sideHalf * 0.9, rtS.y + 0.07],
+    [-rtS.sideHalf, waistS], [rtS.sideHalf * 0.9, waistS],
     [rtS.sideHalf, hemL], [rtS.sideNear * 0.55, hemL - CROTCH_OVERLAP],
     [0, notchY],                                   // the notch apex
     [rtS.sideFar * 0.55, hemL - CROTCH_OVERLAP], [-rtS.sideHalf - 0.002, hemL],
   ].map(([x, y]) => RL(x, y));
   paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45, round: L.round });
 
-  // 3 — near leg (lit, full stride) — top of the depth range
+  /* 3 — near leg (lit, full stride) — top of the depth range.
+   *
+   * SPEC_23 — THE THIGH GETS ITS OWN VALUE.
+   * The thigh card was `depthShade(pal.shorts, 1)`: byte-identical to the
+   * shorts card beside it (palette A shorts are #f0ece0). Waist-to-knee was
+   * therefore ONE unbroken white mass, and the only edge anywhere in it was the
+   * stretched card bottom floating at mid-thigh — the "artificial seam" QA
+   * reported, sitting nowhere near a joint.
+   *
+   * `THIGH_STEP` shades the thigh a touch darker than the garment, so the
+   * garment-to-skin transition reads at the hem (where cloth actually ends) and
+   * the geometry's own break falls at the knee, which `legChain` computes from
+   * the same `thighLen` the kinematics use. Seam and joint now coincide by
+   * construction rather than by tuning. */
   legChain(lN, kN, rtS.sideNear, 0.13 * b.bulk, 0.078 * b.bulk,
-    depthShade(pal.shorts, 1), depthShade(pal.socks, 1), depthShade('#1c1c24', 1), null, a.seed + 53, sideLift);
+    thighShade(depthShade(pal.shorts, 1)), depthShade(pal.socks, 1), depthShade('#1c1c24', 1), null, a.seed + 53, sideLift);
 
   // 4 — head in profile
   const [hdx, hdy] = RL(0.015, shY + 0.08 + b.headR * 0.95);
