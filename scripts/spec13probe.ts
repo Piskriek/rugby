@@ -48,14 +48,20 @@ interface Sample {
 }
 
 const all: Sample[] = [];
+/** The Law 11 ledger, summed across every fixture. */
+const ledger = { releases: 0, forward: 0, whistles: 0, clamped: 0, rejected: 0 };
 /** Flights in the air, so the net travel can be compared with the release. */
-const inFlight = new Map<number, { z: number; x: number; man: number; t: number; rel: number }>();
+const inFlight = new Map<number, { z: number; aimZ: number; lastZ: number; man: number; t: number; rel: number }>();
 const net: { relAtRelease: number; netRel: number; flight: number }[] = [];
 let passes = 0;
 
 for (const seed of list) {
   seedRng(seed);
   const cfg: MatchConfig = gateConfig(diff);
+  /* HUMAN_A=1 puts a human team on the field (AI-driven but flagged human),
+   * so the referee's side of the law is exercised: a human is never clamped,
+   * so his forward passes are whistled rather than corrected. */
+  if (process.env.HUMAN_A === '1') cfg.cpuA = false;
   const d = new Director(cfg);
   let wasLive = false;
   for (let i = 0; i < Math.ceil(seconds * 60) && !d.over; i++) {
@@ -66,18 +72,31 @@ for (const seed of list) {
      * landed with where a legal release says it should have. */
     if (!live && wasLive) {
       for (const [num, f] of inFlight) {
-        const dz = (s?.ball.z ?? f.z) - f.z;
         const dir = (s?.dir ?? 1) >= 0 ? 1 : -1;
         const flight = Math.max(0.016, (s?.t ?? f.t) - f.t);
         net.push({
           relAtRelease: f.rel,
-          /* metres the ball gained relative to the ground the thrower's legs
-           * would have carried it in the same time */
-          netRel: dz * dir - f.man * flight,
+          /* SPEC_13: the pursuit-curve test, stated correctly.
+           *
+           * My first instrument compared the catch with where the thrower's
+           * release speed would have carried HIM over the flight — which is
+           * not the law and is not even true: a man stops running the moment
+           * he has passed, so the ball lands ahead of him by metres on every
+           * flat pass and the metric read 23 false positives.
+           *
+           * The question the pursuit curve actually raises is "did the ball
+           * go where it was thrown?" So: compare the ball's last airborne
+           * position with the aim it was solved to fly to. Straight flight
+           * means this is zero, inside the catch radius. */
+          netRel: (f.lastZ - f.aimZ) * dir,
           flight,
         });
         inFlight.delete(num);
       }
+    }
+    /* Track the last airborne position before the catch snaps the ball. */
+    if (live && s) {
+      for (const f of inFlight.values()) { f.lastZ = s.ball.z; }
     }
     /* The launch frame: the ball was not in flight before this update and is
      * now. `s.carrierNum` is still the thrower — it becomes the receiver only
@@ -91,7 +110,7 @@ for (const seed of list) {
       const ballVz = (dz / dd) * PASS_SPEED;
       const manVz = car.vz;
       passes++;
-      inFlight.set(d.t, { z: s.ball.z, x: s.ball.x, man: (manVz * dir), t: d.t, rel: (ballVz - manVz) * dir });
+      inFlight.set(d.t, { z: s.ball.z, aimZ: s.passTargetZ, lastZ: s.ball.z, man: (manVz * dir), t: d.t, rel: (ballVz - manVz) * dir });
       all.push({
         rel: (ballVz - manVz) * dir,
         absolute: ballVz * dir,
@@ -102,6 +121,12 @@ for (const seed of list) {
     }
     wasLive = live;
   }
+  const law = d.passLawIntegrity;
+  ledger.releases += law.releases;
+  ledger.forward += law.forwardReleases;
+  ledger.whistles += law.whistles;
+  ledger.clamped += law.clamped;
+  ledger.rejected += (d as unknown as { passLawCounts: { candidatesRejected: number } }).passLawCounts.candidatesRejected;
 }
 
 const q = (xs: number[], p: number) => {
@@ -126,11 +151,17 @@ for (const [name, tol] of [['STRICT', 0], ['NORMAL', 0.5], ['LENIENT', 1.5]] as 
 }
 
 const netRel = net.map((x) => x.netRel);
-const legalReleaseForwardArrival = net.filter((x) => x.relAtRelease <= 0 && x.netRel > 0.5);
-console.log(`\n  DID THE FLIGHT MANUFACTURE FORWARD TRAVEL? (${net.length} flights tracked to the catch)`);
-console.log(`     net gain relative to the thrower's momentum (m)  p50 ${q(netRel, 0.5).toFixed(2)}   p90 ${q(netRel, 0.9).toFixed(2)}   max ${q(netRel, 1).toFixed(2)}`);
-console.log(`     released LEGALLY but ARRIVED forward by >0.5 m: ${legalReleaseForwardArrival.length}`
-  + `  (worst ${legalReleaseForwardArrival.length ? Math.max(...legalReleaseForwardArrival.map((x) => x.netRel)).toFixed(2) : '—'} m)`);
+const legalReleaseForwardArrival = net.filter((x) => Math.abs(x.netRel) > 1);
+console.log(`\n  DID THE BALL GO WHERE IT WAS THROWN? (${net.length} flights tracked to the catch)`);
+console.log(`     arrival error vs the solved aim (m)  p50 ${q(netRel, 0.5).toFixed(2)}   p90 ${q(netRel, 0.9).toFixed(2)}   max ${q(netRel, 1).toFixed(2)}`);
+console.log(`     landed more than 1 m from where it was aimed: ${legalReleaseForwardArrival.length}`
+  + `  (worst ${legalReleaseForwardArrival.length ? Math.max(...legalReleaseForwardArrival.map((x) => Math.abs(x.netRel))).toFixed(2) : '—'} m)`);
+console.log(`     a pursuit curve shows up here as a positive tail: the ball creeping forward of its own aim.`);
+
+console.log(`\n  THE LEDGER (${list.length} fixtures)`);
+console.log(`     releases ${ledger.releases}   forward (rel>0) ${ledger.forward}   whistles ${ledger.whistles}`);
+console.log(`     candidates the law removed before they could be offered ${ledger.rejected}`);
+console.log(`     releases the CPU threw flatter instead of forward ${ledger.clamped}`);
 
 console.log(`\n  THE MOMENTUM DEFENCE — passes that look forward but are not`);
 const absFwd = all.filter((x) => x.absolute > 0).length;

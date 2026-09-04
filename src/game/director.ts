@@ -214,6 +214,11 @@ export interface OpenPlayState {
   ball: { x: number; y: number; z: number; vx: number; vz: number; live: boolean; t: number };
   /** T-35 pass flight: who the ball is travelling to, and the arc progress 0..1 */
   pendingReceiver: number;
+  /* SPEC_13: where the throw was AIMED, solved once at release. The ball flies
+   * to this point and the receiver runs to this point, so neither chases the
+   * other and the flight cannot manufacture forward travel. */
+  passTargetX: number;
+  passTargetZ: number;
   /** Playtest 3: the length of the current throw — the flight rate is a
    * real 13 m/s over this distance, not a fixed half-second homing. */
   passDist: number;
@@ -328,6 +333,25 @@ export interface SetPieceWins { scrums: TeamTally; lineouts: TeamTally }
  * Opportunity-normalised ruck/reset telemetry. All timings use engine seconds;
  * display-clock compression is intentionally not applied to these observations.
  */
+/** SPEC_13 — the Law 11 ledger's telemetry surface. */
+export interface PassLawTelemetry {
+  /** passes actually thrown */
+  releases: number;
+  /** throws whose release vector was forward relative to the thrower (rel > 0) */
+  forwardReleases: number;
+  /** whistles blown */
+  whistles: number;
+  /** candidates the law removed before they could be offered */
+  candidatesRejected: number;
+  /** releases the CPU threw flatter rather than forward */
+  clamped: number;
+  relP50: number;
+  relP90: number;
+  relMax: number;
+  /** worst forward travel past the thrower's momentum, metres */
+  worstForwardMetres: number;
+}
+
 export interface FormationIntegrityTelemetry {
   ruckFormationOpportunities: number;
   defensiveLineResetOpportunities: number;
@@ -519,6 +543,14 @@ export class Director {
   /* SPEC_12: the offside windows, keyed by line kind and possession, so they
    * survive a ruck re-forming instead of resetting the referee's memory. */
   private readonly offsideLedger = new OffsideLedger();
+  /* SPEC_13: the Law 11 ledger. `passLawSamples` is every release's relative
+   * velocity, kept so the audit can grade the distribution and not just the
+   * count — a mean of zero with a tail of six is still a broken game. */
+  private readonly passLawCounts = {
+    releases: 0, forwardReleases: 0, whistles: 0, candidatesRejected: 0,
+    clamped: 0, worstForwardMetres: 0,
+  };
+  private readonly passLawSamples: number[] = [];
   /* SPEC_12: two different identities, and conflating them is what moved the
    * SPEC_11 drift number from 2.3 m to 8 m.
    *
@@ -1247,6 +1279,50 @@ export class Director {
    * are calculated from actual target-slot distances, and the rate denominator
    * is eligible player-observations, never compressed display-clock frames.
    */
+  /**
+   * SPEC_13 — the Law 11 ledger. Deliberately separate from
+   * `formationIntegrity`: formation asks whether a man is standing in the
+   * right place, this asks whether a ball was thrown legally, and mixing the
+   * two would make neither auditable.
+   */
+  get passLawIntegrity(): PassLawTelemetry {
+    const c = this.passLawCounts;
+    const rels = this.passLawSamples.slice().sort((a, b) => a - b);
+    const q = (p: number) => rels.length ? rels[Math.min(rels.length - 1, Math.floor(p * rels.length))] : 0;
+    return {
+      releases: c.releases,
+      forwardReleases: c.forwardReleases,
+      whistles: c.whistles,
+      candidatesRejected: c.candidatesRejected,
+      clamped: c.clamped,
+      relP50: q(0.5),
+      relP90: q(0.9),
+      relMax: rels.length ? rels[rels.length - 1] : 0,
+      worstForwardMetres: c.worstForwardMetres,
+    };
+  }
+
+  /**
+   * Record a throw at the release frame. Called by `doPass` for EVERY pass,
+   * whatever the toggle, so the rate is a property of the football and not of
+   * the referee — the same argument that made SPEC_12's OFF mode worth having.
+   */
+  notePassRelease(rel: number, forwardMetres: number, whistled: boolean) {
+    this.passLawCounts.releases++;
+    this.passLawSamples.push(rel);
+    if (rel > 0) {
+      this.passLawCounts.forwardReleases++;
+      this.passLawCounts.worstForwardMetres = Math.max(this.passLawCounts.worstForwardMetres, forwardMetres);
+    }
+    if (whistled) this.passLawCounts.whistles++;
+  }
+
+  /** A candidate the law removed before it could be offered. */
+  notePassCandidateRejected() { this.passLawCounts.candidatesRejected++; }
+
+  /** A release the CPU threw flatter rather than forward. Counted, not hidden. */
+  notePassClamped() { this.passLawCounts.clamped++; }
+
   get formationIntegrity(): FormationIntegrityTelemetry {
     const c = this.formationCounts;
     const rate = (team: 'A' | 'B') => c.eligiblePositionSamples[team]
@@ -2316,6 +2392,17 @@ export class Director {
 
   private kickerTeam(): 'A' | 'B' { return this.kk?.kicker ?? this.possession; }
 
+  /**
+   * Focus for the CAMERA alone. focusPoint() deliberately stays on the carrier while a
+   * pass is in the air, because the formation anchor is measured from it; the camera has
+   * no such obligation, and a pass that flies to a lead-projected aim travels far enough
+   * to leave a carrier-anchored frame. While the ball is live, the ball is the subject.
+   */
+  cameraFocus(): { x: number; z: number } {
+    if (this.op && this.op.ball.live) return { x: this.op.ball.x, z: this.op.ball.z };
+    return this.focusPoint();
+  }
+
   focusPoint(): { x: number; z: number } {
     if (this.op) return { x: this.op.carrierX, z: this.op.carrierZ };
     if (this.bd) return { x: this.bd.contactX, z: this.bd.contactZ };
@@ -3260,6 +3347,7 @@ export class Director {
       open,
       ball: { x, y: 1.05, z, vx: 0, vz: 0, live: false, t: 0 },
       pendingReceiver: num, passT: 0, passDist: 8,
+      passTargetX: x, passTargetZ: z,
     };    this.bd = undefined; this.ml = undefined;
     this.phase = 'OPEN_PLAY';
     this.setCtrl(team, num);
@@ -3349,6 +3437,7 @@ export class Director {
     const forwardContext = !this.isHuman(this.op.attacking) ? {
       enabled: true,
       attackDirection: (this.op.dir < 0 ? -1 : 1) as -1 | 1,
+      noteRejection: () => this.notePassCandidateRejected(),
     } : undefined;
     const next = passOptions(car, this.live, this.op.open, false, wet, forwardContext, gate);
     this.passOpts = next;

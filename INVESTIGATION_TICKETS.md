@@ -244,6 +244,35 @@ rate (sliding metres per pass, or line-lane error at the catch)?
 
 ---
 
+## T-72 · THE STATS HARNESS IS UNSEEDED, SO IT CANNOT COMPARE BUILDS (harness) — logged by SPEC_13
+
+**Observed:** `scripts/stats.ts` never calls `seedRng`, so it draws from ambient
+`Math.random()`. Two consecutive runs of the identical command on the identical
+build (`npx vite-node scripts/stats.ts 5 3`) scored 50% (8/16) and 56% (9/16),
+with OFFSIDE PENALTIES PER TEAM reading 4.2 then 4.0. `scripts/gates.ts` is
+seeded (`seedRng(seed)`) and is bit-reproducible.
+
+**Why it matters:** the audit score is the project's headline metric. At this
+variance a one-row move is indistinguishable from noise, which invites two
+opposite errors — claiming a win that was luck, and chasing a regression that
+was never there. SPEC_13 nearly reported the 50% -> 56% move as an improvement;
+it was not.
+
+**Already measured:** run-to-run spread on one row is ~0.2 penalties and the
+score moves by one row (6%). Not measured: the spread of every row, or whether
+seeding changes the mean.
+
+**Not known:** (1) Is the harness unseeded by design (a deliberate broader
+sample) or by omission? (2) Should `stats.ts` take a seed argument the way
+`gates.ts` does, and should the reported score be a mean over N seeds rather
+than one sample? (3) Does `statsAudit.ts` own RNG at all, or does it inherit
+whatever `Director` leaves lying around?
+
+**Explicitly not the fix:** changing any band or ceiling to make the score
+settle down. This is a measurement-instrument question, not a game question.
+
+---
+
 ## T-71 · AI LOITERING / RETREAT DEBT (AI) — logged by SPEC_12, deferred to the AI behaviour pass
 
 **Observed:** the CPU is offside roughly ten times as often as a real team. Over

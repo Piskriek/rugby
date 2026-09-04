@@ -408,7 +408,12 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'offside', label: 'OFFSIDE', values: ['STRICT', 'LENIENT', 'OFF'], def: 1, cat: 'RULES', note: 'How fussy the referee is about the offside line. STRICT polices every line including the set pieces; LENIENT ignores a man who is retiring or more than ten metres from the ball, and leaves the technical set-piece lines alone; OFF observes and counts the law but never blows. Defaults to LENIENT so the whistle arrives without ambushing a muscle memory built without one.' },
   { id: 'offsideAiClean', label: 'FORCE AI CLEAN', values: ['NO', 'YES'], def: 0, cat: 'RULES', note: 'The CPU is never allowed to infringe: every CPU mark is projected onto the legal side of the live line before it is steered to, and a separation shove can no longer push a man across it. The AI whistle can then never sound. The human is never constrained — only prevented from being cheated.' },
   { id: 'knockOn', label: 'KNOCK-ON', values: ['STRICT', 'NORMAL', 'LENIENT'], def: 1, note: 'Loose ball spill probability and whether the whistle goes.', cat: 'RULES' },
-  { id: 'fwdPass', label: 'FORWARD PASS', values: ['STRICT', 'NORMAL', 'LENIENT'], def: 1, note: 'Judged against the pass vector, not the receiver.', cat: 'RULES' },
+  /* SPEC_13. Mirrors the OFFSIDE toggle exactly, on purpose: two laws, one
+   * shape of control. The old STRICT/NORMAL/LENIENT slider had no OFF, so
+   * there was no way to watch the law without enforcing it — which is the
+   * setting that let SPEC_12 prove the offside referee was not the cause of
+   * what it was measuring. */
+  { id: 'fwdPass', label: 'FORWARD PASS', values: ['STRICT', 'LENIENT', 'OFF'], def: 1, cat: 'RULES', note: 'Judged on the ball’s velocity RELATIVE TO THE THROWER, as Law 11 requires: a flat pass by a man running forward is legal, and momentum is allowed for. STRICT forgives a tenth of a metre per second; LENIENT adds a visual grace; OFF measures the rate and never blows.' },
   { id: 'advantage', label: 'ADVANTAGE', values: ['SHORT', 'NORMAL', 'LONG'], def: 1, note: 'How long play runs before the referee comes back.', cat: 'RULES' },
   { id: 'ruckLaw', label: 'RUCK CLOCK', values: ['1.5 S', '3.0 S', '5.0 S'], def: 2, note: 'Time to use it before the scrum is awarded. Defaults to 5 seconds so the player has a clear window to choose a pass, a carry or a kick.', cat: 'RULES' },
   /* T-38 follow-up: who receives the auto-play when the ruck clock runs out.

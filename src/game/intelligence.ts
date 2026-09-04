@@ -23,6 +23,7 @@ import {
   snapshotForwardAttackPlayers,
 } from './forwardAttackGates';
 import type { ForwardAttackGateReporter, ForwardAttackGateValue } from './forwardAttackGates';
+import { solvePassAim, passReleaseRel, PASS_FORWARD_EPSILON } from './engine/throwforward';
 
 export interface Live {
   /* Playtest 2: the turn beat (the cutout pivots through edge-on) */
@@ -469,6 +470,11 @@ export function evaluateForwardAttackPriority(
 export interface ForwardAttackPassContext {
   readonly enabled: boolean;
   readonly attackDirection: -1 | 1;
+  /* SPEC_13: how the Law 11 filter reports the candidates it removes. A
+   * filtered candidate is not a gate failure — it is the law working — so it
+   * is counted, not thrown. (Reporting it through the gate reporter made the
+   * harness throw on the first short pass of the match.) */
+  readonly noteRejection?: (targetNum: number, rel: number) => void;
 }
 
 export interface PassOption {
@@ -623,10 +629,28 @@ export function passOptions(
       0.03 + (dist / 26) * 0.16 + wet * 0.14 + (1 - skill) * 0.12 + (cutOut ? 0.05 : 0) + (covered ? 0.1 : 0),
       0.02, 0.5,
     );
-    /* Match solvePassTarget's 80%-of-top-speed run-on lead, but express it in
-     * attacking metres rather than screen Z. This is the direct gain the
-     * approved wing contract may — or may not — trade away. */
-    const projectedZ = m.z + atkDir * maxSpeed(m, false, false, m.stamina) * 0.8 * time;
+    /* SPEC_13. The lead is now the SAME solve the ball will actually fly — an
+     * intercept on the receiver's real velocity, not a flat 80% of his top
+     * speed. Ranking and law read one number, so the option the CPU likes best
+     * is the option the law measures.
+     *
+     * And the law is applied HERE, at selection: a candidate whose solved
+     * release vector is forward is never offered. That is what makes the
+     * whistle rare rather than busy — the referee exists for the human
+     * override and the cut-out, not to clean up after the solver. */
+    const aim = solvePassAim(carrier, m);
+    const aimRel = passReleaseRel(carrier, aim, carrier.vz, atkDir);
+    /* Only the CPU is held to the law here. The human is OFFERED the forward
+     * pass and is whistled for it if he throws it: a law he cannot break is a
+     * law he cannot learn, and a referee who never blows is not a referee.
+     * `forwardContext` is exactly the CPU flag — it is only passed for a
+     * CPU-driven side — so the two behaviours fall out of the existing
+     * structure rather than a second option. */
+    if (forwardContext?.enabled && aimRel > PASS_FORWARD_EPSILON) {
+      forwardContext?.noteRejection?.(m.num, aimRel);
+      continue;
+    }
+    const projectedZ = aim.z;
     const forwardGainMetres = Math.max(0, (projectedZ - carrier.z) * atkDir);
     const beforePush = scored.length;
     scored.push({
