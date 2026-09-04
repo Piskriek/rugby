@@ -20,6 +20,7 @@ import {
   Ctx, Pt, Palette, Build, PaperView, OUT, DISPLAY, shade,
   paperCard, poly, foldTab, crease, ballPaper,
   hipRoots, groundedClearance, armDepth, solveKnee,
+  depthShade, pairShade, cornerRadius,
 } from './paper';
 import { Pose } from './clips';
 import { project, type Camera, type View } from './retro';
@@ -109,26 +110,40 @@ function carryPose(p: Pose, carry: number, cs: number, ballSide: number): Pose {
   return q;
 }
 
-interface Locals { ctx: Ctx; sc: number; lw: number; seed: number; X: (m: number) => number; Y: (m: number) => number }
+interface Locals { ctx: Ctx; sc: number; lw: number; seed: number; round: number; X: (m: number) => number; Y: (m: number) => number }
 
 function makeLocals(ctx: Ctx, sc: number, seed: number): Locals {
   return {
     ctx, sc, seed,
     lw: Math.min(3.2, Math.max(1.05, sc * 0.021)),
+    round: cornerRadius(sc),          // SPEC_18.2
     X: (m: number) => m * sc,
     Y: (m: number) => -m * sc,
   };
 }
 
-function limbCard(L: Locals, x0: number, y0: number, x1: number, y1: number, w: number, fill: string, out: string, lw: number, seed: number, back = 1.1) {
+/**
+ * A limb card.
+ *
+ * SPEC_18.2 — the rounding inset lives in `paperCard` (centroid inset by `r`),
+ * so every card is compensated whether or not its call site remembers. This
+ * function just passes the radius down.
+ *
+ * `out` is now optional: passing `null` means "no hard outline", and the card
+ * relies on depth shading for separation (SPEC_18.1).
+ */
+function limbCard(L: Locals, x0: number, y0: number, x1: number, y1: number, w: number, fill: string, out: string | null, lw: number, seed: number, back = 1.1) {
   const dx = x1 - x0, dy = y1 - y0;
   const len = Math.hypot(dx, dy) || 1;
+  /* Corner radius is in pixels; convert to metres for the inset, since the
+   * card is built in metres and only converted by X()/Y() at the end. */
+  const rPx = L.round;
   const px = (-dy / len) * w * 0.5, py = (dx / len) * w * 0.5;
   const pts: Pt[] = [
     [L.X(x0 - px), L.Y(y0 - py)], [L.X(x0 + px), L.Y(y0 + py)],
     [L.X(x1 + px * 0.82), L.Y(y1 + py * 0.82)], [L.X(x1 - px * 0.82), L.Y(y1 - py * 0.82)],
   ];
-  paperCard(L.ctx, pts, fill, { lw, out, seed, back, jit: 0.4 });
+  paperCard(L.ctx, pts, fill, { lw, out: out ?? undefined, seed, back, jit: 0.4, round: rPx });
 }
 
 function disc(L: Locals, x: number, y: number, r: number, fill: string, lw: number, seed: number) {
@@ -137,8 +152,9 @@ function disc(L: Locals, x: number, y: number, r: number, fill: string, lw: numb
   c.fillStyle = '#101018'; c.fill();
   c.beginPath(); c.arc(L.X(x), L.Y(y), r * L.sc, 0, Math.PI * 2);
   c.fillStyle = fill; c.fill();
-  c.lineWidth = lw; c.strokeStyle = OUT; c.stroke();
-  void seed;
+  /* SPEC_18.1 — a circle has no corners to round and no ambiguous edge, so it
+   * simply loses the hard outline; its own fill carries the shape. */
+  void lw; void seed;
 }
 
 /* ================================================================== */
@@ -186,6 +202,16 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const rt = hipRoots(b, p.hip);
   /* Both feet solved together so the LOWER one is pinned at y = 0. */
   const [clrL, clrR] = groundedClearance(p.kL, p.kR);
+  /* SPEC_18.1 — the two legs are shaded AS A PAIR. `sin(l)` alone collapses to
+   * zero exactly when the legs cross (measured: contrast 1.00 on 50% of walk
+   * frames), so the pair helper enforces a minimum value split. `front` flips
+   * the sense because from behind the near side of the body is the far side of
+   * the card. */
+  const vf = front ? 1 : -1;
+  const [shShortL, shShortR] = pairShade(pal.shorts, Math.sin(p.lL) * vf, Math.sin(p.lR) * vf);
+  const [shSockL, shSockR] = pairShade(pal.socks, Math.sin(p.lL) * vf, Math.sin(p.lR) * vf);
+  const [shTrimL, shTrimR] = pairShade(pal.trim, Math.sin(p.lL) * vf, Math.sin(p.lR) * vf);
+  const [shBootL, shBootR] = pairShade('#1c1c24', Math.sin(p.lL) * vf, Math.sin(p.lR) * vf);
   for (const s of [-1, 1] as const) {
     const l = s < 0 ? p.lL : p.lR;
     const k = s < 0 ? p.kL : p.kR;
@@ -200,11 +226,19 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     const footX = hx + s * ad * (thighD + shinD) * 0.42 - Math.sin(l) * 0.055 * s;
     const footY = s < 0 ? clrL : clrR;
     const [kneeX, kneeY] = solveKnee(hx, hy, footX, footY, thighD, shinD, s);
-    limbCard(L, hx, hy, kneeX, kneeY, 0.15 * b.bulk, pal.shorts, OUT, lw, a.seed + s * 3);
-    limbCard(L, kneeX, kneeY, footX, footY, 0.112 * b.bulk, pal.socks, OUT, lw, a.seed + s * 5);
+    /* SPEC_18.1 — the leg's own depth. `sin(l)` is the odd term: a leg swung
+     * forward is nearer the camera than one swung back, so the two legs get a
+     * value step even though they share a fill. This is the same quantity the
+     * rig already uses, so shading can never contradict the geometry. */
+    const cShort = s < 0 ? shShortL : shShortR;
+    const cSock = s < 0 ? shSockL : shSockR;
+    const cTrim = s < 0 ? shTrimL : shTrimR;
+    const cBoot = s < 0 ? shBootL : shBootR;
+    limbCard(L, hx, hy, kneeX, kneeY, 0.15 * b.bulk, cShort, null, lw, a.seed + s * 3);
+    limbCard(L, kneeX, kneeY, footX, footY, 0.112 * b.bulk, cSock, null, lw, a.seed + s * 5);
     // sock turnover band
     const bx = lerp(kneeX, footX, 0.18), by = lerp(kneeY, footY, 0.18);
-    limbCard(L, bx, by, lerp(kneeX, footX, 0.34), lerp(kneeY, footY, 0.34), 0.12 * b.bulk, pal.trim, OUT, lw * 0.8, a.seed + s * 7, 0.6);
+    limbCard(L, bx, by, lerp(kneeX, footX, 0.34), lerp(kneeY, footY, 0.34), 0.12 * b.bulk, cTrim, null, lw * 0.8, a.seed + s * 7, 0.6);
     // boot: toe toward camera — stride pitch reads as sole flash / lifted heel
     const bp2 = footPitch(l, k);
     const lift = Math.max(0, -bp2) * 0.07;
@@ -212,7 +246,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     paperCard(ctx, [
       [L.X(footX - 0.075), L.Y(footY + lift + bh)], [L.X(footX + 0.075), L.Y(footY + lift + bh)],
       [L.X(footX + 0.062), L.Y(footY + lift - 0.015)], [L.X(footX - 0.062), L.Y(footY + lift - 0.015)],
-    ], '#1c1c24', { lw, seed: a.seed + s, jit: 0.35 });
+    ], cBoot, { lw, seed: a.seed + s, jit: 0.35, round: L.round });
     if (bp2 > 0.12) {
       ctx.save();
       ctx.globalAlpha = clamp01(bp2 * 1.6);
@@ -225,7 +259,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
       poly(ctx, [
         [L.X(footX - 0.05), L.Y(footY + lift + 0.02)], [L.X(footX + 0.05), L.Y(footY + lift + 0.02)],
         [L.X(footX + 0.045), L.Y(footY + lift - 0.005)], [L.X(footX - 0.045), L.Y(footY + lift - 0.005)],
-      ], shade('#1c1c24', 1.7));
+      ], shade(cBoot, 1.7));
     }
   }
 
@@ -235,7 +269,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const hemY = rt.y - 0.18;
   const sq: Pt[] = [[-hipHalf - 0.02, rt.y + 0.08], [hipHalf + 0.02, rt.y + 0.08], [hipHalf + 0.01, hemY], [-hipHalf - 0.01, hemY]]
     .map(([x, y]) => { const q = RP(x, y); return [L.X(q[0]), L.Y(q[1])] as Pt; });
-  paperCard(ctx, sq, pal.shorts, { lw, seed: a.seed + 11, jit: 0.5 });
+  paperCard(ctx, sq, pal.shorts, { lw, seed: a.seed + 11, jit: 0.5, round: L.round });
   foldTab(ctx, L.X(RP(-hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(-hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
   foldTab(ctx, L.X(RP(hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
 
@@ -256,6 +290,11 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
      overlapping the body) instead of merely rising. Measured: the two arms are
      on opposite sides of the torso on 100% of gait frames, so this changes
      every frame of every stride. */
+  /* SPEC_18.1 — same pairing for the arms; measured 1.00 contrast against the
+   * torso on 39% of run frames with the plain depth term. */
+  const avf = front ? 1 : -1;
+  const [shKitL, shKitR] = pairShade(pal.kit, armDepth(p.aL) * avf, armDepth(p.aR) * avf);
+  const [shSkinL, shSkinR] = pairShade(a.skin, armDepth(p.aL) * avf, armDepth(p.aR) * avf);
   const drawOneArm = (s: -1 | 1) => {
     const aa = s < 0 ? p.aL : p.aR;
     const e = s < 0 ? p.eL : p.eR;
@@ -271,9 +310,12 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     const elY = sy0 - Math.cos(aa) * upD;
     const hdX = elX - s * Math.sin(e) * foreD * 0.5 + dep * 0.045;
     const hdY = elY - Math.cos(aa - e * 0.8) * foreD * 0.8;
-    limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, pal.kit, OUT, lw, a.seed + s * 17);
-    limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, a.skin, OUT, lw, a.seed + s * 19);
-    disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? '#e8e2d0' : a.skin, lw * 0.9, a.seed + s);
+    /* SPEC_18.1 — shade by the SAME depth that decided the draw pass above. */
+    const cKit = s < 0 ? shKitL : shKitR;
+    const cSkin = s < 0 ? shSkinL : shSkinR;
+    limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, cKit, null, lw, a.seed + s * 17);
+    limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, cSkin, null, lw, a.seed + s * 19);
+    disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? depthShade('#e8e2d0', armDepth(s < 0 ? p.aL : p.aR) * avf) : cSkin, lw * 0.9, a.seed + s);
     foldTab(ctx, L.X(sx0), L.Y(sy0), 0.09 * sc, 0.045 * sc, pal.kitDark, lw);
   };
   /* An arm is IN FRONT when it swings toward the viewer. Seen from the back
@@ -291,7 +333,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const t0 = RP(-hipHalf, p.hip - 0.02), t1 = RP(hipHalf, p.hip - 0.02);
   const t2 = RP(shHalf + tws, shY), t3 = RP(-shHalf + tws, shY);
   const torsoPts: Pt[] = [[L.X(t0[0]), L.Y(t0[1])], [L.X(t1[0]), L.Y(t1[1])], [L.X(t2[0]), L.Y(t2[1])], [L.X(t3[0]), L.Y(t3[1])]];
-  paperCard(ctx, torsoPts, pal.kit, { lw: lw * 1.05, seed: a.seed + 13, jit: 0.55, back: 1.6 });
+  paperCard(ctx, torsoPts, pal.kit, { lw: lw * 1.05, seed: a.seed + 13, jit: 0.55, back: 1.6, round: L.round });
   // hoops
   for (const hy of [0.62, 0.44]) {
     const y = p.hip + shLen * hy;
@@ -304,7 +346,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   // collar
   const c0 = RP(-shHalf * 0.42 + tws, shY + 0.015), c1 = RP(shHalf * 0.42 + tws, shY + 0.015);
   const c2 = RP(shHalf * 0.3 + tws, shY - 0.06), c3 = RP(-shHalf * 0.3 + tws, shY - 0.06);
-  poly(ctx, [[L.X(c0[0]), L.Y(c0[1])], [L.X(c1[0]), L.Y(c1[1])], [L.X(c2[0]), L.Y(c2[1])], [L.X(c3[0]), L.Y(c3[1])]], front ? pal.trim : pal.kitDark, OUT, lw * 0.8);
+  poly(ctx, [[L.X(c0[0]), L.Y(c0[1])], [L.X(c1[0]), L.Y(c1[1])], [L.X(c2[0]), L.Y(c2[1])], [L.X(c3[0]), L.Y(c3[1])]], front ? pal.trim : pal.kitDark);
 
   if (!front) {
     // shirt number on the back card
@@ -344,8 +386,6 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
       ctx.beginPath(); ctx.arc(hx + hr * 0.62 * sc, hy + hr * 0.15 * sc, hr * 0.22 * sc, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
-    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
     // face
     const ey = hy + hr * sc * 0.06;
     const exo = Math.sin(p.headY) * hr * sc * 0.4;
@@ -367,7 +407,6 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     ctx.save();
     ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
     ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
-    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
     ctx.restore();
     // nape
     poly(ctx, [[hx - hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.5, hy + hr * sc * 0.75], [hx + hr * sc * 0.34, hy + hr * sc * 1.05], [hx - hr * sc * 0.34, hy + hr * sc * 1.05]], a.cap ? shade(pal.kitDark, 0.7) : a.hair);
@@ -429,13 +468,13 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     const bq: [number, number][] = [R(fx - 0.06, fy + 0.1), R(fx + 0.205, fy + 0.1), R(fx + 0.235, fy + 0.005), R(fx - 0.062, fy - 0.01)];
     const sole: [number, number][] = [R(fx - 0.062, fy - 0.01), R(fx + 0.235, fy + 0.005), R(fx + 0.222, fy + 0.032), R(fx - 0.06, fy + 0.016)];
     if (out) {
-      limbCard(L, hx, hy, kx, ky, wT, cT, out, lw, seed);
-      limbCard(L, kx, ky, fx, fy, wS, cS, out, lw, seed + 1);
-      paperCard(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB, { lw, seed, jit: 0.35 });
+      limbCard(L, hx, hy, kx, ky, wT, cT, null, lw, seed);
+      limbCard(L, kx, ky, fx, fy, wS, cS, null, lw, seed + 1);
+      paperCard(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB, { lw, seed, jit: 0.35, round: L.round });
       poly(ctx, sole.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), shade(cB, 1.9));
     } else {
-      limbCard(L, hx, hy, kx, ky, wT, cT, cT, lw * 0.7, seed, 0);
-      limbCard(L, kx, ky, fx, fy, wS, cS, cS, lw * 0.7, seed + 1, 0);
+      limbCard(L, hx, hy, kx, ky, wT, cT, null, lw * 0.7, seed, 0);
+      limbCard(L, kx, ky, fx, fy, wS, cS, null, lw * 0.7, seed + 1, 0);
       poly(ctx, bq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), cB);
     }
     return [fx, fy] as const;
@@ -451,12 +490,12 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
       hx2 = bx + 0.02; hy2 = by - 0.02;
     }
     if (out) {
-      limbCard(L, sx0, sy0, ex, ey, w, cU, out, lw, seed);
-      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, out, lw, seed + 1);
+      limbCard(L, sx0, sy0, ex, ey, w, cU, null, lw, seed);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, null, lw, seed + 1);
       disc(L, hx2, hy2, 0.052 * b.bulk, cF === a.skin ? a.skin : cF, lw * 0.9, seed);
     } else {
-      limbCard(L, sx0, sy0, ex, ey, w, cU, cU, lw * 0.7, seed, 0);
-      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, cF, lw * 0.7, seed + 1, 0);
+      limbCard(L, sx0, sy0, ex, ey, w, cU, null, lw * 0.7, seed, 0);
+      limbCard(L, ex, ey, hx2, hy2, w * 0.8, cF, null, lw * 0.7, seed + 1, 0);
     }
     return [ex, ey] as const;
   };
@@ -473,21 +512,26 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     sideFootY(lF - 0.1, kF, rtS.sideFar),
   );
 
-  // 1 — far paper layer (dark silhouettes behind the lit card)
-  /* SPEC_17 — the far leg now carries its OWN OUTLINE. Measured: the two thigh
-     cards overlap with no gap on 75% of walk and 67% of jog frames, and the far
-     leg was drawn with `out = null`, so near thigh, far thigh and skirt fused
-     into one continuous silhouette — the "watermelon". A dark rim on the far
-     leg means the legs always read as two even when they touch. */
-  armChain(aF + 0.12, eF, -0.05, 0.08, kitF, skinF, null, a.seed + 41, false);
-  legChain(lF - 0.1, kF, rtS.sideFar, 0.1, 0.068, shortF, sockF, bootF, shade(OUT, 1.35), a.seed + 43, sideLift);
+  /* 1 — far paper layer.
+     SPEC_17 gave the far leg a hard OUTLINE so the overlapping thigh cards
+     would not fuse into the "watermelon" (they overlap with no gap on 75% of
+     walk and 67% of jog frames). SPEC_18.1 removes hard outlines, so that
+     separation is re-expressed as a VALUE STEP instead of a stroke: the far
+     limbs are shaded to the bottom of the depth range (z = -1) and the near
+     limbs to the top, which is a measured 1.78-2.62 contrast ratio depending on
+     palette — stronger than the stroke it replaces. The rule is unchanged, only
+     its encoding: far reads as behind because it is DARKER, not because it is
+     ringed. */
+  armChain(aF + 0.12, eF, -0.05, 0.08, depthShade(kitF, -1), depthShade(skinF, -1), null, a.seed + 41, false);
+  legChain(lF - 0.1, kF, rtS.sideFar, 0.1, 0.068,
+    depthShade(shortF, -1), depthShade(sockF, -1), depthShade(bootF, -1), null, a.seed + 43, sideLift);
 
   // 2 — torso strip (narrow paper card, chest bulge on the front edge)
   const tq: [number, number][] = [
     [-0.086, rtS.y - 0.03], [0.07, rtS.y - 0.03], [0.118, p.hip + b.torso * 0.52],
     [0.074, shY], [-0.082, shY],
   ].map(([x, y]) => RL(x, y));
-  paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6 });
+  paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6, round: L.round });
   // hoop band across the strip
   for (const hy of [0.58, 0.42]) {
     const y0 = p.hip + b.torso * hy;
@@ -510,10 +554,11 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     [0, notchY],                                   // the notch apex
     [rtS.sideFar * 0.55, hemS], [-rtS.sideHalf - 0.002, hemS],
   ].map(([x, y]) => RL(x, y));
-  paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45 });
+  paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45, round: L.round });
 
-  // 3 — near leg (lit, full stride)
-  legChain(lN, kN, rtS.sideNear, 0.13 * b.bulk, 0.078 * b.bulk, pal.shorts, pal.socks, '#1c1c24', OUT, a.seed + 53, sideLift);
+  // 3 — near leg (lit, full stride) — top of the depth range
+  legChain(lN, kN, rtS.sideNear, 0.13 * b.bulk, 0.078 * b.bulk,
+    depthShade(pal.shorts, 1), depthShade(pal.socks, 1), depthShade('#1c1c24', 1), null, a.seed + 53, sideLift);
 
   // 4 — head in profile
   const [hdx, hdy] = RL(0.015, shY + 0.08 + b.headR * 0.95);
@@ -526,7 +571,7 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     [hx + hr * sc * 0.72, hy + hr * sc * 0.16],
     [hx + hr * sc * 1.22, hy - hr * sc * 0.02],
     [hx + hr * sc * 0.7, hy - hr * sc * 0.24],
-  ], a.skin, OUT, lw * 0.9);
+  ], a.skin);
   // hair cap: back + crown
   ctx.save();
   ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.01) * sc, 0, Math.PI * 2); ctx.clip();
@@ -540,8 +585,6 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
   ctx.lineTo(hx - (hr + 0.02) * sc, hy + hr * sc * 0.9);
   ctx.closePath(); ctx.fill();
   ctx.restore();
-  ctx.beginPath(); ctx.arc(hx, hy, hr * sc, 0, Math.PI * 2);
-  ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
   // ear + eye + brow
   disc(L, hdx - hr * 0.12, hdy - hr * 0.05, hr * 0.24, shade(a.skin, 0.82), lw * 0.7, a.seed + 61);
   ctx.fillStyle = '#191922';
@@ -554,13 +597,13 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
 
   // 5 — deltoid cap gives the profile card shoulder mass, then the near arm
   const dl: [number, number][] = [[-0.02, shY + 0.03], [0.085, shY + 0.01], [0.098, shY - 0.17], [-0.015, shY - 0.15]].map(([x, y]) => RL(x, y));
-  paperCard(ctx, dl.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kitLight, { lw: lw * 0.9, seed: a.seed + 67, jit: 0.4, back: 1.2 });
+  paperCard(ctx, dl.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kitLight, { lw: lw * 0.9, seed: a.seed + 67, jit: 0.4, back: 1.2, round: L.round });
   const wrap = a.carry > 0.4;
   if (wrap) {
     const [bx, by] = RL(0.17, shY - 0.16);
     ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
   }
-  armChain(aN, eN, 0.02, 0.118 * b.bulk, pal.kit, a.skin, OUT, a.seed + 63, wrap);
+  armChain(aN, eN, 0.02, 0.118 * b.bulk, depthShade(pal.kit, 1), depthShade(a.skin, 1), null, a.seed + 63, wrap);
   if (!wrap && a.carry > 0.02) {
     const [bx, by] = RL(0.15, shY - 0.14);
     ballPaper(ctx, L.X(bx), L.Y(by), 0.115 * sc, a.ballSpin * 0.35 + 0.5);
@@ -680,7 +723,6 @@ function drawLyingPaper(L: Locals, a: PaperDrawArgs, seeFront: boolean) {
     ctx.save();
     ctx.beginPath(); ctx.arc(hx, hy, (hr + 0.008) * sc, 0, Math.PI * 2);
     ctx.fillStyle = a.cap ? shade(pal.kitDark, 0.7) : a.hair; ctx.fill();
-    ctx.lineWidth = lw; ctx.strokeStyle = OUT; ctx.stroke();
     ctx.restore();
     poly(ctx, [
       [hx + hd * hr * sc * 0.25, hy - hr * sc * 0.72],

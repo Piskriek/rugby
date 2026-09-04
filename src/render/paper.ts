@@ -175,6 +175,88 @@ export interface CardOpts {
   jit?: number;
   /** cut-edge highlight strength 0..1 */
   cut?: number;
+  /**
+   * SPEC_18.2 — corner radius in PIXELS. When > 0 the card is rounded by
+   * stroking the path in its own fill colour with round joins/caps, instead of
+   * carrying a hard contrast outline. No beziers: Canvas does the arcs.
+   */
+  round?: number;
+}
+
+/* ================================================================== */
+/* SPEC_18.1 — DEPTH SHADING (the outline replacement)                 */
+/* ------------------------------------------------------------------ */
+/* Removing the hard stroke removes the ONLY thing separating two      */
+/* limbs that share a fill. Measured contrast for limb-vs-limb and     */
+/* kit-vs-socks is exactly 1.00 — the same colour on both sides of the */
+/* edge. Depth shading replaces that edge with a VALUE STEP driven by  */
+/* the same per-limb depth the SPEC_17 Z-sort already computes, so the */
+/* shading can never disagree with the draw order.                     */
+/*                                                                     */
+/* Measured back-vs-front contrast with the ruled 0.70/1.14 pair:      */
+/*   palette A 2.11   palette B 1.78   palette REF 2.62                */
+/* all clear of the ~1.25 where a value step stops reading small.      */
+/* ================================================================== */
+
+/** Torso reference value. Limbs sit slightly under it so they read as limbs. */
+export const LIMB_MID = 0.92;
+/** Half-span of the limb value range: 0.92 -/+ 0.22 = 0.70 .. 1.14 (ruled). */
+export const LIMB_SPAN = 0.22;
+
+/**
+ * Shade a limb fill by its signed depth.
+ * @param z -1 = fully behind the torso, +1 = fully in front of it.
+ */
+export function depthShade(fill: string, z: number): string {
+  const c = z < -1 ? -1 : z > 1 ? 1 : z;
+  return shade(fill, LIMB_MID + LIMB_SPAN * c);
+}
+
+/**
+ * SPEC_18.1 — PAIRED limb shading, with a guaranteed value floor.
+ *
+ * `depthShade` alone is not sufficient for a matched pair of limbs, and this is
+ * measured rather than assumed. The depth term `sin(angle)` passes through zero
+ * exactly when the two limbs cross — which is precisely when they overlap on
+ * screen and most need separating. Measured with the plain depth term, the two
+ * legs rendered at contrast 1.00 (identical colour) on 50% of walk frames and
+ * the arms at 1.00 on 39% of run frames: the hard outline was deleted and
+ * nothing replaced it at the moment of overlap.
+ *
+ * The fix is to shade the pair RELATIVE to each other rather than absolutely.
+ * Whichever limb is nearer takes the light value and the other the dark one,
+ * with a minimum separation enforced regardless of how close the depths are, so
+ * two crossing limbs can never resolve to the same fill.
+ *
+ * Returns `[shadeForA, shadeForB]`.
+ */
+/* 0.85 chosen by measurement, not taste: it is the smallest floor that clears
+ * a 1.25 contrast ratio on EVERY palette (weakest is B at 1.27). 0.55 left
+ * palette B at 1.16, and 1.00 saturates the range for no extra legibility. */
+export const LIMB_MIN_SPLIT = 0.85;
+export function pairShade(fill: string, zA: number, zB: number): [string, string] {
+  const d = zA - zB;
+  const mag = Math.abs(d);
+  /* Blend from the enforced floor up to the true depth difference, so limbs
+   * far apart in depth still read proportionally. */
+  const sep = Math.max(LIMB_MIN_SPLIT, Math.min(1, mag));
+  const half = sep * 0.5;
+  const mid = (zA + zB) * 0.5 * 0.35;         // slight absolute bias retained
+  const sign = d >= 0 ? 1 : -1;
+  return [
+    depthShade(fill, mid + half * sign),
+    depthShade(fill, mid - half * sign),
+  ];
+}
+
+/**
+ * SPEC_18.2 — corner radius in screen pixels for a card drawn at scale `sc`.
+ * Pixels, not metres: otherwise corners round more when the camera closes in.
+ * Modelled on the existing line-width ramp at roughly two thirds of it.
+ */
+export function cornerRadius(sc: number): number {
+  const r = sc * 0.014;
+  return r < 0.8 ? 0.8 : r > 2.4 ? 2.4 : r;
 }
 
 /** A flat paper card: backing thickness, flat cel fill, cut rim, hard outline. */
@@ -207,14 +289,91 @@ export function paperCard(ctx: Ctx, pts: Pt[], fill: string, o: CardOpts = {}) {
     ctx.stroke();
     ctx.restore();
   }
-  ctx.strokeStyle = o.out ?? OUT;
-  ctx.lineWidth = lw;
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(P[0][0], P[0][1]);
-  for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
-  ctx.closePath();
-  ctx.stroke();
+  /* SPEC_18.2 — ROUNDED CORNERS, NO BEZIERS.
+   *
+   * Stroking the path in its OWN fill colour with round joins/caps adds a
+   * half-width band whose outer corners are arcs of that radius; fill + stroke
+   * is one convex union, i.e. a polygon with rounded corners, for the cost of
+   * a single extra stroke() and no curve maths.
+   *
+   * The caller is responsible for having inset the geometry by `round` (see
+   * limbCard), because the stroke expands the shape outward — uncorrected,
+   * every card would silently gain 2r of width and the whole figure would
+   * fatten, which is the class of error that produced the SPEC_16 ratio bug. */
+  let round = o.round ?? 0;
+  if (round > 0.05) {
+    /* A card thinner than 2r cannot absorb the stroke: the inset would collapse
+     * past its own centre and the stroke would then widen it. Clamp the radius
+     * to a third of the card's smallest dimension. Measured: without this a
+     * narrow trim band still gained 0.41 px. */
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    for (const q of P) {
+      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0];
+      if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+    }
+    const minDim = Math.min(bx1 - bx0, by1 - by0);
+    round = Math.min(round, minDim / 3);
+  }
+  if (round > 0.05) {
+    /* Inset toward the centroid by `round` so the stroke's outward expansion is
+     * cancelled and the card keeps its authored size. Doing it HERE rather than
+     * per-call-site means no card can be rounded without also being inset —
+     * measured: without this the figure's ink grew 28.76 -> 31.68 px (+10%),
+     * the same silent-fattening class of bug as the SPEC_16 ratio error. */
+    /* Per-EDGE inset (not radial): offset every edge inward along its own
+     * normal by `round`, then intersect consecutive edges. A centroid-radial
+     * inset under-compensates thin cards badly — measured +1.18 px on a narrow
+     * trim band, because moving a point toward the centroid barely shortens the
+     * long axis. Edge offsetting is exact for convex cards, which every card
+     * here is (they are all quads or the shorts pentagon). */
+    const n = P.length;
+    const I: Pt[] = [];
+    for (let i = 0; i < n; i++) {
+      const prev = P[(i - 1 + n) % n], cur = P[i], next = P[(i + 1) % n];
+      const off = (A: Pt, B: Pt): [number, number, number, number] => {
+        const ex = B[0] - A[0], ey = B[1] - A[1];
+        const el = Math.hypot(ex, ey) || 1;
+        // inward normal for a counter-clockwise-or-clockwise quad: pick the one
+        // pointing at the centroid
+        let nx = -ey / el, ny = ex / el;
+        const mx = (A[0] + B[0]) * 0.5, my = (A[1] + B[1]) * 0.5;
+        let gx = 0, gy = 0;
+        for (const q of P) { gx += q[0]; gy += q[1]; }
+        gx /= n; gy /= n;
+        if ((gx - mx) * nx + (gy - my) * ny < 0) { nx = -nx; ny = -ny; }
+        return [A[0] + nx * round, A[1] + ny * round, ex, ey];
+      };
+      const [ax, ay, adx, ady] = off(prev, cur);
+      const [bx, by, bdx, bdy] = off(cur, next);
+      const den = adx * bdy - ady * bdx;
+      if (Math.abs(den) < 1e-6) { I.push([ax + adx, ay + ady]); continue; }
+      const t = ((bx - ax) * bdy - (by - ay) * bdx) / den;
+      I.push([ax + adx * t, ay + ady * t]);
+    }
+    for (let i = 0; i < n; i++) { P[i] = I[i]; }
+    ctx.strokeStyle = fill;
+    ctx.lineWidth = round * 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+    ctx.stroke();
+  }
+  /* A hard outline is now opt-IN. Depth shading (see depthShade) carries the
+   * silhouette separation that this stroke used to provide. */
+  if (o.out) {
+    ctx.strokeStyle = o.out;
+    ctx.lineWidth = lw;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+  }
 }
 
 /** Small trapezoid fold tab — the papercraft joint hint. */
