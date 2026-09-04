@@ -1,6 +1,10 @@
 # SEASON 2 QUEUE — SPEC_11 … SPEC_15
 
-**Status: DRAFT — HALTED FOR HUMAN REVIEW. No live TypeScript has been written.**
+**Status: ITEMS 1–3 SHIPPED (`SPEC_11`, `SPEC_12`, `SPEC_13` are live on
+`arena/01a0682b-rugby`). Item 4/5 (`SPEC_14`) is next. This document's
+diagnoses were written before any code existed; each shipped spec has a
+`## VERDICT` section appended below recording what was actually built and
+measured, which supersedes the diagnosis where the two disagree.**
 
 Season 1 (`SPEC_01 … SPEC_10`) is closed. Live playtesting produced six new
 reports; they group into five specifications below. `SPEC_11` carries a full
@@ -9,14 +13,14 @@ read-only diagnosis (§1.2) because it is the only one of the five that is a
 `SPEC_12`/`SPEC_13` is unmeasurable until the players are standing in the right
 places.
 
-| # | Playtest report | Spec | Title | Family |
-|---|---|---|---|---|
-| 1 | Defence drifts through the offence, ends up behind it, faces the wrong way; attackers freeze and recycle instead of going forward | **SPEC_11** | Formation anchoring — the ball-relative target contract | AI / positioning |
-| 2 | Offsides are not enforced; wants Off / Enforce / Force-AI-clean toggles | **SPEC_12** | The offside line: observation → enforcement → prevention | Law |
-| 3 | Violently forward passes are allowed | **SPEC_13** | Law 11 — the throw-forward vector test | Law |
-| 4 | Players are too big for the pitch; tackle visuals lie | **SPEC_14** | Figure scale and contact truth (issue 4) | Render / physics |
-| 5 | Shadows do not anchor to the feet | **SPEC_14** | Ground truth: the shadow anchor (issue 5) | Render |
-| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation |
+| # | Playtest report | Spec | Title | Family | Status |
+|---|---|---|---|---|---|
+| 1 | Defence drifts through the offence, ends up behind it, faces the wrong way; attackers freeze and recycle instead of going forward | **SPEC_11** | Formation anchoring — the ball-relative target contract | AI / positioning | **SHIPPED** |
+| 2 | Offsides are not enforced; wants Off / Enforce / Force-AI-clean toggles | **SPEC_12** | The offside line: observation → enforcement → prevention | Law | **SHIPPED** |
+| 3 | Violently forward passes are allowed | **SPEC_13** | Law 11 — the throw-forward vector test | Law | **SHIPPED** (`cb230df`) |
+| 4 | Players are too big for the pitch; tackle visuals lie | **SPEC_14** | Figure scale and contact truth (issue 4) | Render / physics | NEXT |
+| 5 | Shadows do not anchor to the feet | **SPEC_14** | Ground truth: the shadow anchor (issue 5) | Render | NEXT |
+| 6 | The referee does not animate; floating UI text should become in-world bubbles and referee animation | **SPEC_15** | The referee: an actor, a voice, a bubble | Presentation | queued behind 4/5 |
 
 Issues 4 and 5 are one specification because they are the same defect class —
 **the paper figure's relationship to the turf it stands on** — and both are
@@ -687,3 +691,56 @@ your review of:
 
 Say the word and I start on 11-a (the measurement probe) — or on whichever
 spec you want first.
+
+---
+
+# SPEC_13 VERDICT — shipped `cb230df`
+
+**What the diagnosis got right:** there was no direction test anywhere in the
+pass path. `doPass` only ever examined a pass inside its *spill* branch, so
+"forward pass" was a random name given to a handling error.
+
+**What the diagnosis got wrong, and what shipped instead:** the fix it proposed
+— a test on the pass's landing point — **is not implementable in this engine**.
+`upOpen` homed the ball onto the receiver's live position, so no landing point
+existed until the catch. The spec's geometric form had to be replaced with a
+release-time velocity test.
+
+**The deeper defect the diagnosis missed — the pursuit curve.** The ball flew at
+the receiver's *live* position while the receiver was steered to a point 1 m
+beyond the ball. Neither ever arrived; the ball crept forward of its own throw
+for the whole flight. This was manufacturing forward passes, and it was also
+the cause of the long-standing `BALL ON SCREEN` gate failure (326 frames). The
+aim is now solved **once** at release (`solvePassAim`) and both ball and
+receiver travel to that fixed point. Gate went **326 → 0**.
+
+**The test that shipped** (`src/game/engine/throwforward.ts`, mirrors
+`offside.ts`, imports nothing):
+
+```
+v_ball  = PASS_SPEED · unit(aim − release)
+allowed = max(0, v_thrower.z · dir) · dir     // backpedalling earns NO allowance
+rel     = (v_ball.z − allowed) · dir
+forward = rel > tol                            // STRICT 0.1 · LENIENT 1.5 · OFF never blows
+```
+
+**Measured** (200 s × 3 seeds, diff 3): forward-at-release **9 of 132 → 0 of
+153**; `rel` max **+4.33 → −0.06**; arrival error vs the solved aim p50 0.26 m /
+p90 0.68 m. **25 passes still travel forward over the ground and all 25 are
+legal** — the thrower's momentum carried them. A naive absolute-direction test
+would whistle all 25; that is the whole reason for the relative form.
+
+**Author rulings executed:** toggle mirrors SPEC_12 (`STRICT | LENIENT | OFF`,
+default LENIENT); SPEC_13 owns the flight bias; the knock-on / throw-forward
+split stays out of scope (still `FORWARD PASS` → scrum); STRICT is a 0.1 m/s
+epsilon, not a true zero, because a true zero whistles on floating-point noise
+thrown by a flat pass.
+
+**Deferred:** the CPU is held to the law at *selection* and *release*, but it
+is never *whistled* — it throws flatter instead (counted `clamped`). Whether
+the CPU should ever be blown for a forward pass is a gameplay decision for the
+author, not a law question. The selection filter is CPU-only on purpose: a law
+the human cannot break is a law he cannot learn.
+
+**New debt:** `T-72` — the stats harness is unseeded, so its headline score
+cannot compare builds (50% and 56% on the identical build).
