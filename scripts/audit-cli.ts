@@ -1,12 +1,12 @@
 /**
  * HEADLESS RULE AUDIT — the LAW/LOGIC/UX rules over a captured trace.
  *
- * Usage:  npx vite-node scripts/audit-cli.ts [seconds] [difficulty] [seed]
+ * Usage:  npx vite-node scripts/audit-cli.ts [seconds] [difficulty] [seed] [limit]
  *
  * The seed pins Math.random for the whole run, so two builds can be compared
  * match-for-match — the audit means nothing if every run is a different game.
  */
-import { runDeep, runTrace } from '../src/game/trace';
+import { runDeep, runTrace, TRACE_LIMIT } from '../src/game/trace';
 import { audit } from '../src/game/audit';
 import { gateConfig } from '../src/game/gates';
 import { seedRng } from '../src/game/seed';
@@ -14,14 +14,16 @@ import { seedRng } from '../src/game/seed';
 const seconds = Number(process.argv[2] ?? 90);
 const diff = Number(process.argv[3] ?? 3);
 const seed = Number(process.argv[4] ?? 1);
+const limit = Number(process.argv[5] ?? TRACE_LIMIT);
 
 // deterministic runs: the ambient seed seam pins Math.random for this process
 seedRng(seed);
 
-const deep = runDeep(gateConfig(diff), seconds);
-const run = runTrace(gateConfig(diff), seconds);
+const cfg = gateConfig(diff);
+const deep = runDeep(cfg, seconds);
+const run = runTrace(cfg, seconds, 4, limit);
 const report = audit(run.points);
-console.log(`\n=== RULE AUDIT — ${seconds}s at difficulty ${diff}, seed ${seed} ===`);
+console.log(`\n=== RULE AUDIT — ${seconds}s at difficulty ${diff}, seed ${seed}, limit ${limit} ===`);
 console.log(`points: ${run.points.length}, watchdog trips: ${deep.watchdogTrips}, teleports: ${deep.teleportCount}`);
 const counts = { PASS: 0, WARN: 0, FAIL: 0 };
 for (const r of report.results) counts[r.verdict]++;

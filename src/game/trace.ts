@@ -15,6 +15,8 @@
 import { Director, Input, NO_INPUT, MatchConfig } from './director';
 import { FIELD, project } from '../render/retro';
 import { sanctionOf } from './engine/laws';
+import { liveOffsideLines } from './engine/offside';
+import type { Live } from './intelligence';
 
 
 export type Val = number | string | boolean | null;
@@ -174,15 +176,78 @@ function maxGap(d: Director, team: 'A' | 'B'): number {
   return g;
 }
 
-/* SPEC_10 B2b (LAW-66): line integrity is a property of the men still IN the
- * line. maxGap spans the whole team — a beaten defender who has turned to
- * chase (beatenT > 0) has legitimately left his channel, and the hole he
- * leaves behind IS the line break, not a defensive-line defect (LINE BREAKS
- * grades REALISTIC). The line measurement excludes them. */
+/* BATCH 02 / LAW-66: the law-derived context is the live OPEN line. Its
+ * lineFor belongs to the attacking side; it is deliberately NOT inverted into
+ * a defending-team half-plane. It supplies the live carrier context in which
+ * the authored defensive shape is measured. */
+function hasLiveOpenContext(d: Director): boolean {
+  if (!d.op) return false;
+  return liveOffsideLines(d).some((line) => line.kind === 'OPEN'
+    && line.offenders.includes(d.op!.attacking)
+    && line.lineFor(d.op!.attacking) !== null);
+}
+
+/* BATCH 03 / LAW-66 positional population. The law-derived context and the
+ * authored defensive system remain the gate: this is measured only on a live
+ * OPEN line, against the active system's sweeperDepth contract. No shirt
+ * number carries a role here — the open-play positions rotate. */
+function law66Population(d: Director, team: 'A' | 'B'): Live[] {
+  if (!hasLiveOpenContext(d)) return [];
+
+  const focusX = d.op!.carrierX;
+  const system = d.defenceOf(team);
+  const raw = d.live.filter((p) => p.team === team
+    && p.sinbin <= 0 && !p.down
+    && p.beatenT <= 0
+    && Math.abs(p.x - focusX) < 26);
+
+  /* `d.op.dir` points towards the attacking team's goal. For the defending
+   * team that is the own-goal axis: positive depth is therefore behind the
+   * live defensive line, without inventing a median or a shirt-based slot. */
+  const ownGoalAxis = d.op!.dir;
+  const sweeperCandidates = raw.filter((p) =>
+    (p.z - d.op!.carrierZ) * ownGoalAxis > system.sweeperDepth);
+  const sweeper = sweeperCandidates.reduce<Live | null>((deepest, p) => {
+    if (!deepest) return p;
+    return (p.z - d.op!.carrierZ) * ownGoalAxis
+      > (deepest.z - d.op!.carrierZ) * ownGoalAxis ? p : deepest;
+  }, null);
+
+  /* EDGE means the measured outermost available defender on each flank. It is
+   * intentionally measured from the complete live population before the
+   * sweeper is removed: a sweeper can also be the outermost man, and a nominal
+   * wing can be inside him. The union is identity-based, never shirt-based. */
+  const leftEdge = raw.reduce<Live | null>((edge, p) => (!edge || p.x < edge.x ? p : edge), null);
+  const rightEdge = raw.reduce<Live | null>((edge, p) => (!edge || p.x > edge.x ? p : edge), null);
+  const excluded = new Set<Live>();
+  if (sweeper) excluded.add(sweeper);
+  if (leftEdge) excluded.add(leftEdge);
+  if (rightEdge) excluded.add(rightEdge);
+
+  /* A sin-binned or injured player is absent from `raw`; with fourteen men the
+   * remaining fourteen are measured as-is. There is no placeholder edge or
+   * replacement sweeper, and fewer than two eligible men simply yields no gap. */
+  return raw.filter((p) => !excluded.has(p));
+}
+
+/* SPEC_10 B2b (LAW-66): line integrity is a property of the positional
+ * population above. A beaten, sin-binned, injured, or out-of-window defender
+ * is not silently replaced; the active system's maxSpacing remains the value
+ * emitted to the existing audit check, whose 4.6 m floor is unchanged.
+ *
+ * The earlier numeric Candidate B reported six corrected-gap > raw-gap cases.
+ * They do NOT survive positional selection: in all six, the positional gap is
+ * the raw gap because the numeric shirt-15 exclusion was not justified by the
+ * active sweeperDepth test. The measurements are retained here as an audit
+ * anchor (positional corrected = raw, metres):
+ *   seed 1 19.20: 4.174 (rounded 4.2)
+ *   seed 2 14.13: 1.592 (rounded 1.6)
+ *   seed 4 21.60: 3.425 (rounded 3.4)
+ *   seed 4 21.87: 3.298 (rounded 3.3)
+ *   seed 4 22.13: 3.435 (rounded 3.4)
+ *   seed 5 22.67: 3.323 (rounded 3.3) */
 function maxLineGap(d: Director, team: 'A' | 'B'): number {
-  const fx = d.op?.carrierX ?? d.focusPoint().x;
-  const xs = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26)
-    .map((p) => p.x).sort((a, b) => a - b);
+  const xs = law66Population(d, team).sort((a, b) => a.x - b.x).map((p) => p.x);
   let g = 0;
   for (let i = 0; i < xs.length - 1; i++) g = Math.max(g, xs[i + 1] - xs[i]);
   return g;
@@ -195,10 +260,84 @@ function inFrame(d: Director, x: number, z: number): boolean {
   return p.sx > -60 && p.sx < v.w + 60 && p.sy > -80 && p.sy < v.h + 80;
 }
 
+/* BATCH 04 / TRACE CAPTURE POLICY
+ *
+ * The shipped/default capture is deliberately the legacy policy. A caller that
+ * supplies the current default limit therefore receives the exact old point
+ * order and sampling, including its one-emit overshoot behaviour. Larger audit
+ * captures opt into deterministic per-kind sampling and reserved rare-kind
+ * capacity. This keeps the default baseline bit-identical while making a finite
+ * full-match capture able to see events that the seven high-rate kinds used to
+ * crowd out.
+ */
+const HIGH_RATE_TRACE_KINDS = new Set([
+  'PLAYERS_POS', 'CAMERA', 'HUD', 'SHAPE', 'CONTEXT', 'AFFORDANCES', 'INSTRUCTION',
+]);
+const RESERVED_TRACE_KINDS = ['KICKOFF', 'LINEOUT', 'MAUL'] as const;
+type ReservedTraceKind = typeof RESERVED_TRACE_KINDS[number];
+
+function reservedQuotaFor(limit: number): Record<ReservedTraceKind, number> {
+  /* At least sixteen slots per rare kind is enough to retain a complete short
+   * ritual; five percent each is the larger budget for a full-match capture,
+   * capped so a noisy match cannot consume the whole trace with one kind. */
+  const each = Math.min(1024, Math.max(16, Math.floor(limit * 0.05)));
+  return { KICKOFF: each, LINEOUT: each, MAUL: each };
+}
+
 class Recorder {
   points: TracePoint[] = [];
+  private readonly limit: number;
+  private readonly quotaMode: boolean;
+  private readonly quotas: Record<ReservedTraceKind, number>;
+  private readonly reservedUsed: Record<ReservedTraceKind, number> = { KICKOFF: 0, LINEOUT: 0, MAUL: 0 };
+  private readonly highKindBucket = new Map<string, number>();
+
+  constructor(limit = TRACE_LIMIT) {
+    this.limit = Math.max(1, Math.floor(limit));
+    /* `limit === TRACE_LIMIT` is the compatibility path. A larger explicit
+     * limit is the reviewed opt-in to the Batch 4 capture policy. */
+    this.quotaMode = this.limit > TRACE_LIMIT;
+    this.quotas = reservedQuotaFor(this.limit);
+  }
+
+  private reservedKind(kind: string): kind is ReservedTraceKind {
+    return (RESERVED_TRACE_KINDS as readonly string[]).includes(kind);
+  }
+
+  private reservedRemaining(): number {
+    return RESERVED_TRACE_KINDS.reduce((sum, kind) =>
+      sum + Math.max(0, this.quotas[kind] - this.reservedUsed[kind]), 0);
+  }
+
+  private accept(kind: string, time: number): boolean {
+    if (this.points.length >= this.limit) return false;
+    if (!this.quotaMode) return true;
+
+    if (this.reservedKind(kind)) {
+      if (this.reservedUsed[kind] >= this.quotas[kind]) return false;
+      this.reservedUsed[kind]++;
+      return true;
+    }
+
+    /* Leave the unfilled rare-kind reservations untouched. Once common points
+     * reach the non-reserved budget, only KICKOFF/LINEOUT/MAUL may consume the
+     * remaining slots. If a rare kind never occurs, those slots remain unused;
+     * that is an honest reservation rather than silently spending reachability. */
+    if (this.points.length >= this.limit - this.reservedRemaining()) return false;
+
+    if (HIGH_RATE_TRACE_KINDS.has(kind)) {
+      /* Seven high-rate observational kinds are sampled at 1 Hz in the opt-in
+       * policy. The bucket is based on Director time, not RNG or array index,
+       * so it is deterministic and independent of which other kinds emitted. */
+      const bucket = Math.floor(time + 1e-6);
+      if (this.highKindBucket.get(kind) === bucket) return false;
+      this.highKindBucket.set(kind, bucket);
+    }
+    return true;
+  }
+
   push(d: Director, kind: string, label: string, data: Record<string, Val>) {
-    if (this.points.length >= TRACE_LIMIT) return;
+    if (!this.accept(kind, d.t)) return;
     this.points.push({
       i: this.points.length + 1,
       t: Math.round(d.t * 100) / 100,
@@ -507,7 +646,11 @@ function emit(d: Director, rec: Recorder) {
       /* LAW-67 reads this as the Law-3 HEADCOUNT — keep it the full side;
        * the line-integrity population lives in maxGapMetres (B2b). */
       defenders: d.live.filter((p) => p.team === def).length,
-      lineConnected: maxGap(d, def) <= 4.0,
+      /* BATCH 03 / TASK C: `maxGap()` is the whole-team lateral spread used
+       * by the SPREAD trace. It is not a defensive-line population, and its
+       * old `lineConnected` boolean was an inverse "is the whole 15-man team
+       * bunched within 4 m?" flag. It was written here and read nowhere, so it
+       * has been removed rather than leaving a misleading field in the trace. */
       pressure: Math.round(d.op.pressure * 100) / 100,
       phase: d.op.phase,
       /* SPEC_10 B2b: a line is only 'connected' once it has RE-FORMED — the
@@ -859,9 +1002,9 @@ export function runDeep(cfg: MatchConfig, seconds = 60): DeepReport {
   };
 }
 
-export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun {
+export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4, limit = TRACE_LIMIT): TraceRun {
   const d = new Director(cfg);
-  const rec = new Recorder();
+  const rec = new Recorder(limit);
   const st: BotState = { wait: 0.3, flip: 0, presses: 0, releases: 0 };
   const dt = 1 / 60;
   const interval = 1 / sampleHz;
@@ -869,7 +1012,11 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun
   let elapsed = 0;
   let pending: { key: string; sig: string; down: boolean }[] = [];
 
-  while (elapsed < seconds && rec.points.length < TRACE_LIMIT - 12) {
+  /* Preserve the old `limit - 12` guard for the default path. The recorder's
+   * reserved-quota policy decides which points are admitted in larger opt-in
+   * captures, while this guard remains the finite global ceiling. */
+  const captureLimit = Math.max(1, Math.floor(limit));
+  while (elapsed < seconds && rec.points.length < captureLimit - 12) {
     const { inp, pressed } = botInput(d, dt, st);
     for (const key of pressed) {
       d.held.add(key);
@@ -891,6 +1038,12 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4): TraceRun
     d.update(dt, inp, pressed);
     elapsed += dt;
     acc += dt;
+
+    /* Do not keep sampling a frozen Director after full time. This is
+     * immaterial to the default 90-second compatibility path, but prevents an
+     * opt-in full-match capture from replaying the final LINEOUT/MAUL state
+     * forever after `d.over` becomes true. */
+    if (d.over) break;
 
     // resolve deferred input points against the following frame
     if (pending.length) {
