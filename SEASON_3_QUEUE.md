@@ -707,3 +707,366 @@ untouched and still awaiting triage.
 * New: `scripts/spec17probe.ts`, `scripts/spec17shot.ts`.
 
 Nothing in `src/game/` was modified.
+
+---
+
+# SPEC_18 — DESIGN: visual polish (three features)
+
+**Status: DESIGN ONLY. No live TypeScript engine code has been written.**
+Measurements come from `scripts/spec18probe.ts` (read-only, added with this
+document) plus four throwaway calculation scripts whose outputs are reproduced
+inline below.
+
+Rulings from Phase 3 are recorded as accepted: `sideLift` approved, sprint
+ground contact approved as an artistic call, the 0.393 root ratio confirmed,
+and `BALL ON SCREEN 196` is accepted debt — it is not mentioned again in this
+document except here.
+
+## The measurement that reframes all three features
+
+Before designing anything kinetic I measured the signal the kinetics would ride
+on. **The engine's position stream is not smooth enough to differentiate twice.**
+
+| quantity | measured |
+|---|---|
+| per-frame step distance, p50 / p99 / max | 0.0815 / 0.2174 / **1.019 m** |
+| what a 12 m/s sprinter should step at 60 Hz | 0.200 m |
+| raw acceleration p50 / p99 / max | 2.8 / **478.6** / **3668 m/s²** |
+| position discontinuities (step > 0.30 m) | 94 / 111 569 frames = **0.08%** |
+
+A 1.019 m step in one frame is 61 m/s. Raw p99 of 478 m/s² is **49 g**. Feeding
+that straight into a shear term would not produce "leaning into a sprint" — it
+would produce a figure snapping flat on ~20% of frames.
+
+This does not block the feature, but it does dictate the design: **every kinetic
+input below is a filtered, clamped, saturating function of the raw signal, never
+the raw signal itself.** Details in §18.3.
+
+---
+
+## 18.1 — Stroke removal and value separation
+
+### What the outline is currently doing for free
+
+Measured WCAG contrast ratios between adjacent fills that share an edge today:
+
+| pair | palette A | palette B | palette REF |
+|---|---|---|---|
+| kit vs shorts | 4.20 | 6.07 | 9.97 |
+| kit vs skin | 1.87 | 2.91 | 1.70 |
+| kit vs socks | **1.00** | **1.00** | **1.00** |
+| **limb vs limb (same fill)** | **1.00** | **1.00** | **1.00** |
+| kit vs OUTLINE | 3.25 | 2.09 | 10.32 |
+
+The two rows at exactly **1.00** are the whole problem. An arm crossing the
+torso, or one leg crossing the other, is *the same colour on both sides of the
+edge*. Right now the only thing separating them is the `OUT = '#20202b'` stroke.
+Delete the stroke with no replacement and those silhouettes fuse completely —
+this is the same failure mode as the SPEC_17 "watermelon", which I have already
+measured once and should not reintroduce by choice.
+
+### The formula
+
+Depth shading replaces the stroke with a **value step**, driven by the per-limb
+depth that SPEC_17 already computes (`armDepth() = sin(aa)`, and the equivalent
+leg term). Every limb already knows whether it is in front of or behind the
+torso — that is exactly the Z-sort the three-pass draw uses.
+
+Define, per limb, a signed depth `z ∈ [-1, +1]` (negative = behind the torso):
+
+```
+shadeFactor(z) = LIMB_MID + LIMB_SPAN * clamp(z, -1, +1)
+```
+
+with
+
+```
+LIMB_MID  = 0.92        // torso is 1.00; limbs sit slightly under it
+LIMB_SPAN = 0.22
+```
+
+giving `shade(kit, 0.70)` at full-back and `shade(kit, 1.14)` at full-front.
+Measured contrast of that pair:
+
+| palette | back vs front | back vs torso | front vs torso |
+|---|---|---|---|
+| A | **2.11** | 1.68 | 1.25 |
+| B | **1.78** | 1.48 | 1.20 |
+| REF | **2.62** | 2.03 | 1.29 |
+
+Back-vs-front clears 1.78 on every palette — comfortably above the ~1.25 where a
+value step stops reading at small sizes, and **better separation than the
+outline gave on palette B (2.09)**. Two rejected alternatives are recorded:
+`0.72/1.06` (only 1.56 on B) and `0.78/1.10` (1.52 on B, too weak).
+
+### Why this is the right replacement rather than a substitute trick
+
+It is the *same* information the Z-sort already uses, so it cannot disagree with
+the draw order — a limb that sorts behind is necessarily shaded darker. Contrast
+this with a per-limb outline, which is a second, independent encoding of depth
+that can (and in the old rig, did) contradict the sort.
+
+**Interaction with lighting:** `shade()` is a flat multiplier, so this composes
+with the existing two-tone cel fill without a gradient, preserving the printed-
+paper premise (`B-10` in the papercraft dataset).
+
+**Open question for review:** the shorts and socks currently share the kit hue.
+Depth shading fixes limb-vs-limb, but `kit vs socks` at 1.00 is a *palette*
+problem, not a rendering one. Recommend it is treated separately and not folded
+into SPEC_18.
+
+---
+
+## 18.2 — Performant rounded polygons
+
+### The method (no beziers, as ruled)
+
+Canvas will round the corners of a filled polygon for free if the polygon is
+**stroked with its own fill colour** using round joins:
+
+```
+ctx.lineJoin = 'round';
+ctx.lineCap  = 'round';
+ctx.strokeStyle = fill;      // SAME colour as the fill
+ctx.lineWidth   = 2 * r;     // r = desired corner radius, in px
+ctx.fill();
+ctx.stroke();
+```
+
+The stroke adds a half-width `r` band around the path whose outer corners are
+arcs of radius `r`. Fill plus stroke is one convex union: a polygon with
+radius-`r` rounded corners.
+
+### The geometry that must not be skipped
+
+The stroke expands the shape **outward** by `r` on every edge. Left uncorrected,
+every limb silently gains `2r` of width and the figure fattens — the exact class
+of error that produced the 1.02 crossbar ratio in SPEC_16.
+
+So the path must be **inset by `r` before stroking**. For a limb card, which is
+built by `limbCard()` from a centreline and a half-width `w`, the inset is
+analytic and costs nothing:
+
+```
+w' = w - r        (half-width)
+L' = L - r        (each end of the centreline pulled in by r)
+```
+
+No polygon-offset algorithm, no beziers, no curve flattening — two subtractions
+per card, because every card in this renderer is generated from a centreline and
+a width rather than authored as arbitrary geometry.
+
+### Choosing `r`
+
+`r` must be in **screen pixels**, not metres, or corners round more when the
+camera is close. The existing line width already solves this problem and should
+be reused as the model:
+
+```
+lw = clamp(sc * 0.021, 1.05, 3.2)      // existing, paper.ts makeLocals
+r  = clamp(sc * 0.014, 0.8, 2.4)       // proposed, ~2/3 of lw
+```
+
+At the measured median actor scale (`sc ≈ 10.5` px per scaled metre after
+SPEC_16) this gives `r ≈ 0.8 px` — near-invisible, which is correct for a
+distant player — rising to the 2.4 px cap on close figures where the corners are
+actually legible.
+
+### Cost
+
+One extra `stroke()` per card. No new path construction, no curve maths. The
+existing `paperCard()` already issues a `stroke()` for the outline, so for cards
+that lose their outline this is **cost-neutral**: the same call, a different
+colour and a wider line.
+
+### Interaction with 18.1
+
+These two features must land together. `paperCard()` is the single choke point
+for both — it currently owns the outline being removed and would own the round-
+join stroke replacing it, and the depth shade is the `fill` argument it already
+takes. Splitting them across two changes means an intermediate state with no
+outline and no value separation, i.e. the fused silhouette.
+
+---
+
+## 18.3 — Dynamic 3/4 perspective: squeeze and pop
+
+### The affine matrix
+
+The 3/4 view is a horizontal shear composed with a vertical squash, applied
+about the **ground anchor** (the feet), so a sheared figure stays planted:
+
+```
+        | 1   tan(θ)  0 |
+M(θ,κ) =| 0    κ      0 |        about (0, 0) = the foot anchor
+        | 0    0      1 |
+```
+
+θ = shear angle (lean), κ = vertical scale (squash). In Canvas terms, with the
+origin already translated to the anchor and `Y` pointing up the card:
+
+```
+ctx.transform(1, 0, -Math.tan(theta), kappa, 0, 0);
+```
+
+The `-tan(θ)` is negative because screen-y is down while the card's `Y()` helper
+maps metres upward; a positive θ must lean the *top* of the card in the
+direction of travel.
+
+**Volume conservation.** A squash that only compresses reads as a figure
+shrinking. Pairing it with a horizontal bulge preserves apparent mass, exactly
+as SPEC_01's `impactSquash` already does:
+
+```
+kappa = 1 - s
+sx    = 1 + 0.6 * s        // the existing SPEC_01 ratio, reused deliberately
+```
+
+### Linking shear to acceleration — with the filter the data demands
+
+Given the measured signal, the raw derivative is unusable. The chain is:
+
+```
+1. reject discontinuities   step > MAX_STEP (0.30 m) -> drop the frame, reseed
+2. EMA the velocity         alpha_v = 1 - exp(-dt / TAU),        TAU = 0.35 s
+3. differentiate            a = (v_smooth - v_smooth_prev) / dt
+4. project along travel     a_along = dot(a, v_hat)        (signed)
+5. EMA again                alpha_a = 1 - exp(-dt / (TAU * 1.6))
+6. saturate                 theta = SHEAR_MAX * tanh(a_along / A_REF)
+```
+
+`tanh` is the important choice: it is linear for small accelerations (so gentle
+changes of pace read proportionally) and **saturates** for large ones, so the
+0.08% of frames carrying a teleport cannot throw the figure flat even if step 1
+misses one.
+
+Measured effect of `TAU` on the filtered signal:
+
+| TAU | p50 | p90 | p99 | max | sign flips / min |
+|---|---|---|---|---|---|
+| 0.10 s | 2.61 | 13.20 | 24.51 | 78.4 | 2858 |
+| 0.20 s | 2.14 | 7.67 | 12.89 | 41.4 | 2200 |
+| **0.35 s** | **1.55** | **4.52** | **7.90** | **24.2** | **1760** |
+| 0.50 s | 1.16 | 3.15 | 6.40 | 17.2 | 1505 |
+
+`TAU = 0.35 s` is recommended: it is the knee of the curve. Below it the p99
+doubles and the sign-flip rate climbs (visible as a figure twitching between
+lean-forward and lean-back); above it the lean lags the actual change of pace
+enough to read as disconnected.
+
+Constants, with the resulting geometry:
+
+```
+SHEAR_MAX = 0.18 rad   (10.3 deg at saturation)
+A_REF     = 6.0 m/s^2
+```
+
+| a_along | tanh(a/6) | θ (deg) | head displacement, 1.9 m figure |
+|---|---|---|---|
+| 1.5 | 0.245 | 2.5 | 8 cm |
+| 3.0 | 0.462 | 4.8 | 16 cm |
+| 6.0 | 0.762 | 7.9 | 26 cm |
+| 10.0 | 0.931 | 9.6 | 32 cm |
+| 25.0 | 1.000 | 10.3 | 35 cm |
+| **∞** | **1.000** | **10.3** | **35 cm (hard bound)** |
+
+35 cm of head lean at full saturation is a decisive sprint attitude that cannot
+become a pratfall. Compare `SHEAR_MAX = 0.22` (42 cm, starts to read as falling)
+and `0.14` (27 cm, too timid to notice) — both measured, both rejected.
+
+### Squash on footfall — driven by clip phase, not physics
+
+**The footfall is not in the physics stream.** It is in the clip, and the SPEC_17
+rig makes it exactly measurable: a footfall is a foot transitioning from
+airborne to grounded under `groundedClearance()`. Measured contact events per
+cycle:
+
+| clip | duration | footfalls / cycle | at u = |
+|---|---|---|---|
+| walk | 1.05 s | 3 | 0.00, 0.37, 0.87 |
+| jog | 0.72 s | 3 | 0.00, 0.38, 0.88 |
+| run | 0.58 s | 3 | 0.00, 0.38, 0.88 |
+| sprint | 0.46 s | 3 | 0.00, 0.38, 0.88 |
+
+Every gait shares the same phase structure, so one rule covers all four. (The
+third event at u = 0.00 is the loop seam re-reporting the u = 0.88 contact; the
+implementation must debounce on a minimum inter-event time or it will
+double-fire once per cycle. Recording this now because it is precisely the kind
+of off-by-one that ships as a visible stutter.)
+
+Footfall squash magnitude scales with speed, so a walk does not thud:
+
+```
+s_footfall = FOOT_SQUASH * clamp01((spd - 2.0) / 8.0)
+FOOT_SQUASH = 0.06
+```
+
+with the same smoothstep spike-and-recover envelope SPEC_01 already uses
+(`impactSquash`, ~5–6 frames at 60 Hz). At walk pace the term is ~0; at sprint it
+reaches the full 0.06 — a 6% compression, well under SPEC_01's tackle value.
+
+### Squash on tackles — reuse, do not reinvent
+
+SPEC_01 **already implements this** in `squashForClip()`, with authored impact
+frames per clip (`tackleHit` 0.45, `diveFront` 0.92, `ruckCommit` 0.5,
+`scrumShove` 0.5, `scrumBind` 0.72) and per-kind magnitudes (tackle 0.09, dive
+0.08, cleanout 0.06, scrum 0.10).
+
+**Recommendation: do not add a second tackle-squash path.** Combine the two
+sources multiplicatively so a footfall during a tackle does not double-compress:
+
+```
+s_total = 1 - (1 - s_footfall) * (1 - s_impact)
+```
+
+This is bounded above by each term and cannot exceed 1.
+
+### Where the 3/4 view fits
+
+`PaperView` gains a fourth upright member (`threeQuarter`), which requires
+changes in three places (`paper.ts:52` enum, the `END_ON`/`EDGE_IN`/`EDGE_OUT`/
+`BACK_IN` thresholds at `paper.ts:99`, and a new draw path).
+
+**Sequencing recommendation:** the shear/squash transform above is **independent
+of the new view** — it is a transform applied around whichever card is drawn, so
+it works on the existing front/back/edge paths on day one. I recommend shipping
+the kinetics first and the new draw path second, as two reviewable steps, rather
+than as one change that alters both what is drawn and how it is transformed.
+
+---
+
+## Proposed execution order
+
+```
+18.1 + 18.2 together   (both live in paperCard(); splitting them fuses silhouettes)
+      -> HALT, review pictures
+18.3a kinetics          (shear + squash on the existing views)
+      -> HALT, review pictures
+18.3b threeQuarter view (new enum member, thresholds, draw path)
+      -> HALT
+```
+
+## Verification plan
+
+Same test-and-verify workflow as SPEC_16/17:
+
+* `scripts/spec18probe.ts` — already written, extended per step with
+  before/after contrast ratios and shear/squash distributions.
+* `scripts/spec18shot.ts` — a sheet in the style of `spec17shot.ts`: the same
+  figure at a range of accelerations and at footfall frames, since **the
+  SPEC_17 float proved a green probe board does not mean a correct picture.**
+* All nine gates byte-identical — every change here is render-only, so any gate
+  movement means something has leaked into logic.
+
+## Risks recorded
+
+1. **Fused silhouettes** if 18.1 and 18.2 are separated. Mitigated by shipping
+   them together.
+2. **Figure fattening** if the round-join inset is skipped. Mitigated by the
+   `w - r` / `L - r` inset, and caught by re-running the SPEC_16 ratio probe.
+3. **Twitching lean** from an under-filtered signal. Mitigated by `TAU = 0.35 s`
+   and `tanh` saturation; the sign-flip count is the metric to watch.
+4. **Double-fired footfalls** at the loop seam. Mitigated by a debounce, and
+   flagged in advance above.
+
+**Halting here for review of the mathematics before any engine change.**
