@@ -244,6 +244,42 @@ rate (sliding metres per pass, or line-lane error at the catch)?
 
 ---
 
+## T-71 · AI LOITERING / RETREAT DEBT (AI) — logged by SPEC_12, deferred to the AI behaviour pass
+
+**Observed:** the CPU is offside roughly ten times as often as a real team. Over
+nine fixtures (3 difficulties × 3 seeds, 200 s each) with Force AI Clean off,
+the CPU side committed **1200 sustained episodes**; with it on, **0** — the
+projection is carrying the whole load. What reaches the whistle is not
+technical: the LENIENT referee's residual offences have a median depth of about
+**3 m past the line, held for 2 seconds**. That is the honest reason
+`OFFSIDE PENALTIES PER TEAM` reads 5.6 against a 2..4 band.
+**Known:** the offences are dominated by the RESET line — defenders who have
+not got back behind the contact mark by the end of the release beat — and by
+the `CURVE` defensive job. Instrumenting the tail made it concrete: of the
+thirty samples beyond 8 m in one match, **twenty-nine were the CURVE job at a
+breakdown**, sprinting at ~5 m/s with the gap to their mark *growing*
+(progress negative), not closing. So it is not a man who has not started
+running; it is a man running and losing ground, which points at the mark
+moving faster than he can, at an anchor that is wrong for the wide channel, or
+at a retreat instruction that is too shallow.
+**Not known:** which of those three it is. Specifically — whether the release
+beat (1.2 s) is long enough for the current acceleration model to cover the
+ground the law requires; whether the retreat needs to be a distinct locomotion
+state with its own top speed rather than an ordinary steer to a mark; and how
+much of the CURVE tail is a systematic anchor error on the wide channel versus
+a legitimate defender being dragged across by the ball.
+**Questions:** (1) Is the retreat target the right distance behind the mark, or
+is it being clamped by something else? (2) Should `RELEASE AND RETREAT` own
+the player's velocity rather than compete with the shape? (3) What is the
+measurement that proves a fix — metres behind the line at the end of the beat,
+or time-to-legal?
+**Explicitly not the fix:** widening the referee's tolerance. The author's
+ruling is that the referee is working and the numbers are real; the debt is in
+the AI. Force AI Clean (`offsideAiClean`) is the shipped mitigation and is a
+projection, not a repair.
+
+---
+
 ## PRIORITY ORDER (my read — challenge it)
 1. STAGE-2 RE-PRICE (it gates every future verdict — measurement first)
 2. T-49 backward pods (the on-pitch feel of attack)
