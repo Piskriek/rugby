@@ -340,6 +340,140 @@ export const BUILDS: Record<string, Build> = {
  */
 export const FIGURE_SCALE = 1.65;
 
+/* ================================================================== */
+/* SPEC_17 — SHARED RIG GEOMETRY                                       */
+/* ------------------------------------------------------------------ */
+/* One source of truth for where the legs are rooted. Before this, the */
+/* coronal path used `s * hipHalf * 0.8` and the side path used the    */
+/* literals +0.012 / -0.045, disagreeing by 2.6x on the same           */
+/* anatomical question — the measured cause of the "watermelon crotch" */
+/* (SPEC_17.4 findings 1, 2 and 4). Both drawers now call this.        */
+/* ================================================================== */
+
+export interface HipRoots {
+  /** coronal: leg root is at (side * coronalX, y) */
+  coronalX: number;
+  /** side profile: near-leg root x */
+  sideNear: number;
+  /** side profile: far-leg root x */
+  sideFar: number;
+  /** root height, in the same hip-relative space both drawers use */
+  y: number;
+  /** half-width of the side-profile shorts card, so the hem can follow */
+  sideHalf: number;
+}
+
+/**
+ * The hip joint, for every view.
+ *
+ * `y` sits at the ANATOMICAL hip. The greater trochanter is at leg-length
+ * height, so a root of `hip - 0.02` put the pivot 0.040 m low at stand and
+ * 0.160 m low at sprint (a third of a thigh), making the legs breathe by up to
+ * 0.096 m inside a single stride. Rooting at the authored `hip` channel plus a
+ * small rise puts the joint where the shorts hem can actually hinge from it.
+ */
+export function hipRoots(build: Build, hip: number): HipRoots {
+  const hipHalf = build.hipW * 0.5;
+  /* Side card is drawn at hip DEPTH, not hip width — it is a thin profile
+   * strip. Root the two legs at the same fraction of their own card that the
+   * coronal path uses (0.8 of the half-width), so neither view leaves
+   * unrooted overhang that nothing can move. */
+  const sideHalf = 0.099;
+  const sideSpread = sideHalf * 0.62;
+  return {
+    coronalX: hipHalf * 0.8,
+    sideNear: sideSpread,
+    sideFar: -sideSpread,
+    y: hip + 0.02,
+    sideHalf,
+  };
+}
+
+/**
+ * SPEC_17 — swing-foot ground clearance.
+ *
+ * The old rig computed foot height FORWARD from the hip
+ * (`footY = kneeY - cos(l-k)*shin + ...`), so a sagittal stride rendered as
+ * pure vertical shortening and the swing foot rose 0.71 m in run and 0.92 m in
+ * sprint. Both legs pulling up into the torso is the "squatting" report.
+ *
+ * Seen front-on, a stride is motion into DEPTH. The foot should stay near the
+ * turf and pass under the body. So foot height is authored directly as a
+ * shallow clearance arc driven by knee flexion — the one channel that actually
+ * distinguishes swing from stance — and the stance foot lands at exactly 0.
+ *
+ * Calibrated against the gait table: walk 0.06, jog 0.08, run 0.13,
+ * sprint 0.17 m of peak clearance.
+ */
+export const SWING_LIFT_K = 0.115;
+export const SWING_KNEE_FLOOR = 0.15;
+function rawClearance(knee: number): number {
+  const lift = SWING_LIFT_K * (knee - SWING_KNEE_FLOOR);
+  return lift < 0 ? 0 : lift > 0.34 ? 0.34 : lift;
+}
+
+/**
+ * Both feet at once, with the lower one PINNED TO THE TURF.
+ *
+ * Knee flexion alone does not guarantee contact: at mid-stride both knees are
+ * partly bent, which floated both feet ~0.075 m and simply relocated the old
+ * hover. Subtracting the lower foot's clearance makes the stance foot sit at
+ * exactly y = 0 on every frame of every gait, by construction, while the swing
+ * foot keeps its arc above it. This is the structural replacement for the
+ * deleted `pinPlantedFoot()`, and unlike that helper it is not optional and
+ * cannot silently fail to fire.
+ *
+ * Note this deliberately removes the true flight phase of a sprint — a real
+ * runner does leave the ground. A paper cut-out that floats reads as broken
+ * rather than as airborne, so the contact is held; airborne states are the
+ * jump/dive clips' job, and they drive `hip` directly.
+ */
+export function groundedClearance(kneeL: number, kneeR: number): [number, number] {
+  const l = rawClearance(kneeL), r = rawClearance(kneeR);
+  const base = Math.min(l, r);
+  return [l - base, r - base];
+}
+
+/** Single-leg clearance, already grounded against its partner. */
+export function swingClearance(knee: number, otherKnee: number): number {
+  return groundedClearance(knee, otherKnee)[0];
+}
+
+/**
+ * SPEC_17 — per-arm depth for Z-sorting.
+ *
+ * The elbow used `cos(aa)`, which is EVEN: a forward swing and a backward
+ * swing gave an identical elbow height, so the sagittal rotation was discarded
+ * and both arms stayed pinned in front of the chest ("carrying baskets").
+ * `sin` is the missing odd term. Positive = swinging toward the camera.
+ */
+export function armDepth(shoulderPitch: number): number {
+  return Math.sin(shoulderPitch);
+}
+
+/**
+ * Two-bone IK in the drawing plane. The foot is authored (clearance arc); the
+ * knee is solved rather than accumulated forward, which is what keeps the
+ * stance foot pinned at ground level instead of floating 1-2 cm.
+ * `bend` is the side the knee breaks toward.
+ */
+export function solveKnee(
+  hx: number, hy: number, fx: number, fy: number,
+  thigh: number, shin: number, bend: number,
+): [number, number] {
+  const dx = fx - hx, dy = fy - hy;
+  const reach = thigh + shin;
+  let d = Math.hypot(dx, dy);
+  if (d < 1e-4) d = 1e-4;
+  const dc = Math.min(d, reach * 0.999);
+  const ux = dx / d, uy = dy / d;
+  const a = (thigh * thigh - shin * shin + dc * dc) / (2 * dc);
+  const hgt = Math.sqrt(Math.max(0, thigh * thigh - a * a));
+  // perpendicular, pointing to the side the knee breaks toward
+  const px = -uy * bend, py = ux * bend;
+  return [hx + ux * a + px * hgt, hy + uy * a + py * hgt];
+}
+
 export const POS_OF_NUM: Record<number, keyof typeof BUILDS> = {
   1: 'PROP', 2: 'HOOK', 3: 'PROP', 4: 'LOCK', 5: 'LOCK', 6: 'BACKROW', 7: 'BACKROW', 8: 'BACKROW',
   9: 'HALF', 10: 'FLY', 11: 'WING', 12: 'CENTRE', 13: 'CENTRE', 14: 'WING', 15: 'FULL',
@@ -384,7 +518,7 @@ export function makeRef(): Character {
 /* These are the four dataset demands ported onto the papercraft        */
 /* pipeline. Core logic lives here (the permitted file); the frozen     */
 /* drawer in coronal.ts only consumes the optional PaperDrawArgs fields  */
-/* (squash, legScale) and the Pose returned by pinPlantedFoot /         */
+/* (squash, legScale) and the Pose returned by upperLowerRun.           */
 /* upperLowerRun. See IMPLEMENT_XL_ANIMATION.md.                        */
 /* ================================================================== */
 
@@ -435,22 +569,18 @@ export function edgeLegForeshorten(perp: number, camTiltDeg: number): number {
   return clampN(edge * tiltF, 0.6, 1);
 }
 
-/* ---- 2. NO-FOOT-SLIDE (SM-02 / W-07 / B-04) ----
- * Pose-level correction (zero drawer change): pin the planted foot to the
- * ground by nudging the hip so the lower (stance) foot meets y = 0. The
- * cadence lock (T-29 / S-06) already keeps feet tracking turf; this just
- * guarantees the contact foot does not float as the hip bobs. */
-export function pinPlantedFoot(pose: Pose, build: Build, speed = 1): Pose {
-  if (speed < 0.7) return pose;
-  const thigh = build.leg * 0.52, shin = build.leg * 0.48;
-  const hy = pose.hip - 0.02;
-  const fyL = hy - Math.cos(pose.lL) * thigh - Math.cos(pose.lL - pose.kL) * shin;
-  const fyR = hy - Math.cos(pose.lR) * thigh - Math.cos(pose.lR - pose.kR) * shin;
-  const stance = Math.min(fyL, fyR);
-  if (stance >= -0.005) return pose;          // already grounded
-  const corr = Math.min(0.06, -stance);        // raise hip so the foot meets the turf
-  return { ...pose, hip: pose.hip + corr };
-}
+/* ---- 2. NO-FOOT-SLIDE — REMOVED (SPEC_17.1) ----
+ * `pinPlantedFoot()` lived here. It raised the hip when a foot sank below the
+ * turf, but its guard `if (stance >= -0.005) return pose` only ever fired on a
+ * SINKING foot, and measurement across one full cycle of all five gaits found
+ * the lowest foot at +0.003 m. It never fired; before/after poses were
+ * byte-identical in every clip. It read as a working correction while doing
+ * nothing, which is worse than no code at all.
+ *
+ * Grounding is now STRUCTURAL, in the rig rather than in a post-hoc pose
+ * patch: the coronal leg authors its foot on a shallow clearance arc and the
+ * stance foot sits at exactly y = 0 by construction. See `swingClearance()`.
+ */
 
 /* ---- 3. RUNNING PASS upper/lower separation (R-03 / SM-13 / PR-04) ----
  * Keep the LOWER body on the run cycle (legs drive) while the UPPER body

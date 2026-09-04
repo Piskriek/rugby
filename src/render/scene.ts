@@ -21,7 +21,7 @@ import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
 import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
-  upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
+  upperLowerRun, squashForClip, edgeLegForeshorten,
   BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
@@ -370,18 +370,20 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
 
     /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
     let pose = pg.pose;
-    const GAIT = new Set(['jog', 'run', 'sprint', 'walk', 'shuffle', 'strafe', 'strafeL']);
     if (pg.clipName === 'passSpin' && pg.spd > 3.6) {
       // Running pass (R-03 / SM-13 / PR-04): upper/lower separation — legs keep
       // running while the arms throw the ball.
       const gc = actionClip(pg.spd < 6.2 ? 'run' : 'sprint', pg.spd);
-      let gait = sampleC(gc.name, pg.runU);
-      gait = pinPlantedFoot(gait, pg.ch.build, pg.spd);
+      const gait = sampleC(gc.name, pg.runU);
       pose = upperLowerRun(gait, pg.pose);
-    } else if (GAIT.has(pg.clipName) && pg.spd > 0.7) {
-      // No-foot-slide (SM-02 / W-07 / B-04): pin the planted foot to the turf.
-      pose = pinPlantedFoot(pose, pg.ch.build, pg.spd);
     }
+    /* SPEC_17 — `pinPlantedFoot` deleted. It was dead code: its guard only
+     * corrected a foot that SANK, and measurement showed the foot never sank
+     * (lowest +0.003 m across every gait), so before/after poses were
+     * byte-identical in all five clips. Grounding is now structural — the
+     * coronal rig authors the foot on a clearance arc and pins the stance foot
+     * at y = 0 by construction, which is what that helper only pretended to
+     * do. See SEASON_3_QUEUE.md SPEC_17.1. */
     const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
     const legScale = edgeLegForeshorten(perp, cam.tilt * 180 / Math.PI); // Edge Leg Foreshortening (B-14)
 

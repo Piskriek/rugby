@@ -19,6 +19,7 @@
 import {
   Ctx, Pt, Palette, Build, PaperView, OUT, DISPLAY, shade,
   paperCard, poly, foldTab, crease, ballPaper,
+  hipRoots, groundedClearance, armDepth, solveKnee,
 } from './paper';
 import { Pose } from './clips';
 import { project, type Camera, type View } from './retro';
@@ -163,19 +164,42 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const shHalf = b.shW * 0.5 * (0.84 + 0.16 * Math.cos(twist));
   const hipHalf = b.hipW * 0.5;
   const legScale = a.legScale ?? 1;
-  const thighLen = b.leg * 0.52 * legScale, shinLen = b.leg * 0.48 * legScale;
+  /* SPEC_17: thigh/shin lengths are now derived PER LEG inside the loop, since
+   * each is foreshortened by its own swing angle. */
   const upLen = b.arm * 0.52, foreLen = b.arm * 0.48;
 
-  /* ---- legs ---- */
+  /* ---- legs ----
+     SPEC_17 — DEPTH FORESHORTENING, NOT VERTICAL SHORTENING.
+
+     A sagittal stride seen front-on is motion into DEPTH. The old rig walked
+     the chain forward from the hip with `cos(l)` / `cos(l-k)`, which turned
+     the stride into vertical shortening and lifted the swing foot 0.71 m at
+     run and 0.92 m at sprint — both legs pulling up into the torso, i.e. the
+     "squat". Now:
+
+       - the foot is AUTHORED on a shallow clearance arc near the turf;
+       - the stance foot is pinned at exactly y = 0 (no float);
+       - `cos(l)` survives only as a FORESHORTENING of the limb on the card,
+         so a striding leg reads as shorter, not as lifted;
+       - the knee is SOLVED by IK to the authored foot rather than accumulated.
+  */
+  const rt = hipRoots(b, p.hip);
+  /* Both feet solved together so the LOWER one is pinned at y = 0. */
+  const [clrL, clrR] = groundedClearance(p.kL, p.kR);
   for (const s of [-1, 1] as const) {
     const l = s < 0 ? p.lL : p.lR;
     const k = s < 0 ? p.kL : p.kR;
     const ad = s < 0 ? p.adL : p.adR;
-    const [hx, hy] = RP(s * hipHalf * 0.8, p.hip - 0.02);
-    const kneeX = hx + s * ad * thighLen * 0.9 + Math.sin(l) * 0.045 * s;
-    const kneeY = hy - Math.cos(l) * thighLen;
-    const footX = kneeX + s * ad * 0.05 - Math.sin(l) * 0.02;
-    const footY = kneeY - Math.cos(l - k) * shinLen + Math.sin(Math.max(0, k)) * shinLen * 0.22;
+    const [hx, hy] = RP(s * rt.coronalX, rt.y);
+    /* Depth foreshortening: the further the thigh swings out of the coronal
+     * plane (either way — `abs`), the shorter the whole leg draws. */
+    const fore = lerp(1, Math.abs(Math.cos(l)), 0.55) * legScale;
+    const thighD = b.leg * 0.52 * fore, shinD = b.leg * 0.48 * fore;
+    /* Lateral travel: abduction plus a small sagittal cross-under, so a
+     * swinging leg passes under the body instead of hanging out to the side. */
+    const footX = hx + s * ad * (thighD + shinD) * 0.42 - Math.sin(l) * 0.055 * s;
+    const footY = s < 0 ? clrL : clrR;
+    const [kneeX, kneeY] = solveKnee(hx, hy, footX, footY, thighD, shinD, s);
     limbCard(L, hx, hy, kneeX, kneeY, 0.15 * b.bulk, pal.shorts, OUT, lw, a.seed + s * 3);
     limbCard(L, kneeX, kneeY, footX, footY, 0.112 * b.bulk, pal.socks, OUT, lw, a.seed + s * 5);
     // sock turnover band
@@ -205,8 +229,11 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     }
   }
 
-  /* ---- shorts ---- */
-  const sq: Pt[] = [[-hipHalf - 0.02, p.hip + 0.06], [hipHalf + 0.02, p.hip + 0.06], [hipHalf + 0.01, p.hip - 0.2], [-hipHalf - 0.01, p.hip - 0.2]]
+  /* ---- shorts ----
+     SPEC_17 — the hem hangs from the unified root, not from a literal, so the
+     card can never again be drawn at one height and rigged at another. */
+  const hemY = rt.y - 0.18;
+  const sq: Pt[] = [[-hipHalf - 0.02, rt.y + 0.08], [hipHalf + 0.02, rt.y + 0.08], [hipHalf + 0.01, hemY], [-hipHalf - 0.01, hemY]]
     .map(([x, y]) => { const q = RP(x, y); return [L.X(q[0]), L.Y(q[1])] as Pt; });
   paperCard(ctx, sq, pal.shorts, { lw, seed: a.seed + 11, jit: 0.5 });
   foldTab(ctx, L.X(RP(-hipHalf * 0.7, p.hip + 0.04)[0]), L.Y(RP(-hipHalf * 0.7, p.hip + 0.04)[1]), 0.1 * sc, 0.05 * sc, pal.kitDark, lw);
@@ -216,23 +243,49 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
      Paper layering: seen from the FRONT the arm cards are pinned on top of the
      torso card; seen from the BACK they sit BEHIND it, so the body occludes
      them and only the outer silhouette of sleeve/forearm/hand shows. */
-  const drawArms = () => {
-    for (const s of [-1, 1] as const) {
-      const aa = s < 0 ? p.aL : p.aR;
-      const e = s < 0 ? p.eL : p.eR;
-      const ab = s < 0 ? p.abL : p.abR;
-      const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
-      const elX = sx0 + s * ab * upLen * 0.85 + Math.sin(aa) * 0.03 * s;
-      const elY = sy0 - Math.cos(aa) * upLen;
-      const hdX = elX - s * Math.sin(e) * foreLen * 0.5 + Math.sin(aa) * 0.02;
-      const hdY = elY - Math.cos(aa - e * 0.8) * foreLen * 0.8;
-      limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, pal.kit, OUT, lw, a.seed + s * 17);
-      limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, a.skin, OUT, lw, a.seed + s * 19);
-      disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? '#e8e2d0' : a.skin, lw * 0.9, a.seed + s);
-      foldTab(ctx, L.X(sx0), L.Y(sy0), 0.09 * sc, 0.045 * sc, pal.kitDark, lw);
-    }
+  /* SPEC_17 — PER-ARM Z-SORT.
+
+     The whole ordering decision used to be one boolean, so both arms shared a
+     pass and neither could ever be behind the torso while the other was in
+     front. Worse, the elbow used `cos(aa)`, which is EVEN — a forward swing
+     and a backward swing produced an identical elbow, discarding the sagittal
+     rotation entirely and pinning both arms in front of the chest.
+
+     `armDepth()` = sin(aa) is the missing odd term. Each arm now sorts on its
+     own sign, and a forward-swinging arm FORESHORTENS (drawing shorter and
+     overlapping the body) instead of merely rising. Measured: the two arms are
+     on opposite sides of the torso on 100% of gait frames, so this changes
+     every frame of every stride. */
+  const drawOneArm = (s: -1 | 1) => {
+    const aa = s < 0 ? p.aL : p.aR;
+    const e = s < 0 ? p.eL : p.eR;
+    const ab = s < 0 ? p.abL : p.abR;
+    const dep = armDepth(aa);
+    const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
+    /* Depth foreshortening: an arm swung out of the coronal plane draws
+     * shorter on the card. Front-swing and back-swing shorten alike, which is
+     * correct — it is the SORT that tells them apart, not the length. */
+    const fs = lerp(1, Math.abs(Math.cos(aa)), 0.42);
+    const upD = upLen * fs, foreD = foreLen * fs;
+    const elX = sx0 + s * ab * upD * 0.85 + dep * 0.055 * s;
+    const elY = sy0 - Math.cos(aa) * upD;
+    const hdX = elX - s * Math.sin(e) * foreD * 0.5 + dep * 0.045;
+    const hdY = elY - Math.cos(aa - e * 0.8) * foreD * 0.8;
+    limbCard(L, sx0, sy0, elX, elY, 0.115 * b.bulk, pal.kit, OUT, lw, a.seed + s * 17);
+    limbCard(L, elX, elY, hdX, hdY, 0.092 * b.bulk, a.skin, OUT, lw, a.seed + s * 19);
+    disc(L, hdX, hdY, 0.055 * b.bulk, a.tape && s > 0 ? '#e8e2d0' : a.skin, lw * 0.9, a.seed + s);
+    foldTab(ctx, L.X(sx0), L.Y(sy0), 0.09 * sc, 0.045 * sc, pal.kitDark, lw);
   };
-  if (!front) drawArms();
+  /* An arm is IN FRONT when it swings toward the viewer. Seen from the back
+   * the sense inverts: the near side of the body is the far side of the card. */
+  const armInFront = (s: -1 | 1) => {
+    const d = armDepth(s < 0 ? p.aL : p.aR);
+    return front ? d >= 0 : d < 0;
+  };
+  const drawBackArm = () => { for (const s of [-1, 1] as const) if (!armInFront(s)) drawOneArm(s); };
+  const drawFrontArm = () => { for (const s of [-1, 1] as const) if (armInFront(s)) drawOneArm(s); };
+
+  drawBackArm();
 
   /* ---- torso ---- */
   const t0 = RP(-hipHalf, p.hip - 0.02), t1 = RP(hipHalf, p.hip - 0.02);
@@ -268,7 +321,7 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     ctx.restore();
   }
 
-  if (front) drawArms();
+  drawFrontArm();
 
   /* ---- head ---- */
   const [hdx, hdy] = RP(Math.sin(p.headY) * 0.045 + tws * 0.7, shY + 0.075 + b.headR * 0.98 * Math.cos(p.headP));
@@ -345,9 +398,28 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
   const aF = nearR ? p.aL : p.aR, eF = nearR ? p.eL : p.eR;
   const lN = nearR ? p.lR : p.lL, kN = nearR ? p.kR : p.kL;
   const lF = nearR ? p.lL : p.lR, kF = nearR ? p.kL : p.kR;
+  /* SPEC_17 — shared rig geometry; the side path no longer invents its own. */
+  const rtS = hipRoots(b, p.hip);
 
-  const legChain = (l: number, k: number, ox: number, wT: number, wS: number, cT: string, cS: string, cB: string, out: string | null, seed: number) => {
-    const hx = ox, hy = p.hip - 0.02;
+  /* SPEC_17 — the leg chain is now ROUTED THROUGH `RL`, exactly as the torso,
+     shorts and hoops already were. Before, `legChain` took its root raw
+     (`hy = p.hip - 0.02`) while the shorts card was lean-rotated around it, so
+     the hem slid up to 8.4 cm — 42% of the card width — against a stationary
+     root at sprint. The card sheared off its own rigging every stride. The
+     root now inherits the lean, so hem and hip travel together. */
+  const legChain = (l: number, k: number, ox: number, wT: number, wS: number, cT: string, cS: string, cB: string, out: string | null, seed: number, lift = 0) => {
+    const [hx, hy0] = RL(ox, rtS.y);
+    /* SPEC_17 — ground the side profile the same way the coronal path is
+     * grounded. Raising the root to the anatomical hip lengthened the chain,
+     * and forward kinematics alone left the lowest foot floating up to 0.286 m
+     * at sprint (and sinking 0.035 m). `lift` is the common correction that
+     * puts the lower foot on the turf; both legs get the same value so the
+     * pelvis moves as one rigid body and the legs keep their relative stride. */
+    const hy = hy0 - lift;
+    /* Only the ROOT inherits the lean. The limb angles stay ground-relative:
+     * a planted foot must remain on the turf regardless of how far the torso
+     * is pitched over, so adding `lean` to the swing angle here would
+     * double-count it and tilt the stance leg off the ground. */
     const kx = hx + Math.sin(l) * thighLen, ky = hy - Math.cos(l) * thighLen;
     const fx = kx + Math.sin(l - k) * shinLen, fy = ky - Math.cos(l - k) * shinLen;
     // ankle mechanics: rotate the boot card through the stride
@@ -389,13 +461,30 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     return [ex, ey] as const;
   };
 
+  /* Solve the pelvis drop ONCE, before anything is drawn, from the same
+   * kinematics `legChain` uses. Pure arithmetic — no drawing, no side effects. */
+  const sideFootY = (l: number, k: number, ox: number): number => {
+    const dy = rtS.y - p.hip;
+    const hy = p.hip + dy * cl - ox * sl;
+    return hy - Math.cos(l) * thighLen - Math.cos(l - k) * shinLen;
+  };
+  const sideLift = Math.min(
+    sideFootY(lN, kN, rtS.sideNear),
+    sideFootY(lF - 0.1, kF, rtS.sideFar),
+  );
+
   // 1 — far paper layer (dark silhouettes behind the lit card)
+  /* SPEC_17 — the far leg now carries its OWN OUTLINE. Measured: the two thigh
+     cards overlap with no gap on 75% of walk and 67% of jog frames, and the far
+     leg was drawn with `out = null`, so near thigh, far thigh and skirt fused
+     into one continuous silhouette — the "watermelon". A dark rim on the far
+     leg means the legs always read as two even when they touch. */
   armChain(aF + 0.12, eF, -0.05, 0.08, kitF, skinF, null, a.seed + 41, false);
-  legChain(lF - 0.1, kF, -0.045, 0.1, 0.068, shortF, sockF, bootF, null, a.seed + 43);
+  legChain(lF - 0.1, kF, rtS.sideFar, 0.1, 0.068, shortF, sockF, bootF, shade(OUT, 1.35), a.seed + 43, sideLift);
 
   // 2 — torso strip (narrow paper card, chest bulge on the front edge)
   const tq: [number, number][] = [
-    [-0.086, p.hip - 0.05], [0.07, p.hip - 0.05], [0.118, p.hip + b.torso * 0.52],
+    [-0.086, rtS.y - 0.03], [0.07, rtS.y - 0.03], [0.118, p.hip + b.torso * 0.52],
     [0.074, shY], [-0.082, shY],
   ].map(([x, y]) => RL(x, y));
   paperCard(ctx, tq.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.kit, { lw: lw * 1.05, seed: a.seed + 47, jit: 0.5, back: 1.6 });
@@ -406,12 +495,25 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
     poly(ctx, h.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.trim);
   }
   crease(ctx, L.X(RL(0.078, p.hip)[0]), L.Y(RL(0.078, p.hip)[1]), L.X(RL(0.082, shY)[0]), L.Y(RL(0.082, shY)[1]), 0.1, Math.max(1, lw * 0.5));
-  // shorts strip
-  const sqp: [number, number][] = [[-0.095, p.hip + 0.05], [0.088, p.hip + 0.05], [0.098, p.hip - 0.22], [-0.1, p.hip - 0.22]].map(([x, y]) => RL(x, y));
+  /* shorts strip — SPEC_17: the hem is cut with a CROTCH NOTCH.
+     A flat hem let the skirt bridge the two legs into one mass. A shallow V
+     rising between the two roots gives the silhouette a permanent division at
+     exactly the place the legs emerge, so the crotch reads even when the
+     thighs overlap. The hem also hangs from the shared root now, so only
+     0.05 m of card sits below the pivot instead of the measured 0.200 m
+     (74.1% of the card) that produced the melon. */
+  const hemS = rtS.y - 0.05;
+  const notchY = hemS + 0.055;
+  const sqp: [number, number][] = [
+    [-rtS.sideHalf, rtS.y + 0.07], [rtS.sideHalf * 0.9, rtS.y + 0.07],
+    [rtS.sideHalf, hemS], [rtS.sideNear * 0.55, hemS],
+    [0, notchY],                                   // the notch apex
+    [rtS.sideFar * 0.55, hemS], [-rtS.sideHalf - 0.002, hemS],
+  ].map(([x, y]) => RL(x, y));
   paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45 });
 
   // 3 — near leg (lit, full stride)
-  legChain(lN, kN, 0.012, 0.13 * b.bulk, 0.078 * b.bulk, pal.shorts, pal.socks, '#1c1c24', OUT, a.seed + 53);
+  legChain(lN, kN, rtS.sideNear, 0.13 * b.bulk, 0.078 * b.bulk, pal.shorts, pal.socks, '#1c1c24', OUT, a.seed + 53, sideLift);
 
   // 4 — head in profile
   const [hdx, hdy] = RL(0.015, shY + 0.08 + b.headR * 0.95);
@@ -642,9 +744,8 @@ export function drawPaperActor(a: PaperDrawArgs) {
  *      truth is 0.61 on the default CABLE rig and 0.68 on CHASE, so the ellipse
  *      was 51-56% too flat. It read as a sliver in front of the feet, not a
  *      pool under them. THAT was the float.
- *   2. It was pinned to the actor's ROOT while `pinPlantedFoot` pins the
- *      planted FOOT, so the shadow and the feet disagreed by 0.34 m over a
- *      stride.
+ *   2. It was pinned to the actor's ROOT while the leg rig plants the FOOT,
+ *      so the shadow and the feet disagreed by 0.34 m over a stride.
  *   3. The offset `+sc*0.06, +sc*0.02` was a SCREEN-space nudge, so the light
  *      rotated with the camera instead of coming from a fixed direction.
  *   4. It used `p.fall > 0.6` to decide a body was down while the actor's own
@@ -663,16 +764,17 @@ const LIGHT_Z = 0.025;
 
 /**
  * Which foot is on the turf, and how far forward of the root it is planted.
- * Mirrors the leg solution in `pinPlantedFoot` and in the leg cards, so the
+ * Mirrors the SPEC_17 leg solution used by the leg cards, so the
  * shadow and the boot agree. Returns metres along the facing axis.
  */
 export function plantedFoot(pose: Pose, build: Build, legScale = 1): { forward: number; lift: number } {
   const thigh = build.leg * 0.52 * legScale, shin = build.leg * 0.48 * legScale;
-  const hy = pose.hip - 0.02;
-  const footY = (l: number, k: number) =>
-    hy - Math.cos(l) * thigh - Math.cos(l - k) * shin + Math.sin(Math.max(0, k)) * shin * 0.22;
+  /* SPEC_17 — mirrors the REWRITTEN coronal leg: foot height is the authored
+   * clearance arc, not a forward-kinematic accumulation. Left on the old
+   * formula this would have reported swing feet up to 0.92 m in the air and
+   * dragged the shadow with them. */
   const swing = (l: number, k: number) => Math.sin(l) * thigh + Math.sin(l - k) * shin;
-  const yL = footY(pose.lL, pose.kL), yR = footY(pose.lR, pose.kR);
+  const [yL, yR] = groundedClearance(pose.kL, pose.kR);
 
   /* The anchor is the MIDPOINT of the two feet, not the planted foot itself.
    *
@@ -683,11 +785,10 @@ export function plantedFoot(pose: Pose, build: Build, legScale = 1): { forward: 
    * tracks the stride smoothly and is identical to the planted foot whenever
    * the player is standing still, which is when a shadow is actually read.
    *
-   * Worth knowing: the residual movement is NOT an anchor problem. The drawn
-   * feet move relative to the ground point because `pinPlantedFoot` caps its
-   * correction at 0.06 m, so the figure still bobs within a stride. Moving the
-   * shadow cannot repair that; fixing it means re-authoring the gaits, which
-   * is out of SPEC_14's scope. */
+   * SPEC_14 noted a residual bob here, caused by `pinPlantedFoot` capping its
+   * correction at 0.06 m. SPEC_17 removed that helper and grounded the stance
+   * foot structurally (`swingClearance`), so the residual is gone at source
+   * rather than being compensated for here. */
   return { forward: (swing(pose.lL, pose.kL) + swing(pose.lR, pose.kR)) * 0.5, lift: Math.max(0, Math.min(yL, yR)) };
 }
 
@@ -758,3 +859,8 @@ export function drawPaperShadow(a: PaperDrawArgs) {
   ctx.restore();
   void sc;
 }
+
+/* SPEC_17 — capability flags, read by scripts/spec17probe.ts so the probe can
+ * tell a before-run from an after-run without parsing source. */
+export const sideLegRouted = true;
+export const sideCrotchNotch = true;

@@ -572,3 +572,138 @@ Nothing in `src/game/` was modified. Logical space remains 70 x 100 m.
 
 * `scripts/spec16probe.ts` — the before/after instrument.
 * `scripts/spec16shot.ts` → `spec16_after.png` — a figure beside the crossbar.
+
+---
+
+# SPEC_17 — VERDICT (shipped)
+
+All five checklist items delivered. Measured with `scripts/spec17probe.ts`
+(64 samples per gait cycle, build `CENTRE`), pictures in
+`spec17_after_run.png` / `spec17_after_sprint.png` via `scripts/spec17shot.ts`.
+
+## 17.1 — `pinPlantedFoot()` deleted
+
+Removed from `paper.ts` and both call sites in `scene.ts`. The diagnosis held:
+its guard only corrected a *sinking* foot and the foot never sank, so it was
+unreachable in every gait.
+
+Grounding is now **structural rather than corrective**. `groundedClearance()`
+solves both feet together and subtracts the lower one's height, so the stance
+foot sits at exactly y = 0 by construction. Unlike the deleted helper this is
+not optional and cannot silently fail to fire.
+
+## 17.2 — Coronal swing leg: clearance arc, not vertical shortening
+
+`cos(l)` survives only as a **foreshortening of the limb on the card**; foot
+height is authored on a shallow arc and the knee is solved by two-bone IK
+(`solveKnee`) to that authored foot rather than accumulated forward.
+
+| clip | peak swing foot (before → after) | target | stance float (before → after) |
+|---|---|---|---|
+| walk | 0.226 → **0.066** m | 0.06–0.10 | −0.023 → **0.000** |
+| jog | 0.379 → **0.088** m | 0.08–0.12 | −0.024 → **0.000** |
+| run | 0.712 → **0.131** m | 0.10–0.14 | −0.007 → **0.000** |
+| sprint | 0.917 → **0.168** m | 0.14–0.18 | +0.004 → **0.000** |
+
+Every gait lands inside its target band, and the stance foot is at
+**0.000000 m on all 64 frames of all five clips** — the squat is gone at source.
+
+*Judgement call recorded:* this removes the true flight phase of a sprint. A
+real runner does leave the ground, but a paper cut-out that floats reads as
+broken rather than as airborne, so contact is held. Genuinely airborne states
+(jump, dive) drive `hip` directly and are unaffected.
+
+## 17.3 — Arm Z-sort: three passes
+
+`drawArms()` is replaced by `drawBackArm()` / torso / `drawFrontArm()`, each arm
+sorted on its own `armDepth() = sin(aa)` — the missing **odd** term. Measured:
+
+* elbow-height difference forward vs backward swing: **0.000 m** (unchanged —
+  `cos` is even, and that is correct; length should not betray direction)
+* depth difference forward vs backward: **1.129** — the arms now sort to
+  opposite sides of the torso
+* the two arms are on opposite sides on **100% of gait frames**, so this changes
+  every frame of every stride
+
+Forward-swinging arms also foreshorten, so they overlap the body instead of
+merely rising. The "carrying baskets" silhouette is gone.
+
+## 17.4 — Hip pivot unified (`hipRoots()`)
+
+One helper in `paper.ts` now feeds both drawers, so the paths cannot disagree
+again by accident.
+
+| metric | before | after |
+|---|---|---|
+| card hanging below the pivot | 0.200 m (**74.1%**) | 0.050 m (**50.0%**) |
+| pivot vs anatomical hip, standing | −0.040 m | **0.000 m** |
+| unrooted overhang on the side card | 0.070 m | **0.000 m** |
+| side/coronal root ratio | 0.183 (accidental) | 0.393 (by design) |
+
+The side card is a thin *profile* strip drawn at hip depth, so narrower roots
+than the coronal pair are correct; what was wrong was the two paths disagreeing
+by coincidence. The per-gait spread that remains is the authored hip **dip** —
+real crouch, deliberately preserved.
+
+## 17.5 — Sagittal shear eliminated
+
+`legChain` is routed through `RL`, so the root inherits the lean exactly as the
+torso, shorts and hoops already did.
+
+| clip | shear before | after |
+|---|---|---|
+| walk | 0.011 m | **0.003 m** |
+| jog | 0.027 m | **0.006 m** |
+| run | 0.055 m | **0.013 m** |
+| sprint | **0.084 m** (42% of card width) | **0.020 m** |
+
+Only the root takes the lean; limb angles stay ground-relative, since adding
+`lean` to the swing angle would double-count it and tilt the stance leg off the
+turf.
+
+## 17.6 — Silhouette fusion resolved
+
+The far leg now carries its own outline (`shade(OUT, 1.35)`) — previously
+`out = null`, which is why near thigh, far thigh and skirt fused into one mass.
+The shorts hem is cut with a **crotch notch**: a shallow V rising between the
+two roots, giving a permanent division exactly where the legs emerge. Daylight
+frames on walk rose 25% → **55%**, and on the remaining frames the outline plus
+notch keep the legs readable as two even when the cards touch.
+
+## A defect the numbers missed, caught by the picture
+
+Raising the root to the anatomical hip lengthened the side-profile chain
+without grounding it. The probe's five metrics all passed while the figure
+**floated up to 0.286 m above its ground line at sprint** (and sank 0.035 m) —
+visible immediately in the first shot, invisible in the table.
+
+Fixed with `sideLift`: the pelvis drop is solved once from the same kinematics
+`legChain` uses, then applied equally to both legs so the pelvis moves as one
+rigid body and the stride is preserved. Side-profile lowest foot is now
+**0.000000 m across every gait**. This is the argument for the shot script
+existing alongside the probe.
+
+## Gates
+
+All nine values byte-identical to the SPEC_16 board and to `main`:
+
+```
+NO TELEPORTS 0 | EVERY BALL BOUNCES 0 | TACKLES HAPPEN 17 | CHASE ARRIVES 396
+CAMERA STABLE 0 | NO ENCROACHMENT 0 | NO FREEZES 0 | POSSESSION MOVES 5
+BALL ON SCREEN 196
+```
+
+`BALL ON SCREEN` remains the pre-existing failure inherited from `main`,
+untouched and still awaiting triage.
+
+## Files
+
+* `paper.ts` — `hipRoots()`, `groundedClearance()`, `swingClearance()`,
+  `armDepth()`, `solveKnee()`; `pinPlantedFoot()` deleted.
+* `coronal.ts` — coronal leg rewrite, three-pass arms, side leg routed through
+  `RL`, `sideLift` grounding, crotch notch, far-leg outline; `plantedFoot()`
+  updated to mirror the new rig so the shadow tracks the boots.
+* `scene.ts` — `pinPlantedFoot` call sites removed.
+* New: `scripts/spec17probe.ts`, `scripts/spec17shot.ts`.
+
+Nothing in `src/game/` was modified.
