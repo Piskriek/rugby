@@ -715,10 +715,16 @@ export function drawPaperShadow(a: PaperDrawArgs) {
 
   /* The caster height decides both how far the shadow is thrown and how soft
    * it is. A body on the turf casts from almost nothing. */
-  const casterH = (down ? 0.35 : Math.max(0.35, p.hip)) * FIGURE_SCALE;
+  /* SPEC_16 — these are LOGICAL-metre quantities projected through `project()`,
+   * which now carries RENDER_SCALE. SPEC_14 multiplied them by FIGURE_SCALE to
+   * chase a figure that was 1.65x oversize in world terms; with the world
+   * scaled to match, the figure's ink measures true (1.86 m of ink for a 1.86 m
+   * build), so the shadow must be authored true as well. Keeping FIGURE_SCALE
+   * here would leave the shadow 1.65x too wide for the man standing in it. */
+  const casterH = down ? 0.35 : Math.max(0.35, p.hip);
 
-  /* World radius of the pool, in metres, scaled with the figure. */
-  const rxM = (down ? 0.95 : (0.3 + a.build.shW * 0.32) * (1 + air * 0.9)) * FIGURE_SCALE;
+  /* World radius of the pool, in metres. */
+  const rxM = down ? 0.95 : (0.3 + a.build.shW * 0.32) * (1 + air * 0.9);
 
   const anchor = groundAnchor(a);
   const ax = anchor.x + LIGHT_X * casterH;

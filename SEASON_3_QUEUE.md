@@ -483,3 +483,92 @@ changes. Independent of the render chain; may run in parallel with SPEC_16/17.
 3. On sign-off, SPEC_16 begins at step 16.0 (the probe), not at step 16.1.
 
 **Halting here.**
+
+---
+
+# SPEC_16 — VERDICT (shipped)
+
+Executed under the Phase 2 authorisation. Steps 16.0 → 16.4 complete.
+
+## The framing ruling turned out to be free
+
+The ruling directed that the ~40% viewport loss be bought back by pulling the
+camera out by 1.65x. **Measurement shows the compensation is not merely
+adequate — it is exact, and the loss never occurs at all.**
+
+Projection is a *similarity transform*. Scaling world coordinates and the
+camera rig (`x`, `z`, `h`) by the same factor `k`, while leaving `yaw`, `tilt`
+and `fov` untouched, leaves every ground feature on **identically the same
+pixel**. Verified directly: pitch corners, touchlines and the crossbar all land
+byte-identical before and after.
+
+What *does* change is `sc`, the px-per-scaled-metre returned by `project()`.
+It falls by exactly `1/1.65 = 0.60606`. Because the figure is drawn in SCREEN
+space as `FIGURE_SCALE * sc`, its ink shrinks by exactly 1.65 — while the
+world's ink does not move at all. That is the whole fix, and it is why
+`RENDER_SCALE` and `FIGURE_SCALE` now cancel to unity: **every build draws
+exactly its authored height.**
+
+So the ruling's intent is honoured with zero framing cost. There is no trade to
+accept.
+
+## Measured before / after (seeds 1 & 7, difficulty 3, 60 s, 600 drawn frames)
+
+| metric | before | after | note |
+|---|---|---|---|
+| **figure / crossbar** (depth-corrected) | **1.066** | **0.572** | running figure |
+| **figure / crossbar** (standing, at posts depth) | 1.039 | **0.6310** | life = 0.6300 |
+| crossbar height | 26.65 px | **26.65 px** | unmoved |
+| visible pitch WIDTH | 179.00 m | **179.00 m** | unmoved |
+| visible pitch DEPTH | 142.00 m | **142.00 m** | unmoved |
+| drawn figure height | 2.735 m of ink | **1.717 m** | authored 1.86 standing |
+| HALF / CENTRE / LOCK drawn | 2.90 / 3.12 / 3.27 m | **1.76 / 1.89 / 1.98 m** | = authored, exactly |
+| shadow ÷ silhouette width | 1.160 | **1.039** | tightened onto the feet |
+
+The depth-corrected running figure reads 0.572 rather than 0.62 because a
+runner is genuinely shorter than his standing height — hip dip plus forward
+lean. Standing, at the posts, the number is 0.6310 against a life value of
+0.6300: **exact to 0.16%.**
+
+## Gates: all nine byte-identical
+
+`npx vite-node scripts/gates.ts 100`, before vs after:
+
+```
+NO TELEPORTS 0 | EVERY BALL BOUNCES 0 | TACKLES HAPPEN 17 | CHASE ARRIVES 396
+CAMERA STABLE 0 | NO ENCROACHMENT 0 | NO FREEZES 0 | POSSESSION MOVES 5
+BALL ON SCREEN 196
+```
+
+Every value identical. `RENDER_SCALE` has not leaked into logic — the exit
+criterion.
+
+**`BALL ON SCREEN` fails at 196 (limit 60) both before and after.** It is a
+pre-existing failure inherited from `main`, confirmed by running the gates on a
+clean stash. It is **not** caused by SPEC_16 and, under No Scope Creep, is
+recorded here rather than fixed. It should be triaged — recommend it becomes
+part of SPEC_19/20 or its own ticket.
+
+## What was changed
+
+* `retro.ts` — `RENDER_SCALE = 1.65`; `camScale()`; both applied inside
+  `project()`, the single choke point (option 1 of step 16.2 — no call site can
+  forget). The 0.25 m near plane is scaled with the world so the clip plane
+  does not silently move.
+* **Anchor reconciliation.** Five world-space anchors were multiplied by
+  `FIGURE_SCALE` under SPEC_14 to chase a figure that was 1.65x oversize *in
+  world terms*. With the world now scaled to match, the figure measures true,
+  so those inflations became wrong and were removed: the shadow caster height
+  and pool radius (`coronal.ts`), the carried-ball chest anchor, the maul and
+  breakdown ball heights, and `REF_HEAD_Y` (`scene.ts`). Left in place, the
+  shadow would have been 1.65x too wide and the referee's bubble 1.2 m above
+  his head. This is why the shadow ratio improved from 1.160 to 1.039.
+* `FIGURE_SCALE` itself is **untouched** at 1.65, per the ruling that logical
+  data and the SPEC_14 contract stay intact.
+
+Nothing in `src/game/` was modified. Logical space remains 70 x 100 m.
+
+## Artefacts
+
+* `scripts/spec16probe.ts` — the before/after instrument.
+* `scripts/spec16shot.ts` → `spec16_after.png` — a figure beside the crossbar.

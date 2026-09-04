@@ -22,7 +22,7 @@ import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten, pinPlantedFoot,
-  FIGURE_SCALE, BUILDS, paperCard, type Pt,
+  BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 
@@ -307,16 +307,19 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
        * offset from the spine have to grow with the figure or it ends up at
        * his waist. Only the CARRIED anchors scale; a ball in flight or on the
        * turf is world geometry and is untouched. */
-      const hx = (cp ? Math.sin(cp.face) * 0.26 : 0.3) * FIGURE_SCALE;
-      const hz = (cp ? Math.cos(cp.face) * 0.26 : 0) * FIGURE_SCALE;
-      ballWorld = { x: o.carrierX + hx, y: 1.14 * FIGURE_SCALE, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
+      /* SPEC_16 — chest anchors are logical metres and now draw true through
+       * RENDER_SCALE; the SPEC_14 FIGURE_SCALE inflation would put the ball
+       * 1.65x out from the spine and above the carrier's head. */
+      const hx = cp ? Math.sin(cp.face) * 0.26 : 0.3;
+      const hz = cp ? Math.cos(cp.face) * 0.26 : 0;
+      ballWorld = { x: o.carrierX + hx, y: 1.14, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
     }
   } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
     const m = d.ml;
     const yawRad = (m.yaw * Math.PI) / 180;
     const lz = -m.dir * m.ballRank * 0.78;
     ballWorld = {
-      x: m.x - lz * Math.sin(yawRad), y: 1.02 * FIGURE_SCALE,
+      x: m.x - lz * Math.sin(yawRad), y: 1.02,   // SPEC_16: logical metres
       z: m.z + lz * Math.cos(yawRad), spin: m.t * 0.6, visible: true,
     };
   } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
@@ -325,7 +328,8 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
       ballWorld = { x: b.ball.x, y: 0.16, z: b.ball.z, spin: b.t * 0.5, visible: true };
     } else if (carrier) {
-      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05 * FIGURE_SCALE, z: carrier.z, spin: b.t * 2.2, visible: true };
+      // SPEC_16: chest height in logical metres
+      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z, spin: b.t * 2.2, visible: true };
     }
   }
 
@@ -766,9 +770,11 @@ const BUBBLE_COLOUR: Record<string, string> = {
   NUDGE: '#ffd76a',
 };
 
-/** Above his head. SPEC_14 made the figures 1.65x, so this has to scale with
- *  them or the bubble ends up at his chest. */
-const REF_HEAD_Y = BUILDS.REF.h * FIGURE_SCALE + 0.8;
+/** Above his head. SPEC_16: the figure now draws true against a world carrying
+ *  RENDER_SCALE, so the authored build height IS the drawn height in logical
+ *  metres and the SPEC_14 FIGURE_SCALE inflation would float the bubble 1.2 m
+ *  clear of the referee. */
+const REF_HEAD_Y = BUILDS.REF.h + 0.8;
 
 /**
  * One paper card with a tail. The card is clamped inside the frame so it never
