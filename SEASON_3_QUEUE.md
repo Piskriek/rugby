@@ -1289,3 +1289,149 @@ a gate hole) → `D-3` (rich existing telemetry) → `D-4` (needs a predicate ru
 first) → `D-5` (needs a scope ruling first).
 
 **Halting for review of this plan before any diagnostic code is written.**
+
+---
+
+# SPEC_19 / SPEC_20 — DIAGNOSTIC DATA (D-1 … D-5)
+
+All five probes are read-only. **No live fixes written.** Probes committed:
+`scripts/d1viewport.ts`, `d2lineout.ts`, `d3offside.ts`, `d4smellblood.ts`,
+`d5volume.ts`.
+
+## D-1 `BALL ON SCREEN` — **H2 confirmed, H1 rejected**
+
+Ruling was to probe camera focal point vs ball. Done, difficulty 0, gate's own
+live-ball filter, 4623 live-ball frames, 266 failing.
+
+**The camera is not pointed at the ball, and it is not a viewport problem.**
+
+| measure | value |
+|---|---|
+| median \|yaw error\| vs view axis | **39.4°** (p90 53.0°, max 131.3°) |
+| median \|pitch error\| | **34.5°** (p90 37.1°) |
+| camera within 8 m of the ball | **239 / 266** failing frames |
+| ball behind the camera plane | 20 / 266 |
+
+Viewport sweep — H1 predicts a bigger box fixes it. It does not:
+
+| viewport | failing |
+|---|---|
+| 960×540 m60 (current) | 266 |
+| 1920×1080 m60 (same aspect, 2× scale) | 166 |
+| 2560×1440 m60 | 155 |
+| 960×540 m0 (no margin at all) | 133 |
+
+Even with **zero margin** 133 frames still fail. The fault is angular, so
+`RENDER_SCALE` is exonerated — it is applied to camera and world alike inside
+`project()` and cancels.
+
+**Root cause.** The failing frames are a camera that has come *too close*:
+
+| | failing | healthy |
+|---|---|---|
+| horizontal gap to ball | p50 **5.5 m** (min 4.8) | p50 18.7 m |
+| camera height | 13.0 m | 13.0 m |
+| tilt | 30.4° | 29.6° |
+
+At 13 m high and 5.5 m out, the ball sits ~67° below horizontal while the rig
+tilts 30°. The ball is nearly underneath the camera and falls out of the bottom
+of frame — which matches the measured 97% "bottom" failures. Concentrated in 3
+episodes (197, 62, 59 frames), phases `OPEN_PLAY` 231 / `KICK` 35.
+
+**This is a camera rig fault, not a test fault. The 60-frame threshold stays.**
+Candidate fix for review: floor the horizontal trail distance as a function of
+camera height so the tilt can always reach the ball.
+
+## D-2 N-01 lineout teleport — **a real gate blind spot**
+
+| phase | frames | mean disp | max disp | >1.4 m (gate) |
+|---|---|---|---|---|
+| LINEOUT | 26190 | 0.0878 | **0.906** | **0** |
+| OPEN_PLAY | 121860 | 0.0761 | 1.087 | 0 |
+
+33 jumps over 0.35 m inside `LINEOUT`, tightly clustered at **0.87–0.91 m per
+frame** — implied speed **p50 51.9 m/s, max 54.4 m/s** against a ~9 m/s sprint.
+
+**The `NO TELEPORTS` gate passes at 0 because its threshold is 1.4 m/frame and
+every lineout snap lands just under it.** The bug is real and the gate is blind
+to it by ~35%. Jumps occur **1–5 s after** phase entry, never at the edge
+(0 jumps in the first 1.0 s), so this is not a phase-transition write race — it
+is a positioning step applied mid-phase.
+
+Threshold change would need written justification per house rules; flagging, not
+moving.
+
+## D-3 T-71 offside loitering — **the premise is partly wrong**
+
+1606 episodes, 1241 lasting ≥ 0.25 s.
+
+| what an offside player does | frame share |
+|---|---|
+| retreating toward the line | **64.9%** |
+| holding station (loitering) | 21.7% |
+| drifting further offside | 11.3% |
+
+Episodes with **zero** retreating frames: **64 / 1241 (5.2%)**. Episodes ending
+no better than they started: 171 / 1241 (13.8%).
+
+"Players do not retreat with intent" is **not** what the engine does in the
+general case — two thirds of offside frames are already retreating. The real
+defect is narrower: a **5.2% tail that never retreats at all**, plus a long
+lingering tail (p50 0.67 s but max **8.42 s**) and peak penetration reaching
+**37.9 m**. By line kind: RESET 497, OPEN 399, RUCK 292, LINEOUT 27, MAUL 26.
+
+Recommend re-scoping T-71 from "make them retreat" to "eliminate the
+never-retreat tail and cap episode duration".
+
+## D-4 N-02 Smell Blood — **the detector works; the sample is thin**
+
+Ruled predicate: carrier ahead of defensive median depth AND ≥ 7.0 m clear in a
+±45° forward cone. 2890 carrier frames.
+
+| component | frames | share |
+|---|---|---|
+| ahead of defensive median | 840 | 29.1% |
+| ≥ 7 m clear in cone | 876 | 30.3% |
+| **both (predicate fires)** | **712** | **24.6%** |
+
+Forward clear space: p10 0.9 m, p50 2.9 m, p90 6.8 m, p99 13.9 m; the cone is
+empty on 671 frames.
+
+**The detector is not the bug** — it fires on a quarter of carrier frames. But
+those 712 frames collapse into only **12 episodes** (8 lasting ≥ 0.2 s), and
+metres gained is p50 2.7 m with a single 79.5 m / 8.4 s outlier that is almost
+certainly one clean break. Only 1 of 8 episodes gained < 1 m.
+
+**Caution before tuning:** n = 8 is too small to justify a behaviour change, and
+the mean is dominated by one episode. Recommend re-running across several seeds
+and difficulties to get a stable episode count before touching attacker AI.
+
+## D-5 SPEC_04 volume — **scope located, mix computed analytically**
+
+`src/game/audio.ts` (164 lines) is pure WebAudio; every gain is a literal, so
+the mix is exact without a browser. Master 0.9 (−0.9 dBFS).
+
+| source | at master | dBFS |
+|---|---|---|
+| bed — idle, no travelling support | 0.025 | **−32.1** |
+| bed — idle, full support | 0.050 | −26.1 |
+| bed — momentum + in 22 + full support | 0.183 | −14.7 |
+| bed — TRY spike | 0.520 | **−5.7** |
+| TACKLE force 1.0 | 0.225 | −13.0 |
+| TACKLE force 0 | 0.096 | −20.3 |
+| KICK | 0.106 | −19.5 |
+| whistle (envelope) | 0.077 | −22.3 |
+| whistle (**true peak**, 2 detuned oscillators, og 1.0 + 0.5) | 0.115 | −18.8 |
+
+Worst-case sum, try scored: bed 0.520 + whistle 0.115 = 0.635 (−4.0 dBFS); add a
+max-force tackle in the same instant = **0.860 (−1.3 dBFS)**. No clipping, but
+only **1.3 dB of headroom**, and **there is no limiter or compressor** — every
+node connects straight to master, so any future gain increase hard-clips.
+
+Two findings worth a ruling:
+1. **The whistle is quieter than a tackle** (−18.8 vs −13.0 dBFS). A referee's
+   whistle being 5.8 dB under a collision is likely backwards.
+2. **Bed dynamic range is 26.4 dB** (−32.1 → −5.7). The quiet bed at −32 dBFS is
+   near inaudible over typical playback; the try spike is 4× the loudest tackle.
+
+**Halting for review of all five diagnostics.**
