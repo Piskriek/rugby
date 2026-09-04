@@ -1039,11 +1039,11 @@ export function runTrace(cfg: MatchConfig, seconds = 70, sampleHz = 4, limit = T
     elapsed += dt;
     acc += dt;
 
-    /* Do not keep sampling a frozen Director after full time. This is
-     * immaterial to the default 90-second compatibility path, but prevents an
-     * opt-in full-match capture from replaying the final LINEOUT/MAUL state
-     * forever after `d.over` becomes true. */
-    if (d.over) break;
+    /* Do not keep sampling a frozen Director after full time in the opt-in
+     * quota capture. The legacy/default path deliberately retains its old
+     * behaviour for every existing caller, including callers that request more
+     * than one match's worth of seconds. */
+    if (d.over && captureLimit > TRACE_LIMIT) break;
 
     // resolve deferred input points against the following frame
     if (pending.length) {
