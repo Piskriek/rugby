@@ -567,6 +567,11 @@ export const REFEREE_CALLS: Record<string, string> = {
   MAUL_STOPPED: 'TURNOVER — MAUL STOPPED AND RESTARTED',
   IN_AT_SIDE: 'PENALTY — IN AT THE SIDE',
   TRIP: 'PENALTY — TRIPPING',
+  /* RC2-3 — Law 9.7(b), wasting time. A kickoff that is never struck used to
+   * hang forever: the AIM/METER stage had no timeout for a human kicker, so
+   * `s.t` accrued unbounded and the match simply stopped. Sanctioned as a
+   * free kick, which under Law 12 is what a delayed restart concedes. */
+  DELAY_KICKOFF: 'FREE KICK — TIME WASTING AT THE RESTART',
 };
 
 /* ============================ 9. COMPETITIONS ============================ */

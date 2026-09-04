@@ -410,3 +410,106 @@ worked around.**
 `AB_BASE = 0.26`, `AB_SWING = 0.30`, `AB_MAX = 0.72` — all exactly as approved.
 Worst-case total abduction with the turn flare stacked is **0.7200**, held by the
 clamp, inside the 0.72–0.80 the `shuffle` clip already authors.
+
+---
+
+## RC2 HOTFIXES — SHIPPED
+
+Five QA defects. `tsc --noEmit` clean; **9/9 Season 3 gates**, **15/15 seeds**,
+SPEC_21, SPEC_22 and SPEC_06 hysteresis all still pass. Shot sheets:
+`rc2_shot.png` (run), `rc2_sprint.png` (sprint — the worst case for #1).
+
+Per the directive, **no new automated gates were written for the visual fixes**;
+each rests on structural mathematics, verified by one-shot measurement.
+
+### 1. Side-view crotch gap — cause was NOT the notch
+
+The ruling assumed the SPEC_21 clamp left the polygon short of the roots. It was
+larger than that: `legChain` roots each leg at `hy = hy0 - lift`, where
+`sideLift` drops the pelvis to keep the lower foot on the turf. **The shorts card
+never applied that lift.** Measured gap between the notch apex and the *drawn*
+root:
+
+| gait | gap |
+|---|---|
+| walk | 0.049 m |
+| jog | 0.082 m |
+| run | 0.174 m |
+| **sprint** | **0.279 m** |
+
+At sprint the drawn hip sat 28 cm below the fabric — the legs walked out of
+their own shorts. Both hem and notch now hang from `rootS = rtS.y - sideLift`,
+and the card is pushed a further `CROTCH_OVERLAP = 0.045` below it so it
+positively overlaps the thigh tops. Verified across 10 builds x 4 gaits: worst
+case the card reaches **0.095 m BELOW** the root — zero daylight everywhere. The
+V survives, so SPEC_17's anti-melon property is intact.
+
+### 2. Arm clipping and z-sort popping — two discontinuities on one frame
+
+Both halves confirmed and both fixed.
+
+- **Anchor.** `shHalf * 0.9` rooted the arm **0.0225–0.0290 m inside** the torso
+  edge on every build, so the card straddled the outline. `SHOULDER_ANCHOR = 1.0`
+  puts the joint on the edge; the arm swings beside the body.
+- **Shade.** The real pop was in `pairShade`. Its `sign` term is a step function
+  and the 0.85 floor holds right up to the crossing, so the two arms **jumped
+  past each other** — measured `#a42121 <-> #c92929` swapping in a single frame,
+  landing on the same frame as the layer swap. Replaced the step with a smooth
+  odd ramp across a tight `LIMB_FADE_BAND = 0.06`; the shades now converge
+  continuously (to `#b62525` at the crossing) instead of leaping.
+
+**SPEC_18.1 regression checked, because this trades against it.** Inside the band
+the limbs do converge — but the fade only applies where they are at the same
+depth. Arms sit on opposite sides of the torso and cannot fuse. For the legs,
+which genuinely do cross, I measured colour-fusion AND spatial overlap together:
+**0 frames** where legs both fuse in colour and overlap in space. The anti-fusion
+intent holds.
+
+### 3. Kickoff delay of game
+
+Confirmed: `AIM`/`METER` had **no timeout on the human path** — every other stage
+is bounded (FANFARE 2.2/4.2 s, WALKUP 5.0 s), so this was the one open end and
+`s.t` accrued forever. Added `RESTART_SHOT_CLOCK = 15 s`, scoped to
+`RESTART`/`DROP_OUT`, sanctioned as `FREE KICK — TIME WASTING AT THE RESTART`
+through the existing `beginPenalty(..., free = true)` path.
+
+Two deliberate constraints: the clock **does not run while the kicker is lawfully
+blocked** (opposition not back ten, formation not set), and 15 s leaves **7.4 s
+of headroom** over the 7.6 s a maximum aim sweep plus full charge actually needs.
+
+### 4. Referee ruck warning — DIAGNOSIS CORRECTED
+
+**The ruck warning never blew a whistle.** It is a silent `showHint` at
+`breakdown.ts:47` and always has been. There are exactly five whistle call sites
+in the game; four are genuine stoppages (try, card, law call, TMO). The only
+non-stoppage whistle was the **maul USE IT cue** in `setpieces.ts` — that is the
+one that breaks immersion, and it is what the ruling describes.
+
+So I applied the ruling's *intent* to the real site and the ruling's *letter* to
+the named one:
+
+- Added `audio.shout()` — a band-passed noise bark sweeping 900 -> 420 Hz,
+  deliberately unlike the 2093/2333 Hz whistle. At −22.3 dBFS it sits **11.0 dB
+  below** the whistle, so D-5's "whistle is the peak" ruling is preserved and the
+  worst-case sum stays at −5.6 dBFS with no clipping.
+- The maul USE IT cue now shouts instead of whistling. Play does not halt.
+- The ruck warning text is now **"NO MORE HANDS!"** as ruled, spoken by the
+  referee, and it **gains audio it never had** — previously a defender could be
+  penalised on a second attempt with no audible warning of the first.
+
+### 5. Anti-skating
+
+The divisors were already correct: above the floor, stride length is **exactly
+constant** (walk 1.300 m/cycle, jog 2.100, run 2.900, sprint 3.600). The skating
+came from the `Math.max(...)` **floors**, which kept the clock running when the
+ground was not moving — at `v = 0` every gait still cycled at 0.30–0.60 cycles/s,
+and sprint was floored all the way up to 2.16 m/s.
+
+Any non-zero floor breaks `du/dt ∝ |v|` by construction, so they were removed
+rather than lowered. Also fixed two the brief did not mention: **`shuffle` ran at
+a fixed 1.0 cycles/s** — identical at `v = 0` and `v = 9`, the purest skate in
+the table — and `strafe` carried its own 0.5 floor.
+
+Verified structurally: stride length now invariant at every speed for every
+gait; `rate(0) === 0` exactly for all seven moving clips; and
+`rate(2v) === 2·rate(v)` to `0.0e+0`.

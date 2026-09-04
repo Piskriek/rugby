@@ -79,6 +79,17 @@ export interface PaperDrawArgs {
  *  without severing the pelvis. */
 const CROTCH_MIN_DEPTH = 0.012;
 
+/** RC2-1 — how far the side shorts card is pushed BELOW the leg-root line so it
+ *  positively overlaps the thigh tops instead of merely meeting them. Zero
+ *  daylight is the requirement; a butt joint would still show a seam. */
+const CROTCH_OVERLAP = 0.045;
+
+/** RC2-2 — shoulder anchor as a fraction of the torso half-width. 0.9 rooted
+ *  the arm 22-29 mm INSIDE the torso edge on every build, so the card
+ *  straddled the outline and the z-sort swap had overlapping area to reveal.
+ *  1.0 puts the joint on the edge: the arm swings beside the body. */
+const SHOULDER_ANCHOR = 1.0;
+
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const clampN = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
@@ -363,7 +374,15 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
      * the art has never drawn. */
     const abGait = gaitFlare(aa, a.spd ?? 0, flareW);
     const abEff = Math.min(AB_MAX, ab + abGait + abBias);
-    const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
+    /* RC2-2 — SHOULDER ANCHOR MOVED OUT TO THE TORSO EDGE.
+     * The anchor was `shHalf * 0.9`, which measured 0.0225-0.0290 m INSIDE the
+     * torso edge on every build. The arm therefore rooted inside the body and
+     * its card straddled the torso outline, so each time `armDepth` crossed
+     * zero the overlapping wedge switched layer and popped. Anchoring at
+     * SHOULDER_ANCHOR = 1.0 puts the joint ON the edge, so the limb swings
+     * BESIDE the torso and the layer swap has far less overlapping area to
+     * reveal. */
+    const [sx0, sy0] = RP(s * shHalf * SHOULDER_ANCHOR + tws, shY - 0.02);
     /* Depth foreshortening: an arm swung out of the coronal plane draws
      * shorter on the card. Front-swing and back-swing shorten alike, which is
      * correct — it is the SORT that tells them apart, not the length. */
@@ -609,7 +628,6 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
      thighs overlap. The hem also hangs from the shared root now, so only
      0.05 m of card sits below the pivot instead of the measured 0.200 m
      (74.1% of the card) that produced the melon. */
-  const hemS = rtS.y - 0.05;
   /* SPEC_21 Item 2 — CLAMP THE NOTCH APEX BELOW THE LEG ROOTS.
    * SPEC_17's V was authored as `hemS + 0.055`, which measured 0.9450 against a
    * root line at 0.9400 — the apex rose 5 mm ABOVE the roots and bit a wedge
@@ -617,12 +635,32 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
    * join. The anti-melon property only needs the V to exist, not to overshoot,
    * so the apex is now held a guaranteed CROTCH_MIN_DEPTH below the roots.
    * No new polygon: the `sqp` card already spans both roots. */
-  const notchY = Math.min(hemS + 0.055, rtS.y - CROTCH_MIN_DEPTH);
+  /* RC2-1 — THE HEM MUST FOLLOW THE LIFTED ROOT.
+   *
+   * SPEC_21's clamp stopped the notch biting UPWARD, but a second, larger gap
+   * remained and it is not a notch problem at all: `legChain` roots each leg at
+   * `hy = hy0 - lift`, where `sideLift` drops the pelvis by as much as 0.29 m at
+   * sprint to keep the lower foot on the turf. The shorts card never applied
+   * that lift, so the legs walked down out of their own shorts. Measured worst
+   * (notch apex minus the DRAWN root):
+   *
+   *     walk 0.049 m   jog 0.082 m   run 0.174 m   sprint 0.279 m
+   *
+   * i.e. at sprint the drawn hip sat 28 cm below the fabric — daylight straight
+   * through the pelvis, which is exactly the "torso and legs disconnected" QA
+   * saw. Both the hem and the notch now hang from `rootS`, the same lifted line
+   * the legs are actually rooted at, and the card is extended below it by
+   * CROTCH_OVERLAP so it positively overlaps the leg tops rather than merely
+   * touching them. The V survives (anti-melon, SPEC_17); it is simply cut in a
+   * card that now reaches the legs. */
+  const rootS = rtS.y - sideLift;
+  const hemL = rootS - 0.05;                      // hem line, on the lifted root
+  const notchY = Math.min(hemL + 0.055, rootS - CROTCH_MIN_DEPTH);
   const sqp: [number, number][] = [
     [-rtS.sideHalf, rtS.y + 0.07], [rtS.sideHalf * 0.9, rtS.y + 0.07],
-    [rtS.sideHalf, hemS], [rtS.sideNear * 0.55, hemS],
+    [rtS.sideHalf, hemL], [rtS.sideNear * 0.55, hemL - CROTCH_OVERLAP],
     [0, notchY],                                   // the notch apex
-    [rtS.sideFar * 0.55, hemS], [-rtS.sideHalf - 0.002, hemS],
+    [rtS.sideFar * 0.55, hemL - CROTCH_OVERLAP], [-rtS.sideHalf - 0.002, hemL],
   ].map(([x, y]) => RL(x, y));
   paperCard(ctx, sqp.map(([x, y]) => [L.X(x), L.Y(y)] as Pt), pal.shorts, { lw, seed: a.seed + 51, jit: 0.45, round: L.round });
 

@@ -371,17 +371,46 @@ export function actionClip(action: string, speed: number, lat?: number): ClipCho
     /* SPEC_06: scene.ts resolves shuffle-vs-strafe via the reviewed hysteresis
      * dead bands (0.85-1.15 for strafe), so these are explicit states. The
      * strafe cadence still tracks the lateral rate so feet lock to the ground. */
+    /* RC2-5 — the shuffle ran at a FIXED 1.0 cycles/s, identical at v = 0 and
+     * v = 9: the purest skate in the table. It is a side-step, so its cadence
+     * is driven by the total ground speed it is covering. */
     case 'shuffle':
-      return { name: 'shuffle', rate: 1.0 };
+      return { name: 'shuffle', rate: speed / 1.15 };
     case 'strafe': case 'strafeL': {
-      const r = lat !== undefined ? Math.max(0.5, Math.abs(lat) / 1.7)
-        : Math.max(0.5, speed / 1.7);
+      /* RC2-5 — floor removed here too. The strafe keys off the LATERAL rate
+       * (that is the direction the feet are actually crossing), falling back to
+       * total speed when the caller has not resolved `lat`. */
+      const r = lat !== undefined ? Math.abs(lat) / 1.7 : speed / 1.7;
       return { name: action === 'strafe' ? 'strafe' : 'strafeL', rate: r };
     }
-    case 'sprint': return { name: 'sprint', rate: Math.max(0.6, speed / 3.6) };
-    case 'run': return { name: 'run', rate: Math.max(0.5, speed / 2.9) };
-    case 'jog': return { name: 'jog', rate: Math.max(0.4, speed / 2.1) };
-    case 'walk': return { name: 'walk', rate: Math.max(0.3, speed / 1.3) };
+    /* RC2-5 — ANTI-SKATING. du/dt is now STRICTLY proportional to |v|.
+     *
+     * The divisors were always right — above the floor, stride length is
+     * exactly constant (walk 1.300 m/cycle, jog 2.100, run 2.900, sprint
+     * 3.600, measured). The skating came from the `Math.max(...)` FLOORS, which
+     * held the clock running when the ground was not moving:
+     *
+     *   gait    floor   engages below   stride at v=0.5
+     *   walk    0.30    0.390 m/s       1.300 m (ok)
+     *   jog     0.40    0.840 m/s       1.250 m
+     *   run     0.50    1.450 m/s       1.000 m
+     *   sprint  0.60    2.160 m/s       0.833 m   <- feet cycling, ground crawling
+     *
+     * At v = 0 every floored gait still ran (0.30-0.60 cycles/s): legs moving
+     * on the spot, which is the definition of skating. The floor cannot be
+     * "tuned"; any non-zero floor breaks du/dt proportional to |v| by
+     * construction. Removed outright: rate = |v| / stride, so v = 0 gives
+     * exactly rate 0 and the legs stop dead, and stride length is invariant at
+     * every speed rather than only above the floor.
+     *
+     * Why a floor existed: without one a near-stationary actor freezes
+     * mid-stride instead of settling. That is handled correctly upstream —
+     * scene.ts selects `idle` below 0.7 m/s — so the floor was compensating for
+     * a case the gait chooser already prevents. */
+    case 'sprint': return { name: 'sprint', rate: speed / 3.6 };
+    case 'run': return { name: 'run', rate: speed / 2.9 };
+    case 'jog': return { name: 'jog', rate: speed / 2.1 };
+    case 'walk': return { name: 'walk', rate: speed / 1.3 };
     case 'scrumBind': return { name: 'scrumBind', rate: 1.4 };
     case 'scrumShove': return { name: 'scrumShove', rate: 1.5 };
     case 'jump': return { name: 'lineoutJump', rate: 0.95 };

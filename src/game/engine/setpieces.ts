@@ -552,9 +552,15 @@ function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
     /* SPEC_08 (T-65): the warn used to be a one-shot 2.4 s hint and then the
      * whistle "looked arbitrary". The call now PERSISTS — it rides the
      * ruck-countdown channel (maulUseItClock/maulUseItCall below) every frame
-     * until the maul resolves — and its engagement gets exactly one short
-     * referee blast, so the stall is unavoidable in vision AND in audio. */
-    d.audio.whistle('SHORT');
+     * until the maul resolves — and its engagement gets exactly one referee
+     * cue, so the stall is unavoidable in vision AND in audio.
+     *
+     * RC2-4 — that cue is now a SHOUT, not a whistle. This is the only whistle
+     * in the game that did not stop play (the other four are a try, a card, a
+     * law call and a TMO confirmation, all genuine stoppages), and a stop
+     * signal used for a keep-playing instruction is what QA reported as
+     * immersion-breaking. The referee manages the maul with his voice. */
+    d.audio.shout();
     d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4);
   }
   if (s.stallClock <= MAUL_USE_IT_WHISTLE_AT || s.contest !== 'DEFENCE_CONTROL') return false;

@@ -136,6 +136,10 @@ export type KickType = 'PUNT' | 'GRUBBER' | 'DROP_GOAL' | 'GOAL' | 'RESTART' | '
 
 export interface KickState {
   t: number;
+  /** RC2-3 — restart shot clock. Accrues only while the kicker is free to
+   *  strike (opposition back ten, formation set), so a lawful wait is never
+   *  punished. Undefined outside RESTART/DROP_OUT. */
+  delayT?: number;
   stage: 'SETUP' | 'FANFARE' | 'WALKUP' | 'AIM' | 'METER' | 'FLIGHT' | 'RESULT';
   type: KickType;
   bx: number; by: number; bz: number;

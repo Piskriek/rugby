@@ -44,7 +44,21 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       return;
     }
     s.stealWarned = true;
-    d.showHint('OUTNUMBERED AT THE BREAKDOWN — NO STEAL. GO AGAIN AND IT IS A PENALTY', 2.2);
+    /* RC2-4 — the ruck warning.
+     *
+     * Diagnosis correction: this warning never blew a whistle. It was a silent
+     * `showHint` and always has been — the only non-stoppage whistle in the
+     * game was the maul USE IT cue in setpieces.ts, which is now a shout. What
+     * this call actually lacked was any audio at all, so a defender who went in
+     * again got penalised with no audible warning that he had been told once.
+     *
+     * It now gets the referee's voice (never the whistle — play continues) and
+     * the ruled wording. The full explanation stays in the hint line: "No more
+     * hands!" is what the referee shouts, but the player still needs to be told
+     * that a second attempt concedes a penalty. */
+    d.audio.shout();
+    d.refSay('NO MORE HANDS!', 'NARRATIVE', 2.2);
+    d.showHint('NO MORE HANDS! — OUTNUMBERED AT THE BREAKDOWN. GO AGAIN AND IT IS A PENALTY', 2.2);
   }
   const limit = [1.5, 3, 5][d.options.ruckLaw ?? 1];
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];

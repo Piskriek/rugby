@@ -179,4 +179,40 @@ export class MatchAudio {
     else if (kind === 'SHORT') blast(0, 0.22);
     else { blast(0, 0.16); blast(0.24, 0.16); }
   }
+
+  /**
+   * RC2-4 — THE REFEREE'S VOICE, not his whistle.
+   *
+   * A whistle means STOP. Using one for a live-play management call ("no more
+   * hands", "use it") teaches the player to freeze when the referee actually
+   * wants him to keep going, which is what broke immersion in QA. On a real
+   * pitch these are shouted, so this is a shout: a short filtered noise burst
+   * with a falling formant — a vocal bark rather than a tone, deliberately
+   * unlike the 2093/2333 Hz whistle so the two can never be confused.
+   *
+   * Level sits BELOW the whistle by design (D-5 ruled the whistle is the peak
+   * of the mix): ~0.085 against the whistle's 0.20 envelope, so it reads as
+   * the referee raising his voice over the noise, not as a stoppage.
+   */
+  shout() {
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(0.3);
+    if (!src.buffer) return;
+    /* Band-pass around the human vocal range, sweeping down — the contour of a
+     * barked syllable. A whistle is a steady high tone; this is neither. */
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 4.5;
+    bp.frequency.setValueAtTime(900, t);
+    bp.frequency.exponentialRampToValueAtTime(420, t + 0.22);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.085, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+    src.connect(bp).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 0.32);
+  }
 }

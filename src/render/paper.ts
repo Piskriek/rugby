@@ -234,18 +234,42 @@ export function depthShade(fill: string, z: number): string {
  * a 1.25 contrast ratio on EVERY palette (weakest is B at 1.27). 0.55 left
  * palette B at 1.16, and 1.00 saturates the range for no extra legibility. */
 export const LIMB_MIN_SPLIT = 0.85;
+
+/* RC2-2 — CROSS-FADE THE SPLIT THROUGH THE ZERO CROSSING.
+ *
+ * `sign` below is a step function of `d`, and the floor holds `sep` at 0.85
+ * right up to the crossing, so the two limbs never converge — they JUMP past
+ * each other. Measured on a run cycle the pair swapped #a42121 <-> #c92929 in a
+ * single frame, at the same instant the z-sort swapped layers. Two
+ * discontinuities landing on one frame is the "pop" QA reported.
+ *
+ * The floor is still required: SPEC_18.1 exists because a vanishing split let
+ * crossing limbs render in identical colour (contrast 1.00 on 50% of walk
+ * frames). So the floor is kept everywhere it matters and faded out ONLY inside
+ * a narrow band around the crossing, where the limbs genuinely are at the same
+ * depth and equal shading is the honest answer. Within the band the two shades
+ * converge continuously to the same value instead of leaping across it, and
+ * `sign` is replaced by a smooth odd ramp so there is no step at d = 0.
+ *
+ * The band is deliberately tight (LIMB_FADE_BAND) so anti-fusion is unaffected
+ * outside |d| > 0.06: at that depth the limbs are visually separated and the
+ * full floor still applies. */
+export const LIMB_FADE_BAND = 0.06;
 export function pairShade(fill: string, zA: number, zB: number): [string, string] {
   const d = zA - zB;
   const mag = Math.abs(d);
   /* Blend from the enforced floor up to the true depth difference, so limbs
    * far apart in depth still read proportionally. */
   const sep = Math.max(LIMB_MIN_SPLIT, Math.min(1, mag));
+  /* Smooth odd ramp: -1 .. +1 across the band, exactly +/-1 outside it, and
+   * continuously 0 at d = 0. Replaces the `d >= 0 ? 1 : -1` step. */
+  const t = Math.min(1, mag / LIMB_FADE_BAND);
+  const ramp = t * t * (3 - 2 * t) * (d >= 0 ? 1 : -1);
   const half = sep * 0.5;
   const mid = (zA + zB) * 0.5 * 0.35;         // slight absolute bias retained
-  const sign = d >= 0 ? 1 : -1;
   return [
-    depthShade(fill, mid + half * sign),
-    depthShade(fill, mid - half * sign),
+    depthShade(fill, mid + half * ramp),
+    depthShade(fill, mid - half * ramp),
   ];
 }
 
