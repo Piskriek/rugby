@@ -774,19 +774,45 @@ export function updateTurnBias(st: LeanState, dt: number): number {
  * angle the view machine computes. Zero new states, and it degenerates
  * exactly to the current picture at 0 deg.
  *
- *   | 1   -tan(phi)*ky   0 |     x' = x - tan(phi)*ky*y
- *   | 0        kappa     0 |     y' = kappa*y
+ * SPEC_21 Item 1 — THE SHEAR IS GONE. It was the "Leaning Tower".
  *
- * `narrow` additionally compresses X toward the spine, which is what
- * actually sells the turn: a body rotating away from camera loses
- * apparent SHOULDER WIDTH by cos(angle). The shear alone only skews.  */
+ * The original transform carried an x-shear proportional to y:
+ *
+ *   | narrow   -tan(shear) |      head at (0,-h) maps to (+tan(shear)*h, -h)
+ *   |   0            1     |
+ *
+ * so the head slid sideways while the feet stayed put. Measured, that was a
+ * 0.479 m head displacement and a 14.90 deg slant at the 55 deg edge — the
+ * figure leaned instead of turning. A shear IS the right image of a 3D yaw,
+ * but only under an OBLIQUE (cavalier) projection. `project()` in retro.ts is
+ * a PERSPECTIVE projection with its own camera tilt; depth is already spent in
+ * `p.f`/`p.sc`. Shearing on top of it double-counts depth, and the slant was
+ * the visible residue.
+ *
+ * Under this projection, rotating a flat card about its own VERTICAL axis by
+ * theta does exactly one thing to the screen image: it foreshortens X by
+ * cos(theta). Vertical extent is invariant because the rotation axis IS the
+ * vertical. So the transform is now a pure scale:
+ *
+ *   | scaleX  0 |     (0,-h) -> (0,-h) exactly. Tilt is 0 by construction,
+ *   |   0     1 |     not by tuning.
+ *
+ * On the floor: literal cos(theta) reaches 0 at 90 deg. The view machine swaps
+ * to the profile card at EDGE_IN = 55 deg where cos = 0.5736, so the front card
+ * would narrow to 57% of width and POP against the profile card's natural
+ * width at the handover. TQ_NARROW = 0.86 is the already-tuned answer to that
+ * handover and is retained (ruled), tracking cos closely out to ~20 deg where
+ * the eye actually reads foreshortening, and departing only near the swap. */
 
-/** Max 3/4 yaw expressed as a shear, radians. */
-export const TQ_SHEAR_MAX = 0.26;
 /** Deepest shoulder-width compression at full 3/4 (1 = none). */
 export const TQ_NARROW = 0.86;
 
-export interface ThreeQuarter { shear: number; narrow: number; }
+/* SPEC_21 Item 1 — `TQ_SHEAR_MAX` DELETED, not zeroed, so it cannot be
+ * re-enabled by a future reader who mistakes it for a tuning knob. The kinetic
+ * lean in coronal.ts is a DIFFERENT shear and is correct: a player leaning into
+ * acceleration genuinely does slant. Only the 3/4 shear was wrong. */
+
+export interface ThreeQuarter { narrow: number; }
 
 /**
  * Continuous 3/4 projection for a front/back card.
@@ -800,7 +826,7 @@ export function threeQuarter(ang: number): ThreeQuarter {
   const a = ang > 90 ? 180 - ang : ang;         // symmetric front/back
   const t = Math.min(1, Math.max(0, a / EDGE_IN));
   const e = t * t * (3 - 2 * t);                 // smoothstep — no kink at 0
-  return { shear: TQ_SHEAR_MAX * e, narrow: 1 - (1 - TQ_NARROW) * e };
+  return { narrow: 1 - (1 - TQ_NARROW) * e };
 }
 
 /** Signed facing angle helper: degrees, plus the side the camera sits on. */

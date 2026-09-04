@@ -10,7 +10,7 @@
  * Usage: npx vite-node scripts/spec17shot.ts [clip] [out.png]
  */
 import { CLIPS, STAND, POSE_CH, type Pose } from '../src/render/clips';
-import { BUILDS, PALETTES, threeQuarter, type Build } from '../src/render/paper';
+import { BUILDS, PALETTES, threeQuarter, squashForClip, combineSquash, FOOT_SQUASH, type Build } from '../src/render/paper';
 import { drawPaperActor, type PaperDrawArgs } from '../src/render/coronal';
 import { type Camera, type View } from '../src/render/retro';
 import { Rec } from './spec14rec';
@@ -53,7 +53,7 @@ function sample(name: string, u: number): Pose {
 
 const cam: Camera = { x: 0, z: -12, h: 1.6, yaw: 0, tilt: 0.05, fov: 0.42, shake: 0, horizon: 0.5, roll: 0 };
 
-function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null, turn = 0): Poly[] {
+function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null, turn = 0, fall: number | null = null, squash?: { sx: number; sy: number }): Poly[] {
   const rec = new Rec();
   rec.cap = [];
   const ctx = rec.asCtx();
@@ -64,6 +64,9 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, le
   rec.cap.push({ pts: [[ox + 14, groundY], [ox + CELL.w - 14, groundY], [ox + CELL.w - 14, groundY + 2], [ox + 14, groundY + 2]], fill: '#c9c2b0', alpha: 1, isStroke: false });
 
   const pose = sample(clip, u);
+  /* SPEC_21 Item 3 — allow an explicit fall/squash so the dive row can sweep
+   * the rotation that used to flatten the figure. */
+  if (fall !== null) { pose.fall = fall; pose.fallD = 1; }
   const args: PaperDrawArgs = {
     ctx, sx: cx, sy: groundY, sc: SC,
     cam, v: CELL, wx: 0, wz: 0, face: 0,
@@ -72,7 +75,7 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, le
     carry: 0, carryStyle: 0, ballSide: 0.6, ballSpin: 0,
     cap: false, tape: false, spinDir: 1, gs: 0.6, fore: 0,
     headDir: 0, depth: 0, lean,
-    tq: tqAng === null ? undefined : threeQuarter(tqAng), tqSign: 1, turn,
+    tq: tqAng === null ? undefined : threeQuarter(tqAng), turn, squash,
   };
   drawPaperActor(args);
   return (rec.cap ?? []).map((c) => ({
@@ -100,6 +103,19 @@ const LEANS = [-0.18, -0.09, 0.09, 0.18];
 const leanP: Poly[] = [];
 LEANS.forEach((ln, i) => { leanP.push(...cell('rightEdge', 0.25, i * CELL.w, 0, ln)); });
 
+/* SPEC_21 Item 3 — DIVE VOLUME row. Same worst-case tackle squash at four
+ * fall angles. Before the transform reorder the figure lost 13.6% of its width
+ * and gained length as it rotated (the "flat puddle"); it must now hold the
+ * same proportions at every angle. */
+const SQ21 = (() => {
+  const s = squashForClip('tackleHit', 0.45)!;
+  const t = combineSquash(FOOT_SQUASH, Math.max(0, 1 - s.sy));
+  return { sx: 1 + 0.6 * t, sy: 1 - t };
+})();
+const FALLS = [0, 0.33, 0.66, 0.95];
+const diveP: Poly[] = [];
+FALLS.forEach((f, i) => { diveP.push(...cell('rightEdge', 0.5, i * CELL.w, 0, 0, null, 0, f, SQ21)); });
+
 rasterise(
   [
     { name: `SPEC_17  ${clip.toUpperCase()}  CORONAL  (swing leg + arm z-sort)`, polys: coronalP },
@@ -107,6 +123,7 @@ rasterise(
     { name: 'SPEC_18.3b  3/4 PERSPECTIVE  facing angle 0 / 20 / 35 / 55 deg  (0 = identity)', polys: tqP },
     { name: 'SPEC_18.5  CENTRIFUGAL FLARE  turn bias -1 / -0.5 / +0.5 / +1  (inside tucks, outside flares)', polys: turnP },
     { name: 'SPEC_18.3a  KINETIC LEAN  -10.3 / -5.2 / +5.2 / +10.3 deg  (brake <-> accelerate)', polys: leanP },
+    { name: 'SPEC_21  DIVE VOLUME  fall 0 / 0.33 / 0.66 / 0.95 at max tackle squash  (must not flatten)', polys: diveP },
   ],
   out,
   { w: CELL.w * US.length, h: CELL.h },

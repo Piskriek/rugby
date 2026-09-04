@@ -66,11 +66,15 @@ export interface PaperDrawArgs {
   lean?: number;
   /** SPEC_18.5 — saturated centrifugal turn bias, -1..1. */
   turn?: number;
-  /** SPEC_18.3b — 3/4 projection for the front/back card. */
-  tq?: { shear: number; narrow: number };
-  /** Which way the actor is turning away from camera, +1 / -1. */
-  tqSign?: number;
+  /** SPEC_18.3b — 3/4 projection for the front/back card. SPEC_21 Item 1: a
+   *  pure horizontal foreshortening; the shear term is gone. */
+  tq?: { narrow: number };
 }
+
+/** SPEC_21 Item 2 — minimum depth of the side-profile crotch notch apex below
+ *  the leg-root line, metres. Keeps the V readable (anti-melon, SPEC_17)
+ *  without severing the pelvis. */
+const CROTCH_MIN_DEPTH = 0.012;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -595,7 +599,14 @@ function drawSidePaper(L: Locals, a: PaperDrawArgs, nearR: boolean) {
      0.05 m of card sits below the pivot instead of the measured 0.200 m
      (74.1% of the card) that produced the melon. */
   const hemS = rtS.y - 0.05;
-  const notchY = hemS + 0.055;
+  /* SPEC_21 Item 2 — CLAMP THE NOTCH APEX BELOW THE LEG ROOTS.
+   * SPEC_17's V was authored as `hemS + 0.055`, which measured 0.9450 against a
+   * root line at 0.9400 — the apex rose 5 mm ABOVE the roots and bit a wedge
+   * out of the pelvis, severing the two legs at exactly the point they should
+   * join. The anti-melon property only needs the V to exist, not to overshoot,
+   * so the apex is now held a guaranteed CROTCH_MIN_DEPTH below the roots.
+   * No new polygon: the `sqp` card already spans both roots. */
+  const notchY = Math.min(hemS + 0.055, rtS.y - CROTCH_MIN_DEPTH);
   const sqp: [number, number][] = [
     [-rtS.sideHalf, rtS.y + 0.07], [rtS.sideHalf * 0.9, rtS.y + 0.07],
     [rtS.sideHalf, hemS], [rtS.sideNear * 0.55, hemS],
@@ -800,25 +811,41 @@ export function drawPaperActor(a: PaperDrawArgs) {
    * paper.ts: the builds draw true to life, they were simply too small to read
    * contact against the 1.10 m tackle radius. */
   ctx.scale(FIGURE_SCALE, FIGURE_SCALE);
-  if (a.squash) ctx.scale(a.squash.sx, a.squash.sy);   // SPEC_01 impact squash about the foot anchor
-  /* SPEC_18.3a — KINETIC SHEAR ("squeeze and pop"), about the FOOT ANCHOR so a
-   * leaning figure stays planted. The matrix is
-   *     | 1  -tan(theta)  0 |
-   *     | 0      1        0 |
-   * and -tan is negative because screen-y runs down while the card's Y() maps
-   * metres up: a positive theta must throw the TOP of the card forward. Shear
-   * is the last transform before the card is drawn and after the squash, so the
-   * two compose rather than fight. */
-  if (a.lean) ctx.transform(1, 0, -Math.tan(a.lean), 1, 0, 0);
-  /* SPEC_18.3b — 3/4 perspective. Only ever applied to the front/back card;
-   * the profile card IS the 90 deg view and must not be skewed on top. The
-   * narrowing is about the spine (x = 0), which is already the card's origin. */
-  if (a.tq && (a.view === 'front' || a.view === 'back')) {
-    const sg = a.tqSign ?? 1;
-    ctx.transform(a.tq.narrow, 0, -Math.tan(a.tq.shear) * sg, 1, 0, 0);
-  }
+  /* ================================================================
+   * SPEC_21 Item 3 — TRANSFORM ORDER. This block was reordered; read
+   * before editing.
+   *
+   * The stack used to be
+   *     FIG · SQUASH · LEAN · TQ · MIRROR · ROTATE(fall)
+   * with the fall rotation INNERMOST, so the card was rotated first and the
+   * squash then applied to the rotated result, in SCREEN space. Because a
+   * non-uniform scale and a rotation do not commute (S·R != R·S whenever
+   * sx != sy), the composite carried a shear the author never wrote, and the
+   * squash's compression axis drifted off the figure's spine as it fell. At
+   * full fall the axes had swapped outright: `sy` (compression) was acting
+   * along the figure's LENGTH and `sx` (the volume-preserving expansion)
+   * across its THICKNESS. Measured on a 1.8 m spine / 0.5 m shoulder span,
+   * the figure kept its length (1.800 -> 1.946) but lost 13.6% of its width
+   * (0.500 -> 0.432): the "flat puddle".
+   *
+   * Note the squash magnitude was never the cause — worst case anywhere in
+   * the system is 15.4% (`scrumShove`), 14.5% on `tackleHit`. Disabling it on
+   * dives would have removed 14.5% and left the 13.6% width loss in place.
+   *
+   * The order is now
+   *     FIG · MIRROR · ROTATE(fall) · SQUASH · LEAN · TQ
+   * so SQUASH/LEAN/TQ all evaluate INSIDE the figure's own rotated frame.
+   * Their axes are welded to the spine at every fall angle, which is what
+   * they were authored against, and the singular values of the squash factor
+   * are exactly (sx, sy) for all phi — so volume is bounded by construction
+   * rather than by tuning.
+   * ================================================================ */
   const edge = a.view === 'leftEdge' || a.view === 'rightEdge';
-  if (edge) ctx.scale(a.spinDir >= 0 ? 1 : -1, 1); // profile faces the actor's screen direction
+  /* Profile card faces the actor's screen direction. This mirror is now the
+   * OUTERMOST of the figure transforms. It was already outside the fall
+   * rotation before the reorder, so `dirSign` below keeps its meaning. */
+  const mirror = edge && a.spinDir < 0 ? -1 : 1;
+  if (mirror < 0) ctx.scale(-1, 1);
   const falling = q.fall > 0.01 && q.fall < 0.985;
   if (falling) {
     // tip the standing card over about the hip — seamless into the lying art
@@ -828,6 +855,27 @@ export function drawPaperActor(a: PaperDrawArgs) {
     ctx.translate(0, -q.hip * sc);
     ctx.rotate(spin);
     ctx.translate(0, q.hip * sc);
+  }
+  // SPEC_01 impact squash — now about the foot anchor IN THE FIGURE'S FRAME.
+  if (a.squash) ctx.scale(a.squash.sx, a.squash.sy);
+  /* SPEC_18.3a — KINETIC SHEAR ("squeeze and pop"), about the FOOT ANCHOR so a
+   * leaning figure stays planted. The matrix is
+   *     | 1  -tan(theta)  0 |
+   *     | 0      1        0 |
+   * and -tan is negative because screen-y runs down while the card's Y() maps
+   * metres up: a positive theta must throw the TOP of the card forward.
+   * SPEC_21: this shear is CORRECT and stays — a player leaning into
+   * acceleration really does slant. Only the 3/4 shear below was wrong.
+   * `mirror` compensates the reflection now sitting outside it, so the lean
+   * throws the same way on screen as it did before the reorder. */
+  if (a.lean) ctx.transform(1, 0, -Math.tan(a.lean) * mirror, 1, 0, 0);
+  /* SPEC_18.3b / SPEC_21 Item 1 — 3/4 perspective as a PURE HORIZONTAL
+   * FORESHORTENING. Only ever applied to the front/back card; the profile card
+   * IS the 90 deg view. The narrowing is about the spine (x = 0), which is
+   * already the card's origin, so the spine maps to itself exactly and the
+   * figure cannot lean. */
+  if (a.tq && (a.view === 'front' || a.view === 'back')) {
+    ctx.scale(a.tq.narrow, 1);
   }
   switch (a.view) {
     case 'front': drawCoronal(L, args, true); break;

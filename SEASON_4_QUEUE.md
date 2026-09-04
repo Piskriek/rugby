@@ -218,3 +218,76 @@ Additional SPEC_21 verification:
 - **Verticality:** max apparent tilt of the spine across the facing sweep must be **0.00°** (Item 1).
 - **Volume:** spine length and shoulder width through the full `fall` sweep must stay within **±5%** of nominal (Item 3).
 - **Silhouette:** legs neither fuse nor sever across all gaits and builds (Item 2).
+
+---
+
+## SPEC_21 — SHIPPED
+
+All four items executed live. `tsc --noEmit` clean. **9/9 Season 3 gates pass**,
+**15/15 seed x difficulty combinations clean**, SPEC_06 hysteresis intact, and a
+new `scripts/spec21verify.ts` adds four SPEC_21-specific gates. Shot sheet:
+`spec21_shot.png` (six rows; rows 3 and 6 are the new evidence).
+
+### Item 1 — 3/4 foreshortening (shear removed)
+
+`paper.ts`: `ThreeQuarter` is now `{ narrow }`; `TQ_SHEAR_MAX` **deleted**
+(not zeroed, so it cannot be mistaken for a knob). `coronal.ts` applies
+`ctx.scale(a.tq.narrow, 1)` — a pure horizontal foreshortening.
+`tqSign` deleted throughout: a symmetric scale has no side to pick.
+
+| facing | before (tilt) | after |
+|---|---|---|
+| 30° | 8.46° | **0.00°** |
+| 45° | 13.60° | **0.00°** |
+| ≥55° | 14.90°, head 0.479 m off | **0.00°** |
+
+Measured max tilt over the full 0–180° sweep: **0.000000°**. The spine maps to
+itself exactly, so verticality is structural, not tuned. `TQ_NARROW = 0.86`
+floor retained as ruled. Kinetic lean shear retained.
+
+### Item 2 — crotch notch clamp
+
+`notchY = min(hemS + 0.055, rtS.y - CROTCH_MIN_DEPTH)`, `CROTCH_MIN_DEPTH =
+0.012`. Apex moves 0.9450 → 0.9280, from **5 mm above** the roots to **12 mm
+below**. Verified on all ten builds: notch still visible (anti-melon holds) and
+no longer severing. No new polygon, as ruled.
+
+### Item 3 — transform reorder
+
+Stack changed from `FIG · SQUASH · LEAN · TQ · MIRROR · ROT(fall)` to
+**`FIG · MIRROR · ROT(fall) · SQUASH · LEAN · TQ`**, so squash/lean/tq evaluate
+inside the figure's own rotated frame. The mirror moved outermost, so the lean
+shear is multiplied by `mirror` to preserve its on-screen direction.
+
+Spine / width through the fall sweep at max tackle squash:
+
+| fall | OLD spine | OLD width | NEW spine | NEW width |
+|---|---|---|---|---|
+| 0.00 | 1.540 | 0.543 | 1.540 | 0.543 |
+| 0.50 | 1.760 | 0.489 | 1.540 | 0.543 |
+| 0.98 | 1.956 | 0.428 | **1.540** | **0.543** |
+
+Drift from the figure-frame expectation is **0.0000%** at every angle, across
+both views, both mirrors and four facing angles. The squash still fires on
+impact — it was never the cause, and removing it (option 3b) would have left
+the 13.6% width loss untouched.
+
+### Item 4 — flight telemetry removed
+
+`scene.ts:558` `HANG … · APEX … · … m` deleted. Kick-type label kept (it names
+the player's chosen kick). `MatchView.tsx` power readout and control prompt
+untouched, as ruled.
+
+### Verification note
+
+The first draft of the SPEC_21 volume gate was **wrong and was corrected**: it
+compared the squashed figure against unsquashed nominal, so it reported 14.46%
+"failure" that was simply the tackle squash doing its job. The gate now asserts
+the correct property — that measured proportions match the figure-frame
+expectation *invariantly with fall angle*.
+
+### Pre-existing, not introduced
+
+The T-16 sweep row `diff 3 teleport = 1` is **pre-existing**: `git stash` +
+re-run produced a byte-identical table. It sits in the unseeded fault-hunt
+sweep, not the seeded gate run, and all 15 seeded combinations are clean.

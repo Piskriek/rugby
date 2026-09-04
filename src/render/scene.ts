@@ -409,8 +409,10 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
      * do. See SEASON_3_QUEUE.md SPEC_17.1. */
     /* SPEC_18.3b — 3/4 projection, from the same angle the view machine uses. */
     const fa = facingAngle(fx, fz, a.rx, a.rz, cam.x, cam.z);
+    /* SPEC_21 Item 1 — `tqSign` is gone with the shear. A symmetric horizontal
+     * foreshortening has no side to pick: narrowing about the spine looks the
+     * same whichever way the actor turns away from camera. */
     const tqProj = threeQuarter(fa.ang);
-    const tqSign = fa.sign;
     const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
     /* SPEC_18.3a — footfall squash, combined MULTIPLICATIVELY with the SPEC_01
      * impact squash (ruled), so a tackle landing on a footfall compresses once
@@ -426,7 +428,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
       lean: pg.leanAngle, turn: pg.turnBias,
-      tq: tqProj, tqSign: tqSign,
+      tq: tqProj,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
       pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
@@ -555,9 +557,12 @@ function drawKickOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
         s.goalProb > 0.7 ? '#6ee7a0' : s.goalProb > 0.45 ? '#ffd76a' : '#ff6a5a', jx, jy);
     } else {
       worldLabel(ctx, cam, v, s.bx, s.by + 2.6, s.bz, s.profile.label.toUpperCase(), '#f4efe2', jx, jy);
-      worldLabel(ctx, cam, v, s.bx, s.by + 1.9, s.bz,
-        `HANG ${s.hangTime.toFixed(2)}s · APEX ${s.apex.toFixed(1)} m · ${s.distance.toFixed(0)} m`,
-        '#cfcabb', jx, jy);
+      /* SPEC_21 Item 4 — FLIGHT TELEMETRY REMOVED.
+       * `HANG 2.41s · APEX 18.3 m · 42 m` was analytical readout hanging in
+       * world space over the kicker. The kick-type label above is kept: it
+       * names the kick the player chose, which is gameplay, not telemetry.
+       * The interactive power readout and control prompt live in
+       * MatchView.tsx and are deliberately untouched (ruled). */
     }
   }
 }
