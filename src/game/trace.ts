@@ -15,6 +15,8 @@
 import { Director, Input, NO_INPUT, MatchConfig } from './director';
 import { FIELD, project } from '../render/retro';
 import { sanctionOf } from './engine/laws';
+import { liveOffsideLines } from './engine/offside';
+import type { Live } from './intelligence';
 
 
 export type Val = number | string | boolean | null;
@@ -174,15 +176,58 @@ function maxGap(d: Director, team: 'A' | 'B'): number {
   return g;
 }
 
-/* SPEC_10 B2b (LAW-66): line integrity is a property of the men still IN the
- * line. maxGap spans the whole team — a beaten defender who has turned to
- * chase (beatenT > 0) has legitimately left his channel, and the hole he
- * leaves behind IS the line break, not a defensive-line defect (LINE BREAKS
- * grades REALISTIC). The line measurement excludes them. */
+/* BATCH 02 / LAW-66: the law-derived context is the live OPEN line. Its
+ * lineFor belongs to the attacking side; it is deliberately NOT inverted into
+ * a defending-team half-plane. It supplies the live carrier context in which
+ * the authored defensive shape is measured. */
+function hasLiveOpenContext(d: Director): boolean {
+  if (!d.op) return false;
+  return liveOffsideLines(d).some((line) => line.kind === 'OPEN'
+    && line.offenders.includes(d.op!.attacking)
+    && line.lineFor(d.op!.attacking) !== null);
+}
+
+/* BATCH 02 / LAW-66 Candidate B. Line integrity is a property of the men still
+ * in the authored defensive line, not of every player in the 26 m observation
+ * window. The current authored defensive slot 15 is the last-line sweeper; its
+ * role is represented by the defence system's sweeperDepth contract. Excluding
+ * that role is not a z/median heuristic and is not a new depth cutoff. */
+function law66Population(d: Director, team: 'A' | 'B'): Live[] {
+  if (!hasLiveOpenContext(d)) return [];
+  const fx = d.op!.carrierX;
+  const system = d.defenceOf(team);
+  const raw = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26);
+  const core = raw.filter((p) => !(p.num === 15 && system.sweeperDepth > 0));
+
+  /* Shirts 11 and 14 are authored wings. A wing parked beyond the min/max of
+   * the non-wing core is an edge of the shape, not an interior hole. Keep it
+   * only when it lies inside that core envelope. If there is no usable core
+   * envelope, retain the non-sweeper set rather than manufacturing bounds. */
+  const wings = new Set([11, 14]);
+  const nonWingCore = core.filter((p) => !wings.has(p.num));
+  if (nonWingCore.length < 2) return core;
+  const minX = Math.min(...nonWingCore.map((p) => p.x));
+  const maxX = Math.max(...nonWingCore.map((p) => p.x));
+  return core.filter((p) => !wings.has(p.num) || (p.x >= minX && p.x <= maxX));
+}
+
+/* SPEC_10 B2b (LAW-66): line integrity is a property of the corrected
+ * population above. A beaten defender who has turned to chase (beatenT > 0)
+ * has legitimately left his channel and is excluded by the existing raw
+ * eligibility. The active system's 4.6 m audit threshold remains unchanged.
+ *
+ * Removing the sweeper can legitimately make the measured maximum larger. The
+ * six observed corrected-gap > raw-gap cases, retained explicitly so a future
+ * reader does not mistake them for a regression, are:
+ *   seed 1 19.20: 4.174 (15/13) -> 4.225 (12/13)
+ *   seed 2 14.13: 1.592 (12/8)  -> 1.933 (1/9)
+ *   seed 4 21.60: 3.425 (7/10)  -> 3.438 (13/5)
+ *   seed 4 21.87: 3.298 (7/9)   -> 3.544 (13/5)
+ *   seed 4 22.13: 3.435 (15/5)  -> 3.723 (13/5)
+ *   seed 5 22.67: 3.323 (10/15) -> 4.508 (10/12)
+ * In each case shirt 15 sat between the retained endpoints in x-order. */
 function maxLineGap(d: Director, team: 'A' | 'B'): number {
-  const fx = d.op?.carrierX ?? d.focusPoint().x;
-  const xs = d.live.filter((p) => p.team === team && p.beatenT <= 0 && Math.abs(p.x - fx) < 26)
-    .map((p) => p.x).sort((a, b) => a - b);
+  const xs = law66Population(d, team).sort((a, b) => a.x - b.x).map((p) => p.x);
   let g = 0;
   for (let i = 0; i < xs.length - 1; i++) g = Math.max(g, xs[i + 1] - xs[i]);
   return g;
@@ -507,7 +552,11 @@ function emit(d: Director, rec: Recorder) {
       /* LAW-67 reads this as the Law-3 HEADCOUNT — keep it the full side;
        * the line-integrity population lives in maxGapMetres (B2b). */
       defenders: d.live.filter((p) => p.team === def).length,
-      lineConnected: maxGap(d, def) <= 4.0,
+      /* BATCH 03 / TASK C: `maxGap()` is the whole-team lateral spread used
+       * by the SPREAD trace. It is not a defensive-line population, and its
+       * old `lineConnected` boolean was an inverse "is the whole 15-man team
+       * bunched within 4 m?" flag. It was written here and read nowhere, so it
+       * has been removed rather than leaving a misleading field in the trace. */
       pressure: Math.round(d.op.pressure * 100) / 100,
       phase: d.op.phase,
       /* SPEC_10 B2b: a line is only 'connected' once it has RE-FORMED — the

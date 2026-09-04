@@ -205,14 +205,15 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
   { kind: 'PASS_OPTIONS', id: 'UX-65', standard: 'UX', claim: 'Each option carries a stated risk', check: (p) => num(p, 'count') === 0 || str(p, 'risks').length > 0 ? ok() : bad('no risk stated for the options') },
 
   /* ---------- DEFENSIVE LINE ---------- */
-  /* SPEC_10 B2b: the flat ≤4.0 m test fired on every open-play sample, but
-   * (a) the first ~1.2 s after a phase change is the legal reset transition,
-   * and (b) the designed spacing IS up to 4.0 (shapes.ts DEFENCE_SYSTEMS:
-   * WEDGE 3.2, UMBRELLA 3.8, MAN 4.0) — a connected line at design spacing
-   * failed for want of a margin. Corroboration: LINE BREAKS grades
-   * REALISTIC, so the flagged "holes" were not being run through. Judged
-   * only on a re-formed line, against the played system's spacing + 0.6 m. */
-  { kind: 'DEFENSIVE_LINE', id: 'LAW-66', standard: 'LAW', law: 'The defensive line must be connected', claim: 'No gap in a re-formed line exceeds the system spacing', check: (p) => num(p, 'attackT') <= 1.2 ? ok() : num(p, 'maxGapMetres') <= Math.max(4.6, num(p, 'defSpacing') + 0.6) ? ok() : bad(`${num(p, 'maxGapMetres')} m hole in the defensive line`) },
+  /* SPEC_10 B2b / BATCH 02: `maxGapMetres` is emitted by trace.ts from the
+   * law-contextual Candidate-B population: raw eligible defenders, minus the
+   * authored sweeper, with wide wings outside the non-wing core treated as
+   * edges. The six documented cases where that correction widens the numeric
+   * maximum are intentional adjacency effects, not regressions. The first
+   * ~1.2 s after a phase change remains the legal reset transition, and the
+   * designed spacing is up to 4.0 m; judge a re-formed line against the played
+   * system's spacing + 0.6 m, with the existing 4.6 m floor. */
+  { kind: 'DEFENSIVE_LINE', id: 'LAW-66', standard: 'LAW', law: 'The defensive line must be connected', claim: 'No gap in the corrected in-line population exceeds the system spacing', check: (p) => num(p, 'attackT') <= 1.2 ? ok() : num(p, 'maxGapMetres') <= Math.max(4.6, num(p, 'defSpacing') + 0.6) ? ok() : bad(`${num(p, 'maxGapMetres')} m hole in the defensive line`) },
   { kind: 'DEFENSIVE_LINE', id: 'LAW-67', standard: 'LAW', law: 'Law 3', claim: 'Fifteen defenders are on the field', check: (p) => num(p, 'defenders') === 15 ? ok() : bad(`${num(p, 'defenders')} defenders`) },
   { kind: 'DEFENSIVE_LINE', id: 'UX-68', standard: 'UX', claim: 'Pressure is expressed as a number between zero and one', check: (p) => num(p, 'pressure') >= 0 && num(p, 'pressure') <= 1 ? ok() : bad('pressure out of range') },
   { kind: 'DEFENSIVE_LINE', id: 'UX-69', standard: 'UX', claim: 'Metres to the try line is always known', check: (p) => num(p, 'metresToLine') > 0 ? ok() : bad('no distance to the line shown') },
