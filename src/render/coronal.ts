@@ -21,6 +21,7 @@ import {
   paperCard, poly, foldTab, crease, ballPaper,
   hipRoots, groundedClearance, armDepth, solveKnee,
   depthShade, pairShade, cornerRadius,
+  insideSign, KNEE_GAIN, ELBOW_GAIN,
 } from './paper';
 import { Pose } from './clips';
 import { project, type Camera, type View } from './retro';
@@ -63,6 +64,8 @@ export interface PaperDrawArgs {
   legScale?: number;
   /** SPEC_18.3a — kinetic lean, radians. Sheared about the foot anchor. */
   lean?: number;
+  /** SPEC_18.5 — saturated centrifugal turn bias, -1..1. */
+  turn?: number;
   /** SPEC_18.3b — 3/4 projection for the front/back card. */
   tq?: { shear: number; narrow: number };
   /** Which way the actor is turning away from camera, +1 / -1. */
@@ -87,6 +90,20 @@ function rotPt(px: number, py: number, cx: number, cy: number, ang: number): [nu
   const c = Math.cos(ang), s = Math.sin(ang);
   const dx = px - cx, dy = py - cy;
   return [cx + dx * c - dy * s, cy + dx * s + dy * c];
+}
+
+/**
+ * SPEC_18.5 — how strongly each arm is locked to the ball, 0..1, using exactly
+ * the weights `carryPose` applies below. Returned as [left, right] so the
+ * centrifugal flare can be suppressed in proportion to the override rather
+ * than switched off by a boolean guess.
+ */
+export function carryLock(carry: number, cs: number, ballSide: number): [number, number] {
+  if (carry <= 0.02) return [0, 0];
+  const nearR = ballSide >= 0;
+  const twoHand = clamp01(1 - cs * 1.6) * carry;
+  const wFar = Math.max(twoHand, cs * carry);
+  return nearR ? [wFar, carry] : [carry, wFar];
 }
 
 /** apply carry overrides: clamp arm around the ball, fend with the far arm */
@@ -229,7 +246,22 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
     const thighD = b.leg * 0.52 * fore, shinD = b.leg * 0.48 * fore;
     /* Lateral travel: abduction plus a small sagittal cross-under, so a
      * swinging leg passes under the body instead of hanging out to the side. */
-    const footX = hx + s * ad * (thighD + shinD) * 0.42 - Math.sin(l) * 0.055 * s;
+    /* SPEC_18.5 — centrifugal bias. Applied to the IK FOOT TARGET, never to
+     * `bend`. `bend` is a +/-1 perpendicular selector, not an angle: the IK
+     * only preserves bone length at exactly |bend| = 1. Measured, bend = 1.3
+     * stretches the femur 0.440 -> 0.473 m and bend = 2.0 stretches it to
+     * 0.571 m. Biasing it would literally hyperextend the leg. Moving the
+     * target instead keeps both bone lengths exact by construction, and
+     * solveKnee's own `reach * 0.999` clamp bounds the result. */
+    /* The bias must act along each limb's OWN outward direction (`s`), not
+     * along world x. Applying it in world x moved both legs the same way, so
+     * the stance merely widened or narrowed symmetrically instead of the
+     * inside limb tucking while the outside limb flared. Measured before the
+     * fix: at turn = +1 both feet sat 0.084 m FURTHER from the spine. */
+    const inSide = insideSign(a.turn ?? 0);
+    const legFlare = (a.turn ?? 0) === 0 ? 0
+      : s * (s === inSide ? -1 : 1) * Math.abs(a.turn ?? 0) * KNEE_GAIN * (thighD + shinD);
+    const footX = hx + s * ad * (thighD + shinD) * 0.42 - Math.sin(l) * 0.055 * s + legFlare;
     const footY = s < 0 ? clrL : clrR;
     const [kneeX, kneeY] = solveKnee(hx, hy, footX, footY, thighD, shinD, s);
     /* SPEC_18.1 — the leg's own depth. `sin(l)` is the odd term: a leg swung
@@ -301,18 +333,28 @@ function drawCoronal(L: Locals, a: PaperDrawArgs, front: boolean) {
   const avf = front ? 1 : -1;
   const [shKitL, shKitR] = pairShade(pal.kit, armDepth(p.aL) * avf, armDepth(p.aR) * avf);
   const [shSkinL, shSkinR] = pairShade(a.skin, armDepth(p.aL) * avf, armDepth(p.aR) * avf);
+  const [carryLockL, carryLockR] = carryLock(a.carry, a.carryStyle, a.ballSide);
   const drawOneArm = (s: -1 | 1) => {
     const aa = s < 0 ? p.aL : p.aR;
     const e = s < 0 ? p.eL : p.eR;
     const ab = s < 0 ? p.abL : p.abR;
     const dep = armDepth(aa);
+    /* SPEC_18.5 — elbow flare, suppressed on an arm locked to the ball so the
+     * carry cannot visually disconnect (ruled). `carryLock` is the same weight
+     * carryPose used to override this arm, so suppression tracks the override
+     * exactly rather than guessing from a boolean. */
+    const armInside = insideSign(a.turn ?? 0);
+    const flareW = 1 - (s < 0 ? carryLockL : carryLockR);
+    /* `ab` is already a per-side abduction (multiplied by `s` at use), so a
+     * positive bias abducts and a negative one adducts — no `s` factor here. */
+    const abBias = (s === armInside ? -1 : 1) * Math.abs(a.turn ?? 0) * ELBOW_GAIN * flareW;
     const [sx0, sy0] = RP(s * shHalf * 0.9 + tws, shY - 0.02);
     /* Depth foreshortening: an arm swung out of the coronal plane draws
      * shorter on the card. Front-swing and back-swing shorten alike, which is
      * correct — it is the SORT that tells them apart, not the length. */
     const fs = lerp(1, Math.abs(Math.cos(aa)), 0.42);
     const upD = upLen * fs, foreD = foreLen * fs;
-    const elX = sx0 + s * ab * upD * 0.85 + dep * 0.055 * s;
+    const elX = sx0 + s * (ab + abBias) * upD * 0.85 + dep * 0.055 * s;
     const elY = sy0 - Math.cos(aa) * upD;
     const hdX = elX - s * Math.sin(e) * foreD * 0.5 + dep * 0.045;
     const hdY = elY - Math.cos(aa - e * 0.8) * foreD * 0.8;

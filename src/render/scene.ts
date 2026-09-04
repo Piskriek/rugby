@@ -22,7 +22,7 @@ import {
   PALETTES, PaperView, Character, makeCharacter, makeRef,
   paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
   upperLowerRun, squashForClip, edgeLegForeshorten,
-  newLeanState, updateLean, threeQuarter, facingAngle, updateFootSquash, combineSquash, groundedClearance, type LeanState,
+  newLeanState, updateLean, updateTurnBias, threeQuarter, facingAngle, updateFootSquash, combineSquash, groundedClearance, type LeanState,
   BUILDS, paperCard, type Pt,
 } from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
@@ -55,6 +55,7 @@ interface Puppet {
   /* SPEC_18.3a — kinetic lean/squash filter state. */
   lean: LeanState;
   leanAngle: number;
+  turnBias: number;
   footSquash: number;
   clock: number;
 }
@@ -176,7 +177,7 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
       ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
       seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
       lat: 0, view: 'front', gait: 'idle',   // SPEC_06 — facing/strafe debug + hysteresis
-      lean: newLeanState(), leanAngle: 0, footSquash: 0, clock: 0,  // SPEC_18.3a
+      lean: newLeanState(), leanAngle: 0, turnBias: 0, footSquash: 0, clock: 0,  // SPEC_18.3a/18.5
     };
     puppets.set(key, pg);
   }
@@ -188,6 +189,9 @@ function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | n
   pg.spd = Math.hypot(vx, vz);
   /* SPEC_18.3a — filtered lean. Teleports are rejected inside updateLean. */
   pg.leanAngle = updateLean(pg.lean, vx, vz, stepped, dt);
+  /* SPEC_18.5 — must run AFTER updateLean, which publishes the smoothed
+   * acceleration this reads. */
+  pg.turnBias = updateTurnBias(pg.lean, dt);
   /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
    * stationary man LOOKS AT THE BALL. The old velocity-only heading had
    * support runners strolling back to marks staring straight at the camera
@@ -421,7 +425,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
 
     const args: PaperDrawArgs = {
       ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
-      lean: pg.leanAngle,
+      lean: pg.leanAngle, turn: pg.turnBias,
       tq: tqProj, tqSign: tqSign,
       /* SPEC_14 — the shadow is projected from world geometry now. */
       cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,

@@ -53,7 +53,7 @@ function sample(name: string, u: number): Pose {
 
 const cam: Camera = { x: 0, z: -12, h: 1.6, yaw: 0, tilt: 0.05, fov: 0.42, shake: 0, horizon: 0.5, roll: 0 };
 
-function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null): Poly[] {
+function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, lean = 0, tqAng: number | null = null, turn = 0): Poly[] {
   const rec = new Rec();
   rec.cap = [];
   const ctx = rec.asCtx();
@@ -72,7 +72,7 @@ function cell(view: 'front' | 'rightEdge', u: number, ox: number, oy: number, le
     carry: 0, carryStyle: 0, ballSide: 0.6, ballSpin: 0,
     cap: false, tape: false, spinDir: 1, gs: 0.6, fore: 0,
     headDir: 0, depth: 0, lean,
-    tq: tqAng === null ? undefined : threeQuarter(tqAng), tqSign: 1,
+    tq: tqAng === null ? undefined : threeQuarter(tqAng), tqSign: 1, turn,
   };
   drawPaperActor(args);
   return (rec.cap ?? []).map((c) => ({
@@ -92,6 +92,10 @@ const TQ = [0, 20, 35, 55];
 const tqP: Poly[] = [];
 TQ.forEach((ang, i) => { tqP.push(...cell('front', 0.25, i * CELL.w, 0, 0, ang)); });
 
+const TURNS = [-1, -0.5, 0.5, 1];
+const turnP: Poly[] = [];
+TURNS.forEach((t, i) => { turnP.push(...cell('front', 0.25, i * CELL.w, 0, 0, null, t)); });
+
 const LEANS = [-0.18, -0.09, 0.09, 0.18];
 const leanP: Poly[] = [];
 LEANS.forEach((ln, i) => { leanP.push(...cell('rightEdge', 0.25, i * CELL.w, 0, ln)); });
@@ -101,6 +105,7 @@ rasterise(
     { name: `SPEC_17  ${clip.toUpperCase()}  CORONAL  (swing leg + arm z-sort)`, polys: coronalP },
     { name: `SPEC_17  ${clip.toUpperCase()}  SIDE PROFILE  (hip pivot + crotch notch)`, polys: sideP },
     { name: 'SPEC_18.3b  3/4 PERSPECTIVE  facing angle 0 / 20 / 35 / 55 deg  (0 = identity)', polys: tqP },
+    { name: 'SPEC_18.5  CENTRIFUGAL FLARE  turn bias -1 / -0.5 / +0.5 / +1  (inside tucks, outside flares)', polys: turnP },
     { name: 'SPEC_18.3a  KINETIC LEAN  -10.3 / -5.2 / +5.2 / +10.3 deg  (brake <-> accelerate)', polys: leanP },
   ],
   out,

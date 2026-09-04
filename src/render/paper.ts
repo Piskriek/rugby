@@ -636,6 +636,8 @@ export const FOOT_DEBOUNCE = 0.10;
 
 export interface LeanState {
   vx: number; vz: number;        // EMA velocity
+  ax: number; az: number;        // derivative of the EMA velocity (SPEC_18.5)
+  omega: number;                 // EMA signed turn rate, rad/s (SPEC_18.5)
   a: number;                     // EMA along-travel acceleration
   started: boolean;
   lastFootT: number;             // debounce clock
@@ -644,7 +646,7 @@ export interface LeanState {
 }
 
 export function newLeanState(): LeanState {
-  return { vx: 0, vz: 0, a: 0, started: false, lastFootT: -99, wasGrounded: true, squash: 0 };
+  return { vx: 0, vz: 0, ax: 0, az: 0, omega: 0, a: 0, started: false, lastFootT: -99, wasGrounded: true, squash: 0 };
 }
 
 /**
@@ -659,16 +661,19 @@ export function updateLean(st: LeanState, rawVx: number, rawVz: number, stepped:
   // 1 — reject discontinuities: reseed rather than differentiate a teleport
   if (stepped > MAX_STEP) {
     st.vx = rawVx; st.vz = rawVz; st.started = true;
+    st.ax = 0; st.az = 0;   // a teleport is not a turn
+
     return SHEAR_MAX * Math.tanh(st.a / A_REF);
   }
   const av = 1 - Math.exp(-dt / LEAN_TAU);
-  if (!st.started) { st.vx = rawVx; st.vz = rawVz; st.started = true; return 0; }
+  if (!st.started) { st.vx = rawVx; st.vz = rawVz; st.ax = 0; st.az = 0; st.started = true; return 0; }
   // 2 — EMA the velocity
   const px = st.vx, pz = st.vz;
   st.vx += (rawVx - st.vx) * av;
   st.vz += (rawVz - st.vz) * av;
   // 3 — differentiate the SMOOTHED velocity
   const ax = (st.vx - px) / dt, az = (st.vz - pz) / dt;
+  st.ax = ax; st.az = az;   // SPEC_18.5 reads these for the curvature cross product
   // 4 — project along travel (signed: + accelerating, - braking)
   const spd = Math.hypot(st.vx, st.vz);
   const along = spd > 0.5 ? (ax * st.vx + az * st.vz) / spd : 0;
@@ -694,6 +699,68 @@ export function updateFootSquash(st: LeanState, grounded: boolean, spd: number, 
   // spike then recover over ~6 frames at 60 Hz
   st.squash = Math.max(0, st.squash - dt * (FOOT_SQUASH / 0.10));
   return st.squash;
+}
+
+/* ================================================================== */
+/* SPEC_18.5 — CENTRIFUGAL SECONDARY ANIMATION                         */
+/* ------------------------------------------------------------------ */
+/* Limbs respond to angular momentum: the inside limb of a turn tucks  */
+/* toward the body, the outside limb flares out.                       */
+/*                                                                     */
+/* The turn rate is NOT taken from a heading angle. Measured, the raw  */
+/* travel heading d/dt atan2(vx,vz) has a p99 of 8091 deg/s — 22 revs  */
+/* per second — because atan2 of a near-zero velocity is undefined and */
+/* flips wildly; below the 2.2 m/s facing threshold p99 is 9763 deg/s. */
+/* Nor is it taken from the renderer's `pg.face`: that is driven by    */
+/* three different targets which switch mode 4077 times in 90 s, and   */
+/* each switch is a step change that is not real rotation. And `a.rf`  */
+/* is a +/-1 sign, not an angle at all.                                */
+/*                                                                     */
+/* Instead: signed curvature of the SMOOTHED velocity, via the cross   */
+/* product with its own derivative. No atan2, so no wrap discontinuity */
+/* and no low-speed singularity.                                       */
+/*                                                                     */
+/*     w = (vx*az - vz*ax) / |v|^2                                     */
+/*                                                                     */
+/* Verified against known circular motion, exact to 3 decimals:        */
+/* r=5 v=7 -> 1.400, r=10 v=8 -> 0.800, r=3 v=6 -> 2.000 rad/s.        */
+/* Peak on live play 4.92 rad/s, against 188 rad/s for the raw signal. */
+/* ================================================================== */
+
+/** tanh reference. 2.0 keeps a jog near 10% bias, a hard turn near 90%,
+ *  and saturates on only 0.88% of moving frames (measured). */
+export const W_REF = 2.0;
+/** Speed ramp, m/s. A hard gate chattered: 15 sign flips vs 8 for the ramp. */
+export const W_GATE_LO = 1.5;
+export const W_GATE_HI = 3.5;
+/** Max lateral bias, radians-equivalent. Bounded by tanh, so these are hard. */
+export const KNEE_GAIN = 0.10;
+export const ELBOW_GAIN = 0.14;
+
+/**
+ * The cross product below is NEGATIVE for a counter-clockwise turn. Naming the
+ * convention once, here, is the only defence against wiring the flare backwards
+ * — the sign is otherwise invisible at the call site.
+ */
+export function insideSign(omega: number): number {
+  return omega >= 0 ? -1 : 1;
+}
+
+/**
+ * Advance the turn-rate filter and return the saturated bias in (-1, 1).
+ * Shares `LeanState`'s EMA velocity so the lean and the limb flare read the
+ * same motion and can never disagree about which way the player is turning.
+ */
+export function updateTurnBias(st: LeanState, dt: number): number {
+  if (dt <= 0) return Math.tanh(st.omega / W_REF);
+  const spd = Math.hypot(st.vx, st.vz);
+  // smoothstep speed gate: no centrifugal force without linear velocity
+  const t = Math.min(1, Math.max(0, (spd - W_GATE_LO) / (W_GATE_HI - W_GATE_LO)));
+  const gate = t * t * (3 - 2 * t);
+  const raw = spd > 0.5 ? ((st.vx * st.az - st.vz * st.ax) / (spd * spd)) * gate : 0;
+  const a = 1 - Math.exp(-dt / LEAN_TAU);
+  st.omega += (raw - st.omega) * a;
+  return Math.tanh(st.omega / W_REF);
 }
 
 /* ================================================================== */
