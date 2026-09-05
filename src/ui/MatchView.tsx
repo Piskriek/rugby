@@ -4,7 +4,7 @@ import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
-import { ThreeCanvas } from '../render/ThreeCanvas';
+import { ENV_3D, ThreeCanvas } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
@@ -83,8 +83,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     return () => c?.removeEventListener('wheel', wheel);
   }, []);
 
-  /* The 3D layer: one transparent WebGL canvas composited directly over the
-   * 2D pitch canvas, plus the pooled GLB player manager. Created once. */
+  /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
+   * Under ENV_3D this is the world (pitch, fog, uprights, actors); the 2D
+   * canvas is a transparent HUD overlay stacked above it. */
   useEffect(() => {
     const host = threeDivRef.current;
     if (!host) return;
@@ -182,12 +183,20 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
          * BEFORE the 3D squad so the GLB players stand on top of them. */
         drawIndicators(ctx, d, view);
 
-        /* ---- 3D GLB squad overlay (transparent WebGL canvas above) ---- */
+        /* ---- 3D world (pitch + uprights under ENV_3D, plus the GLB squad) ---- */
         const three = threeRef.current;
         if (three) {
           three.resize();
           three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
           playersRef.current?.update(d, view, d.cam, dt);
+          const env = three.environment;
+          if (env) {
+            const recent = d.t - d.bannerAt < 2.2;
+            const b = (d.banner || '').toUpperCase();
+            if (recent && b.includes('TRY')) env.flashAdBoard('TRY');
+            else if (recent && /(PENALTY|YELLOW|CARD|NO GOOD)/.test(b)) env.flashAdBoard('PENALTY');
+            env.update(d.t, dt);
+          }
           three.render();
         }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
@@ -252,13 +261,12 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
   return (
     <div className="relative h-full w-full select-none overflow-hidden bg-black">
-      {/* Layer 0 — the 2D pitch canvas (grass, lines, minimap, CRT, banners). */}
-      <canvas ref={canvasRef} className="absolute inset-0 z-0 h-full w-full" />
-      {/* Layer 1 — transparent WebGL: the GLB squad stands ON the pitch but
-       * UNDER the HUD. z-index 1 sits above the pitch canvas (0) and below the
-       * HUD wrapper (z-10), fixing the players painting over the score bar /
-       * commentary. */}
-      <div ref={threeDivRef} className="pointer-events-none absolute inset-0 z-[1]" />
+      {/* Layer 0/1 — under ENV_3D the WebGL canvas is the world (pitch, fog,
+       * uprights, players) and the 2D canvas is a transparent HUD overlay
+       * (minimap, CRT, banners, telemetry) sitting above it. Without the flag
+       * the 2D canvas paints the pitch and WebGL is a transparent actor layer. */}
+      <canvas ref={canvasRef} className={`absolute inset-0 h-full w-full ${ENV_3D ? 'z-[2]' : 'z-0'}`} />
+      <div ref={threeDivRef} className={`pointer-events-none absolute inset-0 ${ENV_3D ? 'z-0' : 'z-[1]'}`} />
       {/* Layer 2 — every HUD panel lives inside this wrapper so the 3D players
        * can never cover the score bar, commentary, or phase readouts. */}
       <div className="pointer-events-none absolute inset-0 z-10">

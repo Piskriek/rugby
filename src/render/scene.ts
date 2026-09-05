@@ -1,13 +1,18 @@
 /**
  * SCENE RENDERER — the 2D layer of the match view.
  *
- * The 2D canvas paints the stadium, pitch markings, goal posts, in-world
- * telemetry overlays and the referee speech bubbles. The actors themselves —
- * the 30 players plus the referee — are GLB humanoids rendered by the
- * transparent Three.js overlay (see ThreePlayerManager / ThreeCanvas), which
- * is composited directly above this canvas. This module no longer draws any
- * character, limb or ball ink; the old vector puppet pipeline
- * (coronal.ts / paper.ts / rig.ts / clips.ts) is removed.
+ * When `ENV_3D` is on, this canvas is a transparent HUD overlay: it paints
+ * in-world telemetry, referee bubbles, and (via MatchView) the minimap,
+ * banners and CRT scanlines. Stadium, turf, mown stripes, the 260 mud
+ * ellipses, 900 noise specks, 2D pitch markings and 2D goalposts are owned
+ * by ThreeEnvironment and are skipped here.
+ *
+ * When `ENV_3D` is off, the 2D canvas still paints the full stadium under
+ * the transparent WebGL actor overlay.
+ *
+ * The actors themselves — the 30 players plus the referee — are GLB
+ * humanoids rendered by ThreePlayerManager / ThreeCanvas. This module no
+ * longer draws any character, limb or ball ink.
  */
 import { Director } from '../game/director';
 import {
@@ -17,6 +22,7 @@ import {
 import { maulUseItClock, maulUseItCall } from '../game/engine/setpieces';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 import type { ThreePlayerManager } from './ThreePlayerManager';
+import { ENV_3D } from './ThreeCanvas';
 
 export function drawMatch(
   ctx: CanvasRenderingContext2D, d: Director, v: View,
@@ -31,9 +37,14 @@ export function drawMatch(
   const jy = shake?.y ?? (cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0);
   const cam2: Camera = { ...cam, shake: 0 };
 
-  /* Stadium + pitch markings first (they are the ground the GLB squad stands on). */
-  drawStadium(ctx, cam2, v, d.t, d.pitch);
-  drawGoalPosts(ctx, cam2, v, -50, false);
+  /* Stadium + pitch markings. Skipped under ENV_3D — ThreeEnvironment owns
+   * the turf, baked markings, mud-free dual-plane ground and uprights. */
+  if (!ENV_3D) {
+    drawStadium(ctx, cam2, v, d.t, d.pitch);
+    drawGoalPosts(ctx, cam2, v, -50, false);
+  } else {
+    ctx.clearRect(0, 0, v.w, v.h);
+  }
 
   /* Feed the SPEC_06 debug HUD from the 3D animation state machine. */
   if (three) {
@@ -45,10 +56,11 @@ export function drawMatch(
     }
   }
 
-  /* The 3D overlay (players + ball) renders on the transparent WebGL canvas
-   * composited above this one; nothing actor-related is painted in 2D now. */
-
-  drawGoalPosts(ctx, cam2, v, 50, true);
+  /* The 3D overlay (players + ball, and under ENV_3D the pitch itself)
+   * renders on the WebGL canvas; nothing actor-related is painted in 2D. */
+  if (!ENV_3D) {
+    drawGoalPosts(ctx, cam2, v, 50, true);
+  }
 
   /* --- mini-game overlays (world-space telemetry on the 2D layer) --- */
   if (d.phase === 'SCRUM' || d.phase === 'REPLAY') drawScrumOverlay(ctx, d, v, cam2, jx, jy);
