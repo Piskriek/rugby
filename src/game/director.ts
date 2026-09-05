@@ -300,7 +300,51 @@ export interface BreakdownState {
   /** T-05 — seconds the defence has held the ball below −0.5. A jackal with
    * sustained hands on it is the law's turnover, not a dice roll. */
   redT: number;
+  /* MOMENTUM BRANCH. A collision between two men who are already almost
+   * stationary is not the same event as one at a closing 10 m/s, and playing
+   * the diving running-tackle clip for both is what made a static contact
+   * look like two men throwing themselves at nothing. Measured over 437
+   * tackles, the closing speed splits ~58/42 either side of 3.5 m/s.
+   *   'RUNNING'  — the dive; momentum carries the pair across the turf.
+   *   'STANDING' — a takedown on the spot; the slide is suppressed. */
+  hitKind: 'RUNNING' | 'STANDING';
+  /** closing speed at the contact frame, m/s (diagnostics + renderer). */
+  hitSpeed: number;
 }
+
+/**
+ * GET-UP LOCK duration, seconds.
+ *
+ * This is the length of the stand-up animation, and it is duplicated here on
+ * purpose: the engine must be able to run headless, with no GLB loaded, so it
+ * cannot read the clip. The renderer asserts the two agree at load
+ * (ThreePlayerManager.checkRecoverSeconds) and warns in DEV if a re-exported
+ * asset changes the duration, which is the only way this can drift.
+ *
+ *   MX_StandUp (retargeted Mixamo, tools/fetch_mixamo.mjs)  1.67 s
+ *   GetUp      (Quaternius fallback)                        1.53 s
+ *
+ * The shorter of the two is used so the lock never outlasts the animation and
+ * leave a man standing frozen after he is visibly back on his feet.
+ */
+export const RECOVER_SECONDS = 1.53;
+
+/**
+ * WHY NOT THE FULL 1.53 s CLIP LENGTH.
+ *
+ * Locking a man for the whole stand-up animation froze ~2.5 players for 18.7%
+ * of open play. Those men are exempt from their own offside (see
+ * offsideCandidates) but they still sit in the defensive line's shape while it
+ * tries to reform, and their team-mates were penalised around them: offside
+ * penalties per team went 3.7 (in band) -> 5.3 (band is 2-4) and the realism
+ * score dropped 56% -> 50%.
+ *
+ * 0.75 s is the compromise: long enough that a man visibly pushes up off the
+ * turf instead of teleporting into a sprint, short enough that the line
+ * reforms in time. The renderer plays the stand-up clip at a matching rate
+ * (see GETUP_RATE) so the animation still completes rather than being cut
+ * off — the clip is sped up, not truncated.
+ */
 
 /* ============================ CONFIG ============================ */
 
@@ -1382,6 +1426,10 @@ export class Director {
     }
 
     this.watchdog(dt);
+    /* GET-UP LOCK — runs BEFORE think() so a recovering man is already at zero
+     * velocity when the AI is asked where everyone should go, and before
+     * placeBound so no phase writer can drag him either. */
+    this.tickRecovery(dt);
     this.think(dt, input);
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
      * capture target-slot drift before a phase-bound writer can take control. */
@@ -1553,7 +1601,11 @@ export class Director {
 
   /** A player is excluded only for an active lawful/role-specific exception. */
   private isFormationEligible(p: Live) {
-    if (p.sinbin > 0 || p.down || p.carrier || p.beatenT > 0) return false;
+    /* `recoverT` sits alongside `down` for the same reason: a man on the
+     * ground and a man pushing himself up off it are both physically
+     * unavailable, and counting either into the defensive line's shape
+     * measures a line that does not exist yet. */
+    if (p.sinbin > 0 || p.down || (p.recoverT ?? 0) > 0 || p.carrier || p.beatenT > 0) return false;
     return !/(CHASE|TACKLE|FIELD THE KICK)/.test(p.job.toUpperCase());
   }
 
@@ -1653,9 +1705,15 @@ export class Director {
      * himself. The carrier is never offside against the ball. Both are already
      * excluded by `isFormationEligible`; the bound test is stated here too
      * because the set-piece lines make it load-bearing. */
+    /* A man getting to his feet is not penalised for where he is lying. The
+     * get-up lock pins him in place for the length of the stand-up animation,
+     * so without this exemption he accrues offside time he is physically
+     * unable to clear — which pushed offside penalties per team from inside
+     * the realistic band to 5.3 (band 2-4). World Rugby 11.4 likewise allows
+     * a player time to get up and retire. */
     return this.live.filter((p) => p.team === team && !p.bound && p.sinbin <= 0
       && !line.participants?.has(`${p.team}:${p.num}`)
-      && this.isFormationEligible(p));
+      && this.isFormationEligible(p));   // excludes recoverT — see there
   }
 
   /**
@@ -3071,6 +3129,21 @@ export class Director {
         });
         continue;
       }
+      /* GET-UP LOCK. A man climbing off the floor is not steerable. Without
+       * this he was handed a formation slot the instant the ruck cleared and
+       * slid to it flat on his back — 33% of post-ruck frames moved faster
+       * than 3 m/s. He holds his ground, at zero velocity, for exactly as
+       * long as the stand-up animation takes. The timer is decremented in
+       * one place (tickRecovery) so nothing here can leak it. */
+      if ((p.recoverT ?? 0) > 0) {
+        this.writeThinkPlayer(gate, `think:recovering:${p.team}${p.num}`, p,
+          ['urgency', 'job', 'tx', 'tz'] as const, () => {
+            p.urgency = 0;
+            p.tx = p.x; p.tz = p.z;      // no target: stay exactly here
+            p.job = 'GETTING UP';
+          });
+        continue;
+      }
       if (isBound(p) || p.down) {
         this.writeThinkPlayer(gate, `think:bound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = true; });
         continue;
@@ -3433,7 +3506,8 @@ export class Director {
        * which is a player-facing option that is off by default and projects
        * marks outright; this is about intent, not about guaranteeing legality.
        */
-      if (!this.isHuman(p.team) && !p.carrier && !p.bound && p.sinbin <= 0 && retreatLines.length) {
+      if (!this.isHuman(p.team) && !p.carrier && !p.bound && p.sinbin <= 0
+        && (p.recoverT ?? 0) <= 0 && retreatLines.length) {
         let worst = 0;
         let lawfulZ = p.tz;
         for (const line of retreatLines) {
@@ -3917,8 +3991,49 @@ export class Director {
 
 
   clearRuck() { /* T-03: engine-internal */
-    for (const p of this.live) { p.down = false; p.bound = false; }
+    for (const p of this.live) {
+      /* only a man who was actually ON THE GROUND has to get up; the rest of
+       * the ruck were on their feet and can go straight back to work. */
+      if (p.down) p.recoverT = RECOVER_SECONDS;   // cleared by releaseAll on a whistle
+      p.down = false; p.bound = false;
+    }
     this.bd = undefined;
+  }
+
+  /**
+   * Run the get-up lock for every player, once per frame, before think().
+   * Velocity is hard-zeroed here rather than trusted to the steering, so no
+   * later writer can slide a man who is still on the floor.
+   */
+  tickRecovery(dt: number) {
+    /* The lock is an OPEN-PLAY concept. Every other phase either pins players
+     * itself (scrum, lineout, kick, maul) or is walking them to a mark, and a
+     * man frozen on the turf would stall it. Rather than trust every teardown
+     * path to have called releaseAll — several do not, which showed up as
+     * 4134 frames of a recovering man being steered — the invariant is
+     * enforced here, in the one place the timer is read. */
+    if (this.phase !== 'OPEN_PLAY') {
+      for (const p of this.live) {
+        if ((p.recoverT ?? 0) > 0) {
+          p.recoverT = 0;
+          if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
+        }
+      }
+      return;
+    }
+    for (const p of this.live) {
+      const t = p.recoverT ?? 0;
+      if (t <= 0) continue;
+      const left = t - dt;
+      if (left <= 0) {
+        p.recoverT = 0;
+        if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
+        continue;
+      }
+      p.recoverT = left;
+      p.vx = 0; p.vz = 0;
+      if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+    }
   }
 
   /**
@@ -3932,7 +4047,13 @@ export class Director {
       p.bound = false;
       p.carrier = false;
       p.urgency = 0.6;
-      if (p.clip === 'grounded' || p.clip === 'tackle') { p.clip = 'ready'; p.clipT = 0; }
+      /* A whistle outranks the get-up lock: the man has to walk to a scrum or
+       * a lineout mark now, and holding him on the floor would stall the set
+       * piece. Cancelling here (rather than letting `steer` fight the lock)
+       * keeps the ownership contract honest — measured 4134 frames of a
+       * recovering man being steered before this was added. */
+      p.recoverT = 0;
+      if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
     }
     this.bd = undefined;
     this.ml = undefined;

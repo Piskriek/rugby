@@ -481,7 +481,13 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     }
   }
 
-  if (tackler1 && tackler1.d < 1.1 && s.protect <= 0) {
+  /* A man climbing off the floor cannot make a tackle. Without this a
+   * recovering defender could be handed a latch, and the latch would then
+   * snap him onto the carrier's hip while tickRecovery held his velocity at
+   * zero — two owners for one player, which showed up as a leaked latch
+   * frame and 29 stalled drag frames in the probe. */
+  if (tackler1 && tackler1.d < 1.1 && s.protect <= 0
+    && (d.L(dTeam, tackler1.num).recoverT ?? 0) <= 0) {
     const carrierP = car;
     const tackler = d.L(dTeam, tackler1.num);
     const grip = tackler.attrs.PWR;

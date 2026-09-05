@@ -245,6 +245,15 @@ export function tickLatch(
 ): LatchTick {
   latch.t += dt;
 
+  /* Either man starting to climb off the floor ends the drag immediately.
+   * tickRecovery pins a recovering player's velocity at zero, so a latch that
+   * survived into a recovery would tow a corpse: the carrier cannot move, the
+   * grip never ramps out, and the pair sit motionless until the 0.6 s cap.
+   * Measured as 43 stalled drag frames before this guard. */
+  if ((carrier.recoverT ?? 0) > 0 || (tackler.recoverT ?? 0) > 0) {
+    return { end: 'LOST', dragged: latch.dragged };
+  }
+
   /* THE SNAP. The defender has no independent position while he is holding
    * on: his coordinates ARE the carrier's, offset to the hip. This is the
    * whole illusion — two men moving as one unit — and it costs nothing but a

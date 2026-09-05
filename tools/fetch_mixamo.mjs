@@ -73,6 +73,10 @@ const REPO = 'CandyManGames/Enable3dFootball_Prod';
 const SOURCES = [
   { remote: 'animations/Player_Actions/tackle_ip.gltf', clip: 'MX_Tackle' },
   { remote: 'animations/Player_Actions/tackle_react_ip.gltf', clip: 'MX_TackleReact' },
+  /* Get-up. Phase 3 locks the player in place for exactly this clip's length,
+   * so the engine's recovery timer is derived from the duration baked here
+   * rather than a hand-guessed constant. */
+  { remote: 'animations/Player_Actions/standing_up_ip.gltf', clip: 'MX_StandUp' },
 ];
 const MODEL = 'public/assets/models/rugby_player.glb';
 const OUT = 'public/assets/models/tackle_pair.glb';

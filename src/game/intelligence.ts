@@ -76,6 +76,12 @@ export interface Live {
   latchingOnto?: string | null;
   /** the live drag multiplier while held — see latch.ts dragMultiplier() */
   latchDrag?: number;
+  /* GET-UP LOCK. Seconds left of climbing back to his feet. A man on this
+   * timer is not available to the AI: he holds position, keeps zero velocity,
+   * and plays the stand-up clip through. Without it players slid to their
+   * next formation slot while still on the floor — measured at 33% of
+   * post-ruck frames moving faster than 3 m/s, peaking at 10 m/s. */
+  recoverT?: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:

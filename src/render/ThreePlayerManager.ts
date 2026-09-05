@@ -23,6 +23,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
+import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 
@@ -246,6 +247,8 @@ interface PlayerInstance {
     tackleT: number;
     /** which side of the collision this man is on, for the stage clips */
     tackleRole: 'TACKLER' | 'CARRIER' | null;
+    /** true when the engine classed this collision as a standing takedown */
+    standingHit: boolean;
     /** playhead of the tackle clip, carried across stage boundaries so a
      *  single authentic clip runs on instead of restarting each stage. */
     tackleClipT: number;
@@ -364,6 +367,7 @@ export class ThreePlayerManager {
           }
         }
         this.prepareTemplate();
+        this.checkRecoverSeconds();
         this.ready = true;
         resolve();
       }, undefined, reject);
@@ -725,7 +729,7 @@ export class ThreePlayerManager {
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
         passLatched: false,
-        tackleT: -1, tackleRole: null, tackleClipT: 0,
+        tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
       },
     };
     return inst;
@@ -799,6 +803,29 @@ export class ThreePlayerManager {
     }
   }
 
+  /**
+   * The engine's get-up lock is a hard-coded constant because it has to run
+   * headless; this is the only place both numbers exist at once, so it is
+   * where they are checked. A re-exported stand-up clip that changes duration
+   * would otherwise silently leave the man frozen after he is on his feet, or
+   * cut the animation off mid-rise.
+   */
+  private checkRecoverSeconds() {
+    if (!import.meta.env?.DEV) return;
+    const name = this.pick('MX_StandUp', 'GetUp');
+    const clip = this.templateClips.find(c => c.name === name);
+    if (!clip) return;
+    /* The lock is deliberately SHORTER than the clip (see RECOVER_SECONDS):
+     * the clip is sped up to fit. Warn only if that speed-up would be so
+     * extreme the rise reads as a twitch. */
+    const rate = clip.duration / RECOVER_SECONDS;
+    if (rate > 3.5) {
+      console.warn(`[players] get-up clip '${name}' runs ${clip.duration.toFixed(2)}s `
+        + `but the engine lock is only ${RECOVER_SECONDS}s — a ${rate.toFixed(1)}x `
+        + 'speed-up will look like a twitch. Raise RECOVER_SECONDS in director.ts.');
+    }
+  }
+
   /** `want` if the retargeted pair was loaded, else the stand-in `fallback`. */
   private pick(want: string, fallback: string): string {
     return this.templateClips.some(c => c.name === want) ? want : fallback;
@@ -825,6 +852,13 @@ export class ThreePlayerManager {
        * its matched partner (MX_TackleReact). Both were retargeted from
        * Mixamo onto this skeleton by tools/fetch_mixamo.mjs. `??` keeps the
        * old stand-ins alive if that artefact has not been built. */
+      /* MOMENTUM BRANCH. A standing takedown has no dive in it, so the
+       * running-tackle clip is wrong for it — see BreakdownState.hitKind.
+       * With no bespoke takedown asset available (none exists in any
+       * reachable public repo — see tools/fetch_mixamo.mjs) the standing
+       * branch plays the SAME retargeted pair at a reduced time scale and
+       * without the dive tilt, which reads as a grapple to ground rather
+       * than a launch. `standingHit` is set per-frame from the engine. */
       case 'tackleDrive': return { name: this.pick('MX_Tackle', 'Tackle'), loop: false };
       case 'hitReact': return { name: this.pick('MX_TackleReact', 'SlideStart'), loop: false };
       case 'tackleGround': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
@@ -867,7 +901,7 @@ export class ThreePlayerManager {
       case 'dive': return { name: 'SlideStart', loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
       case 'tryStart': return { name: 'SlideStart', loop: false };
-      case 'getup': return { name: 'GetUp', loop: false };
+      case 'getup': return { name: this.pick('MX_StandUp', 'GetUp'), loop: false };
       default: return { name: 'Idle', loop: true };
     }
   }
@@ -1170,8 +1204,11 @@ export class ThreePlayerManager {
       wantTilt = TILT_MAX * Math.max(0, Math.min(1, t));
     } else if (grounding && (state === 'tackleGround' || state === 'rollAway')) {
       /* the takedown: continue the same rotation on to horizontal, so the
-       * dive and the fall are one continuous movement rather than a cut. */
-      wantTilt = TILT_GROUNDED;
+       * dive and the fall are one continuous movement rather than a cut.
+       * A STANDING takedown gets much less of it: the procedural tilt is what
+       * sells a horizontal dive, and a man wrestling another to the floor
+       * from a standstill should stay far more upright. */
+      wantTilt = TILT_GROUNDED * (inst.st.standingHit ? 0.45 : 1);
     }
     /* no procedural lift once the clip itself is putting him on the ground */
     this.applyBodyTilt(inst, wantTilt, step, !grounding);
@@ -1309,6 +1346,10 @@ export class ThreePlayerManager {
       if (tackleSide && st.tackleRole !== tackleSide) {
         // fresh collision for this man — restart the sequence
         st.tackleRole = tackleSide;
+        /* MOMENTUM BRANCH: latch the engine's verdict for this collision now,
+         * so the whole three-stage sequence plays as one kind of hit even if
+         * the breakdown is torn down underneath it mid-fall. */
+        st.standingHit = d.bd?.hitKind === 'STANDING';
         st.tackleT = 0;
         st.tackleClipT = 0;
         st.oneShot = null;
@@ -1344,8 +1385,11 @@ export class ThreePlayerManager {
             : wantStage === 1 ? TACKLE_GROUND_END - TACKLE_IMPACT_END : 0;
           const prevName = st.oneShot ? this.clipForState(st.oneShot).name : null;
           const nextName = this.clipForState(state).name;
-          const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12,
-            this.fitTimeScale(state, win));
+          /* A takedown on the spot is a slower, heavier movement than a dive
+           * at 10 m/s. Same clip, stretched, so the two hits do not read as
+           * the same event replayed. */
+          const rate = this.fitTimeScale(state, win) * (st.standingHit ? 0.62 : 1);
+          const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, rate);
           /* CONTINUE, DO NOT RESTART.
            *
            * Stage 0 and stage 1 now resolve to the SAME retargeted clip: one
@@ -1393,8 +1437,11 @@ export class ThreePlayerManager {
         this.play(inst, 'kick', 0.12, 1);
         st.oneShot = 'kick'; st.lock = 0.7;
       } else if (desired === 'getup' && st.oneShot !== 'getup') {
-        this.play(inst, 'getup', 0.18, 1);
-        st.oneShot = 'getup'; st.lock = 1.0; st.lie = false;
+        /* Fit the stand-up to the engine's lock so he is upright exactly as
+         * the AI regains control of him — otherwise the clip is cut off
+         * mid-rise and he snaps to a run from a crouch. */
+        this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+        st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
       } else if (desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup')) {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
@@ -1411,8 +1458,8 @@ export class ThreePlayerManager {
         if (st.oneShot === 'getup') { /* held until lock expires */ }
         else {
           if (st.lie && st.oneShot !== 'getup') {
-            this.play(inst, 'getup', 0.18, 1);
-            st.oneShot = 'getup'; st.lock = 1.0; st.lie = false;
+            this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+            st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
           } else {
             st.oneShot = null;
             st.lie = false;
