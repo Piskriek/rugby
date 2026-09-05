@@ -27,6 +27,9 @@ import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
+/* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
+ * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
+const TACKLE_PAIR_URL = 'assets/models/tackle_pair.glb';
 
 /* ---------------------------------------------------------------- kits --- */
 export type KitTeam = 'A' | 'B' | 'REF';
@@ -243,6 +246,9 @@ interface PlayerInstance {
     tackleT: number;
     /** which side of the collision this man is on, for the stage clips */
     tackleRole: 'TACKLER' | 'CARRIER' | null;
+    /** playhead of the tackle clip, carried across stage boundaries so a
+     *  single authentic clip runs on instead of restarting each stage. */
+    tackleClipT: number;
   };
 }
 
@@ -333,10 +339,30 @@ export class ThreePlayerManager {
 
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
+    const loader = new GLTFLoader();
+    const one = (url: string) => new Promise<THREE.AnimationClip[] | null>((res) => {
+      loader.load(url, (g) => res(g.animations),
+        undefined, () => res(null));   // optional asset: absent = fall back
+    });
     return new Promise((resolve, reject) => {
-      new GLTFLoader().load(MODEL_URL, (gltf) => {
+      loader.load(MODEL_URL, async (gltf) => {
         this.template = gltf.scene;
-        this.templateClips = gltf.animations.map(stripRootMotion);
+        const base = gltf.animations.map(stripRootMotion);
+        /* The retargeted pair is already in-place (the tool drops the source's
+         * horizontal channel) so it does NOT go through stripRootMotion again;
+         * doing so would be harmless but pointless. It is loaded second and
+         * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
+         * more entries in the same clip table. */
+        const extra = await one(TACKLE_PAIR_URL);
+        if (extra && extra.length) {
+          this.templateClips = base.concat(extra);
+        } else {
+          this.templateClips = base;
+          if (import.meta.env?.DEV) {
+            console.warn('[players] tackle_pair.glb missing — falling back to the '
+              + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
+          }
+        }
         this.prepareTemplate();
         this.ready = true;
         resolve();
@@ -699,7 +725,7 @@ export class ThreePlayerManager {
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
         passLatched: false,
-        tackleT: -1, tackleRole: null,
+        tackleT: -1, tackleRole: null, tackleClipT: 0,
       },
     };
     return inst;
@@ -773,6 +799,11 @@ export class ThreePlayerManager {
     }
   }
 
+  /** `want` if the retargeted pair was loaded, else the stand-in `fallback`. */
+  private pick(want: string, fallback: string): string {
+    return this.templateClips.some(c => c.name === want) ? want : fallback;
+  }
+
   private clipForState(st: string): { name: string; loop: boolean } {
     switch (st) {
       case 'idle': return { name: 'Idle', loop: true };
@@ -789,12 +820,22 @@ export class ThreePlayerManager {
        * rig actually ships (Quaternius UAL): Tackle is the drive/hit,
        * SlideStart the stumble off it, DiveRoll the grounding and the
        * roll-away, Death the prone hold. */
-      case 'tackleDrive': return { name: 'Tackle', loop: false };      // Hit
-      case 'hitReact': return { name: 'SlideStart', loop: false };     // Stumble
-      case 'tackleGround': return { name: 'DiveRoll', loop: false };   // Fall (tackler)
-      case 'carrierFall': return { name: 'Death', loop: false };       // Fall (carrier)
-      case 'present': return { name: 'Death', loop: false };           // prone ball presentation
-      case 'rollAway': return { name: 'DiveRoll', loop: false };
+      /* The tackler drives and goes to ground on ONE authentic clip
+       * (MX_Tackle, a real football tackle); the carrier is hit and falls on
+       * its matched partner (MX_TackleReact). Both were retargeted from
+       * Mixamo onto this skeleton by tools/fetch_mixamo.mjs. `??` keeps the
+       * old stand-ins alive if that artefact has not been built. */
+      case 'tackleDrive': return { name: this.pick('MX_Tackle', 'Tackle'), loop: false };
+      case 'hitReact': return { name: this.pick('MX_TackleReact', 'SlideStart'), loop: false };
+      case 'tackleGround': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
+      case 'carrierFall': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
+      /* Stage 2 stays on the SAME clip as stages 0-1 when the retargeted pair
+       * is present: MX_Tackle / MX_TackleReact each end with the man already
+       * down, and clampWhenFinished holds that final grounded frame as the
+       * prone hold. Cutting to Death/DiveRoll here truncated the fall at ~50%
+       * and threw away the part where he actually lands. */
+      case 'present': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
+      case 'rollAway': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
       /* LATCH-AND-DRAG. The two halves of the struggle, before the takedown.
        * The rig ships no bespoke Struggle or Hang, so the illusion is built
        * out of what it has:
@@ -1243,6 +1284,9 @@ export class ThreePlayerManager {
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
+        /* remember where the tackle clip actually got to, so the next stage
+         * can resume from here instead of rewinding to frame 0 */
+        if (inst.active) st.tackleClipT = inst.active.action.time;
         pending.push(inst);
         continue;
       }
@@ -1266,6 +1310,7 @@ export class ThreePlayerManager {
         // fresh collision for this man — restart the sequence
         st.tackleRole = tackleSide;
         st.tackleT = 0;
+        st.tackleClipT = 0;
         st.oneShot = null;
       } else if (!tackleSide && st.tackleRole) {
         st.tackleRole = null; st.tackleT = -1;
@@ -1297,8 +1342,21 @@ export class ThreePlayerManager {
           const win = wantStage === 0
             ? TACKLE_IMPACT_END
             : wantStage === 1 ? TACKLE_GROUND_END - TACKLE_IMPACT_END : 0;
-          this.play(inst, state, wantStage === 0 ? 0.05 : 0.12,
+          const prevName = st.oneShot ? this.clipForState(st.oneShot).name : null;
+          const nextName = this.clipForState(state).name;
+          const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12,
             this.fitTimeScale(state, win));
+          /* CONTINUE, DO NOT RESTART.
+           *
+           * Stage 0 and stage 1 now resolve to the SAME retargeted clip: one
+           * authentic tackle contains both the drive and the fall, where the
+           * old stand-ins needed a different clip per stage. play() calls
+           * reset(), so without this the stage-1 crossfade would rewind to
+           * frame 0 and replay the wind-up — the man would hit, then wind up
+           * and hit again, never reaching the ground. When the clip is
+           * unchanged across a stage boundary the playhead is carried over so
+           * the motion runs on continuously into the grounding. */
+          if (act && prevName && prevName === nextName) act.time = st.tackleClipT;
           st.oneShot = state;
           st.lock = 0;
         }
