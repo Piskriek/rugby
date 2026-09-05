@@ -13,7 +13,7 @@ import type { SkyPresetId } from '../render/ThreeSky';
 const TIME_PRESETS: SkyPresetId[] = ['AFTERNOON', 'GOLDEN', 'FLOODLIT', 'OVERCAST'];
 
 const clampQuality = (v: number | undefined): QualityLevel =>
-  (v === 0 || v === 1 || v === 2 ? v : 2);
+  (v === 0 || v === 1 || v === 2 ? v : 1);
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
