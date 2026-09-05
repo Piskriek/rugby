@@ -24,6 +24,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
+import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
 
@@ -93,6 +94,8 @@ interface PlayerInstance {
   mixer: THREE.AnimationMixer;
   clips: Map<string, THREE.AnimationClip>;
   badgeMat: THREE.MeshBasicMaterial;
+  /** cached carrying-hand socket bone (Part 1 ball socketing); null = none */
+  handBone?: THREE.Bone | null;
   active: { name: string; action: THREE.AnimationAction } | null;
   st: {
     oneShot: string | null;      // non-looping/locked clip state
@@ -101,8 +104,29 @@ interface PlayerInstance {
     lx: number; lz: number;
     spd: number;
     face: number;                // smoothed heading, radians
+    /* PART 1 — THE ONE-SHOT LATCH. A `pass` that is re-`play()`ed on the
+     * frames after the first restarts the clip, which is what read as the
+     * throw looping three times in a third of a second. Once the latch is
+     * set nothing may call play() on that state again until the engine
+     * leaves it. */
+    passLatched: boolean;
+    /* PART 2 — the multi-stage tackle timeline, in seconds since impact.
+     * −1 when no tackle is running. */
+    tackleT: number;
+    /** which side of the collision this man is on, for the stage clips */
+    tackleRole: 'TACKLER' | 'CARRIER' | null;
   };
 }
+
+/* PART 2 — TACKLE ANIMATION TIMELINE (seconds from the impact frame).
+ *   0.00 – 0.15  IMPACT     tackler drives, carrier reacts to the hit
+ *   0.15 – 0.40  GROUNDING  both crossfade to the fall
+ *   > 0.40       RUCK PREP  carrier presents prone, tackler rolls away
+ * The physics half of the same window lives in engine/breakdown.ts, which
+ * shares the carrier's dampened momentum between the two men for 0.3 s so
+ * they slide forward together instead of stopping dead. */
+export const TACKLE_IMPACT_END = 0.15;
+export const TACKLE_GROUND_END = 0.40;
 
 /* ================================================================== */
 export class ThreePlayerManager {
@@ -499,6 +523,8 @@ export class ThreePlayerManager {
         oneShot: null, lock: 0, lie: false,
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
+        passLatched: false,
+        tackleT: -1, tackleRole: null,
       },
     };
     return inst;
@@ -577,6 +603,16 @@ export class ThreePlayerManager {
       case 'pass': return { name: 'Pass', loop: false };
       case 'kick': return { name: 'Kick', loop: false };
       case 'tackle': return { name: 'Tackle', loop: false };
+      /* PART 2 — the three stages of a tackle, mapped onto the clips this
+       * rig actually ships (Quaternius UAL): Tackle is the drive/hit,
+       * SlideStart the stumble off it, DiveRoll the grounding and the
+       * roll-away, Death the prone hold. */
+      case 'tackleDrive': return { name: 'Tackle', loop: false };      // Hit
+      case 'hitReact': return { name: 'SlideStart', loop: false };     // Stumble
+      case 'tackleGround': return { name: 'DiveRoll', loop: false };   // Fall (tackler)
+      case 'carrierFall': return { name: 'Death', loop: false };       // Fall (carrier)
+      case 'present': return { name: 'Death', loop: false };           // prone ball presentation
+      case 'rollAway': return { name: 'DiveRoll', loop: false };
       case 'grounded': return { name: 'Death', loop: true };
       case 'dive': return { name: 'SlideStart', loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
@@ -594,8 +630,17 @@ export class ThreePlayerManager {
     const clip = inst.clips.get(info.name);
     if (!clip) return null;
     const action = inst.mixer.clipAction(clip);
-    action.setLoop(info.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-    action.clampWhenFinished = !info.loop;
+    /* PART 1 — ONE SHOT MEANS ONE. `LoopOnce` with `Infinity` repetitions is
+     * the three-rapid-throws bug: three.js reads the repetition count even in
+     * LoopOnce mode, so the Pass clip re-fired until the 0.45 s lock expired.
+     * Exactly one repetition, and the last frame is held. */
+    if (info.loop) {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = false;
+    } else {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    }
     action.timeScale = timeScale;
     action.reset();
     action.enabled = true;
@@ -669,17 +714,69 @@ export class ThreePlayerManager {
       // stayed on their sideways approach — the pack read as rotated 90°.
       // Hard-hold the engagement heading; the velocity logic still governs
       // open play, mauls (which have a yaw) and lineouts (formed along X).
-      if (d.phase === 'SCRUM' && team !== 'REF') {
-        // A pushes toward +Z pitch (theta 0), B toward -Z (theta pi).
-        const want = a.team === 'A' ? 0 : Math.PI;
+      if ((d.phase === 'SCRUM' || d.phase === 'REPLAY') && team !== 'REF') {
+        /* PART 3: the single authored engagement heading — A faces 0, B
+         * faces π — shared with the engine so the pack cannot be pointing
+         * one way in the simulation and another on screen. Hard-set (not
+         * smoothed) once the pack is set: a bound forward has no heading of
+         * his own, and the exponential blend left the last man in still
+         * square to the touchline for half a second. */
+        const want = scrumFacing(a.team as 'A' | 'B');
         let dy = want - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
-        st.face += dy * (1 - Math.exp(-step * 14));
+        st.face = Math.abs(dy) < 0.02 ? want : st.face + dy * (1 - Math.exp(-step * 14));
       }
 
       const desired = this.mapState(a.renderClip, st.spd);
       const locomoting = ['idle', 'walk', 'run', 'sprint'].includes(desired);
+
+      /* PART 1 — release the pass latch the moment the engine leaves the
+       * pass state, so the NEXT pass gets a fresh single shot. */
+      if (desired !== 'pass') st.passLatched = false;
+
+      /* PART 2 — THE TACKLE TIMELINE.
+       *
+       * A tackle used to be one 0.8 s clip fired on the impact frame while
+       * the physics had already zeroed both men: they stopped dead, then
+       * slowly folded over on the spot. It is now a three-stage sequence
+       * driven by a clock that starts on impact and runs alongside the
+       * kinetic-impact window in engine/breakdown.ts. */
+      const tackleSide: 'TACKLER' | 'CARRIER' | null =
+        desired === 'tackle' ? 'TACKLER'
+          : desired === 'grounded' ? 'CARRIER' : null;
+      if (tackleSide && st.tackleRole !== tackleSide) {
+        // fresh collision for this man — restart the sequence
+        st.tackleRole = tackleSide;
+        st.tackleT = 0;
+        st.oneShot = null;
+      } else if (!tackleSide && st.tackleRole) {
+        st.tackleRole = null; st.tackleT = -1;
+      }
+
+      if (st.tackleRole) {
+        const prev = st.tackleT;
+        st.tackleT += step;
+        const stageOf = (t: number) => (t < TACKLE_IMPACT_END ? 0 : t < TACKLE_GROUND_END ? 1 : 2);
+        const wantStage = stageOf(st.tackleT);
+        if (prev < 0 || stageOf(prev) !== wantStage) {
+          const carrier = st.tackleRole === 'CARRIER';
+          const state = wantStage === 0
+            ? (carrier ? 'hitReact' : 'tackleDrive')       // 0.00–0.15 IMPACT
+            : wantStage === 1
+              ? (carrier ? 'carrierFall' : 'tackleGround') // 0.15–0.40 GROUNDING
+              : (carrier ? 'present' : 'rollAway');        // > 0.40 RUCK PREP
+          // the crossfade lasts a fraction of the stage it is entering
+          this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, wantStage === 0 ? 1.6 : 1);
+          st.oneShot = state;
+          st.lock = 0;
+        }
+        st.lie = true;
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+        inst.root.rotation.y = Math.PI - st.face;
+        inst.mixer.update(step);
+        continue;
+      }
 
       // ---- one-shots & downed sequencing ----
       if (desired === 'tackle' && !st.lie) {
@@ -691,9 +788,12 @@ export class ThreePlayerManager {
       } else if (desired === 'try' && st.oneShot !== 'tryStart' && st.oneShot !== 'tryLoop') {
         this.play(inst, 'tryStart', 0.1, 1.05);
         st.oneShot = 'tryStart'; st.lock = 0.55;
-      } else if (desired === 'pass' && st.oneShot !== 'pass') {
+      } else if (desired === 'pass' && st.oneShot !== 'pass' && !st.passLatched) {
+        /* PART 1 — fire it once, latch it, hold the final frame. The latch is
+         * what stops a re-trigger on the frames the engine is still reporting
+         * `pass`; it clears above when the state leaves `pass`. */
         this.play(inst, 'pass', 0.1, 1.1);
-        st.oneShot = 'pass'; st.lock = 0.45;
+        st.oneShot = 'pass'; st.lock = 0.45; st.passLatched = true;
       } else if (desired === 'kick' && st.oneShot !== 'kick') {
         this.play(inst, 'kick', 0.12, 1);
         st.oneShot = 'kick'; st.lock = 0.7;
@@ -801,9 +901,15 @@ export class ThreePlayerManager {
 
     this.ball.visible = free.visible || !!carrier;
     if (carrier) {
-      // Attach to the forearm/hand socket bone; its transform then drives the
-      // ball through the carry. Parent root already carries RENDER_SCALE.
-      const hand = this.findBone(carrier.root, 'hand_r') ?? this.findBone(carrier.root, 'hand_l');
+      /* PART 2 (BALL SOCKETING). The ball used to be synced to the 2D
+       * simulation's ground coordinates even while a man was carrying it, so
+       * it slid along the floor beside him. A carried ball is not a simulated
+       * body: its world matrix is OVERRIDDEN by the carrying hand's. Parent
+       * it to the hand bone (Quaternius rig: hand_r, with the forearm and the
+       * left hand as fallbacks) and let the skeleton drive it; the parent
+       * root already carries RENDER_SCALE, so the socket offsets below are in
+       * model metres. */
+      const hand = this.carryBone(carrier);
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
         this.ball.position.set(0, 0.05, 0.03);
@@ -823,6 +929,21 @@ export class ThreePlayerManager {
       this.ball.parent?.remove(this.ball);
       this.scene.add(this.ball);
     }
+  }
+
+  /**
+   * The carrying-hand socket bone of a player, cached per instance.
+   * Quaternius' rig names the wrist `hand_r`; the forearm (`lowerarm_r`) is
+   * the fallback when a clip's hand track is missing, and the left hand the
+   * last resort.
+   */
+  private carryBone(inst: PlayerInstance): THREE.Bone | null {
+    if (inst.handBone !== undefined) return inst.handBone;
+    const bone = this.findBone(inst.root, 'hand_r')
+      ?? this.findBone(inst.root, 'lowerarm_r')
+      ?? this.findBone(inst.root, 'hand_l');
+    inst.handBone = bone;
+    return bone;
   }
 
   private findBone(root: THREE.Object3D, name: string): THREE.Bone | null {

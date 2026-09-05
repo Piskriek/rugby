@@ -64,7 +64,9 @@ import {
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
-import { upBreakdown, startBreakdown } from './engine/breakdown';
+import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
+import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
+import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
 /* ============================ INPUT ============================ */
@@ -2108,8 +2110,15 @@ export class Director {
            * biggest potential snap of the three set pieces. */
           if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
-          p.face = slot.team === 'A' ? 1 : -1;
         }
+        /* PART 3 — SCRUM ORIENTATION IS THE LAW, NOT A PREFERENCE.
+         * A pack binds head-on down the engagement axis, which runs ALONG
+         * the pitch. This used to be written only in the settled branch, so
+         * a forward still walking in kept the facing his last run left him
+         * with — the sideways approach — and the whole pack read as rotated
+         * ninety degrees towards the touchline. Locked for every frame of
+         * the scrum, arriving or bound. */
+        p.face = scrumFaceSign(slot.team);
         if (set) {
           if (s.stage === 'DRIVE' || s.stage === 'BASE' || s.stage === 'STRIKE') clip(p, 'scrumDrive');
           else if (s.stage === 'ENGAGE') clip(p, 'scrumCrouch');
@@ -2257,9 +2266,18 @@ export class Director {
           /* D-2 — bounded even for the tackled carrier. He is pinned to the
            * slot recorded at the tackle, which can be ~0.9 m from where the
            * physics left him on that frame. */
-          if (!p.movedBy) this.settleToward(p, q.x, q.z, dt, 'bound');
-          p.vx = 0; p.vz = 0;
+          /* PART 2 — the kinetic impact window owns the carrier and the
+           * tackler for the first 0.3 s. Pinning them here would be exactly
+           * the instantaneous stop the window exists to remove: they are
+           * sliding forward together, and breakdown.ts has already
+           * integrated them this frame (movedBy === 'bound'). */
+          if (!inKineticImpact(s)) {
+            if (!p.movedBy) this.settleToward(p, q.x, q.z, dt, 'bound');
+            p.vx = 0; p.vz = 0;
+          }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+        } else if (q.role === 'TACKLER' && inKineticImpact(s)) {
+          /* he is riding the carrier down — breakdown.ts moved him. */
         } else {
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
@@ -2275,10 +2293,11 @@ export class Director {
         else if (q.role === 'JACKAL') clip(p, 'jackal');
         else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');
         else if (q.role === 'CLEANER') clip(p, s.stage === 'PLACE' ? 'cleanout' : 'maulBind');
-        /* PLAYTEST 4: the tackler's dive-at-the-man one-shot gets its beat —
-         * the role clip used to stomp it the same frame and the hit read as
-         * two men walking into each other. */
-        else if (q.role === 'TACKLER' && !(p.clip === 'dive' && p.clipT < 0.45)) clip(p, 'tackle');
+        /* PART 2: the tackler wears 'tackle' from the impact frame. The
+         * renderer's tackle timeline (impact / grounding / roll-away) is what
+         * gives the hit its beat now, so holding the old dive one-shot for
+         * 0.45 s here would only delay the first stage of it. */
+        else if (q.role === 'TACKLER') clip(p, 'tackle');
         else if (q.role !== 'TACKLER') clip(p, s.ruckFormed ? 'maulBind' : 'ready');
         p.job = q.role === 'CARRIER' ? 'PRESENT THE BALL BACK TO YOUR NINE'
           : q.role === 'JACKAL' ? 'GET YOUR HANDS ON THE BALL, LEGALLY'
@@ -2319,6 +2338,69 @@ export class Director {
       const k = this.L(s.kicker, s.kickerNum);
       const setting = s.stage === 'AIM' || s.stage === 'METER';
       const prepping = s.stage === 'FANFARE' || s.stage === 'WALKUP';
+
+      /* PART 3 — SET-PIECE LAW COMPLIANCE: THE KICK AT GOAL.
+       *
+       * A conversion or a penalty goal is not open play with a stationary
+       * ball in the middle of it. Law 8.20/8.22: the non-kicking team retires
+       * to its own goal line and stays there until the kicker starts his
+       * run-up; the kicking team stays behind the ball. Everything else in
+       * this method — the celebration huddle, the walk-back, the open-play
+       * marks — used to keep steering the other twenty-nine men through the
+       * whole ritual, so they wandered.
+       *
+       * This override sits above every other source of position for the
+       * duration. It ends the moment the ball is struck (stage FLIGHT), from
+       * which point the chase logic below owns them again. */
+      if (isGoalKickState(s.type) && (prepping || setting)) {
+        const kickDir: 1 | -1 = s.dir > 0 ? 1 : -1;
+        const defTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
+        const attackers = this.live.filter((p) => p.team === s.kicker && p !== k && p.sinbin <= 0);
+        const defenders = this.live.filter((p) => p.team === defTeam && p.sinbin <= 0);
+        const apply = (list: Live[], defending: boolean) => {
+          /* distribute across the width in a stable order, so nobody swaps
+           * lanes with a team-mate frame to frame. */
+          const ordered = [...list].sort((a, b) => a.x - b.x);
+          ordered.forEach((p, i) => {
+            const mark = goalKickMark(i, ordered.length, defending, kickDir, s.bz);
+            p.tx = clamp(mark.x, -33, 33);
+            p.tz = clamp(mark.z, -59, 59);
+            p.job = mark.job;
+            const off = Math.hypot(p.tx - p.x, p.tz - p.z);
+            if (off > 0.6) {
+              /* he is still retiring: walk him back, at pace for a defender
+               * who has ten metres of goal line to find. */
+              p.urgency = defending ? 0.85 : 0.6;
+              steer(p, dt, false);
+            } else {
+              /* on his mark and lawfully STILL. Velocity zero until the ball
+               * is kicked — this is the clause the wandering broke. */
+              if (this.settleToward(p, p.tx, p.tz, dt, 'goal-kick')) { p.vx = 0; p.vz = 0; }
+              p.vx = 0; p.vz = 0;
+              p.urgency = 0;
+              p.face = defending ? -kickDir : kickDir;
+              if (p.clip !== 'ready') { p.clip = 'ready'; p.clipT = (p.num * 0.37) % 1.4; }
+            }
+          });
+        };
+        apply(attackers, false);
+        apply(defenders, true);
+
+        /* the kicker himself keeps his existing walk-up ritual below. */
+        if (s.stage === 'WALKUP' && Math.hypot(k.x - s.bx, k.z - (s.bz - s.dir * 1.1)) > 0.8) {
+          k.tx = s.bx; k.tz = s.bz - s.dir * 1.1;
+          k.urgency = clamp(1.15, 0, 1);
+          k.job = 'WALK TO THE TEE';
+          k.face = s.dir;
+          steer(k, dt, false);
+          clip(k, 'jog');
+        } else {
+          this.place(k, s.bx, s.bz - s.dir * 1.1, 'kicker');
+          k.vx = 0; k.vz = 0; k.face = s.dir;
+          clip(k, 'ready');
+        }
+        return;
+      }
 
       if (prepping) {
         /* T-32. The kicker walks to the tee, everyone else holds and watches.
@@ -3347,6 +3429,40 @@ export class Director {
           p.offsideT = 0;
         }
       }
+      /* PART 4 — THE BACKLINE ECHELON.
+       *
+       * Depth is a RELATIONSHIP, and until now nothing in the game expressed
+       * it: 10, 12 and 13 were authored at 7.4 / 8.0 / 8.6 m, a spread of
+       * 1.2 m over twelve metres of width, which draws as a flat horizontal
+       * line and lets one shooting defender take two receivers.
+       *
+       * The override runs last, over whichever source wrote the mark (the
+       * dataset, the shape slot, the CPU planner or the contract), because
+       * the relationship has to hold whichever of them answered. It writes
+       * DEPTH ONLY — the lateral spread, the job and the urgency all stay
+       * with the branch that owns them. The 10's own depth is the reference
+       * and is derived from the shape rather than from his live mark, so the
+       * diagonal does not depend on the order the loop happens to visit the
+       * backline in. */
+      if (this.op && p.team === atk && !p.carrier && inEchelon(p.num)
+          && !(this.op.ball.live && p.num === this.op.pendingReceiver)) {
+        const tenSlot = atkShape.slots.find((q) => q.num === 10);
+        if (tenSlot) {
+          const tempo10 = this.slider(atk, 'tempo') / 100;
+          const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
+          const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
+          const echZ = echelonTargetZ(p.num, tenZ, atkSigma);
+          const mark = this.boundMark(p.tx, echZ);
+          this.writeThinkPlayer(gate, `think:echelon:${p.team}${p.num}`, p,
+            ['tz', 'job'] as const, () => {
+              p.tz = clamp(mark.z, -59, 59);
+              if (p.num !== 10) {
+                p.job = `${p.job} — ${echelonDepthBehindTen(p.num)} m BEHIND THE TEN, ON THE ANGLE`;
+              }
+            });
+        }
+      }
+
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.

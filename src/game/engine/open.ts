@@ -22,6 +22,9 @@ import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal,
 import { approach } from './approach';
 import { clamp } from './clamp';
 import {
+  anticipates, passIntersection, runOnVelocity, RUN_ON_SPEED_FRACTION,
+} from '../behaviour/backline-echelon';
+import {
   forwardAttackPassDispatchFailures, forwardAttackPlayerWriteFailures,
   forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
 } from '../forwardAttackGates';
@@ -677,6 +680,39 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
       `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter, opt.player.num,
     )) gate(failure);
   }
+  /* PART 4 — ANTICIPATORY ACCELERATION: RUNNING ONTO THE BALL.
+   *
+   * The receiver was given a forward velocity above; everyone outside him
+   * waited on his mark for a ball that was still two passes away, so the
+   * whole backline took the ball from a standing start and was tackled on
+   * the catch. A real backline leaves WITH the pass: the moment the ball
+   * is out of the nine's hands, the 10, 12 and 13 are already running.
+   *
+   * The velocity is injected once, here, at release — not steered towards
+   * every frame — so the men are genuinely moving when the ball arrives
+   * rather than being dragged along by their marks. Each is aimed at the
+   * point where he will MEET the pass (solved from the same fixed aim the
+   * ball flies at, so nobody is chasing anybody), at RUN_ON_SPEED_FRACTION
+   * of his own maximum sprint — comfortably over the 60% the line needs to
+   * cross the gain line rather than reach for it. */
+  const flightT = Math.max(0.01, s.passDist / PASS_SPEED);
+  for (const runner of d.live) {
+    if (runner.team !== s.attacking || runner.sinbin > 0 || runner.down) continue;
+    if (runner.num === car.num || runner.num === opt.player.num) continue;
+    if (!anticipates(runner.num, car.num, opt.player.num)) continue;
+    const sprint = maxSpeed(runner, false, true, runner.stamina);
+    const meet = passIntersection(
+      { x: runner.tx, z: runner.tz }, { x: aim.x, z: aim.z },
+      flightT, sprint * RUN_ON_SPEED_FRACTION, dir,
+    );
+    const v = runOnVelocity(runner, meet, sprint, dir);
+    runner.vx = v.vx;
+    runner.vz = v.vz;
+    runner.urgency = 1;
+    runner.face = dir;
+    runner.job = 'RUN ONTO IT — DO NOT WAIT FOR THE BALL';
+  }
+
   if (cutOut) d.say(`CUT-OUT PASS TO ${d.L(s.attacking, opt.player.num).num}`);
 }
 

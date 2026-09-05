@@ -11,10 +11,56 @@ import { ruckDistributor, assignCrew } from '../intelligence';
 import { R } from './rng';
 import { clamp } from './clamp';
 
+/* PART 2 — MULTI-STAGE TACKLE PHYSICS.
+ *
+ * The collision does not stop the two men; it merges them. For
+ * KINETIC_WINDOW seconds after the hit they share the carrier's forward
+ * velocity dampened by KINETIC_DAMPING, decaying to a standstill by the end
+ * of the window. The 3D animation timeline in ThreePlayerManager is cut
+ * against exactly these numbers. */
+export const KINETIC_WINDOW = 0.3;
+export const KINETIC_DAMPING = 0.7;
+
+/** Is the tackle still sliding? While true, nothing may pin the two men. */
+export function inKineticImpact(s: BreakdownState): boolean {
+  return s.stage === 'CONTACT' || s.stage === 'PLACE'
+    ? s.t < KINETIC_WINDOW
+    : false;
+}
+
+/**
+ * Slide the carrier and the tackler forward together through the kinetic
+ * impact window, decaying the shared velocity to zero by its end, and carry
+ * the contact point (and therefore the ruck) along with them. Called once per
+ * frame from upBreakdown, before any stage logic reads contactX/Z.
+ */
+function kineticImpact(d: Director, s: BreakdownState, dt: number) {
+  if (!inKineticImpact(s)) return;
+  /* linear ramp-out over the window: full shared speed at the hit, zero at
+   * the end of it — a slide, not a bounce and not a dead stop. */
+  const decay = Math.max(0, 1 - dt / Math.max(1e-3, KINETIC_WINDOW - s.t + dt));
+  for (const q of s.players) {
+    if (q.role !== 'CARRIER' && q.role !== 'TACKLER') continue;
+    const p = d.L(q.team, q.num);
+    if (p.sinbin > 0) continue;
+    p.vx *= decay;
+    p.vz *= decay;
+    p.x = clamp(p.x + p.vx * dt, -34.5, 34.5);
+    p.z = clamp(p.z + p.vz * dt, -61, 61);
+    p.movedBy = 'bound';   // T-02: this branch owns the integration this frame
+    q.x = p.x; q.z = p.z;
+    if (q.role === 'CARRIER') {
+      s.contactX = p.x; s.contactZ = p.z;
+      if (!s.ball.placed) { s.ball.x = p.x; s.ball.z = p.z; }
+    }
+  }
+}
+
 export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set<string>) {
 
   const s = d.bd!;
   s.t += dt;
+  kineticImpact(d, s, dt);
   const atk = s.attacking, dTeam = d.defending();
 
   /* Playtest 2: "I press the pass button and it doesn't pass." A pass
@@ -495,9 +541,26 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     return;
   }
 
+  /* PART 2 — THE KINETIC IMPACT WINDOW.
+   *
+   * A tackle used to zero both men on the collision frame: fifteen stone of
+   * carrier travelling at seven metres a second stopped inside 16 ms, and the
+   * fall animation then played on the spot, so contact read as two men
+   * deciding to lie down next to each other.
+   *
+   * Momentum does not vanish at contact — it is SHARED. For the next 0.3 s
+   * the tackler and the ball-carrier both carry the carrier's forward
+   * velocity, dampened by 70%, and slide forward together. `upBreakdown`
+   * decays that shared velocity to zero across the window (see KINETIC_*
+   * below), which is what the animation timeline in ThreePlayerManager is
+   * cut against: impact 0.00–0.15, grounding 0.15–0.40, ruck prep after it,
+   * by which time velocity has genuinely reached zero.
+   */
+  const shareVx = car.vx * (1 - KINETIC_DAMPING);
+  const shareVz = car.vz * (1 - KINETIC_DAMPING);
   car.down = true;
-  car.vx = 0; car.vz = 0;
-  if (tackler) { tackler.down = true; tackler.vx = 0; tackler.vz = 0; }
+  car.vx = shareVx; car.vz = shareVz;
+  if (tackler) { tackler.down = true; tackler.vx = shareVx; tackler.vz = shareVz; }
 
   // three named attackers, in arrival order, assigned before the whistle
   const commitA = clamp(1 + Math.round((d.slider(atk, 'ruckCommit') / 100) * 2), 1, 3);

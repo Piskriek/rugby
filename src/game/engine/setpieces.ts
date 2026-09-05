@@ -9,6 +9,7 @@ import { Director, ScrumSlot, Input, MaulState } from '../director';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
 import { clamp } from './clamp';
+import { scrumBlock } from '../behaviour/setpiece-overrides';
 import { approach } from './approach';
 import {
   MAUL_REGATE_WINDOW_COUNT,
@@ -172,20 +173,19 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
 export function scrumSlots(_d: Director, feed: 'A' | 'B', ax: number, az: number): ScrumSlot[] {
   /* T-11 void audit: frozen-interface param — the slots are symmetric and the
    * feed side is the caller's knowledge (startScrum places and drives). */
-  const out: ScrumSlot[] = [];
-  const rows = [[1, 2, 3], [4, 5, 6], [7, 8]];
-  for (const t of ['A', 'B'] as const) {
-    const back = t === 'A' ? -1 : 1;
-    rows.forEach((row, ri) => {
-      row.forEach((num, ci) => {
-        out.push({
-          num, team: t, row: ri + 1, down: false,
-          x: ax + (ci - (row.length - 1) / 2) * 0.68,
-          z: az + back * (0.62 + ri * 0.66),
-        });
-      });
-    });
-  }
+  /* PART 3 — THE 3-4-1 BLOCK, AND THE ENGAGEMENT AXIS.
+   *
+   * The old rows here were 3-3-2: the two flankers packed down in the back
+   * row alongside the eight, which is not a scrum. The lawful pack is
+   * 3-4-1 — front row, then the two locks bound between the two flankers,
+   * then the eight alone at the base — and it is authored once, in
+   * behaviour/setpiece-overrides.ts, together with the locked engagement
+   * heading so the renderer and the engine cannot disagree about which way
+   * the packs are pointing. Rows stack along z (down the pitch), never
+   * across it: A packs from −z, B from +z, and they meet head-on. */
+  const out: ScrumSlot[] = scrumBlock(ax, az).map((b) => ({
+    num: b.num, team: b.team, row: b.row, down: false, x: b.x, z: b.z,
+  }));
   /* T-11 void audit: frozen-interface param — the slots are symmetric and
    * the feed side is the caller's knowledge (startScrum places and drives). */
   void feed;
