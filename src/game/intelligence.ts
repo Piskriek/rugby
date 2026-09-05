@@ -24,6 +24,9 @@ import {
 } from './forwardAttackGates';
 import type { ForwardAttackGateReporter, ForwardAttackGateValue } from './forwardAttackGates';
 import { solvePassAim, passReleaseRel, PASS_FORWARD_EPSILON } from './engine/throwforward';
+import {
+  LATCH_SPEED_MULT, LATCH_ACCEL_MULT, CLIP_LATCH_CARRY, CLIP_LATCH_HANG,
+} from './engine/latch';
 
 export interface Live {
   /* Playtest 2: the turn beat (the cutout pivots through edge-on) */
@@ -63,6 +66,16 @@ export interface Live {
    *  recovers (steers back into the line) but cannot tackle while the timer
    *  runs; this is where line breaks come from. */
   beatenT: number;
+  /* LATCH-AND-DRAG. The two halves of one link, held as the other man's
+   * `team:num` identity so the pair survives the live array being rebuilt.
+   * A latched carrier keeps running under a crippling drag penalty; the man
+   * latching onto him is towed along on his hip. Both are null in open play.
+   * See engine/latch.ts — these two fields are the whole contract between
+   * the tackle physics, the steering and the 3D animation layer. */
+  latchedBy?: string | null;
+  latchingOnto?: string | null;
+  /** the live drag multiplier while held — see latch.ts dragMultiplier() */
+  latchDrag?: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:
@@ -85,6 +98,14 @@ export const RUCK_ELIGIBLE = [9, 8, 2, 7, 6, 5, 4, 3, 1];
 /** Shirts contractually forbidden from entering a ruck. */
 export const RUCK_FORBIDDEN = [10, 11, 12, 13, 14, 15];
 
+/**
+ * LATCH-AND-DRAG — the drag penalty, applied at the single place every system
+ * in the game asks how fast a man can run. A carrier with a defender hanging
+ * off his hips does not stop, but he is fighting a grown man: he keeps his
+ * legs going at a fraction of his free pace. Putting it here rather than in
+ * the tackle code means the human input branch, `cpuCarrier` and `steer()`
+ * are all taxed identically, and no future caller can forget about it.
+ */
 export function maxSpeed(p: Live, carrying: boolean, sprint: boolean, fatigue: number): number {
   /* T-39 realistic speeds. Elite wingers hit ~9.5 m/s in a full sprint, props
    * ~6.0. The spread comes from SPEED; a bigger body costs a touch of top speed
@@ -96,7 +117,8 @@ export function maxSpeed(p: Live, carrying: boolean, sprint: boolean, fatigue: n
   const sprintMul = sprint ? 1.32 : 1.0;
   const sizeMul = 1.03 - (p.size ?? 1) * 0.03;
   const tired = 1 - clamp(1 - fatigue / 100, 0, 1) * 0.22;
-  return Math.max(3.4, base - carryPenalty) * sprintMul * sizeMul * tired;
+  const drag = p.latchedBy ? (p.latchDrag ?? LATCH_SPEED_MULT) : 1;
+  return Math.max(3.4, base - carryPenalty) * sprintMul * sizeMul * tired * drag;
 }
 
 /* ============================ MOVEMENT ============================
@@ -128,6 +150,11 @@ export function steer(
     // one continuous curve — the accel rate is the only difference between
     // a prop and a wing, so sprint never feels like a different game
     let accel = 9 + (p.attrs.SPD / 100) * 5;
+    /* LATCH-AND-DRAG: a held man cannot build pace either — the drag taxes
+     * acceleration as hard as it taxes top speed, which is what turns the
+     * churn into a few heavy metres rather than a jog that happens to be
+     * slow. */
+    if (p.latchedBy) accel *= LATCH_ACCEL_MULT;
     /* T-13. THE TURN. A beaten defender turning back THROUGH himself cannot
      * accelerate at the full rate — he plants, redirects, builds again.
      * Until this, a flipped-180 defender accelerated at the full
@@ -172,7 +199,22 @@ export function steer(
   let clip = p.clip;
   let clipSpeed = 0;
   if (p.down) clip = 'grounded';
-  else if (!p.bound) {
+  else if (p.clip === 'dive' && p.clipT < 0.5) {
+    /* LATCH-AND-DRAG (Part 3): the committed dive is a one-shot and the gait
+     * picker must not stomp it. It used to be overwritten on the very next
+     * frame — the human-input branch in Director had its own guard for
+     * exactly this, but every CPU defender's leap was erased before a single
+     * frame of it rendered. Half a second of committed dive, then the gait
+     * resumes; if he connects, the latch takes the body over first. */
+    clip = 'dive';
+  } else if (p.latchedBy || p.latchingOnto) {
+    /* LATCH-AND-DRAG: the struggle owns the body. The gait picker would
+     * otherwise overwrite the churn and the hang with 'carry'/'jog' on the
+     * very next frame, and the drag would read as two men jogging in
+     * formation. engine/latch.ts holds the clip; this branch only declines
+     * to stomp it. */
+    clip = p.clip;
+  } else if (!p.bound) {
     if (sp < 0.7) clip = 'ready';
     else if (p.carrier) clip = 'carry';
     else if (sp > 6.2) clip = 'sprint';
@@ -185,6 +227,10 @@ export function steer(
   if (clip === 'sprint') clipSpeed = 7.2;
   else if (clip === 'jog') clipSpeed = 3.9;
   else if (clip === 'carry') clipSpeed = 5.6;
+  /* A man churning through contact is authored slow and heavy: locking the
+   * cycle to his (crippled) ground speed would read as slow motion. */
+  else if (clip === CLIP_LATCH_CARRY || clip === CLIP_LATCH_HANG) clipSpeed = 0;
+  else if (clip === 'dive') clipSpeed = 0;   // one-shot: real time, not ground-locked
 
   /* THE TURN BEAT. A face flip is the cutout pivoting — it passes through
    * edge-on. One field, decays in a fifth of a second; the drawer squashes
@@ -254,6 +300,13 @@ export function separate(
        * existing movement-owner semantics. */
       const beforeA = reportGate ? snapshotForwardAttackPlayer(a) : undefined;
       const beforeB = reportGate ? snapshotForwardAttackPlayer(b) : undefined;
+
+      /* LATCH-AND-DRAG: the two men in a latch are DELIBERATELY occupying the
+       * same half-metre of grass — that is the tackle. The separation shove
+       * would prise them apart every frame and the defender would appear to
+       * bounce off the man he is supposed to be hanging onto. */
+      if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
+        || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
       /* T-04. Opposing players must not run through one another. Two cases:
        *

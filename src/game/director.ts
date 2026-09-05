@@ -65,6 +65,8 @@ import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
+import type { LatchState } from './engine/latch';
+import { inLatch, isLatching, clearLatch } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
@@ -201,6 +203,13 @@ export interface OpenPlayState {
   aiTimer: number; aiIntent: string; aiPlay: string; aiPhasePlan: number;
   /** T-18: defenders who have already had their one slip-roll this episode */
   beatTried?: Set<number>;
+  /* LATCH-AND-DRAG — the live latch, or undefined in free running. A
+   * defender who reaches the contact radius does not end the episode any
+   * more: he HANGS on, the carrier churns forward under a heavy drag
+   * penalty, and the takedown fires when the momentum dies or the drag timer
+   * expires. See engine/latch.ts. One at a time — a second arriving defender
+   * joins the takedown through the ordinary breakdown crew. */
+  latch?: LatchState;
   /* Playtest P1.4: from-hand kicks charge ON THE RUN. 0 = not kicking;
    * >0 = the key is held and power is building; released = strike. The
    * match never pauses for a punt — only tee kicks get the ritual. */
@@ -1357,6 +1366,17 @@ export class Director {
        * nobody ever asked. A whistle tears the phase down, so this runs after
        * the phase updater and before the players are told where to stand. */
       if (this.enforceOffsideLines(dt)) return;
+
+      /* LATCH-AND-DRAG — THE LEAK GUARD. The two link fields live on `Live`,
+       * which outlives the episode: a whistle, a try or a kick tears `op`
+       * down mid-drag and would leave a man permanently at 28% pace with a
+       * phantom defender attached. A latch is only ever legal inside a live
+       * OPEN_PLAY episode that still owns it, so anything else is stale and
+       * is cut here, once, at the top level. */
+      if (this.phase !== 'OPEN_PLAY' || !this.op?.latch) {
+        for (const p of this.live) if (inLatch(p)) { p.latchedBy = null; p.latchingOnto = null; }
+        if (this.op) clearLatch(this.op, null, null);
+      }
     } catch (err) {
       this.trip(`${this.phase} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -3014,7 +3034,12 @@ export class Director {
          * engine sets clip='dive' on the hit; the gait picker must not stomp
          * it in the same beat. Half a second of committed dive, then the gait
          * resumes (or the ruck role clip takes over, which blends anyway). */
-        if (!(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
+        /* LATCH-AND-DRAG: the struggle owns the body for the controlled man
+         * too. Without this the human carrier's gait picker overwrote the
+         * churn on the very next frame and a held player looked like he was
+         * running free — while moving at a quarter of the pace, which is the
+         * worst of both. */
+        if (!inLatch(ctrlHuman) && !(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
           ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
             : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
               : sp2 > 0.7 ? 'jog' : 'ready';
@@ -3034,6 +3059,18 @@ export class Director {
        * the shape. Skipping him here stops think() from yanking him back to his
        * support mark — which is what made him teleport onto the ball. */
       if (this.op?.ball.live && p.team === this.op.attacking && p.num === this.op.pendingReceiver) continue;
+      /* LATCH-AND-DRAG (T-02 ownership). A defender hanging off a carrier is
+       * owned by engine/latch.ts, which snaps his coordinates onto the
+       * carrier's hip every frame. Steering him at a defensive mark at the
+       * same time is the double-move the ownership contract exists to
+       * prevent, and it would visibly tear him off the man he is holding. */
+      if (isLatching(p) || p.movedBy === 'latch') {
+        this.writeThinkPlayer(gate, `think:latched:${p.team}${p.num}`, p, ['urgency', 'job'] as const, () => {
+          p.urgency = 0;
+          p.job = 'HANG ON — DRAG HIM DOWN';
+        });
+        continue;
+      }
       if (isBound(p) || p.down) {
         this.writeThinkPlayer(gate, `think:bound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = true; });
         continue;

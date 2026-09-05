@@ -21,6 +21,7 @@ import { wetnessOf, windOf, WEATHERS } from './weather';
 import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal, PASS_SPEED } from './throwforward';
 import { approach } from './approach';
 import { clamp } from './clamp';
+import { beginLatch, clearLatch, tickLatch, shouldDive } from './latch';
 import {
   anticipates, passIntersection, runOnVelocity, RUN_ON_SPEED_FRACTION,
 } from '../behaviour/backline-echelon';
@@ -180,7 +181,26 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
 
   // ---- verbs. Sampled now, resolved now, never queued. ----
   if (s.speedDebt < 1) s.speedDebt = Math.min(1, s.speedDebt + dt * 0.45);
-  if (human) {
+  /* LATCH-AND-DRAG — A HELD MAN HAS NO VERBS.
+   *
+   * The drag is a commitment, exactly as the goal-line dive is. With hands
+   * on him the carrier cannot pass, kick, step, fend, dummy or burst: his
+   * only outs are the try line and time. Without this gate the whole middle
+   * of the tackle is escapable — the CPU brain in particular fires a pass on
+   * the very next decision tick and the drag ends before it has been seen,
+   * which is precisely what the measured 0/195 dead-momentum takedowns were
+   * telling us. He is still RUNNING (that is the churn); he simply cannot
+   * play the ball while he is being held. */
+  if (s.latch) {
+    /* he keeps his own legs — the human's input branch and cpuCarrier both
+     * still integrate him, taxed by the drag multiplier in maxSpeed(). */
+    if (human) {
+      const dragCar = d.L(s.attacking, s.carrierNum);
+      dragCar.job = 'FIGHT THROUGH IT — KEEP YOUR LEGS GOING';
+    } else {
+      cpuCarrierDrag(d, dt, s);
+    }
+  } else if (human) {
     // SPACE performs the context action when the player has asked for that
     if (pressed.has('action') && (d.options.spaceAction ?? 0) !== 0) { d.fireContext(); return; }
     if (pressed.has('step') && s.stepCd <= 0) { s.stepCd = 2.2; d.doStep(dt); }
@@ -347,6 +367,59 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     d.commentate('LINE_BREAK');
   }
 
+  /* ---- LATCH-AND-DRAG: advance a live latch ----
+   *
+   * The hands are already on. The carrier is still being run by his ordinary
+   * owner (the human input branch or cpuCarrier, both taxed through
+   * maxSpeed's drag multiplier), so all that happens here is that the
+   * defender is towed along on his hip and the two takedown triggers are
+   * tested. This sits AFTER the carrier has been integrated for the frame —
+   * the anchor has to be his position now, not his position last frame, or
+   * the hanging man lags a stride behind and the illusion breaks. */
+  if (s.latch) {
+    const lc = d.L(s.attacking, s.latch.carrierNum);
+    const lt = d.L(s.latch.tacklerTeam, s.latch.tacklerNum);
+    const brokenLink = !lc || !lt || lc.num !== s.carrierNum
+      || lt.sinbin > 0 || lt.beatenT > 0 || s.ball.live;
+    if (brokenLink) {
+      /* the ball moved on, or the holder was removed: let him go. */
+      clearLatch(s, lc, lt);
+    } else {
+      const tick = tickLatch(s.latch, lc, lt, dt);
+      s.carrierX = lc.x; s.carrierZ = lc.z;
+      s.vx = lc.vx; s.vz = lc.vz; s.z = lc.z;
+      s.heldT += dt;
+      s.gained = (lc.z - s.originZ) * s.dir;
+      s.toLine = Math.abs((s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ) - lc.z);
+      /* THE REACH, through the drag. A man being dragged over the line still
+       * scores — the tackle has not been completed, and a held carrier who
+       * reaches the plane has grounded it. This test has to live here or the
+       * latch would swallow every close-range try. */
+      const dragLine = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
+      if ((s.dir > 0 && lc.z >= dragLine) || (s.dir < 0 && lc.z <= dragLine)) {
+        clearLatch(s, lc, lt);
+        d.scoreTry();
+        return;
+      }
+      if (tick.end) {
+        /* THE TAKEDOWN. Hand straight over to the existing path: the crew
+         * assignment, then the 0.3 s kineticImpact slide that carries the
+         * pair the last metre into the ruck. The drag distance is real
+         * ground the attack has made and is already in s.gained. */
+        const tacklerNum = lt.num;
+        clearLatch(s, lc, lt);
+        if (tick.dragged > 2.2) d.commentate('BIG_HIT', '— BUT HE DRAGS HIM ON');
+        d.startBreakdown(tacklerNum);
+        return;
+      }
+      /* the drag continues: no verbs, no passes, no new tackles this frame.
+       * A held man's only outs are the line (above) and time. */
+      d.refreshPassOptions();
+      s.current.label = d.contextLabel(s);
+      return;
+    }
+  }
+
   // ---- the human defender chooses his tackle ----
   /* PLAYTEST 4: Q WORKS ON DEFENCE. It lived only in the attack branch, so
    * the user was told "Q — change player" and it never fired while
@@ -365,7 +438,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       const grip = tp.attrs.PWR;
       const chance = clamp((safe + grip / 400 - car.attrs.PWR / 420) * (0.85 + d.assists.tackle * 0.25), 0.4, 0.98);
       d.setCtrl(dTeam, tacklerNum);
-      if (R() < chance) { d.startBreakdown(tacklerNum); return; }
+      if (R() < chance) {
+        /* LATCH-AND-DRAG: a successful dive/smother gets HANDS ON, it does
+         * not put the man down on the frame it lands. The drag decides
+         * that. The dive flag is true here by construction — he left his
+         * feet to make it. */
+        beginLatch(s, car, tp, dive);
+        return;
+      }
       d.teams[dTeam].stats.missed++;
       d.commentate('BIG_HIT', '— AND HE MISSES HIM!');
       tp.urgency = 0.25;
@@ -380,6 +460,27 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * offside line and cannot legally touch him for the first stride. Without
    * this the nearest defender was on the new carrier inside two frames and the
    * match became one endless ruck. */
+  /* PART 3 — THE LEAP. A defender closing hard from just outside the contact
+   * radius leaves his feet BEFORE he can reach the man, so that the grab a
+   * few frames later lands as the end of a dive rather than as a man walking
+   * into someone. Presentation only: the latch itself still happens at the
+   * honest 1.1 m radius below, and a dive that does not connect is simply a
+   * defender who ends up on the floor — which is also what happens in the
+   * real game. */
+  if (tackler1 && !s.latch && s.protect <= 0) {
+    const diver = d.L(dTeam, tackler1.num);
+    if (diver && shouldDive(diver, car, tackler1.d, 1.1)) {
+      diver.clip = 'dive';
+      diver.clipT = 0;
+      /* he commits his body along the line to the man — the lunge is what
+       * carries him the last metre into the radius. */
+      const lx = car.x - diver.x, lz = car.z - diver.z;
+      const ld = Math.max(0.4, Math.hypot(lx, lz));
+      diver.vx = (lx / ld) * 5.2;
+      diver.vz = (lz / ld) * 5.2;
+    }
+  }
+
   if (tackler1 && tackler1.d < 1.1 && s.protect <= 0) {
     const carrierP = car;
     const tackler = d.L(dTeam, tackler1.num);
@@ -421,7 +522,18 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * roll always fired first and the red zone converted by attrition
        * only (16.5 entries a match, 3 tries). */
       if (distLine < 2.4 && car.vz * s.dir > 1.2 && R() < 0.34 + car.attrs.PWR / 300) { d.scoreTry(); return; }
-      d.startBreakdown(tackler1.num);
+      /* LATCH-AND-DRAG. THE HANDS GO ON — the man does not go down.
+       *
+       * This is the frame the tackle used to end on: the radius test passed
+       * and startBreakdown tore the episode down on the spot, which is why
+       * contact read as an event rather than a collision. The defender now
+       * LATCHES instead. He is towed on the carrier's hip while the carrier
+       * churns forward under the drag penalty, and the takedown fires from
+       * the latch tick above when the momentum dies (< 1.5 m/s) or the
+       * 0.6 s drag timer expires — at which point the existing
+       * startBreakdown path and its 0.3 s kineticImpact slide finish the
+       * job exactly as before. */
+      beginLatch(s, car, tackler, tackler.clip === 'dive');
       return;
     }
     if (R() < 0.1 * dt * 10) d.commentate('BIG_HIT');
@@ -714,6 +826,33 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   }
 
   if (cutOut) d.say(`CUT-OUT PASS TO ${d.L(s.attacking, opt.player.num).num}`);
+}
+
+/**
+ * LATCH-AND-DRAG — THE CPU CARRIER, WHILE HELD.
+ *
+ * `cpuCarrier` is a decision brain with an integrator bolted on the end: it
+ * decides to pass, kick, step or carry, and only the CARRY case actually
+ * moves him. A held man has no decisions left (see the verb gate in upOpen),
+ * but he must still churn forward, so this is the integrator on its own —
+ * the same physics, driving straight ahead through the contact, with the drag
+ * penalty arriving through `maxSpeed`.
+ */
+export function cpuCarrierDrag(d: Director, dt: number, s: OpenPlayState) {
+  const car = d.L(s.attacking, s.carrierNum);
+  /* he drives for the line, not for a gap — a man with a defender on him is
+   * not stepping anybody, he is trying to fall forwards. */
+  const spd = maxSpeed(car, true, true, car.stamina);
+  car.vx = approach(car.vx, 0, 4, dt);
+  car.vz = approach(car.vz, spd * s.dir, 4.5, dt);
+  if (car.movedBy && import.meta.env.DEV && car.movedBy !== 'carrier') {
+    console.warn(`[T-02] shirt ${car.num} moved by ${car.movedBy}, then carrier-drag in one frame`);
+  }
+  car.x = clamp(car.x + car.vx * dt, -34.5, 34.5);
+  car.z = clamp(car.z + car.vz * dt, -61, 61);
+  car.movedBy = 'carrier';
+  if (Math.abs(car.vz) > 0.4) car.face = car.vz > 0 ? 1 : -1;
+  car.job = 'FIGHT THROUGH IT — KEEP YOUR LEGS GOING';
 }
 
 export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {

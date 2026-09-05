@@ -128,6 +128,13 @@ interface PlayerInstance {
 export const TACKLE_IMPACT_END = 0.15;
 export const TACKLE_GROUND_END = 0.40;
 
+/* LATCH-AND-DRAG — the churn rate. The carrier's Run clip is played well
+ * under the speed it was authored for while he is held, so his legs labour
+ * and drive rather than stride: a man fighting through contact, not a man
+ * jogging. Slow enough to read as effort, fast enough not to read as slow
+ * motion. */
+export const LATCH_CHURN_RATE = 0.72;
+
 /* ================================================================== */
 export class ThreePlayerManager {
   ready = false;
@@ -568,6 +575,13 @@ export class ThreePlayerManager {
   /** Engine renderClip -> FSM state. */
   private mapState(engineClip: string, spd: number): string {
     switch (engineClip) {
+      /* LATCH-AND-DRAG: the engine's two struggle clips pass straight
+       * through. They must NOT fall to the locomotion default — a latched
+       * carrier is still moving at two or three metres a second, so the
+       * default would put him back into a clean Run and the whole point of
+       * the drag would be invisible. */
+      case 'latchCarry': return 'latchCarry';
+      case 'latchHang': return 'latchHang';
       case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
       case 'kick': return 'kick';
       case 'tackle': return 'tackle';
@@ -613,6 +627,19 @@ export class ThreePlayerManager {
       case 'carrierFall': return { name: 'Death', loop: false };       // Fall (carrier)
       case 'present': return { name: 'Death', loop: false };           // prone ball presentation
       case 'rollAway': return { name: 'DiveRoll', loop: false };
+      /* LATCH-AND-DRAG. The two halves of the struggle, before the takedown.
+       * The rig ships no bespoke Struggle or Hang, so the illusion is built
+       * out of what it has:
+       *   latchCarry  Run, played heavy — the timeScale in setLocomotion is
+       *               dropped well under ground-lock so the carrier churns
+       *               and labours instead of striding cleanly. He is being
+       *               held, and the legs have to read as fighting for it.
+       *   latchHang   Tackle, CLAMPED on its final frame — the drive pose,
+       *               arms wrapped, held. His 2D coordinates are snapped to
+       *               the carrier's hip by the engine, so a held pose is all
+       *               that is needed to read as a man being towed. */
+      case 'latchCarry': return { name: 'Run', loop: true };
+      case 'latchHang': return { name: 'Tackle', loop: false };
       case 'grounded': return { name: 'Death', loop: true };
       case 'dive': return { name: 'SlideStart', loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
@@ -734,6 +761,45 @@ export class ThreePlayerManager {
       /* PART 1 — release the pass latch the moment the engine leaves the
        * pass state, so the NEXT pass gets a fresh single shot. */
       if (desired !== 'pass') st.passLatched = false;
+
+      /* LATCH-AND-DRAG — THE STRUGGLE, BEFORE THE TAKEDOWN.
+       *
+       * This runs BEFORE the tackle timeline below, and deliberately does not
+       * touch `st.tackleT`. The takedown that follows a latch arrives as an
+       * ordinary transition into `tackle`/`grounded`, so the timeline starts
+       * from stage 0 with a normal crossfade and the struggle flows straight
+       * into the impact → grounding → presentation sequence with no seam. */
+      if (desired === 'latchCarry' || desired === 'latchHang') {
+        if (st.oneShot !== desired) {
+          if (desired === 'latchCarry') {
+            /* the carrier keeps churning. A long crossfade out of the sprint
+             * is what sells the loss of pace: he does not snap into the
+             * struggle, he is dragged down into it over a third of a
+             * second. */
+            const a = this.play(inst, 'latchCarry', 0.3, LATCH_CHURN_RATE);
+            a?.setLoop(THREE.LoopRepeat, Infinity);
+          } else {
+            /* the hanger holds the drive pose. LoopOnce + clampWhenFinished
+             * (set in play()) freezes him wrapped around the carrier's
+             * waist, and the engine's coordinate snap does the travelling. */
+            this.play(inst, 'latchHang', 0.12, 1.35);
+          }
+          st.oneShot = desired;
+          st.lock = 0;
+        }
+        st.lie = false;
+        st.passLatched = false;
+        st.tackleRole = null; st.tackleT = -1;
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+        inst.root.rotation.y = Math.PI - st.face;
+        inst.mixer.update(step);
+        continue;
+      }
+      if (st.oneShot === 'latchCarry' || st.oneShot === 'latchHang') {
+        /* the latch broke or the takedown fired — release the hold so the
+         * branches below own the body again. */
+        st.oneShot = null; st.lock = 0;
+      }
 
       /* PART 2 — THE TACKLE TIMELINE.
        *
