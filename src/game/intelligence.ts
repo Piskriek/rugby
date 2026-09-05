@@ -296,6 +296,12 @@ export function steer(
  * gate; 0.22 leaves clear margin while still resolving overlaps in one or two
  * frames. */
 const MAX_SHOVE_PER_FRAME = 0.22;
+/** Measured front-to-back torso depth of rugby_player.glb. Two centres closer
+ *  than this are visibly inside one another whatever their animation. */
+const SHELL_RADIUS = 0.29;
+/** Relaxation sweeps per frame. Resolving one pair can push a man into a
+ *  third, so a dense ruck needs several passes to settle. */
+const SHELL_ITERATIONS = 4;
 
 export function separate(
   all: Live[], dt: number,
@@ -384,6 +390,70 @@ export function separate(
       p.x = o.x + mx * k;
       p.z = o.z + mz * k;
     }
+  }
+}
+
+/**
+ * THE HARD SHELL — the last word on two men occupying one patch of grass.
+ *
+ * `separate()` above deliberately skips `bound` and `down` players, because a
+ * bound man's position is owned by a slot writer (scrum, lineout, breakdown)
+ * and a full 0.82-1.05 m separation shove would fight that writer every frame.
+ * The cost of skipping them was that nothing stopped two bound men from
+ * standing inside each other. Measured over three matches, 14506 pairs sat
+ * closer than the model's own torso depth, and 11800 of them (81%) were bound
+ * team-mates converging on breakdown and lineout slots. On screen that is the
+ * "blob": two figures inside one another, arms flailing through each other's
+ * chests.
+ *
+ * ORDERING IS THE WHOLE POINT. This must run AFTER `placeBound()`, not inside
+ * `separate()`. The first attempt lived in `separate()` and measured no
+ * improvement whatsoever, because the slot writers run later in the frame and
+ * simply overwrote it.
+ *
+ * The pass is deliberately far weaker than the steering rules. It does not try
+ * to establish a comfortable gap; it only refuses to let two torsos share the
+ * same volume, moving each man by half the shortfall. A slot writer that
+ * genuinely wants them closer wins again next frame, so this costs a few
+ * centimetres and never accumulates.
+ */
+export function hardShell(all: Live[], iterations = SHELL_ITERATIONS) {
+  /* ITERATED, because one pass cannot solve a pile. Resolving A-B can push A
+   * into C; with a single sweep, 6855 bound pairs were still interpenetrating
+   * after the shell ran. A handful of relaxation sweeps converges the cluster
+   * without the cost or instability of a real constraint solver. */
+  for (let pass = 0; pass < iterations; pass++) {
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      const a = all[i], b = all[j];
+      /* A latched pair is SUPPOSED to share that half-metre — it is the
+       * tackle. Prising them apart is the exact bug the latch exemption in
+       * `separate()` exists to prevent. */
+      if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
+        || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
+      /* An airborne diver has a locked trajectory — that commitment is the
+       * whole risk of diving, and nudging him mid-flight both breaks it and
+       * shows up as steering in the dive probe. He lands where he launched. */
+      if ((a.diveT ?? 0) > 0 || (b.diveT ?? 0) > 0) continue;
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= SHELL_RADIUS * SHELL_RADIUS) continue;
+      const d = Math.sqrt(d2);
+      /* Two men at exactly the same point have no line to separate along.
+       * Derive a deterministic axis from their shirt numbers so the
+       * resolution is stable frame to frame instead of jittering. */
+      let nx: number, nz: number;
+      if (d < 1e-4) {
+        const ang = ((a.num * 31 + b.num * 17) % 360) * Math.PI / 180;
+        nx = Math.cos(ang); nz = Math.sin(ang);
+      } else {
+        nx = dx / d; nz = dz / d;
+      }
+      const push = (SHELL_RADIUS - d) * 0.5;
+      a.x -= nx * push; a.z -= nz * push;
+      b.x += nx * push; b.z += nz * push;
+    }
+  }
   }
 }
 

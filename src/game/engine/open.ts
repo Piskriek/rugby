@@ -293,7 +293,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * directly and did not consult the get-up lock, so it dragged recovering
      * players 627 m across three matches while their clip said 'getup' —
      * the single largest source of foot-sliding on a planted animation. */
-    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer) && (p.recoverT ?? 0) <= 0) {
+    /* Nor can a man in mid-air back-pedal: the dive is a committed trajectory
+     * and the retreat was bending it, which the dive probe saw as steering. */
+    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer)
+      && (p.recoverT ?? 0) <= 0 && (p.diveT ?? 0) <= 0) {
       const gap = (p.z - rb!.z) * rb!.dir;
       if (gap < 2.0) {
         p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;

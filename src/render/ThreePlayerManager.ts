@@ -187,6 +187,13 @@ const REACH_MIN = 0.2;
 /** forward pitch of the torso when fully committed to a reach, radians */
 const DIP_MAX = 0.52;          // ~30 deg, spread over spine_01/02 + neck
 const DIP_RATE = 9;
+/** How hard a latched man is turned onto his partner. The tackler commits;
+ *  the carrier is only nudged, because he is trying to get away. */
+const ALIGN_RATE_TACKLER = 12;
+const ALIGN_RATE_CARRIER = 4;
+/** How far over a standing wrapper is dragged, as a fraction of fully prone.
+ *  He ends up bent over the falling carrier, not flat on his face. */
+const WRAP_TILT_FRACTION = 0.62;
 const REACH_RATE = 12;
 
 /** Peak spine thrash, radians, at full sprint. */
@@ -872,7 +879,22 @@ export class ThreePlayerManager {
        * branch plays the SAME retargeted pair at a reduced time scale and
        * without the dive tilt, which reads as a grapple to ground rather
        * than a launch. `standingHit` is set per-frame from the engine. */
+      /* THE STANDING WRAP. A dive clip slowed to 0.62x does not read as a
+       * grapple, it reads as swimming: the limbs still travel on a ballistic
+       * arc, just lazily. For a takedown on the spot the tackler stays on his
+       * FEET and keeps a locomotion pose, and the contact is sold procedurally
+       * instead — both hands driven onto the carrier's waist by applyArmReach
+       * at full weight, plus the torso dip, while the carrier plays the real
+       * MX_TackleReact and collapses. He is pulled down by the carrier rather
+       * than launching himself. 61% of tackles are STANDING, so this is the
+       * common case, not an edge case. */
       case 'tackleDrive': return { name: this.pick('MX_Tackle', 'Tackle'), loop: false };
+      /* `Push` is the scrum/ruck drive pose: measured pelvis 0.70 m (he is on
+       * his feet, braced), hands already at 1.165 m and a 48 deg forward lean
+       * built in. That is a man leaning into another man — exactly the shape a
+       * standing wrap needs, and far closer than Crouch (pelvis 0.477 m, which
+       * is a man already on his way to the floor). */
+      case 'standWrap': return { name: 'Push', loop: true };
       case 'hitReact': return { name: this.pick('MX_TackleReact', 'SlideStart'), loop: false };
       case 'tackleGround': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
       case 'carrierFall': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
@@ -1012,13 +1034,19 @@ export class ThreePlayerManager {
    * wearing the opposite half of the struggle IS the partner.
    */
   private latchPartner(inst: PlayerInstance, pool: PlayerInstance[]): PlayerInstance | null {
+    /* A standing wrap needs a partner too — without one the IK has nothing to
+     * aim at and the tackler just holds a brace pose in mid-air. His opposite
+     * number is the man playing the matching fall, whichever stage it is in. */
+    const wrapTargets = ['hitReact', 'carrierFall', 'present', 'grounded'];
     const want = inst.proc.state === 'latchHang' ? 'latchCarry'
-      : inst.proc.state === 'latchCarry' ? 'latchHang' : null;
+      : inst.proc.state === 'latchCarry' ? 'latchHang'
+        : inst.proc.state === 'standWrap' ? wrapTargets : null;
     if (!want) return null;
+    const matches = (st: string) => (Array.isArray(want) ? want.includes(st) : st === want);
     let best: PlayerInstance | null = null;
     let bestD = Infinity;
     for (const other of pool) {
-      if (other === inst || other.proc.state !== want || other.team === inst.team) continue;
+      if (other === inst || !matches(other.proc.state) || other.team === inst.team) continue;
       const d = inst.root.position.distanceToSquared(other.root.position);
       if (d < bestD) { bestD = d; best = other; }
     }
@@ -1179,6 +1207,35 @@ export class ThreePlayerManager {
   }
 
   /**
+   * 2a — PAIRED FACING.
+   *
+   * Turns a latched tackler onto the man he is holding. `latchHang` is the
+   * tackler and `latchCarry` the carrier, so only the tackler gets the full
+   * aim; the carrier is given a gentler nudge so the pair reads as a single
+   * contact rather than two independent people who happen to be adjacent.
+   *
+   * Uses the same exponential smoothing as the main heading rule so the two
+   * cannot fight: this simply supplies a target the velocity rule refuses to
+   * because the men are moving too slowly.
+   */
+  private alignToPartner(inst: PlayerInstance, partner: PlayerInstance, step: number) {
+    const isTackler = inst.proc.state === 'latchHang';
+    const dx = partner.root.position.x - inst.root.position.x;
+    const dz = partner.root.position.z - inst.root.position.z;
+    if (dx * dx + dz * dz < 1e-6) return;
+    /* root.rotation.y = PI - face, so face = atan2 in the same convention the
+     * heading rule uses (x first, then z). Render Z is negated relative to
+     * engine Z, which is already baked into root.position. */
+    const want = Math.atan2(dx, dz);
+    const rate = isTackler ? ALIGN_RATE_TACKLER : ALIGN_RATE_CARRIER;
+    let dy = want - inst.st.face;
+    while (dy > Math.PI) dy -= Math.PI * 2;
+    while (dy < -Math.PI) dy += Math.PI * 2;
+    inst.st.face += dy * (1 - Math.exp(-rate * step));
+    inst.root.rotation.y = Math.PI - inst.st.face;
+  }
+
+  /**
    * 2b — TORSO DIP (the "magnetic lead").
    *
    * A forward pitch spread down the spine so the tackler drops his chest and
@@ -1259,6 +1316,7 @@ export class ThreePlayerManager {
   ) {
     const latching = state === 'latchHang';
     const latched = state === 'latchCarry';
+    const wrapping = state === 'standWrap';
     const grounding = state === 'tackleGround' || state === 'rollAway'
       || state === 'carrierFall' || state === 'present' || state === 'grounded';
 
@@ -1276,6 +1334,13 @@ export class ThreePlayerManager {
        * sells a horizontal dive, and a man wrestling another to the floor
        * from a standstill should stay far more upright. */
       wantTilt = TILT_GROUNDED * (inst.st.standingHit ? 0.45 : 1);
+    } else if (wrapping) {
+      /* PULLED DOWN, NOT DIVING. He starts upright with his hands on the man
+       * and is progressively dragged over as the carrier collapses under him.
+       * The tilt is driven by the tackle clock rather than by distance, so it
+       * tracks the carrier's fall instead of anticipating it. */
+      const t = Math.max(0, Math.min(1, inst.st.tackleT / TACKLE_GROUND_END));
+      wantTilt = TILT_GROUNDED * WRAP_TILT_FRACTION * t;
     }
     /* no procedural lift once the clip itself is putting him on the ground */
     this.applyBodyTilt(inst, wantTilt, step, !grounding);
@@ -1288,7 +1353,7 @@ export class ThreePlayerManager {
      *
      * The weight RAMPS with distance rather than snapping to 1 — a man still a
      * couple of metions out is beginning to reach, not already wrapped. */
-    if (latching && partner) {
+    if ((latching || wrapping) && partner) {
       const prig = this.resolveRig(partner);
       const anchor = prig.pelvis ?? prig.spine[0];
       if (anchor) {
@@ -1297,7 +1362,13 @@ export class ThreePlayerManager {
         _target.y -= LATCH_WAIST_DROP * RENDER_SCALE;
         const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
         const ramp = 1 - (dist - REACH_FULL_RANGE) / (REACH_NO_RANGE - REACH_FULL_RANGE);
-        const w = REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
+        /* A wrap is hands-ON: no distance ramp, both arms at full commitment.
+         * This is the whole illusion — the clip underneath is a generic brace
+         * pose, and it is the IK that puts his hands on the carrier's waist
+         * and keeps them there as the carrier goes down. */
+        const w = wrapping
+          ? 1
+          : REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
         this.applyArmReach(inst, _target, w, step);
         /* TORSO DIP. He gets his eyes and his chest down to the height he is
          * aiming at. This is a small forward pitch spread over the spine, on
@@ -1448,11 +1519,19 @@ export class ThreePlayerManager {
         const wantStage = stageOf(st.tackleT);
         if (prev < 0 || stageOf(prev) !== wantStage) {
           const carrier = st.tackleRole === 'CARRIER';
-          const state = wantStage === 0
-            ? (carrier ? 'hitReact' : 'tackleDrive')       // 0.00–0.15 IMPACT
-            : wantStage === 1
-              ? (carrier ? 'carrierFall' : 'tackleGround') // 0.15–0.40 GROUNDING
-              : (carrier ? 'present' : 'rollAway');        // > 0.40 RUCK PREP
+          /* THE STANDING WRAP replaces the TACKLER's dive for stages 0 and 1
+           * of a low-momentum hit. The carrier is untouched: he still plays
+           * MX_TackleReact and crumples to the turf properly, and it is that
+           * collapse which drags the wrapped tackler down. By stage 2 both men
+           * are on the ground and the normal prone clips take over. */
+          const standWrap = st.standingHit && !carrier && wantStage < 2;
+          const state = standWrap
+            ? 'standWrap'
+            : wantStage === 0
+              ? (carrier ? 'hitReact' : 'tackleDrive')       // 0.00–0.15 IMPACT
+              : wantStage === 1
+                ? (carrier ? 'carrierFall' : 'tackleGround') // 0.15–0.40 GROUNDING
+                : (carrier ? 'present' : 'rollAway');        // > 0.40 RUCK PREP
           /* DYNAMIC TIME SCALING — fit the clip to the stage.
            *
            * The stage windows are short (IMPACT 0.15 s, GROUNDING 0.25 s) but
@@ -1472,7 +1551,11 @@ export class ThreePlayerManager {
           /* A takedown on the spot is a slower, heavier movement than a dive
            * at 10 m/s. Same clip, stretched, so the two hits do not read as
            * the same event replayed. */
-          const rate = this.fitTimeScale(state, win) * (st.standingHit ? 0.62 : 1);
+          /* The wrap is a held pose, not a one-shot to be squeezed into a
+           * stage window, so it plays at its own speed. The 0.62x slow-down
+           * that used to stand in for a standing hit is gone with it — that
+           * is precisely the "swimming" artefact. */
+          const rate = standWrap ? 1 : this.fitTimeScale(state, win) * (st.standingHit ? 0.62 : 1);
           const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, rate);
           /* CONTINUE, DO NOT RESTART.
            *
@@ -1489,11 +1572,16 @@ export class ThreePlayerManager {
           st.lock = 0;
         }
         st.lie = true;
-        inst.proc.state = wantStage === 0
-          ? (st.tackleRole === 'CARRIER' ? 'hitReact' : 'tackleDrive')
-          : wantStage === 1
-            ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
-            : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
+        /* Must mirror the clip choice above, including the standing-wrap
+         * branch — the procedural pass keys off proc.state, so if the two
+         * disagree the tackler plays a wrap pose with dive procedurals. */
+        inst.proc.state = (st.standingHit && st.tackleRole !== 'CARRIER' && wantStage < 2)
+          ? 'standWrap'
+          : wantStage === 0
+            ? (st.tackleRole === 'CARRIER' ? 'hitReact' : 'tackleDrive')
+            : wantStage === 1
+              ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
+              : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
@@ -1597,6 +1685,21 @@ export class ThreePlayerManager {
      * which at seven metres a second is a visible hand-lag. */
     for (const inst of pending) {
       const partner = this.latchPartner(inst, pending);
+      /* FACE YOUR MAN.
+       *
+       * The heading rule earlier in this function only tracks velocity above
+       * 2.2 m/s, so a pair closing into contact — who are by definition
+       * slowing down — freeze at whatever heading they carried a moment
+       * before. Measured over three matches: 49% of latched frames had the
+       * tackler more than 30 deg off facing the man he had hold of, and 26%
+       * more than 60 deg. That mismatch is what reads as two figures
+       * flailing past each other rather than one tackling the other.
+       *
+       * The tackler is turned onto the carrier and the carrier is turned to
+       * present his side to the tackler, both as a smoothed correction
+       * rather than a snap: a hard set produced a visible pop on the contact
+       * frame, and the whole point is that contact should look continuous. */
+      if (partner) this.alignToPartner(inst, partner, step);
       this.applyProcedural(inst, inst.proc.state, partner, step);
     }
 
