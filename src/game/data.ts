@@ -436,6 +436,8 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'commentary', label: 'COMMENTARY', values: ['OFF', 'TICKER', 'FULL'], def: 2, note: 'Caption feed under the HUD.', cat: 'DISPLAY' },
   { id: 'crowd', label: 'CROWD NOISE', values: ['OFF', 'LOW', 'FULL'], def: 2, note: 'Mixed by travelling support ratio.', cat: 'DISPLAY' },
   { id: 'hud', label: 'HUD DENSITY', values: 'MINIMAL STANDARD FULL TELEMETRY'.split(' '), def: 1, note: 'From bare score to live expected-points readouts.', cat: 'DISPLAY' },
+  { id: 'broadcast', label: 'PRESENTATION', values: ['HERITAGE 1991', 'AAA BROADCAST'], def: 1, note: 'AAA adds the matchday card, television score bug and player spotlight lower-thirds; HERITAGE keeps the original 16-bit HUD.', cat: 'DISPLAY' },
+  { id: 'spokenCommentary', label: 'SPOKEN COMMENTARY', values: ['OFF', 'ON'], def: 0, note: 'Reads the live commentary feed aloud with the browser speech engine. Designed to be layered over the crowd bed.', cat: 'DISPLAY' },
   { id: 'handicap', label: 'CPU HANDICAP', values: ['NONE', 'SLIGHT', 'PLAYER EDGE'], def: 1, note: 'Quiet stat nudge for whoever needs it.', cat: 'MATCH' },
   { id: 'extraTime', label: 'EXTRA TIME', values: ['OFF', 'ON', 'GOLDEN POINT'], def: 1, note: 'Only in knockout rugby.', cat: 'MATCH' },
 ];

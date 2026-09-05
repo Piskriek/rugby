@@ -12,6 +12,8 @@ import { contractFor } from '../game/jlr';
 import { SpaceRemap } from './SpaceRemap';
 import { TutorialOverlay, CameraPanel } from './TutorialOverlay';
 import { stepAt } from '../game/tutorial';
+import { pollGamepad, emptyPrev, PrevGp } from '../game/gamepad';
+import { ScoreBug, MatchIntro, PlayerSpotlight, GamepadBadge } from './broadcast';
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -53,6 +55,18 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [slow, setSlow] = useState(1);
   /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
   const [showAnimDebug, setShowAnimDebug] = useState(false);
+  /* AAA broadcast — match-day intro card and gamepad connection badge. */
+  const [intro, setIntro] = useState(true);
+  const introRef = useRef(true);
+  const gpPrev = useRef<PrevGp>(emptyPrev());
+  const [gp, setGp] = useState<{ connected: boolean; name: string }>({ connected: false, name: '' });
+  /* AAA — spoken commentary reads only new feed lines, never repeats them. */
+  const spokenRef = useRef('');
+
+  useEffect(() => {
+    const t = window.setTimeout(() => { setIntro(false); introRef.current = false; }, 7500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   if (!dirRef.current) {
     dirRef.current = new Director(cfg);
@@ -142,8 +156,34 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
-      inp.run = inp.sprint;
-      prev.current = new Set(keys.current);
+
+      /* AAA — the gamepad merges into the same verb stream as the keyboard:
+       * held input first, then the rising/falling edges for the kick-meter,
+       * waggles, pause and stats. */
+      const gf = pollGamepad(gpPrev.current);
+      gpPrev.current = gf;
+      /* The matchday card consumes the input that dismisses it: if the player
+       * skips with the pad's START that press must not also pause the match. */
+      const gpSkip = gf.connected && gf.pressed.length > 0;
+      const skip = introRef.current && (pressed.size > 0 || gpSkip);
+      if (skip) {
+        introRef.current = false; setIntro(false);
+        pressed.clear(); released.clear();
+        for (const k of Object.keys(NO_INPUT) as (keyof Input)[]) inp[k] = false;
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      } else {
+        if (gf.connected) {
+          Object.assign(inp, gf.input);
+          for (const k of gf.pressed) pressed.add(k);
+          for (const k of gf.released) released.add(k);
+          setGp((cur) => (cur.connected && cur.name === gf.name ? cur : { connected: true, name: gf.name }));
+        } else {
+          setGp((cur) => (cur.connected ? { connected: false, name: '' } : cur));
+        }
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      }
 
       // The tutorial card resumes on the keys it lists, and only those.
       if (d.tut.active && d.tut.showing) {
@@ -160,7 +200,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
 
       d.gameSpeed = slow;
-      d.update(dt, inp, pressed, released);
+      /* AAA — the world stays in the kickoff frame until the matchday card is
+       * dismissed; the presentation is a curtain, not a running clock behind
+       * the text. */
+      if (!introRef.current) d.update(dt, inp, pressed, released);
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -229,6 +272,26 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
   const d = dirRef.current!;
   const A = d.A, B = d.B;
+  /* AAA — spoken commentary overlays the feed every live tick when enabled.
+   * Uses the browser speech engine, so no audio assets are required. */
+  useEffect(() => {
+    if ((d.options.spokenCommentary ?? 0) < 1) return;
+    const line = d.feed[0]?.text ?? '';
+    if (!line || line === spokenRef.current) return;
+    spokenRef.current = line;
+    try {
+      if (!('speechSynthesis' in window)) return;
+      const u = new SpeechSynthesisUtterance(line.replace(/\s+/g, ' '));
+      u.rate = 1.02;
+      u.pitch = 0.82;
+      u.volume = 0.6;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch {
+      /* a browser without voices just stays silent */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick]);
   const density = ['MINIMAL', 'STANDARD', 'FULL', 'TELEMETRY'][d.options.hud ?? 1];
   const ctrl = d.ctrlPlayer;
   const contract = ctrl ? contractFor(ctrl.num) : null;
@@ -301,50 +364,54 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         </div>
       )}
 
-      {/* SCORE BAR */}
-      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
-        <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
-          <div className="flex items-center gap-3">
-            <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
-            <span className="text-[11px] text-[#6f7f96]">v</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
-            <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
-            <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+      {/* SCORE BAR — AAA broadcast bug by default, heritage 1991 from OPTIONS */}
+      {(d.options.broadcast ?? 1) >= 1 ? (
+        <ScoreBug d={d} objective={objective} density={density} />
+      ) : (
+        <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+          <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
+            <div className="flex items-center gap-3">
+              <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
+              <span className="text-[11px] text-[#6f7f96]">v</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
+              <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
+              <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+            </div>
+            {objective && (
+              <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
+                {objective.name} — TARGET {objective.target}
+              </div>
+            )}
+            {(d.live.some((p) => p.sinbin > 0)) && (
+              <div className="mt-0.5 flex gap-2">
+                {(['A', 'B'] as const).map((t) => {
+                  const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
+                  if (!binned.length) return null;
+                  return (
+                    <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
+                      <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
+                      {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {density !== 'MINIMAL' && (
+              <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
+                <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
+                  {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
+                </span>
+                <span>·</span><span>{d.phase.replace('_', ' ')}</span>
+                {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
+                {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
+              </div>
+            )}
           </div>
-          {objective && (
-            <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
-              {objective.name} — TARGET {objective.target}
-            </div>
-          )}
-          {(d.live.some((p) => p.sinbin > 0)) && (
-            <div className="mt-0.5 flex gap-2">
-              {(['A', 'B'] as const).map((t) => {
-                const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
-                if (!binned.length) return null;
-                return (
-                  <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
-                    <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
-                    {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
-                  </span>
-                );
-              })}
-            </div>
-          )}
-          {density !== 'MINIMAL' && (
-            <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
-              <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
-                {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
-              </span>
-              <span>·</span><span>{d.phase.replace('_', ' ')}</span>
-              {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
-              {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
       {/* CONTROLLED PLAYER NAMEPLATE — four channels so you always know who you are */}
       {ctrl && (
@@ -502,6 +569,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
+        <div className="mt-0.5 text-[#5f6f86]">GAMEPAD: STICK MOVE · <Kbd>A</Kbd> ACTION · <Kbd>X</Kbd>/<Kbd>Y</Kbd> PASS · <Kbd>B</Kbd> TACKLE · <Kbd>RB</Kbd> KICK</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
       </div>
@@ -526,6 +594,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           </Panel>
         </div>
       )}
+
+      {/* AAA BROADCAST — matchday intro, player spotlight, controller badge */}
+      {(d.options.broadcast ?? 1) >= 1 && <PlayerSpotlight d={d} />}
+      <GamepadBadge connected={gp.connected} name={gp.name} />
+      {intro && (d.options.broadcast ?? 1) >= 1 && <MatchIntro d={d} />}
 
       {/* PAUSE / HALF TIME / FULL TIME */}
       {(d.paused || d.over) && (
