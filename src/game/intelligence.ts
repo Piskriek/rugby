@@ -87,6 +87,11 @@ export interface Live {
    * if it expires without him getting hands on anyone he has missed, and he
    * pays for it by landing on the floor. 0/undefined when he is on his feet. */
   diveT?: number;
+  /* The spot a recovering player went down on. While recoverT runs he is
+   * restored here every frame, so a direct p.x/p.z write by any other system
+   * cannot slide him out from under his own get-up animation. */
+  recoverX?: number;
+  recoverZ?: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:

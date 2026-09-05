@@ -289,7 +289,11 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   for (const p of d.live) {
     if (p.beatenT > 0) p.beatenT = Math.max(0, p.beatenT - dt);
     if (p.team !== dTeam || p.sinbin > 0) continue;
-    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer)) {
+    /* A man on the floor cannot back-pedal. The release retreat wrote p.z
+     * directly and did not consult the get-up lock, so it dragged recovering
+     * players 627 m across three matches while their clip said 'getup' —
+     * the single largest source of foot-sliding on a planted animation. */
+    if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer) && (p.recoverT ?? 0) <= 0) {
       const gap = (p.z - rb!.z) * rb!.dir;
       if (gap < 2.0) {
         p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;

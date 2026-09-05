@@ -329,6 +329,11 @@ export interface BreakdownState {
  */
 export const RECOVER_SECONDS = 1.53;
 
+/** How far a recovering man may be displaced before his anchor follows him.
+ *  Below this he is planted; above it something with a real reason to move
+ *  him (a retreat, a shove) wins and the anchor re-seats. */
+const RECOVER_ANCHOR_SLACK = 0.06;
+
 /**
  * WHY NOT THE FULL 1.53 s CLIP LENGTH.
  *
@@ -4105,6 +4110,7 @@ export class Director {
       for (const p of this.live) {
         if ((p.recoverT ?? 0) > 0) {
           p.recoverT = 0;
+          p.recoverX = undefined; p.recoverZ = undefined;
           if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
         }
       }
@@ -4116,11 +4122,33 @@ export class Director {
       const left = t - dt;
       if (left <= 0) {
         p.recoverT = 0;
+        p.recoverX = undefined; p.recoverZ = undefined;
         if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
         continue;
       }
       p.recoverT = left;
       p.vx = 0; p.vz = 0;
+      /* ANCHOR THE MARK, not just the velocity.
+       *
+       * Zeroing vx/vz only stops the integrator. Any code that writes p.x/p.z
+       * DIRECTLY — the release retreat, a separation push, a set-piece slot
+       * write — moves him anyway, and the probe found 581 m of drift on men
+       * whose clip said 'getup' with no owning writer at all. Latching the
+       * spot he went down on and restoring it every frame makes the lock mean
+       * "he is HERE until he is up", which is what the animation shows. */
+      /* Anchor him to the spot he went down on, but let the anchor itself be
+       * DRAGGED by anything that legitimately needs him elsewhere. A hard pin
+       * stopped the retreat entirely and offside episodes rose 105 -> 154 a
+       * match, because a man frozen in front of the mark keeps his whole side
+       * offside while the line tries to reset around him. Re-seating the
+       * anchor on whatever position survived the frame keeps the foot-plant
+       * (he is not being flung about) while still allowing the slow correction
+       * a referee would expect him to make. */
+      if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
+      const ax = p.recoverX, az = p.recoverZ ?? p.z;
+      const drift = Math.hypot(p.x - ax, p.z - az);
+      if (drift <= RECOVER_ANCHOR_SLACK) { p.x = ax; p.z = az; }
+      else { p.recoverX = p.x; p.recoverZ = p.z; }
       if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
     }
   }
@@ -4142,6 +4170,7 @@ export class Director {
        * keeps the ownership contract honest — measured 4134 frames of a
        * recovering man being steered before this was added. */
       p.recoverT = 0;
+      p.recoverX = undefined; p.recoverZ = undefined;
       if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
     }
     this.bd = undefined;
