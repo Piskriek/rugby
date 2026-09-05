@@ -20,6 +20,34 @@ SUP = sys.argv[1]        # Superhero_Male.glb  (male base character)
 UALS = sys.argv[2:-1]    # UAL1.glb UAL2.glb
 OUT = sys.argv[-1]
 
+# ---------------------------------------------------------------------------
+# ASSET UPGRADE PATH — READ BEFORE TUNING THE TACKLE ANIMATIONS.
+#
+# The tackle currently borrows generic UAL clips: 'Hit_Knockback' as the hit,
+# 'Roll' as the grounding, 'Death01' as the prone hold. They are stand-ins.
+# A rugby collision has a violent HORIZONTAL dive and a twisting ground
+# impact, and no amount of procedural correction on top (see the fake-ragdoll
+# layer in src/render/ThreePlayerManager.ts) will manufacture footage that
+# was never in the clip.
+#
+# The fix is a better base asset. Mixamo (https://www.mixamo.com) is free and
+# its rig is a superset of this one; download the PAIRED animations:
+#
+#     "American Football Tackle"   -> the tackler   (the horizontal dive)
+#     "Tackled"                    -> the carrier   (the twisting impact)
+#
+# They are authored as a matched pair, so the two bodies meet correctly
+# instead of being approximated by the arm-pointing override. Add them to
+# CLIP_MAP as 'TackleDive' and 'TackleReact', then point clipForState() at
+# them in ThreePlayerManager (the state names 'tackleDrive' / 'hitReact'
+# already exist and are wired — only the clip NAMES need changing).
+#
+# Note the naming convention differs: Mixamo exports 'mixamorig:Hips' /
+# 'RightArm', this rig uses Unreal names ('pelvis', 'upperarm_r'). BONE_NAMES
+# in ThreePlayerManager already accepts both spellings, so the procedural
+# layer keeps working across the swap without a code change.
+# ---------------------------------------------------------------------------
+
 # UAL clip name -> our in-engine clip name. Only these clips are kept.
 CLIP_MAP = {
     # from UAL1.glb

@@ -85,6 +85,117 @@ function makeToonGradient(): THREE.DataTexture {
   return tex;
 }
 
+
+/* ================== PROCEDURAL "FAKE RAGDOLL" LAYER ==================
+ *
+ * Canned clips cannot know how far apart two men are, how fast they are
+ * travelling or which way they are twisting, so a latch built purely out of
+ * them reads as a hug between two statues. Rather than a physics engine (a
+ * true ragdoll would fight the AnimationMixer and wreck the skinning), the
+ * chaos is written ON TOP of the sampled pose, every frame, in three layers:
+ *
+ *   1  BODY TILT    the whole mesh pitches forward into the carrier, so the
+ *                   tackler is flying horizontally rather than standing up
+ *   2  ARM POINTING the tackler's arm bones are aimed at the carrier's spine
+ *                   in world space, so his hands track the man he is holding
+ *   3  SPINE THRASH a velocity-scaled sine injected into the carrier's spine
+ *                   and neck, so he fights and lurches under the weight
+ *
+ * ORDER IS EVERYTHING. `mixer.update()` OVERWRITES every bone it animates,
+ * and this rig's clips animate the whole spine and both arms (65 tracks,
+ * confirmed against the GLB). So all three layers must be applied AFTER the
+ * mixer has sampled the frame, and re-applied from scratch on the next one —
+ * they are a post-process on the pose, never a stored state on the bone.
+ *
+ * ── BONE NAMING: THIS RIG IS NOT A MIXAMO RIG ─────────────────────────────
+ * The brief names Mixamo bones (`Spine1`, `RightArm`, `Hips`). This model is
+ * Quaternius' Universal Base Character, which uses the UNREAL skeleton
+ * convention, so those lookups would every one of them return undefined and
+ * the whole layer would silently do nothing:
+ *
+ *      Mixamo            this rig
+ *      Hips              pelvis
+ *      Spine / Spine1    spine_01 / spine_02 / spine_03
+ *      Neck              neck_01
+ *      RightArm          upperarm_r      LeftArm       upperarm_l
+ *      RightForeArm      lowerarm_r      LeftForeArm   lowerarm_l
+ *      RightHand         hand_r          LeftHand      hand_l
+ *
+ * Equally important: Unreal bones point down their local +Y axis, not -Z, so
+ * `Object3D.lookAt()` — which aims local +Z — twists an arm sideways into the
+ * chest. The reach below therefore uses `setFromUnitVectors` on the bone's
+ * own +Y, which is the correct generalisation of "point this bone at that
+ * point" for any rig.
+ */
+
+/** The bones the procedural layer drives, resolved once per player. */
+interface ProceduralRig {
+  pelvis: THREE.Bone | null;
+  spine: (THREE.Bone | null)[];
+  neck: THREE.Bone | null;
+  upperArms: (THREE.Bone | null)[];
+  foreArms: (THREE.Bone | null)[];
+}
+
+/** Unreal-convention bone names, with the Mixamo spellings as fallbacks so a
+ *  future re-export against a Mixamo rig keeps working without a code change. */
+const BONE_NAMES = {
+  pelvis: ['pelvis', 'Hips', 'mixamorigHips'],
+  spine: [
+    ['spine_01', 'Spine', 'mixamorigSpine'],
+    ['spine_02', 'Spine1', 'mixamorigSpine1'],
+    ['spine_03', 'Spine2', 'mixamorigSpine2'],
+  ],
+  neck: ['neck_01', 'Neck', 'mixamorigNeck'],
+  upperArms: [
+    ['upperarm_r', 'RightArm', 'mixamorigRightArm'],
+    ['upperarm_l', 'LeftArm', 'mixamorigLeftArm'],
+  ],
+  foreArms: [
+    ['lowerarm_r', 'RightForeArm', 'mixamorigRightForeArm'],
+    ['lowerarm_l', 'LeftForeArm', 'mixamorigLeftForeArm'],
+  ],
+};
+
+/* --- tuning ------------------------------------------------------------- */
+
+/** Maximum forward pitch of a diving tackler, radians (~63 degrees). */
+const TILT_MAX = 1.1;
+/** Pitch held once the pair are on the ground — flat, face down. */
+const TILT_GROUNDED = Math.PI / 2 - 0.12;
+/** Distance at which a tackler is fully committed/horizontal, metres. */
+const TILT_FULL_RANGE = 0.55;
+/** Distance beyond which he is upright again, metres. */
+const TILT_NO_RANGE = 2.2;
+/** How fast the tilt tracks its target (higher = snappier). */
+const TILT_RATE = 9;
+
+/** How far the arm bones may be pulled from their animated pose, 0..1. */
+const REACH_WEIGHT = 0.78;
+const REACH_RATE = 12;
+
+/** Peak spine thrash, radians, at full sprint. */
+const THRASH_MAX = 0.3;
+/** Thrash frequency, radians per second. */
+const THRASH_FREQ = 15;
+const THRASH_RATE = 10;
+/** Speed the thrash is scaled against — a rough top sprint, m/s. */
+const THRASH_REF_SPEED = 9;
+
+/* --- scratch objects. Allocated once; a per-frame `new` here would be
+ *     thirty vectors a frame per player and a guaranteed GC stutter. ------ */
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+/** the reach target. MUST NOT be one of the vectors applyArmReach writes —
+ *  passing `_v1` as the target had every arm aiming at its own shoulder. */
+const _target = new THREE.Vector3();
+/** reused rotation scratch, so the reach allocates nothing per bone */
+const _qBone = new THREE.Quaternion();
+const _dir = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const _qb = new THREE.Quaternion();
+const _mat = new THREE.Matrix4();
+
 /* -------------------------------------------------------------- instance -- */
 interface PlayerInstance {
   actor: Actor;
@@ -96,6 +207,23 @@ interface PlayerInstance {
   badgeMat: THREE.MeshBasicMaterial;
   /** cached carrying-hand socket bone (Part 1 ball socketing); null = none */
   handBone?: THREE.Bone | null;
+  /** contact shadow, kept flat on the turf while the body tilts (procedural) */
+  shadow?: THREE.Mesh;
+  /** lazily-resolved procedural bone set — see resolveRig() */
+  rig?: ProceduralRig;
+  /** smoothed procedural state, so nothing pops between frames */
+  proc: {
+    /** current forward pitch of the whole body, radians */
+    tilt: number;
+    /** 0..1 weight of the arm-pointing override */
+    reach: number;
+    /** 0..1 weight of the spine thrash */
+    thrash: number;
+    /** free-running phase for the wobble, so two men never wobble in sync */
+    phase: number;
+    /** the FSM state resolved this frame, for the post-mixer pass */
+    state: string;
+  };
   active: { name: string; action: THREE.AnimationAction } | null;
   st: {
     oneShot: string | null;      // non-looping/locked clip state
@@ -522,10 +650,16 @@ export class ThreePlayerManager {
     shadow.scale.set(0.95, 0.42, 1);
     shadow.renderOrder = -1;
     root.add(shadow);
+    // kept so the procedural body tilt can counter-rotate it flat (below)
+    const shadowRef = shadow;
 
     const inst: PlayerInstance = {
-      actor, team, num, root, mixer, clips, badgeMat,
+      actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
+      proc: {
+        tilt: 0, reach: 0, thrash: 0,
+        phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
+      },
       st: {
         oneShot: null, lock: 0, lie: false,
         lx: actor.rx, lz: actor.rz, spd: 0,
@@ -640,6 +774,14 @@ export class ThreePlayerManager {
        *               that is needed to read as a man being towed. */
       case 'latchCarry': return { name: 'Run', loop: true };
       case 'latchHang': return { name: 'Tackle', loop: false };
+      /* ASSET NOTE — these tackle states are driven by STAND-IN clips
+       * ('Hit_Knockback', 'Roll', 'Death01' from the Quaternius UAL) with the
+       * procedural layer above compensating for what they lack. The real fix
+       * is Mixamo's free PAIRED "American Football Tackle" / "Tackled" clips,
+       * which contain the violent horizontal dive and the twisting ground
+       * impact a rugby collision needs. Swap them in tools/build_player_glb.py
+       * (see the ASSET UPGRADE PATH note there) and only the clip names below
+       * change — every state name is already wired. */
       case 'grounded': return { name: 'Death', loop: true };
       case 'dive': return { name: 'SlideStart', loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
@@ -705,12 +847,251 @@ export class ThreePlayerManager {
     }
   }
 
+
+  /**
+   * The other half of a live latch.
+   *
+   * The engine holds the link (`Live.latchedBy` / `latchingOnto`), but the
+   * render stream is `Actor`, which deliberately carries only presentation
+   * fields — so rather than widen that contract for one effect, the pair is
+   * recovered from the two complementary clip states. There is at most one
+   * latch at a time (engine/latch.ts enforces it), so the nearest opponent
+   * wearing the opposite half of the struggle IS the partner.
+   */
+  private latchPartner(inst: PlayerInstance, pool: PlayerInstance[]): PlayerInstance | null {
+    const want = inst.proc.state === 'latchHang' ? 'latchCarry'
+      : inst.proc.state === 'latchCarry' ? 'latchHang' : null;
+    if (!want) return null;
+    let best: PlayerInstance | null = null;
+    let bestD = Infinity;
+    for (const other of pool) {
+      if (other === inst || other.proc.state !== want || other.team === inst.team) continue;
+      const d = inst.root.position.distanceToSquared(other.root.position);
+      if (d < bestD) { bestD = d; best = other; }
+    }
+    return best;
+  }
+
+  /* ============ PROCEDURAL LAYER — resolution and the three overrides ==== */
+
+  /** Resolve (once, lazily) the bones the procedural layer drives. */
+  private resolveRig(inst: PlayerInstance): ProceduralRig {
+    if (inst.rig) return inst.rig;
+    const find = (names: string[]): THREE.Bone | null => {
+      for (const n of names) { const b = this.findBone(inst.root, n); if (b) return b; }
+      return null;
+    };
+    const rig: ProceduralRig = {
+      pelvis: find(BONE_NAMES.pelvis),
+      spine: BONE_NAMES.spine.map(find),
+      neck: find(BONE_NAMES.neck),
+      upperArms: BONE_NAMES.upperArms.map(find),
+      foreArms: BONE_NAMES.foreArms.map(find),
+    };
+    inst.rig = rig;
+    if (import.meta.env.DEV && !rig.pelvis && !rig.spine.some(Boolean)) {
+      console.warn('[procedural] no spine/pelvis bones matched — the fake-ragdoll '
+        + 'layer is inert. Check the rig naming convention against BONE_NAMES.');
+    }
+    return rig;
+  }
+
+  /**
+   * 1 — PROCEDURAL BODY TILT.
+   *
+   * The tackler is pitched forward into the man he is holding, so that a
+   * standing "hug" becomes a horizontal dive without anyone animating one.
+   * The angle is driven by the DISTANCE between the two (committed and close
+   * = flat out; still reaching = only leaning), and once the takedown fires
+   * it tweens on to flat.
+   *
+   * The tilt is applied to `inst.root`, not to a bone, so the whole skinned
+   * mesh rotates as one rigid body and the skinning is untouched — this is
+   * what makes it safe against the mixer. Two consequences are handled here:
+   * the pivot is the feet (the root origin), so a pure rotation would sink
+   * the chest through the turf — the body is lifted by the sine of the tilt
+   * to compensate — and the contact shadow is counter-rotated so it stays
+   * flat on the grass instead of tipping up into a vertical disc.
+   */
+  private applyBodyTilt(inst: PlayerInstance, want: number, step: number) {
+    const p = inst.proc;
+    p.tilt += (want - p.tilt) * (1 - Math.exp(-TILT_RATE * step));
+    if (p.tilt < 1e-3) {
+      /* fully upright again — clear the override rather than leaving the last
+       * fractional tilt baked into the root. Without this reset a man who has
+       * been tackled once stays permanently leaning, because rotation.x is
+       * never otherwise written (only rotation.y is, every frame). */
+      p.tilt = 0;
+      inst.root.rotation.x = 0;
+      inst.root.position.y = 0;
+      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
+      return;
+    }
+    /* rotate about the model's own left-right axis. The root already carries
+     * the heading on Y, so an X rotation applied after it is a clean forward
+     * pitch in the direction he is facing whichever way that is. */
+    inst.root.rotation.x = -p.tilt;
+    /* lift the pivot so the torso does not intersect the pitch: the chest is
+     * roughly 0.9 m up the body, and sin(tilt) is how much of that height the
+     * rotation has just swung downward. */
+    inst.root.position.y = Math.sin(p.tilt) * 0.62 * RENDER_SCALE;
+    if (inst.shadow) {
+      /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
+       * on the turf under the man. */
+      inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
+      inst.shadow.position.y = 0.02 - Math.sin(p.tilt) * 0.62;
+    }
+  }
+
+  /**
+   * 2 — PROCEDURAL ARM POINTING (the "magnetic latch").
+   *
+   * The tackler's arms are aimed at the carrier's spine in world space, every
+   * frame, so his hands track the body he is holding however it twists —
+   * killing the "air grab" where the arms hug an empty pose.
+   *
+   * NOT `lookAt()`: that aims an object's local +Z, and on this (Unreal)
+   * skeleton bones run down their local +Y, so lookAt twists the arm sideways
+   * into the chest. The rotation is built with `setFromUnitVectors` from the
+   * bone's own +Y onto the direction to the target, then converted out of
+   * world space into the parent's frame — a bone's `quaternion` is relative
+   * to its parent, and writing a world rotation into it is the classic way to
+   * get a limb that spins with the player's heading.
+   *
+   * The result is BLENDED against the animated pose rather than replacing it,
+   * so the clip still supplies the elbow bend and the shoulder still moves
+   * with the body: the arms are pulled toward the target, not snapped to it.
+   */
+  private applyArmReach(
+    inst: PlayerInstance, target: THREE.Vector3 | null, weight: number, step: number,
+  ) {
+    const p = inst.proc;
+    p.reach += (weight - p.reach) * (1 - Math.exp(-REACH_RATE * step));
+    /* No target means the latch is over: let the weight decay to nothing and
+     * write no bones at all. Continuing to aim at the LAST known point (the
+     * scratch vector still holds it) would leave a released tackler reaching
+     * at a patch of grass while the carrier ran away from it. */
+    if (!target || p.reach < 0.01) return;
+    const rig = this.resolveRig(inst);
+    const bones = [...rig.upperArms, ...rig.foreArms];
+    for (const bone of bones) {
+      if (!bone || !bone.parent) continue;
+      bone.updateWorldMatrix(true, false);
+      /* direction from this bone to the carrier's spine, in world space */
+      _v1.setFromMatrixPosition(bone.matrixWorld);
+      _dir.copy(target).sub(_v1);
+      if (_dir.lengthSq() < 1e-6) continue;
+      _dir.normalize();
+      /* the bone's current world +Y — the direction it is actually pointing */
+      _v2.set(0, 1, 0).applyQuaternion(
+        _qb.setFromRotationMatrix(_mat.extractRotation(bone.matrixWorld)),
+      ).normalize();
+      /* world-space correction that swings +Y onto the target direction */
+      _q.setFromUnitVectors(_v2, _dir);
+      /* into the parent's frame: q_local = inv(parentWorld) * correction * boneWorld */
+      const parentWorld = _qb.setFromRotationMatrix(
+        _mat.extractRotation(bone.parent.matrixWorld),
+      ).invert();
+      const boneWorld = _qBone.setFromRotationMatrix(
+        _mat.extractRotation(bone.matrixWorld),
+      );
+      const wanted = parentWorld.multiply(_q).multiply(boneWorld);
+      /* blend, so the animation still reads through the reach */
+      bone.quaternion.slerp(wanted, p.reach * REACH_WEIGHT);
+    }
+  }
+
+  /**
+   * 3 — PROCEDURAL SPINE THRASH.
+   *
+   * A high-frequency sine, scaled by how fast the man is actually travelling,
+   * added into the spine and neck so a dragged carrier's upper body lurches
+   * and fights instead of gliding along smoothly.
+   *
+   * Two deliberate departures from a naive `rotation.z += wobble`:
+   *  - the phase is per-player and free-running, so two men latched at the
+   *    same moment do not thrash in perfect unison (which reads as a glitch,
+   *    not as a struggle);
+   *  - the offset is distributed DOWN the chain with a rising weight and the
+   *    neck counter-rotates, because adding the same angle to three parented
+   *    bones compounds into a snapped-in-half spine, and a head that stays
+   *    level is what makes the torso look like it is being fought over.
+   */
+  private applySpineThrash(inst: PlayerInstance, speed: number, weight: number, step: number) {
+    const p = inst.proc;
+    p.thrash += (weight - p.thrash) * (1 - Math.exp(-THRASH_RATE * step));
+    if (p.thrash < 0.01) return;
+    p.phase += step * THRASH_FREQ;
+    const rig = this.resolveRig(inst);
+    const drive = Math.min(1, speed / THRASH_REF_SPEED) * p.thrash;
+    const wobble = Math.sin(p.phase) * drive * THRASH_MAX;
+    /* a second, slower beat on the pitch axis so it is not a clean metronome */
+    const pitch = Math.sin(p.phase * 0.63 + 1.1) * drive * THRASH_MAX * 0.5;
+    const share = [0.34, 0.33, 0.33];
+    rig.spine.forEach((bone, i) => {
+      if (!bone) return;
+      bone.rotation.z += wobble * share[i];
+      bone.rotation.x += pitch * share[i];
+    });
+    /* the head fights to stay level — counter the total the spine just took */
+    if (rig.neck) {
+      rig.neck.rotation.z -= wobble * 0.55;
+      rig.neck.rotation.x -= pitch * 0.55;
+    }
+  }
+
+  /**
+   * The whole procedural pass for one man, run AFTER `mixer.update()` has
+   * sampled his pose for this frame. `partner` is the other half of a live
+   * latch, or null.
+   */
+  private applyProcedural(
+    inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
+  ) {
+    const latching = state === 'latchHang';
+    const latched = state === 'latchCarry';
+    const grounding = state === 'tackleGround' || state === 'rollAway'
+      || state === 'carrierFall' || state === 'present' || state === 'grounded';
+
+    /* --- 1. the dive tilt (tackler), tweening to flat on the takedown --- */
+    let wantTilt = 0;
+    if (latching && partner) {
+      const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
+      /* closer = more committed = flatter. Clamped either side of the band. */
+      const t = 1 - (dist - TILT_FULL_RANGE) / (TILT_NO_RANGE - TILT_FULL_RANGE);
+      wantTilt = TILT_MAX * Math.max(0, Math.min(1, t));
+    } else if (grounding && (state === 'tackleGround' || state === 'rollAway')) {
+      /* the takedown: continue the same rotation on to horizontal, so the
+       * dive and the fall are one continuous movement rather than a cut. */
+      wantTilt = TILT_GROUNDED;
+    }
+    this.applyBodyTilt(inst, wantTilt, step);
+
+    /* --- 2. the magnetic latch (tackler's arms onto the carrier) --- */
+    if (latching && partner) {
+      const prig = this.resolveRig(partner);
+      const anchor = prig.spine[0] ?? prig.pelvis;
+      if (anchor) {
+        anchor.updateWorldMatrix(true, false);
+        _target.setFromMatrixPosition(anchor.matrixWorld);
+        this.applyArmReach(inst, _target, 1, step);
+      }
+    } else {
+      this.applyArmReach(inst, null, 0, step);   // no target: decay only
+    }
+
+    /* --- 3. the struggle (carrier's spine) --- */
+    this.applySpineThrash(inst, inst.st.spd, latched ? 1 : 0, step);
+  }
+
   /* ------------------------------------------------------------- update -- */
   update(d: Director, _v: View, _cam: Camera, dt: number) {
     if (!this.ready) return;
     const s = RENDER_SCALE;
     const active = new Set<string>();
     const step = Math.min(dt, 0.05);
+    /* every instance updated this frame, for the paired procedural pass */
+    const pending: PlayerInstance[] = [];
 
     for (const a of d.actors) {
       const team: KitTeam = a.team === 'REF' ? 'REF' : a.team;
@@ -790,9 +1171,11 @@ export class ThreePlayerManager {
         st.lie = false;
         st.passLatched = false;
         st.tackleRole = null; st.tackleT = -1;
+        inst.proc.state = desired;
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
+        pending.push(inst);
         continue;
       }
       if (st.oneShot === 'latchCarry' || st.oneShot === 'latchHang') {
@@ -838,9 +1221,15 @@ export class ThreePlayerManager {
           st.lock = 0;
         }
         st.lie = true;
+        inst.proc.state = wantStage === 0
+          ? (st.tackleRole === 'CARRIER' ? 'hitReact' : 'tackleDrive')
+          : wantStage === 1
+            ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
+            : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
+        pending.push(inst);
         continue;
       }
 
@@ -916,11 +1305,28 @@ export class ThreePlayerManager {
       }
 
       // ---- transform: logical pitch -> scaled 3D world ----
+      inst.proc.state = desired;
       inst.root.position.set(a.rx * s, 0, -a.rz * s);
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 
       inst.mixer.update(step);
+      pending.push(inst);
+    }
+
+    /* ---- THE PROCEDURAL PASS ----
+     *
+     * Runs after EVERY man has been sampled, for two reasons. The mixer
+     * overwrites each bone it animates, so the overrides can only be written
+     * afterwards or they are erased the moment they are applied; and the
+     * latch overrides are PAIRED — the tackler's arms are aimed at the
+     * carrier's spine — so the carrier's pose for this frame has to already
+     * exist before the tackler can be pointed at it. Doing it inside the
+     * main loop would aim him at wherever the carrier stood last frame,
+     * which at seven metres a second is a visible hand-lag. */
+    for (const inst of pending) {
+      const partner = this.latchPartner(inst, pending);
+      this.applyProcedural(inst, inst.proc.state, partner, step);
     }
 
     for (const [k, inst] of this.pool) {
