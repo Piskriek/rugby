@@ -350,8 +350,16 @@ const GRASS = GRASS_A;
 
 export function drawStadium(ctx: Ctx, cam: Camera, v: View, t: number, cond?: PitchConditions) {
   const PC = cond ?? pitchConditions('STANDARD');
+  // Sky: everything above the horizon stays the dark stadium blue-grey.
   ctx.fillStyle = '#1a2132';
   ctx.fillRect(0, 0, v.w, v.h);
+  // Ground: fill the whole field of view BELOW the horizon with grass so the
+  // apron around the pitch reads as turf instead of the sky colour bleeding
+  // down past the field edges. The terraces, ad boards and mown pitch stripes
+  // are then drawn over this base.
+  const horizonY = v.h * cam.horizon;
+  ctx.fillStyle = PC.grassB;
+  ctx.fillRect(0, horizonY, v.w, v.h - horizonY + 1);
 
   const drawTerrace = (
     x0: number, z0: number, x1: number, z1: number, outward: [number, number], seed: number,

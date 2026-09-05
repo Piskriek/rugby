@@ -4,6 +4,8 @@ import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
+import { ThreeCanvas } from '../render/ThreeCanvas';
+import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
@@ -39,6 +41,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dirRef = useRef<Director | null>(null);
+  /** The transparent WebGL overlay (GLB squad) and its asset manager. */
+  const threeRef = useRef<ThreeCanvas | null>(null);
+  const playersRef = useRef<ThreePlayerManager | null>(null);
+  const threeDivRef = useRef<HTMLDivElement | null>(null);
   const keys = useRef<Set<string>>(new Set());
   const prev = useRef<Set<string>>(new Set());
   const [, force] = useState(0);
@@ -75,6 +81,23 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     const c = canvasRef.current;
     c?.addEventListener('wheel', wheel, { passive: false });
     return () => c?.removeEventListener('wheel', wheel);
+  }, []);
+
+  /* The 3D layer: one transparent WebGL canvas composited directly over the
+   * 2D pitch canvas, plus the pooled GLB player manager. Created once. */
+  useEffect(() => {
+    const host = threeDivRef.current;
+    if (!host) return;
+    const three = new ThreeCanvas(host);
+    const players = new ThreePlayerManager(three);
+    threeRef.current = three;
+    playersRef.current = players;
+    players.load().catch((e) => console.error('player GLB load failed', e));
+    return () => {
+      three.dispose();
+      threeRef.current = null;
+      playersRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -148,8 +171,25 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         }
         ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
         const view = { w, h };
-        drawMatch(ctx, d, view);
+
+        /* Camera shake: one offset per frame, shared by the 2D pitch and the
+         * 3D overlay so players and pitch lines shake as one. */
+        const jx = d.cam.shake ? (Math.random() - 0.5) * d.cam.shake * 14 : 0;
+        const jy = d.cam.shake ? (Math.random() - 0.5) * d.cam.shake * 11 : 0;
+
+        drawMatch(ctx, d, view, playersRef.current ?? undefined, { x: jx, y: jy });
+        /* Feet markers (rings, range, kick aim) are painted on the 2D layer
+         * BEFORE the 3D squad so the GLB players stand on top of them. */
         drawIndicators(ctx, d, view);
+
+        /* ---- 3D GLB squad overlay (transparent WebGL canvas above) ---- */
+        const three = threeRef.current;
+        if (three) {
+          three.resize();
+          three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
+          playersRef.current?.update(d, view, d.cam, dt);
+          three.render();
+        }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
         if ((d.options.radar ?? 1) === 1) drawMinimap(ctx, d, view);
@@ -212,7 +252,16 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
   return (
     <div className="relative h-full w-full select-none overflow-hidden bg-black">
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+      {/* Layer 0 — the 2D pitch canvas (grass, lines, minimap, CRT, banners). */}
+      <canvas ref={canvasRef} className="absolute inset-0 z-0 h-full w-full" />
+      {/* Layer 1 — transparent WebGL: the GLB squad stands ON the pitch but
+       * UNDER the HUD. z-index 1 sits above the pitch canvas (0) and below the
+       * HUD wrapper (z-10), fixing the players painting over the score bar /
+       * commentary. */}
+      <div ref={threeDivRef} className="pointer-events-none absolute inset-0 z-[1]" />
+      {/* Layer 2 — every HUD panel lives inside this wrapper so the 3D players
+       * can never cover the score bar, commentary, or phase readouts. */}
+      <div className="pointer-events-none absolute inset-0 z-10">
 
       {/* LIVE CONTROL PANEL — top left, most logical action highlighted */}
       {(d.options.showControls ?? 1) > 0 && (
@@ -445,13 +494,13 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
-        <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
+        <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
       </div>
 
       {/* STATS */}
       {showStats && (
-        <div className="absolute right-3 top-3 w-[300px]">
+        <div className="pointer-events-auto absolute right-3 top-3 w-[300px]">
           <Panel title="LIVE STATISTICS">
             <div className="grid grid-cols-[46px_1fr_46px] gap-x-2 text-[10px]">
               {([
@@ -472,7 +521,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       {/* PAUSE / HALF TIME / FULL TIME */}
       {(d.paused || d.over) && (
-        <div className="absolute inset-0 flex items-center justify-center overflow-auto bg-black/75 p-6">
+        <div className="pointer-events-auto absolute inset-0 flex items-center justify-center overflow-auto bg-black/75 p-6">
           {d.over ? (
             <div className="w-full max-w-3xl">
               <Panel title="FULL TIME">
@@ -640,7 +689,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       )}
 
       {clinic && (
-        <div className="absolute left-1/2 top-3 flex max-w-[90%] -translate-x-1/2 flex-wrap justify-center gap-1 border-2 border-[#e8cf46] bg-[#0d1220]/95 p-2">
+        <div className="pointer-events-auto absolute left-1/2 top-3 flex max-w-[90%] -translate-x-1/2 flex-wrap justify-center gap-1 border-2 border-[#e8cf46] bg-[#0d1220]/95 p-2">
           <span className="w-full text-center text-[9px] tracking-[0.24em] text-[#7f8ea6]">SKILLS CLINIC — SEVEN DRILLS, ONE PER VERB</span>
           <Btn small onClick={() => d.startScrum('A', 0, 0)}>SCRUM</Btn>
           <Btn small onClick={() => d.startLineout('A', 10, 8)}>LINEOUT</Btn>
@@ -652,6 +701,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           <Btn small onClick={() => d.startOpen('A', 0, -10, 13, 1)}>RUN AND PASS</Btn>
         </div>
       )}
+      </div>{/* end HUD wrapper (z-10) */}
+
       <TutorialOverlay d={d} force={force} onExit={onExit} />
       <span className="hidden">{tick}</span>
     </div>

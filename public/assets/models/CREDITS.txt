@@ -1,0 +1,12 @@
+rugby_player.glb - CC0 1.0 Universal (public domain)
+
+Character mesh:   Quaternius "Universal Base Characters" (male, Superhero proportions)
+Animations:       Quaternius "Universal Animation Library" (UAL1 + UAL2 standard/free clips)
+Author:           Quaternius - https://quaternius.com
+Licence:          CC0 1.0 - https://creativecommons.org/publicdomain/zero/1.0/
+
+Rebuilt into a single GLB by tools/build_player_glb.py: the male base mesh
+keeps its Universal Rig skeleton; animation clips were remapped onto it by
+bone name and renamed to the state-machine vocabulary
+(Idle, Walk, Run, Sprint, Pass, Tackle, GetUp, SlideStart, Slide, SlideExit,
+ Kick, Push, Crouch, DiveRoll, Death, JumpLand).
