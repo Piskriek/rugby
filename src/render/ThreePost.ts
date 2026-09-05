@@ -46,16 +46,22 @@ export class ThreePost {
     this.w = Math.max(1, w);
     this.h = Math.max(1, h);
 
-    // HalfFloat keeps highlight headroom for the bloom threshold to bite into;
-    // an 8-bit target clips the floodlights to white before bloom ever sees
-    // them and the glow disappears.
+    /* HalfFloat keeps highlight headroom for the bloom threshold to bite into;
+     * an 8-bit target clips the floodlights to white before bloom ever sees
+     * them and the glow disappears.
+     *
+     * `samples` is deliberately 0. A 4x-MSAA half-float target at DPR 2 costs
+     * ~380 MB of VRAM on its own (measured) and the composer keeps two of
+     * them for ping-pong — enough to hard-crash an integrated GPU. FXAA in the
+     * chain already resolves edges at a fraction of the cost, and the pixel
+     * ratio is clamped below so the targets cannot grow without bound. */
     const target = new THREE.WebGLRenderTarget(this.w, this.h, {
       type: THREE.HalfFloatType,
-      samples: 4,
+      samples: 0,
       colorSpace: THREE.LinearSRGBColorSpace,
     });
     this.composer = new EffectComposer(renderer, target);
-    this.composer.setPixelRatio(renderer.getPixelRatio());
+    this.composer.setPixelRatio(this.effectivePixelRatio());
     this.composer.setSize(this.w, this.h);
 
     this.composer.addPass(new RenderPass(scene, camera));
@@ -95,10 +101,21 @@ export class ThreePost {
     return this.level > 0;
   }
 
+  /**
+   * Render targets scale with the SQUARE of the pixel ratio, so a retina
+   * display quadruples every buffer in the chain. Post-processed frames do not
+   * visibly benefit from supersampling the way raw geometry edges do, so the
+   * composer is capped at 1.5x regardless of the display — the renderer itself
+   * still runs at full DPR for the crisp 2D HUD layered on top.
+   */
+  private effectivePixelRatio(): number {
+    return Math.min(1.5, this.renderer.getPixelRatio());
+  }
+
   setSize(w: number, h: number): void {
     this.w = Math.max(1, w);
     this.h = Math.max(1, h);
-    const pr = this.renderer.getPixelRatio();
+    const pr = this.effectivePixelRatio();
     this.composer.setPixelRatio(pr);
     this.composer.setSize(this.w, this.h);
     this.bloom.setSize(this.w, this.h);

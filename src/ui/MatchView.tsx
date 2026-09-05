@@ -22,6 +22,12 @@ import { TutorialOverlay, CameraPanel } from './TutorialOverlay';
 import { stepAt } from '../game/tutorial';
 import { pollGamepad, emptyPrev, PrevGp } from '../game/gamepad';
 import { ScoreBug, MatchIntro, PlayerSpotlight, GamepadBadge } from './broadcast';
+import { LoadingScreen } from './LoadingScreen';
+
+/** Hand control back to the browser so it can paint and answer input. */
+const yieldToBrowser = () => new Promise<void>((r) => {
+  requestAnimationFrame(() => setTimeout(r, 0));
+});
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -65,6 +71,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [showAnimDebug, setShowAnimDebug] = useState(false);
   /* AAA broadcast — match-day intro card and gamepad connection badge. */
   const [intro, setIntro] = useState(true);
+  /* null once the world is built; drives the loading overlay until then. */
+  const [load, setLoad] = useState<{ stage: string; progress: number } | null>(
+    { stage: 'Preparing the ground', progress: 0 });
+  /* Mirror of `load` for the rAF loop, which closes over stale state. */
+  const loadingRef = useRef(true);
   const introRef = useRef(true);
   const gpPrev = useRef<PrevGp>(emptyPrev());
   const [gp, setGp] = useState<{ connected: boolean; name: string }>({ connected: false, name: '' });
@@ -108,23 +119,72 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
    * Under ENV_3D this is the world (pitch, fog, uprights, actors); the 2D
    * canvas is a transparent HUD overlay stacked above it. */
+  /* ---------------------------------------------------------------- boot --
+   * Building the world is expensive: procedural turf maps, the stadium mesh
+   * set, the post-processing targets and a 6.3 MB rigged GLB. Doing all of it
+   * in one synchronous block starves the event loop for seconds — the browser
+   * cannot paint or answer input, and the tab looks frozen.
+   *
+   * So each stage awaits `yieldToBrowser()` before the next. The total work is
+   * unchanged, but it is now split across frames, so the loading screen
+   * animates and the window stays responsive throughout. */
   useEffect(() => {
     const host = threeDivRef.current;
     if (!host) return;
-    const three = new ThreeCanvas(host);
-    const players = new ThreePlayerManager(three);
-    threeRef.current = three;
-    playersRef.current = players;
-    players.load().catch((e) => console.error('player GLB load failed', e));
+    let cancelled = false;
+    let three: ThreeCanvas | null = null;
 
-    /* Apply the display options to the freshly-built rig. These are read from
-     * the director rather than props because the options screen writes them
-     * straight onto the live match config. */
-    const d0 = dirRef.current;
-    three.setQuality(clampQuality(d0?.options.graphics));
-    three.environment?.applyPreset(TIME_PRESETS[d0?.options.timeOfDay ?? 0] ?? 'AFTERNOON');
+    (async () => {
+      loadingRef.current = true; setLoad({ stage: 'Preparing the ground', progress: 0.04 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      // Stadium + procedural turf (~0.6 s).
+      three = new ThreeCanvas(host);
+      threeRef.current = three;
+      if (cancelled) return;
+
+      loadingRef.current = true; setLoad({ stage: 'Raising the stands', progress: 0.34 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      const d0 = dirRef.current;
+      three.environment?.applyPreset(TIME_PRESETS[d0?.options.timeOfDay ?? 0] ?? 'AFTERNOON');
+
+      loadingRef.current = true; setLoad({ stage: 'Setting the lights', progress: 0.46 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      // Post-processing render targets.
+      three.setQuality(clampQuality(d0?.options.graphics));
+
+      loadingRef.current = true; setLoad({ stage: 'Naming the squads', progress: 0.58 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      const players = new ThreePlayerManager(three);
+      playersRef.current = players;
+
+      loadingRef.current = true; setLoad({ stage: 'Bringing out the teams', progress: 0.66 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      try {
+        await players.load();
+      } catch (e) {
+        console.error('player GLB load failed', e);
+      }
+      if (cancelled) return;
+
+      setLoad({ stage: 'Kick-off', progress: 1 });
+      await yieldToBrowser();
+      if (cancelled) return;
+      loadingRef.current = false; setLoad(null);
+    })();
+
     return () => {
-      three.dispose();
+      cancelled = true;
+      three?.dispose();
       threeRef.current = null;
       playersRef.current = null;
     };
@@ -218,7 +278,13 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* AAA — the world stays in the kickoff frame until the matchday card is
        * dismissed; the presentation is a curtain, not a running clock behind
        * the text. */
-      if (!introRef.current) d.update(dt, inp, pressed, released);
+      if (!introRef.current && !loadingRef.current) d.update(dt, inp, pressed, released);
+
+      /* While the loading screen is up the world is still being assembled, so
+       * there is nothing worth drawing and the boot stages need the main
+       * thread more than the renderer does. Skipping the draw here is what
+       * keeps the progress bar smooth instead of stuttering. */
+      if (loadingRef.current) { raf = requestAnimationFrame(loop); return; }
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -619,7 +685,18 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       {/* AAA BROADCAST — matchday intro, player spotlight, controller badge */}
       {(d.options.broadcast ?? 1) >= 1 && <PlayerSpotlight d={d} />}
       <GamepadBadge connected={gp.connected} name={gp.name} />
-      {intro && (d.options.broadcast ?? 1) >= 1 && <MatchIntro d={d} />}
+      {!load && intro && (d.options.broadcast ?? 1) >= 1 && <MatchIntro d={d} />}
+
+      {/* LOADING — covers the world build so the tab never appears frozen. */}
+      {load && (
+        <LoadingScreen
+          stage={load.stage}
+          progress={load.progress}
+          homeName={A?.nation?.name}
+          awayName={B?.nation?.name}
+          venue={d.options.timeOfDay === 2 ? 'UNDER LIGHTS' : undefined}
+        />
+      )}
 
       {/* PAUSE / HALF TIME / FULL TIME */}
       {(d.paused || d.over) && (

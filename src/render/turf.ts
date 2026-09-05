@@ -16,34 +16,21 @@
  * no network, and a given seed always yields the same pitch.
  */
 
-/** Deterministic value noise in [0,1). */
-function hash2(x: number, y: number, seed: number): number {
-  const n = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453123;
-  return n - Math.floor(n);
-}
+import { NoiseField } from './noise';
 
-function smoothNoise(x: number, y: number, seed: number): number {
-  const xi = Math.floor(x), yi = Math.floor(y);
-  const xf = x - xi, yf = y - yi;
-  const u = xf * xf * (3 - 2 * xf);
-  const v = yf * yf * (3 - 2 * yf);
-  const a = hash2(xi, yi, seed);
-  const b = hash2(xi + 1, yi, seed);
-  const c = hash2(xi, yi + 1, seed);
-  const d = hash2(xi + 1, yi + 1, seed);
-  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
-}
+/* Noise is supplied by a precomputed lattice (see noise.ts). The previous
+ * Math.sin-based hash cost ~12 s of blocking main-thread work for one pitch. */
+let NF: NoiseField;
+const fbm = (x: number, y: number) => NF.fbm(x, y);
+const hash2 = (x: number, y: number, _s: number) => NF.sample(x * 0.9173, y * 0.7919);
 
-/** Fractal noise, 4 octaves. */
-function fbm(x: number, y: number, seed: number): number {
-  let sum = 0, amp = 0.5, f = 1;
-  for (let i = 0; i < 4; i++) {
-    sum += smoothNoise(x * f, y * f, seed + i * 17) * amp;
-    amp *= 0.5;
-    f *= 2;
-  }
-  return sum;
-}
+/**
+ * Albedo resolution. 2048×1024 over a 130×76 m pitch is ~1.6 cm/texel, which
+ * is finer than the anisotropic filter can resolve at broadcast camera
+ * distances — 4096 doubled the memory (32 MB → 8 MB) and quadrupled the build
+ * cost for detail no camera in this game ever gets close enough to see.
+ */
+export const TURF_SIZE = { width: 2048, height: 1024 } as const;
 
 export interface TurfMaps {
   albedo: HTMLCanvasElement;
@@ -92,9 +79,9 @@ function paintGrass(
       mask[y * w + x] = away;
 
       // Base hue with large-scale health variation and fine blade noise.
-      const macro = fbm(x / 140, y / 140, seed);
+      const macro = fbm(x / 140, y / 140);
       const micro = hash2(x, y, seed + 3);
-      const grain = fbm(x / 3.5, y / 22, seed + 9);
+      const grain = fbm(x / 3.5, y / 22);
 
       // Stripes differ mostly in luminance, slightly in saturation.
       const lift = away ? 0.10 : -0.07;
@@ -117,7 +104,7 @@ function paintGrass(
       const goalWear =
         Math.exp(-Math.pow((nx - 0.085) / 0.045, 2)) * 0.55 +
         Math.exp(-Math.pow((nx - 0.915) / 0.045, 2)) * 0.55;
-      const wearNoise = fbm(x / 60, y / 60, seed + 21);
+      const wearNoise = fbm(x / 60, y / 60);
       const wear = Math.min(0.62, (centreWear + goalWear) * (0.45 + wearNoise * 0.9));
       r = r * (1 - wear) + 96 * wear;
       g = g * (1 - wear) + 92 * wear;
@@ -238,7 +225,7 @@ function paintMarkings(ctx: CanvasRenderingContext2D, spec: TurfSpec): void {
 function paintRoughness(
   ctx: CanvasRenderingContext2D, spec: TurfSpec, mask: Uint8Array,
 ): void {
-  const { width: w, height: h, seed } = spec;
+  const { width: w, height: h } = spec;
   const img = ctx.createImageData(w, h);
   const px = img.data;
   for (let y = 0; y < h; y++) {
@@ -247,7 +234,7 @@ function paintRoughness(
       const away = mask[y * w + x];
       // Grass laid away from the viewer shows more blade-back and is glossier.
       const base = away ? 0.60 : 0.84;
-      const n = fbm(x / 50, y / 50, seed + 33) * 0.16;
+      const n = fbm(x / 50, y / 50) * 0.16;
       const rough = Math.max(0, Math.min(1, base + n - 0.08));
       px[i] = 255;                        // AO — the SSAO pass handles contact
       px[i + 1] = rough * 255;            // roughness
@@ -258,28 +245,44 @@ function paintRoughness(
   ctx.putImageData(img, 0, 0);
 }
 
-/** Tangent-space normal map: fine mow grain + gentle undulation. */
+/**
+ * Tangent-space normal map: fine mow grain + gentle undulation.
+ *
+ * The height field is evaluated ONCE per pixel into a scratch buffer, then
+ * differenced. The obvious formulation calls `height()` four times per pixel
+ * for the central difference, which quadruples the noise cost for information
+ * that is already there — the neighbour's height is just the next entry in the
+ * buffer. Edges clamp rather than wrap so the pitch border has no seam.
+ */
 function paintNormal(ctx: CanvasRenderingContext2D, spec: TurfSpec): void {
-  const { width: w, height: h, seed } = spec;
+  const { width: w, height: h } = spec;
   const img = ctx.createImageData(w, h);
   const px = img.data;
-  const height = (x: number, y: number) =>
-    fbm(x / 2.2, y / 12, seed + 41) * 0.55 + fbm(x / 90, y / 90, seed + 55) * 0.45;
 
+  const hf = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
+      hf[y * w + x] = fbm(x / 2.2, y / 12) * 0.55 + fbm(x / 90, y / 90) * 0.45;
+    }
+  }
+
+  const strength = 2.4;
+  for (let y = 0; y < h; y++) {
+    const yUp = y > 0 ? y - 1 : 0;
+    const yDn = y < h - 1 ? y + 1 : h - 1;
+    for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      const dx = height(x + 1, y) - height(x - 1, y);
-      const dy = height(x, y + 1) - height(x, y - 1);
-      const strength = 2.4;
+      const xL = x > 0 ? x - 1 : 0;
+      const xR = x < w - 1 ? x + 1 : w - 1;
+      const dx = hf[y * w + xR] - hf[y * w + xL];
+      const dy = hf[yDn * w + x] - hf[yUp * w + x];
       let nx = -dx * strength;
       let ny = -dy * strength;
-      const nz = 1;
-      const len = Math.hypot(nx, ny, nz);
+      const len = Math.hypot(nx, ny, 1);
       nx /= len; ny /= len;
       px[i] = (nx * 0.5 + 0.5) * 255;
       px[i + 1] = (ny * 0.5 + 0.5) * 255;
-      px[i + 2] = (nz / len * 0.5 + 0.5) * 255;
+      px[i + 2] = (1 / len * 0.5 + 0.5) * 255;
       px[i + 3] = 255;
     }
   }
@@ -293,6 +296,7 @@ function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingCo
 }
 
 export function buildTurfMaps(spec: TurfSpec): TurfMaps {
+  NF = new NoiseField(spec.seed);
   const [albedo, aCtx] = makeCanvas(spec.width, spec.height);
   const mask = paintGrass(aCtx, spec);
   paintMarkings(aCtx, spec);

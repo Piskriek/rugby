@@ -35,6 +35,8 @@ export class ThreeCanvas {
   post: ThreePost | null = null;
   /** Current graphics level; read by callers deciding what else to enable. */
   quality: QualityLevel = 2;
+  /** True between contextlost and contextrestored; drawing is a no-op then. */
+  contextLost = false;
 
   private view: View = { w: 1, h: 1 };
 
@@ -66,6 +68,20 @@ export class ThreeCanvas {
     el.style.zIndex = ENV_3D ? '0' : '1';
     container.appendChild(el);
     this.dom = el;
+
+    /* A lost context (driver reset, GPU OOM, laptop switching graphics)
+     * otherwise leaves a permanently black canvas with no clue why.
+     * Preventing the default event lets the browser hand the context back,
+     * and Three re-uploads its resources automatically on restore. */
+    el.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.contextLost = true;
+      console.warn('[render] WebGL context lost — pausing draw until restore');
+    });
+    el.addEventListener('webglcontextrestored', () => {
+      this.contextLost = false;
+      console.warn('[render] WebGL context restored');
+    });
 
     this.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 400);
     this.camera.frustumCulled = true;
@@ -170,7 +186,11 @@ export class ThreeCanvas {
   resize() {
     const w = this.dom.clientWidth || this.view.w;
     const h = this.dom.clientHeight || this.view.h;
-    const pr = Math.min(2, window.devicePixelRatio || 1);
+    /* 1.75 rather than 2: the WebGL cost (and every post-processing target)
+     * scales with the square of this number, and the difference between 1.75x
+     * and 2x is invisible at normal viewing distance while costing ~30% more
+     * fill. The 2D HUD canvas is separate and still runs at full DPR. */
+    const pr = Math.min(1.75, window.devicePixelRatio || 1);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
     this.post?.setSize(w, h);
@@ -178,6 +198,7 @@ export class ThreeCanvas {
   }
 
   render(dt = 0.016) {
+    if (this.contextLost) return;
     if (this.post) this.post.render(dt);
     else this.renderer.render(this.scene, this.camera);
   }
