@@ -12,6 +12,7 @@ import { contractFor } from '../game/jlr';
 import { SpaceRemap } from './SpaceRemap';
 import { TutorialOverlay, CameraPanel } from './TutorialOverlay';
 import { stepAt } from '../game/tutorial';
+import { CommentarySpeech } from '../game/speech';
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -45,6 +46,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const threeRef = useRef<ThreeCanvas | null>(null);
   const playersRef = useRef<ThreePlayerManager | null>(null);
   const threeDivRef = useRef<HTMLDivElement | null>(null);
+  /* Optional spoken commentary (COMMENTARY → VOICE). View-layer only: the
+   * engine keeps writing d.feed, this listens and speaks it. */
+  const speechRef = useRef<CommentarySpeech | null>(null);
+  const lastSpokenRef = useRef<string>('');
   const keys = useRef<Set<string>>(new Set());
   const prev = useRef<Set<string>>(new Set());
   const [, force] = useState(0);
@@ -66,6 +71,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       keys.current.add(k);
       /* T-10 — browser policy: audio may only start inside a user gesture. */
       dirRef.current?.audio.userGesture();
+      /* Same policy for speech: warm the voice list on first interaction. */
+      speechRef.current?.userGesture();
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
     window.addEventListener('keydown', down);
@@ -82,6 +89,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     c?.addEventListener('wheel', wheel, { passive: false });
     return () => c?.removeEventListener('wheel', wheel);
   }, []);
+
+  /* On leaving the match, silence any commentary still speaking. */
+  useEffect(() => () => speechRef.current?.mute(), []);
 
   /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
    * Under ENV_3D this is the world (pitch, fog, uprights, actors); the 2D
@@ -161,6 +171,21 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       d.gameSpeed = slow;
       d.update(dt, inp, pressed, released);
+
+      /* ---- optional spoken commentary (COMMENTARY → VOICE) ---- */
+      if (!speechRef.current) speechRef.current = new CommentarySpeech();
+      const speech = speechRef.current;
+      speech.level = (d.options.commentary ?? 2) === 3 ? 1 : 0;
+      if (speech.level === 1) {
+        const top = d.feed[0];
+        if (top) {
+          const key = `${top.at}:${top.text}`;
+          if (key !== lastSpokenRef.current) {
+            lastSpokenRef.current = key;
+            speech.speak(top.text, top.text2);
+          }
+        }
+      }
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
