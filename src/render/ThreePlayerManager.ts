@@ -158,6 +158,15 @@ export class ThreePlayerManager {
    */
   private prepareTemplate() {
     const root = this.template!;
+
+    // Bug-fix #5a: reset every skeleton to its bind/rest pose BEFORE cloning
+    // or splitting, so no clip-residual bone transform leaks into the mesh
+    // geometry split (the elastic "stretched vertex between the feet").
+    root.traverse((o) => {
+      const mesh = o as THREE.SkinnedMesh;
+      if (mesh.isSkinnedMesh && mesh.skeleton) mesh.skeleton.pose();
+    });
+
     root.scale.setScalar(RENDER_SCALE);
     root.updateMatrixWorld(true);
 
@@ -173,7 +182,13 @@ export class ThreePlayerManager {
 
     const bodyMats: Record<Slot, THREE.MeshToonMaterial> = {} as Record<Slot, THREE.MeshToonMaterial>;
     for (const slot of SLOTS) {
-      const m = new THREE.MeshToonMaterial({ color: 0xffffff, gradientMap: this.gradient });
+      // Bug-fix #1: fully opaque, front-face only, depth writes ON. Transparent
+      // body materials made the renderer disable depth writes and sort limbs
+      // inside-out (the "see-through / inverted depth" look).
+      const m = new THREE.MeshToonMaterial({
+        color: 0xffffff, gradientMap: this.gradient,
+        transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
+      });
       m.name = TEMPLATE_SLOT_MAT[slot];
       bodyMats[slot] = m;
     }
@@ -196,6 +211,12 @@ export class ThreePlayerManager {
       const jAttr = (geo.attributes.skinIndex ?? (geo.attributes as Record<string, THREE.BufferAttribute>).joints0) as THREE.BufferAttribute | undefined;
       const wAttr = (geo.attributes.skinWeight ?? (geo.attributes as Record<string, THREE.BufferAttribute>).weights0) as THREE.BufferAttribute | undefined;
       const skel = body.skeleton;
+
+      // Bug-fix #5b: clamp cross-foot weight bleed. A vertex weighted to BOTH
+      // feet stretches between them as the stride opens. Snap each foot/toe
+      // vertex fully to its dominant foot, and zero a limb's opposite-side
+      // bone weight so a left-foot vertex can never ride the right foot.
+      this.sanitizeFootWeights(skel, jAttr, wAttr);
 
       // Bucket every vertex by the region of its dominant-weight bone.
       const buckets = new Map<Slot, number[]>();
@@ -244,6 +265,7 @@ export class ThreePlayerManager {
         m.bindMode = bindMode;
         m.bind(skel, bindMatrix);
         m.frustumCulled = false;
+        m.castShadow = false;
         m.name = `body_${slot}`;
         parent.add(m);
       }
@@ -251,31 +273,79 @@ export class ThreePlayerManager {
       body.geometry.dispose();
     }
 
-    // Face materials: hair dark, eyes light — shared across the squad.
+    // Face materials: hair dark, eyes light — opaque & front-facing.
     for (const f of faces) {
       const matName = (f.material as THREE.Material)?.name ?? '';
       if (matName === 'MI_Hair_1') {
-        f.material = new THREE.MeshToonMaterial({ color: 0x2a1c14, gradientMap: this.gradient });
+        f.material = new THREE.MeshToonMaterial({
+          color: 0x2a1c14, gradientMap: this.gradient,
+          transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
+        });
       } else if (matName === 'MI_Eyes') {
-        f.material = new THREE.MeshBasicMaterial({ color: 0xf2f2ee });
+        f.material = new THREE.MeshBasicMaterial({
+          color: 0xf2f2ee, transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
+        });
       }
     }
 
-    // Number badge — a plane on the upper back, bone-bound so it follows the
-    // spine through every clip. +Z is the rig's back in the rest pose.
+    // Number badge — a plane on the UPPER BACK (the model's face/front is +Z,
+    // confirmed by the eyes sitting at z>0), bone-bound so it follows the
+    // spine through every clip. Opaque decal, front-facing outward.
     const spine = root.getObjectByName('spine_03') ?? root.getObjectByName('spine_02');
     if (spine) {
       const badgeGeo = new THREE.PlaneGeometry(0.30, 0.27);
       const badgeMat = new THREE.MeshBasicMaterial({
         map: this.makeBadgeTexture('', '#cccccc'),
-        side: THREE.DoubleSide,
+        side: THREE.FrontSide, transparent: false, depthWrite: true,
       });
       badgeMat.name = 'TPL_NumberBadge';
       const badge = new THREE.Mesh(badgeGeo, badgeMat);
       badge.name = 'NumberBadge';
-      badge.position.set(0, 0.10, 0.165);
+      // back is -Z; place just behind the spine and flip to face backward.
+      badge.position.set(0, 0.10, -0.165);
+      badge.rotation.y = Math.PI;
       spine.add(badge);
     }
+  }
+
+  /**
+   * Bug-fix #5b: remove cross-foot skinning bleed. For every vertex whose
+   * dominant bone is a foot/toe, (a) snap it entirely to that one foot and
+   * (b) zero any weight on the opposite-side foot bones. Mutates the
+   * geometry attributes in place before the region split.
+   */
+  private sanitizeFootWeights(
+    skel: THREE.Skeleton,
+    jAttr: THREE.BufferAttribute | undefined,
+    wAttr: THREE.BufferAttribute | undefined,
+  ) {
+    if (!jAttr || !wAttr) return;
+    const idx: Record<string, number> = {};
+    skel.bones.forEach((b, i) => { idx[b.name] = i; });
+    const footL = ['foot_l', 'ball_l', 'ball_leaf_l'].map((n) => idx[n]).filter((n) => n !== undefined);
+    const footR = ['foot_r', 'ball_r', 'ball_leaf_r'].map((n) => idx[n]).filter((n) => n !== undefined);
+    const isFoot = (bi: number, side: 'l' | 'r') =>
+      (side === 'l' ? footL : footR).includes(bi);
+    for (let vi = 0; vi < jAttr.count; vi++) {
+      // dominant bone
+      let dom = 0, domW = -1;
+      for (let k = 0; k < 4; k++) {
+        const w = wAttr.getComponent(vi, k);
+        if (w > domW) { domW = w; dom = jAttr.getComponent(vi, k); }
+      }
+      const dName = skel.bones[dom]?.name ?? '';
+      const side = /_(l|leaf_l)$/.test(dName) || dName.endsWith('_l') ? 'l'
+        : /_(r|leaf_r)$/.test(dName) || dName.endsWith('_r') ? 'r' : null;
+      if (!side || !isFoot(dom, side)) continue;
+      // This vertex belongs to a foot. Rebuild weights: keep the dominant foot
+      // at 1.0, null the other three slots (kills opposite-foot bleed).
+      for (let k = 0; k < 4; k++) jAttr.setComponent(vi, k, 0);
+      for (let k = 0; k < 4; k++) wAttr.setComponent(vi, k, 0);
+      jAttr.setComponent(vi, 0, dom);
+      wAttr.setComponent(vi, 0, 1);
+    }
+    jAttr.needsUpdate = true;
+    wAttr.needsUpdate = true;
   }
 
   /* ----------------------------------------------------------- ball ----- */
@@ -284,10 +354,15 @@ export class ThreePlayerManager {
     g.name = 'Ball3D';
     const geo = new THREE.SphereGeometry(0.16, 18, 12);
     geo.scale(1.0, 0.78, 1.65);
-    g.add(new THREE.Mesh(geo, new THREE.MeshToonMaterial({ color: 0xb8562f, gradientMap: this.gradient })));
+    g.add(new THREE.Mesh(geo, new THREE.MeshToonMaterial({
+      color: 0xb8562f, gradientMap: this.gradient,
+      transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
+    })));
     const seam = new THREE.Mesh(
       new THREE.TorusGeometry(0.13, 0.007, 6, 20),
-      new THREE.MeshBasicMaterial({ color: 0x24201c }),
+      new THREE.MeshBasicMaterial({
+        color: 0x24201c, transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
+      }),
     );
     seam.rotation.y = Math.PI / 2;
     g.add(seam);
@@ -338,15 +413,17 @@ export class ThreePlayerManager {
         let out: THREE.Material = mat;
         const slot = (Object.keys(TEMPLATE_SLOT_MAT) as Slot[]).find((s) => TEMPLATE_SLOT_MAT[s] === name);
         if (slot && slot !== 'hair' && slot !== 'eyes') {
+          // Bug-fix #1: opaque kit materials, front faces only, depth writes on.
           out = new THREE.MeshToonMaterial({
             color: new THREE.Color(slotColour[slot]),
             gradientMap: this.gradient,
+            transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
           });
           out.name = `M_${slot}`;
         } else if (name === 'TPL_NumberBadge') {
           const bm = new THREE.MeshBasicMaterial({
             map: this.makeBadgeTexture(team === 'REF' ? '' : String(num), kit.badgePanel),
-            side: THREE.DoubleSide,
+            side: THREE.FrontSide, transparent: false, opacity: 1, depthWrite: true, depthTest: true,
           });
           bm.name = 'M_NumberBadge';
           badgeMat = bm;
@@ -425,8 +502,12 @@ export class ThreePlayerManager {
       case 'ruck': case 'jackal': case 'cleanout': return 'ruck';
       case 'jump': case 'lift': case 'lineoutJump': case 'lineoutLift':
       case 'catch': case 'catchHigh': case 'lineoutCatch': return 'jump';
-      case 'crouch': case 'nineSquat': case 'ready': return 'crouch';
-      case 'refIdle': case 'idle':
+      // Bug-fix #3: 'ready' is the athletic standing idle before a set piece,
+      // NOT a crouch — bind it to the upright Idle. Only the scrum-half's
+      // authored bind squat (nineSquat/crouch) uses the low Crouch track.
+      case 'nineSquat': return 'crouch';
+      case 'crouch': return spd < 0.6 ? 'crouch' : this.locomotion(spd);
+      case 'ready': case 'refIdle': case 'idle':
         return spd > 0.6 ? this.locomotion(spd) : 'idle';
       default:
         return this.locomotion(spd);   // jog/run/carry/sprint/walk + ref gaits
@@ -528,6 +609,22 @@ export class ThreePlayerManager {
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
         st.face += dy * (1 - Math.exp(-step * 10));
+      }
+
+      // Bug-fix #4: in a SCRUM the two packs must lock head-on down the
+      // engagement axis (scrumSlots lays the packs along Z: A at z<az, B at
+      // z>az, rows spread on X). As the men walk in slowly their velocity
+      // heading never crosses the 2.2 m/s threshold, so the smoothed heading
+      // stayed on their sideways approach — the pack read as rotated 90°.
+      // Hard-hold the engagement heading; the velocity logic still governs
+      // open play, mauls (which have a yaw) and lineouts (formed along X).
+      if (d.phase === 'SCRUM' && team !== 'REF') {
+        // A pushes toward +Z pitch (theta 0), B toward -Z (theta pi).
+        const want = a.team === 'A' ? 0 : Math.PI;
+        let dy = want - st.face;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        st.face += dy * (1 - Math.exp(-step * 14));
       }
 
       const desired = this.mapState(a.renderClip, st.spd);

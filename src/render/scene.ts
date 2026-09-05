@@ -21,11 +21,14 @@ import type { ThreePlayerManager } from './ThreePlayerManager';
 export function drawMatch(
   ctx: CanvasRenderingContext2D, d: Director, v: View,
   three?: ThreePlayerManager,
+  shake?: { x: number; y: number },
 ) {
   resetFacingDebug();
   const cam = d.cam;
-  const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
-  const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
+  // Shake is computed by the caller so the 3D overlay (ThreeCanvas.syncCamera)
+  // and this 2D layer move together — otherwise players jitter vs the pitch.
+  const jx = shake?.x ?? (cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0);
+  const jy = shake?.y ?? (cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0);
   const cam2: Camera = { ...cam, shake: 0 };
 
   /* Stadium + pitch markings first (they are the ground the GLB squad stands on). */
