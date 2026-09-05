@@ -1,33 +1,42 @@
 /**
- * ThreeCanvas — the transparent WebGL overlay.
+ * ThreeCanvas — the WebGL viewport.
  *
- * A single Three.js renderer/camera rig drawn on a canvas that sits directly
- * on top of the 2D pitch canvas. The camera is NOT a free 3D camera: every
- * frame it is rebuilt to match the 2D pinhole rig in `render/retro.ts`
- * (position, look direction, vertical FOV, and the off-centre horizon via
- * `setViewOffset`), so the GLB players walk the exact screen positions the 2D
- * pitch markings are painted at. The 2D canvas stays authoritative for the
- * stadium, pitch lines, overlays and HUD; this layer only paints 3D actors.
+ * A single Three.js renderer/camera rig. The camera is NOT a free 3D camera:
+ * every frame it is rebuilt to match the 2D pinhole rig in `render/retro.ts`
+ * (position, look direction, vertical FOV, and the off-centre horizon via a
+ * custom projection matrix), so 3D actors and the 3D pitch land on the exact
+ * screen positions the legacy 2D markings used to paint.
+ *
+ * When `ENV_3D` is set, this layer owns the stadium environment (dual-plane
+ * pitch, fog, World Rugby uprights) as well as the GLB actors; the 2D canvas
+ * is a transparent HUD overlay on top. When unset, this canvas stays
+ * transparent and only paints 3D actors over the 2D pitch.
  *
  * World convention: everything 3D is rendered in the game's *scaled* render
- * space (logical metres * RENDER_SCALE), the same space `project()` multiplies
- * into before rasterising, so a player at logical (x, y, z) and the 2D mown
- * stripe under his feet land on the same pixels.
+ * space (logical metres * RENDER_SCALE):
+ *   world = (x · RENDER_SCALE, y · RENDER_SCALE, −z · RENDER_SCALE)
  */
 import * as THREE from 'three';
 import { Camera, View, RENDER_SCALE } from './retro';
+import { ThreeEnvironment } from './ThreeEnvironment';
+
+/** Feature flag: 3D dual-plane pitch, fog and uprights. */
+export const ENV_3D: boolean = true;
+
+const FOG_COLOR = 0x1a2634;
 
 export class ThreeCanvas {
   readonly renderer: THREE.WebGLRenderer;
   readonly camera: THREE.PerspectiveCamera;
   readonly scene: THREE.Scene;
   readonly dom: HTMLCanvasElement;
+  environment: ThreeEnvironment | null = null;
 
   private view: View = { w: 1, h: 1 };
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
-    this.renderer.setClearColor(0x000000, 0);   // transparent — the 2D pitch shows through
+    this.renderer.setClearColor(ENV_3D ? FOG_COLOR : 0x000000, ENV_3D ? 1 : 0);
     this.renderer.shadowMap.enabled = false;
 
     const el = this.renderer.domElement;
@@ -37,13 +46,22 @@ export class ThreeCanvas {
     el.style.width = '100%';
     el.style.height = '100%';
     el.style.pointerEvents = 'none';
-    el.style.zIndex = '1';
+    el.style.zIndex = ENV_3D ? '0' : '1';
     container.appendChild(el);
     this.dom = el;
 
     this.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 400);
     this.camera.frustumCulled = true;
     this.scene = new THREE.Scene();
+
+    this.init();
+  }
+
+  /** Build the 3D environment (pitch, fog, uprights) when the flag is on. */
+  init() {
+    if (ENV_3D) {
+      this.environment = new ThreeEnvironment(this.scene, this.renderer);
+    }
   }
 
   /**
@@ -55,8 +73,7 @@ export class ThreeCanvas {
    *   up     = (wy − camH)·cos(tilt) + fwd·sin(tilt)
    *
    * The 2D lens is an off-centre pinhole (its principal point sits at
-   * `horizon*h`, not h/2). That is reproduced with PerspectiveCamera's
-   * `setViewOffset`, which shifts the frustum without changing focal length —
+   * `horizon*h`, not h/2). That is reproduced with a custom frustum so
    * pitch markings and players therefore cannot parallax apart.
    */
   syncCamera(cam: Camera, v: View, shakeX = 0, shakeY = 0) {
@@ -89,11 +106,6 @@ export class ThreeCanvas {
 
     // Off-axis projection that EXACTLY reproduces the 2D pinhole intrinsics
     // (focal length f and the off-centre principal point at (w/2, horizon*h)).
-    // At the near plane the window maps to frustum bounds:
-    //   f = h / (2 tan(fov/2));  a ray's screen offset = f * axis/depth.
-    // We build the frustum directly (instead of setViewOffset, whose aspect
-    // term distorts the horizontal focal) so players and pitch lines share
-    // one lens.
     const near = 0.15 * s;
     const far = 320 * s;
     const focal = v.h * 0.5 / Math.tan(cam.fov * 0.5);
@@ -123,6 +135,8 @@ export class ThreeCanvas {
   }
 
   dispose() {
+    this.environment?.dispose();
+    this.environment = null;
     this.renderer.dispose();
     this.dom.remove();
   }

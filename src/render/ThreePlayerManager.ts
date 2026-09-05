@@ -312,10 +312,12 @@ export class ThreePlayerManager {
     // spine through every clip. Opaque decal, front-facing outward.
     const spine = root.getObjectByName('spine_03') ?? root.getObjectByName('spine_02');
     if (spine) {
-      const badgeGeo = new THREE.PlaneGeometry(0.30, 0.27);
+      const badgeGeo = new THREE.PlaneGeometry(0.22, 0.26);
       const badgeMat = new THREE.MeshBasicMaterial({
         map: this.makeBadgeTexture('', '#cccccc'),
-        side: THREE.FrontSide, transparent: false, depthWrite: true,
+        color: 0xffffff,
+        side: THREE.FrontSide, transparent: true, opacity: 1,
+        depthWrite: false, depthTest: true, alphaTest: 0.5,
       });
       badgeMat.name = 'TPL_NumberBadge';
       const badge = new THREE.Mesh(badgeGeo, badgeMat);
@@ -463,13 +465,19 @@ export class ThreePlayerManager {
           });
           out.name = `M_${slot}`;
         } else if (name === 'TPL_NumberBadge') {
-          const bm = new THREE.MeshBasicMaterial({
-            map: this.makeBadgeTexture(team === 'REF' ? '' : String(num), kit.badgePanel),
-            side: THREE.FrontSide, transparent: false, opacity: 1, depthWrite: true, depthTest: true,
-          });
-          bm.name = 'M_NumberBadge';
-          badgeMat = bm;
-          out = bm;
+          if (team === 'REF') {
+            mesh.visible = false;
+            out = mat;
+          } else {
+            const bm = new THREE.MeshBasicMaterial({
+              map: this.makeBadgeTexture(String(num), kit.badgePanel),
+              side: THREE.FrontSide, transparent: true, opacity: 1,
+              depthWrite: true, depthTest: true, alphaTest: 0.25,
+            });
+            bm.name = 'M_NumberBadge';
+            badgeMat = bm;
+            out = bm;
+          }
         }
         replaced.push(out);
       }
@@ -496,28 +504,29 @@ export class ThreePlayerManager {
     return inst;
   }
 
-  /** 128x128 offscreen canvas with the squad number in bold sans-serif. */
+  /** Digit only — fully transparent canvas, no backing plate or border. */
   private makeBadgeTexture(label: string, panel: string): THREE.Texture {
-    const cacheKey = `${label}|${panel}`;
+    const cacheKey = `${label}|${panel}|glyph`;
     const cached = this.badgeTextures.get(cacheKey);
     if (cached) return cached;
     const c = document.createElement('canvas');
     c.width = 128; c.height = 128;
-    const ctx = c.getContext('2d')!;
-    ctx.fillStyle = panel;
-    ctx.fillRect(0, 0, 128, 128);
-    ctx.strokeStyle = 'rgba(0,0,0,0.28)';
-    ctx.lineWidth = 6;
-    ctx.strokeRect(5, 5, 118, 118);
+    const ctx = c.getContext('2d', { alpha: true })!;
+    ctx.clearRect(0, 0, 128, 128);
     if (label) {
-      ctx.fillStyle = panel === '#16161a' ? '#f4efe2' : '#16161d';
-      ctx.font = '900 84px ui-sans-serif, system-ui, sans-serif';
+      const darkKit = panel === '#16161a';
+      ctx.font = '900 108px ui-sans-serif, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(label, 64, 68);
+      ctx.fillStyle = darkKit ? '#f4efe2' : '#111111';
+      ctx.fillText(label, 64, 72);
     }
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
     this.badgeTextures.set(cacheKey, tex);
     return tex;
   }
