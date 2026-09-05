@@ -264,6 +264,40 @@ export const TACKLE_GROUND_END = 0.40;
 export const LATCH_CHURN_RATE = 0.72;
 
 /* ================================================================== */
+/**
+ * IN-PLACE CONVERSION — strip horizontal root motion from every clip.
+ *
+ * This is the "In-Place" checkbox, done in code. The 2D engine owns all
+ * spatial movement: `breakdown.ts` slides the pair through the 0.3 s
+ * kinetic-impact window and `latch.ts` snaps the defender onto the carrier's
+ * hip, and then `update()` writes `root.position` from `a.rx/a.rz` every
+ * frame. Any horizontal travel baked into the clip is therefore applied a
+ * SECOND time, on top of the engine's — the double-movement that reads as
+ * skating and rolling in place.
+ *
+ * Measured travel on the shipped rig before this ran:
+ *   DiveRoll 1.10 m, GetUp 0.85 m, Death 0.83 m, Tackle 0.82 m,
+ *   SlideStart/SlideExit 0.78 m, JumpLand 0.50 m, Run 0.24 m.
+ *
+ * Only X and Z are flattened, and only on the root-most translated bone
+ * (`pelvis`). Y is DELIBERATELY LEFT ALONE: the vertical drop of the hips is
+ * how a fall reads as a fall, and it is what replaces the procedural pivot
+ * lift during a tackle. Rotation tracks are untouched.
+ */
+function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const out = clip.clone();
+  for (const track of out.tracks) {
+    const [bone, prop] = track.name.split('.');
+    if (prop !== 'position') continue;
+    if (bone !== 'pelvis' && bone !== 'Hips' && bone !== 'mixamorigHips'
+      && bone !== 'root' && bone !== 'Armature') continue;
+    const v = track.values;            // flat [x,y,z, x,y,z, ...]
+    const x0 = v[0], z0 = v[2];
+    for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
+  }
+  return out;
+}
+
 export class ThreePlayerManager {
   ready = false;
   private template: THREE.Group | null = null;
@@ -302,7 +336,7 @@ export class ThreePlayerManager {
     return new Promise((resolve, reject) => {
       new GLTFLoader().load(MODEL_URL, (gltf) => {
         this.template = gltf.scene;
-        this.templateClips = gltf.animations;
+        this.templateClips = gltf.animations.map(stripRootMotion);
         this.prepareTemplate();
         this.ready = true;
         resolve();
@@ -775,13 +809,19 @@ export class ThreePlayerManager {
       case 'latchCarry': return { name: 'Run', loop: true };
       case 'latchHang': return { name: 'Tackle', loop: false };
       /* ASSET NOTE — these tackle states are driven by STAND-IN clips
-       * ('Hit_Knockback', 'Roll', 'Death01' from the Quaternius UAL) with the
-       * procedural layer above compensating for what they lack. The real fix
+       * (Tackle, SlideStart, DiveRoll, Death — see the cases above) with the
+       * procedural layer compensating for what they lack. The real fix
        * is Mixamo's free PAIRED "American Football Tackle" / "Tackled" clips,
        * which contain the violent horizontal dive and the twisting ground
        * impact a rugby collision needs. Swap them in tools/build_player_glb.py
        * (see the ASSET UPGRADE PATH note there) and only the clip names below
-       * change — every state name is already wired. */
+       * change — every state name is already wired.
+       *
+       * DOWNLOAD THEM WITH "In-Place" TICKED, or if you forget, it no longer
+       * matters: stripRootMotion() flattens the horizontal channel of every
+       * clip at load. Do not "fix" a sliding character by editing the clip's
+       * Y track — the vertical drop is load-bearing (it is what puts a tackled
+       * man on the turf now that the procedural pivot lift is off). */
       case 'grounded': return { name: 'Death', loop: true };
       case 'dive': return { name: 'SlideStart', loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
@@ -789,6 +829,26 @@ export class ThreePlayerManager {
       case 'getup': return { name: 'GetUp', loop: false };
       default: return { name: 'Idle', loop: true };
     }
+  }
+
+  /**
+   * Time scale that makes `state`'s clip play through in `window` seconds.
+   * `window <= 0` means the stage is open-ended (the >0.4 s ruck-prep hold),
+   * where the clip should run at its natural speed and clamp. Clamped to a
+   * sane band so a very long clip is not turned into a blur.
+   */
+  private fitTimeScale(state: string, window: number): number {
+    if (window <= 0) return 1;
+    const clip = this.templateClips.find(c => c.name === this.clipForState(state).name);
+    if (!clip || clip.duration <= 0) return 1;
+    /* Clamped at 3x. The uncapped ratio is 5.5-6x here (a 0.83 s clip into a
+     * 0.15 s window), which plays the whole motion but reads as a blur —
+     * faster than a body can move. At 3x the stage shows roughly the first
+     * half to two-thirds of the clip at a violent-but-readable speed, which
+     * is the part that carries the hit; the following stage's crossfade takes
+     * over from there. This is a LOOKS-RIGHT number, not a derived one, and
+     * is the first thing to tune if the collision reads too fast or too slow. */
+    return Math.min(3, Math.max(0.5, clip.duration / window));
   }
 
   /** Crossfade to a clip. Returns the action (already playing). */
@@ -913,7 +973,7 @@ export class ThreePlayerManager {
    * to compensate — and the contact shadow is counter-rotated so it stays
    * flat on the grass instead of tipping up into a vertical disc.
    */
-  private applyBodyTilt(inst: PlayerInstance, want: number, step: number) {
+  private applyBodyTilt(inst: PlayerInstance, want: number, step: number, lift = true) {
     const p = inst.proc;
     p.tilt += (want - p.tilt) * (1 - Math.exp(-TILT_RATE * step));
     if (p.tilt < 1e-3) {
@@ -934,12 +994,19 @@ export class ThreePlayerManager {
     /* lift the pivot so the torso does not intersect the pitch: the chest is
      * roughly 0.9 m up the body, and sin(tilt) is how much of that height the
      * rotation has just swung downward. */
-    inst.root.position.y = Math.sin(p.tilt) * 0.62 * RENDER_SCALE;
+    /* `lift` is off once a tackle reaches its grounding stage: from there the
+     * clip's OWN pelvis Y track drops the hips onto the turf (the vertical
+     * channel is deliberately preserved by stripRootMotion), and adding the
+     * procedural lift on top floated the body above the grass. Keep the lift
+     * only while the man is still on his feet leaning in, where the pivot is
+     * genuinely at the feet and the chest would otherwise sink. */
+    const rise = lift ? Math.sin(p.tilt) * 0.62 : 0;
+    inst.root.position.y = rise * RENDER_SCALE;
     if (inst.shadow) {
       /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
        * on the turf under the man. */
       inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
-      inst.shadow.position.y = 0.02 - Math.sin(p.tilt) * 0.62;
+      inst.shadow.position.y = 0.02 - rise;
     }
   }
 
@@ -1065,7 +1132,8 @@ export class ThreePlayerManager {
        * dive and the fall are one continuous movement rather than a cut. */
       wantTilt = TILT_GROUNDED;
     }
-    this.applyBodyTilt(inst, wantTilt, step);
+    /* no procedural lift once the clip itself is putting him on the ground */
+    this.applyBodyTilt(inst, wantTilt, step, !grounding);
 
     /* --- 2. the magnetic latch (tackler's arms onto the carrier) --- */
     if (latching && partner) {
@@ -1215,8 +1283,22 @@ export class ThreePlayerManager {
             : wantStage === 1
               ? (carrier ? 'carrierFall' : 'tackleGround') // 0.15–0.40 GROUNDING
               : (carrier ? 'present' : 'rollAway');        // > 0.40 RUCK PREP
-          // the crossfade lasts a fraction of the stage it is entering
-          this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, wantStage === 0 ? 1.6 : 1);
+          /* DYNAMIC TIME SCALING — fit the clip to the stage.
+           *
+           * The stage windows are short (IMPACT 0.15 s, GROUNDING 0.25 s) but
+           * the clips are long: Tackle 0.83 s, DiveRoll 1.47 s, Death 2.40 s.
+           * At timeScale 1 each stage showed only the first 10-18% of its
+           * clip and was then cut off mid-motion by the next crossfade — the
+           * man never got as far as the part where he goes to ground, which
+           * is why the grounding read as a fold-in-place. Scaling each clip
+           * by (its duration / its window) makes it play through COMPLETELY
+           * inside the stage, so the mesh reaches the turf exactly as the
+           * engine's kinetic-impact momentum reaches zero. */
+          const win = wantStage === 0
+            ? TACKLE_IMPACT_END
+            : wantStage === 1 ? TACKLE_GROUND_END - TACKLE_IMPACT_END : 0;
+          this.play(inst, state, wantStage === 0 ? 0.05 : 0.12,
+            this.fitTimeScale(state, win));
           st.oneShot = state;
           st.lock = 0;
         }
