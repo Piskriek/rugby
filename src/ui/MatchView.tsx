@@ -6,6 +6,14 @@ import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
 import { ENV_3D, ThreeCanvas } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
+import type { QualityLevel } from '../render/ThreePost';
+import type { SkyPresetId } from '../render/ThreeSky';
+
+/** OPTION_ITEMS 'timeOfDay' index -> sky preset. */
+const TIME_PRESETS: SkyPresetId[] = ['AFTERNOON', 'GOLDEN', 'FLOODLIT', 'OVERCAST'];
+
+const clampQuality = (v: number | undefined): QualityLevel =>
+  (v === 0 || v === 1 || v === 2 ? v : 2);
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
@@ -108,6 +116,13 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     threeRef.current = three;
     playersRef.current = players;
     players.load().catch((e) => console.error('player GLB load failed', e));
+
+    /* Apply the display options to the freshly-built rig. These are read from
+     * the director rather than props because the options screen writes them
+     * straight onto the live match config. */
+    const d0 = dirRef.current;
+    three.setQuality(clampQuality(d0?.options.graphics));
+    three.environment?.applyPreset(TIME_PRESETS[d0?.options.timeOfDay ?? 0] ?? 'AFTERNOON');
     return () => {
       three.dispose();
       threeRef.current = null;
@@ -232,15 +247,21 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           three.resize();
           three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
           playersRef.current?.update(d, view, d.cam, dt);
+          /* Live-apply display option changes (the options screen can be
+           * opened mid-match). Both setters are no-ops when unchanged. */
+          const wantQ = clampQuality(d.options.graphics);
+          if (wantQ !== three.quality) three.setQuality(wantQ);
           const env = three.environment;
           if (env) {
+            const wantSky = TIME_PRESETS[d.options.timeOfDay ?? 0] ?? 'AFTERNOON';
+            if (wantSky !== env.skyPreset) env.applyPreset(wantSky);
             const recent = d.t - d.bannerAt < 2.2;
             const b = (d.banner || '').toUpperCase();
             if (recent && b.includes('TRY')) env.flashAdBoard('TRY');
             else if (recent && /(PENALTY|YELLOW|CARD|NO GOOD)/.test(b)) env.flashAdBoard('PENALTY');
-            env.update(d.t, dt);
+            env.update(d.t, dt, three.camera);
           }
-          three.render();
+          three.render(dt);
         }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);

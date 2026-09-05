@@ -17,15 +17,12 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { FIELD, RENDER_SCALE } from './retro';
+import { buildTurfMaps } from './turf';
+import { ThreeSky, SKY_PRESETS, SkyPreset, SkyPresetId, sunVector } from './ThreeSky';
 
-const FOG_COLOR = 0x1a2634;
-const FOG_DENSITY = 0.0035;
-const OUTER_COLOR = 0x1d4a1b;
-const STRIPE_A = '#2e6b27';
-const STRIPE_B = '#347a2c';
-const LINE = '#FFFFFF';
-const CONCRETE = 0x3a3f47;
-const SEAT_BLUE = 0x1e2d42;
+const OUTER_COLOR = 0x24461f;
+const CONCRETE = 0x8a8f96;
+const SEAT_BLUE = 0x24354d;
 
 const INNER_WIDTH_M = 76;
 const INNER_LENGTH_M = 130;
@@ -38,16 +35,6 @@ const PAD_HEIGHT = 1.5;
 const POST_RADIUS = 0.06;
 
 export type AdBoardFlash = 'TRY' | 'PENALTY' | 'NORMAL';
-
-function toonGradient(): THREE.DataTexture {
-  const data = new Uint8Array([168, 168, 168, 255, 255, 255]);
-  const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
-  tex.needsUpdate = true;
-  return tex;
-}
 
 function merge(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const out = mergeGeometries(geos, false);
@@ -89,11 +76,10 @@ function scaleUV(g: THREE.BufferGeometry, uMul: number, vMul = 1): void {
 export class ThreeEnvironment {
   public group: THREE.Group;
   private pitchTexture!: THREE.CanvasTexture;
-  private gradient = toonGradient();
 
   private adCanvas!: HTMLCanvasElement;
   private adTexture!: THREE.CanvasTexture;
-  private adMat!: THREE.MeshToonMaterial;
+  private adMat!: THREE.MeshStandardMaterial;
   private adMode: AdBoardFlash = 'NORMAL';
   private adHold = 0;
 
@@ -102,8 +88,17 @@ export class ThreeEnvironment {
   private crowdDummy = new THREE.Object3D();
   private cheer = 0;
 
-  private floodLights: THREE.DirectionalLight[] = [];
+  private floodLights: THREE.PointLight[] = [];
+  private lampMat!: THREE.MeshBasicMaterial;
   private scene: THREE.Scene;
+
+  /* --- lighting rig, owned here so the sky and the shadows always agree --- */
+  private sky!: ThreeSky;
+  private sun!: THREE.DirectionalLight;
+  private hemi!: THREE.HemisphereLight;
+  private ambient!: THREE.AmbientLight;
+  private bounce!: THREE.DirectionalLight;
+  private preset: SkyPreset = SKY_PRESETS.AFTERNOON;
 
   constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     this.scene = scene;
@@ -111,23 +106,102 @@ export class ThreeEnvironment {
     this.group.name = 'Environment3D';
     scene.add(this.group);
 
-    this.setupFog(scene);
+    this.buildSky();
+    this.buildLights();
     this.buildGround(renderer);
     this.buildUprights();
     this.buildAdBoards(renderer);
     this.buildGrandstands();
     this.buildCrowd();
     this.buildFloodlights();
+    this.applyPreset('AFTERNOON');
   }
 
-  private setupFog(scene: THREE.Scene): void {
-    scene.fog = new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
-    scene.background = new THREE.Color(FOG_COLOR);
+  /* -------------------------------------------------------------- lighting */
+
+  private buildSky(): void {
+    this.sky = new ThreeSky(600 * RENDER_SCALE);
+    this.scene.add(this.sky.mesh);
   }
 
-  private mat(color: number, map?: THREE.Texture): THREE.MeshToonMaterial {
-    return new THREE.MeshToonMaterial({
-      color, map, gradientMap: this.gradient, depthWrite: true,
+  private buildLights(): void {
+    const s = RENDER_SCALE;
+
+    // Key. Shadow frustum is sized to the PLAYABLE area only (about 110 × 80 m)
+    // rather than the whole stadium: a camera large enough to include the
+    // stands would spend its whole 2048² map on empty terracing and leave the
+    // players with roughly four texels each.
+    this.sun = new THREE.DirectionalLight(0xfff4e0, 3.0);
+    this.sun.castShadow = true;
+    /* The ortho box is in LIGHT space, not world space, so it has to cover the
+     * pitch whatever bearing the sun is on — that means the half-diagonal
+     * (√(65² + 38²) ≈ 75 m), not the half-length. It also has to hold the
+     * shadows themselves: at GOLDEN the sun sits 11° up, so a 2 m player
+     * throws a ~10 m shadow. 88 m square covers both with margin. */
+    const half = 88 * s;
+    const cam = this.sun.shadow.camera;
+    cam.left = -half; cam.right = half;
+    cam.top = half; cam.bottom = -half;
+    cam.near = 1 * s; cam.far = 320 * s;
+    this.sun.shadow.mapSize.set(2048, 2048);
+    // Normal-bias beats constant bias on a near-flat receiver: it offsets
+    // along the surface normal, so it kills acne on the turf without
+    // detaching the contact shadow from the boots (peter-panning).
+    this.sun.shadow.bias = -0.0006;
+    this.sun.shadow.normalBias = 0.9;
+    this.scene.add(this.sun);
+    this.scene.add(this.sun.target);
+
+    this.hemi = new THREE.HemisphereLight(0xbcd6f5, 0x35521f, 0.7);
+    this.scene.add(this.hemi);
+
+    this.ambient = new THREE.AmbientLight(0xffffff, 0.18);
+    this.scene.add(this.ambient);
+
+    // A dim opposite-side fill so the shadowed side of a player is readable
+    // silhouette rather than a black hole. No shadow, deliberately.
+    this.bounce = new THREE.DirectionalLight(0x9db8ec, 0.35);
+    this.bounce.position.set(40 * s, 26 * s, -30 * s);
+    this.scene.add(this.bounce);
+  }
+
+  /** Switch time-of-day. Sky, key, fill, fog and floodlights move together. */
+  applyPreset(id: SkyPresetId): void {
+    const p = SKY_PRESETS[id];
+    this.preset = p;
+    const s = RENDER_SCALE;
+
+    const dir = sunVector(p, 190 * s);
+    this.sun.position.copy(dir);
+    this.sun.target.position.set(0, 0, 0);
+    this.sun.target.updateMatrixWorld(true);
+    this.sun.color.set(p.sun);
+    this.sun.intensity = p.sunIntensity;
+    this.sun.castShadow = p.sunIntensity > 0.8;
+
+    this.sky.apply(p, dir.clone().normalize());
+
+    this.hemi.intensity = p.ambient * 0.8;
+    (this.hemi.color as THREE.Color).set(p.horizon);
+    this.ambient.intensity = p.ambient * 0.22;
+    this.bounce.intensity = 0.12 + p.ambient * 0.22;
+
+    this.scene.fog = new THREE.FogExp2(new THREE.Color(p.horizon).getHex(), p.fogDensity);
+    // The dome paints the background; a background colour would fight it.
+    this.scene.background = null;
+
+    for (const l of this.floodLights) l.intensity = p.floods * 900 * s * s;
+    if (this.lampMat) {
+      const on = p.floods > 0.05;
+      this.lampMat.color.setHex(on ? 0xfffaf0 : 0x6a6a66);
+    }
+  }
+
+  get skyPreset(): SkyPresetId { return this.preset.id; }
+
+  private mat(color: number, map?: THREE.Texture, rough = 0.85, metal = 0): THREE.MeshStandardMaterial {
+    return new THREE.MeshStandardMaterial({
+      color, map, roughness: rough, metalness: metal, depthWrite: true,
     });
   }
 
@@ -142,33 +216,69 @@ export class ThreeEnvironment {
 
   private buildGround(renderer: THREE.WebGLRenderer): void {
     const s = RENDER_SCALE;
+    const aniso = renderer.capabilities.getMaxAnisotropy();
 
     const outerGeo = new THREE.PlaneGeometry(OUTER_M * s, OUTER_M * s);
-    const outer = this.addMesh(outerGeo, this.mat(OUTER_COLOR), 'OuterGround');
+    const outerMat = this.mat(OUTER_COLOR, undefined, 0.95);
+    const outer = this.addMesh(outerGeo, outerMat, 'OuterGround');
     outer.rotation.x = -Math.PI / 2;
     outer.position.y = -0.05;
     outer.renderOrder = -1;
+    outer.receiveShadow = false;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 2048;
-    canvas.height = 1024;
-    const ctx = canvas.getContext('2d')!;
-    this.paintPitch(ctx, canvas.width, canvas.height);
+    const maps = buildTurfMaps({
+      width: 4096, height: 2048,
+      lengthM: INNER_LENGTH_M, widthM: INNER_WIDTH_M,
+      stripes: 22, seed: 7, field: FIELD,
+    });
 
-    this.pitchTexture = new THREE.CanvasTexture(canvas);
-    this.pitchTexture.colorSpace = THREE.SRGBColorSpace;
-    this.pitchTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    this.pitchTexture.minFilter = THREE.LinearMipmapLinearFilter;
-    this.pitchTexture.magFilter = THREE.LinearFilter;
-    this.pitchTexture.wrapS = THREE.ClampToEdgeWrapping;
-    this.pitchTexture.wrapT = THREE.ClampToEdgeWrapping;
-    this.pitchTexture.needsUpdate = true;
+    const tex = (c: HTMLCanvasElement, srgb: boolean) => {
+      const t = new THREE.CanvasTexture(c);
+      if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = aniso;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.wrapS = THREE.ClampToEdgeWrapping;
+      t.wrapT = THREE.ClampToEdgeWrapping;
+      t.needsUpdate = true;
+      return t;
+    };
 
-    const innerGeo = new THREE.PlaneGeometry(INNER_WIDTH_M * s, INNER_LENGTH_M * s);
+    this.pitchTexture = tex(maps.albedo, true);
+    const roughTex = tex(maps.roughness, false);
+    const normTex = tex(maps.normal, false);
+
+    const pitchMat = new THREE.MeshStandardMaterial({
+      map: this.pitchTexture,
+      roughnessMap: roughTex,
+      normalMap: normTex,
+      normalScale: new THREE.Vector2(0.65, 0.65),
+      roughness: 1,
+      metalness: 0,
+      // Grass is a dense volume of thin blades: a little forward scatter at
+      // grazing angles is what stops a lit pitch looking like painted board.
+      dithering: true,
+    });
+
+    // Tessellated so the pitch can carry a very slight crown (real pitches are
+    // domed ~0.3 m at the centre for drainage). Flat planes betray themselves
+    // the moment a low camera looks down the touchline.
+    const innerGeo = new THREE.PlaneGeometry(INNER_WIDTH_M * s, INNER_LENGTH_M * s, 48, 80);
     this.remapPitchUVs(innerGeo);
-    const inner = this.addMesh(innerGeo, this.mat(0xffffff, this.pitchTexture), 'InnerPitch');
+    const pos = innerGeo.attributes.position as THREE.BufferAttribute;
+    const halfW = (INNER_WIDTH_M / 2) * s;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const t = Math.min(1, Math.abs(x) / halfW);
+      pos.setZ(i, -(1 - t * t) * 0.30 * s);
+    }
+    pos.needsUpdate = true;
+    innerGeo.computeVertexNormals();
+
+    const inner = this.addMesh(innerGeo, pitchMat, 'InnerPitch');
     inner.rotation.x = -Math.PI / 2;
     inner.position.y = 0.0;
+    inner.receiveShadow = true;
   }
 
   private remapPitchUVs(geo: THREE.PlaneGeometry): void {
@@ -181,101 +291,13 @@ export class ThreeEnvironment {
     uv.needsUpdate = true;
   }
 
-  private paintPitch(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const zMin = -INNER_LENGTH_M / 2;
-    const xMax = INNER_WIDTH_M / 2;
-    const pxZ = w / INNER_LENGTH_M;
-    const pxX = h / INNER_WIDTH_M;
-
-    const toPx = (x: number, z: number): [number, number] => [
-      (z - zMin) * pxZ,
-      (xMax - x) * pxX,
-    ];
-
-    const stripeCount = 24;
-    const stripeW = w / stripeCount;
-    for (let i = 0; i < stripeCount; i++) {
-      ctx.fillStyle = i % 2 === 0 ? STRIPE_A : STRIPE_B;
-      ctx.fillRect(i * stripeW, 0, stripeW + 0.5, h);
-    }
-
-    ctx.strokeStyle = LINE;
-    ctx.fillStyle = LINE;
-    ctx.lineCap = 'butt';
-    ctx.lineJoin = 'miter';
-    ctx.setLineDash([]);
-
-    const linePx = (metres: number) => Math.max(2, metres * pxZ);
-    const dashPx = (onM: number, offM: number) => {
-      ctx.setLineDash([onM * pxZ, offM * pxZ]);
-    };
-    const stroke = (x0: number, z0: number, x1: number, z1: number) => {
-      const [ax, ay] = toPx(x0, z0);
-      const [bx, by] = toPx(x1, z1);
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx, by);
-      ctx.stroke();
-    };
-
-    const { minX, maxX, tryZ, tryZFar, deadZ, deadZFar } = FIELD;
-
-    ctx.lineWidth = linePx(0.20);
-    stroke(minX, deadZ, minX, deadZFar);
-    stroke(maxX, deadZ, maxX, deadZFar);
-
-    ctx.lineWidth = linePx(0.22);
-    stroke(minX, tryZ, maxX, tryZ);
-    stroke(minX, tryZFar, maxX, tryZFar);
-
-    ctx.lineWidth = linePx(0.16);
-    stroke(minX, deadZ, maxX, deadZ);
-    stroke(minX, deadZFar, maxX, deadZFar);
-
-    ctx.lineWidth = linePx(0.20);
-    stroke(minX, 0, maxX, 0);
-
-    ctx.lineWidth = linePx(0.18);
-    stroke(minX, -28, maxX, -28);
-    stroke(minX, 28, maxX, 28);
-
-    ctx.lineWidth = linePx(0.16);
-    dashPx(2.0, 1.4);
-    stroke(minX, -10, maxX, -10);
-    stroke(minX, 10, maxX, 10);
-    ctx.setLineDash([]);
-
-    ctx.lineWidth = linePx(0.14);
-    dashPx(1.6, 1.6);
-    stroke(minX, tryZ + 5, maxX, tryZ + 5);
-    stroke(minX, tryZFar - 5, maxX, tryZFar - 5);
-
-    ctx.lineWidth = linePx(0.13);
-    dashPx(1.6, 1.6);
-    for (const x of [minX + 5, minX + 15, maxX - 15, maxX - 5]) {
-      stroke(x, tryZ, x, tryZFar);
-    }
-    ctx.setLineDash([]);
-
-    ctx.lineWidth = linePx(0.30);
-    for (const z of [-28, 0, 28]) {
-      for (const x of [minX + 5, minX + 15, maxX - 15, maxX - 5]) {
-        stroke(x, z - 0.6, x, z + 0.6);
-      }
-    }
-
-    const [cx, cy] = toPx(0, 0);
-    ctx.beginPath();
-    ctx.arc(cx, cy, Math.max(3, 0.35 * pxZ), 0, Math.PI * 2);
-    ctx.fill();
-  }
-
   /* ---------------------------------------------------------------- uprights */
 
   private buildUprights(): void {
     const s = RENDER_SCALE;
-    const postMat = this.mat(0xffffff);
-    const padMat = this.mat(0x111111);
+    // Posts are painted aluminium: bright, fairly smooth, faintly metallic.
+    const postMat = this.mat(0xf2f4f5, undefined, 0.34, 0.12);
+    const padMat = this.mat(0x15181d, undefined, 0.72);
 
     const xOff = POST_HALF * s;
     const postH = POST_HEIGHT * s;
@@ -296,8 +318,11 @@ export class ThreeEnvironment {
       pads.push(box(0.5 * s, padH, 0.5 * s, xOff, padH / 2, wz));
     }
 
-    this.addMesh(merge(white), postMat, 'GoalPosts');
-    this.addMesh(merge(pads), padMat, 'GoalPads');
+    const posts = this.addMesh(merge(white), postMat, 'GoalPosts');
+    posts.castShadow = true;
+    const padMesh = this.addMesh(merge(pads), padMat, 'GoalPads');
+    padMesh.castShadow = true;
+    padMesh.receiveShadow = true;
   }
 
   /* ------------------------------------------------------------- LED boards */
@@ -322,7 +347,16 @@ export class ThreeEnvironment {
     this.adTexture.minFilter = THREE.LinearMipmapLinearFilter;
     this.adTexture.needsUpdate = true;
 
-    this.adMat = this.mat(0xffffff, this.adTexture);
+    // LED panels are emissive: they must stay bright at night and are the
+    // main thing the bloom pass has to bite on.
+    this.adMat = new THREE.MeshStandardMaterial({
+      map: this.adTexture,
+      emissiveMap: this.adTexture,
+      emissive: new THREE.Color(0xffffff),
+      emissiveIntensity: 0.85,
+      roughness: 0.42,
+      metalness: 0.0,
+    });
 
     const geos: THREE.BufferGeometry[] = [];
     const panelM = 8; // metres per sponsor repeat
@@ -354,7 +388,8 @@ export class ThreeEnvironment {
     pushBoard(half * s, t, -cx * s, 65.5 * s, tilt, 0, 0, half);
     pushBoard(half * s, t, cx * s, 65.5 * s, tilt, 0, 0, half);
 
-    this.addMesh(merge(geos), this.adMat, 'AdBoards');
+    const boards = this.addMesh(merge(geos), this.adMat, 'AdBoards');
+    boards.castShadow = true;
   }
 
   private paintAdTexture(mode: AdBoardFlash): void {
@@ -472,19 +507,28 @@ export class ThreeEnvironment {
     concrete.push(box(0.55 * s, 14 * s, 0.55 * s, (43 + 23) * s, 7 * s, -50 * s));
     concrete.push(box(0.55 * s, 14 * s, 0.55 * s, (43 + 23) * s, 7 * s, 50 * s));
 
-    this.addMesh(merge(concrete), this.mat(CONCRETE), 'StandsConcrete');
-    this.addMesh(merge(seats), this.mat(SEAT_BLUE), 'StandsSeats');
+    const conc = this.addMesh(merge(concrete), this.mat(CONCRETE, undefined, 0.94), 'StandsConcrete');
+    conc.castShadow = true;
+    conc.receiveShadow = true;
+    // Moulded plastic seating: smoother than concrete, never metallic.
+    const seatMesh = this.addMesh(merge(seats), this.mat(SEAT_BLUE, undefined, 0.55), 'StandsSeats');
+    seatMesh.receiveShadow = true;
   }
 
   /* --------------------------------------------------------- instanced crowd */
 
   private makeSpectatorGeo(): THREE.BufferGeometry {
-    // ~1.1 m seated figure: 12-tri torso prism + 8-tri head.
-    const torso = new THREE.BoxGeometry(0.44, 0.72, 0.28);
-    torso.translate(0, 0.36, 0);
-    const head = new THREE.BoxGeometry(0.22, 0.26, 0.22);
-    head.translate(0, 0.92, 0);
-    return merge([torso, head]);
+    // ~1.15 m seated figure. Tapered torso + shoulders + head reads as a
+    // person at 60 m; a plain box reads as a crate. Still only ~40 tris, and
+    // there is exactly one of these in the whole scene (InstancedMesh).
+    const torso = new THREE.CylinderGeometry(0.20, 0.26, 0.62, 6);
+    torso.translate(0, 0.31, 0);
+    const shoulders = new THREE.SphereGeometry(0.215, 6, 4);
+    shoulders.scale(1.15, 0.62, 0.85);
+    shoulders.translate(0, 0.64, 0);
+    const head = new THREE.SphereGeometry(0.115, 6, 5);
+    head.translate(0, 0.83, 0);
+    return merge([torso, shoulders, head]);
   }
 
   private buildCrowd(): void {
@@ -535,9 +579,14 @@ export class ThreeEnvironment {
     const count = seats.length;
     const geo = this.makeSpectatorGeo();
     geo.scale(s, s, s);
-    const mat = this.mat(0xffffff);
+    // Cloth: rough, unlit-adjacent. Crowd neither casts nor receives shadows —
+    // 3,300 shadow casters would cost more than the entire rest of the frame
+    // and none of it is visible at this distance.
+    const mat = this.mat(0xffffff, undefined, 0.92);
     this.crowd = new THREE.InstancedMesh(geo, mat, count);
     this.crowd.name = 'Crowd';
+    this.crowd.castShadow = false;
+    this.crowd.receiveShadow = false;
     this.crowd.frustumCulled = false;
     this.crowd.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
@@ -617,25 +666,29 @@ export class ThreeEnvironment {
         }
       }
 
-      const light = new THREE.DirectionalLight(0xfff0c8, 0.16);
+      // Point lights (not directional) so each tower falls off with distance
+      // and the corners of the pitch are genuinely dimmer than the middle —
+      // four directional lights would light the pitch perfectly evenly and
+      // look like an unlit render.
+      const light = new THREE.PointLight(0xfff0c8, 0, 260 * s, 2);
       light.position.set(wx, h, wz);
-      light.target.position.set(0, 0, 0);
       this.scene.add(light);
-      this.scene.add(light.target);
       this.floodLights.push(light);
     }
 
-    this.addMesh(merge(towers), this.mat(0x2a3038), 'FloodTowers');
-    const lampMat = new THREE.MeshBasicMaterial({
-      color: 0xfff3c4, depthWrite: true,
-    });
-    this.addMesh(merge(lamps), lampMat, 'FloodLamps');
+    const tower = this.addMesh(merge(towers), this.mat(0x4a5058, undefined, 0.62, 0.55), 'FloodTowers');
+    tower.castShadow = true;
+    // Unlit so the lamps stay at full value regardless of time of day; the
+    // bloom pass turns them into the glare that sells a night match.
+    this.lampMat = new THREE.MeshBasicMaterial({ color: 0xfffaf0, depthWrite: true, toneMapped: false });
+    this.addMesh(merge(lamps), this.lampMat, 'FloodLamps');
   }
 
   /* ---------------------------------------------------------------- update */
 
   /** Crowd bounce + LED flash decay. `time` is Director.t (seconds). */
-  update(time: number, dt = 0.016): void {
+  update(time: number, dt = 0.016, camera?: THREE.Camera): void {
+    if (camera) this.sky.follow(camera);
     if (this.adMode !== 'NORMAL') {
       this.adHold -= dt;
       if (this.adHold <= 0) this.flashAdBoard('NORMAL');
@@ -673,9 +726,14 @@ export class ThreeEnvironment {
   dispose(): void {
     this.pitchTexture?.dispose();
     this.adTexture?.dispose();
-    this.gradient.dispose();
+    this.sky?.dispose();
+    this.sun?.removeFromParent();
+    this.sun?.target?.removeFromParent();
+    this.sun?.dispose();
+    this.hemi?.removeFromParent();
+    this.ambient?.removeFromParent();
+    this.bounce?.removeFromParent();
     for (const l of this.floodLights) {
-      l.target.removeFromParent();
       l.removeFromParent();
       l.dispose();
     }

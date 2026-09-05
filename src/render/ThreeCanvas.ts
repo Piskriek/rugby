@@ -19,6 +19,7 @@
 import * as THREE from 'three';
 import { Camera, View, RENDER_SCALE } from './retro';
 import { ThreeEnvironment } from './ThreeEnvironment';
+import { ThreePost, QualityLevel } from './ThreePost';
 
 /** Feature flag: 3D dual-plane pitch, fog and uprights. */
 export const ENV_3D: boolean = true;
@@ -31,13 +32,29 @@ export class ThreeCanvas {
   readonly scene: THREE.Scene;
   readonly dom: HTMLCanvasElement;
   environment: ThreeEnvironment | null = null;
+  post: ThreePost | null = null;
+  /** Current graphics level; read by callers deciding what else to enable. */
+  quality: QualityLevel = 2;
 
   private view: View = { w: 1, h: 1 };
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
     this.renderer.setClearColor(ENV_3D ? FOG_COLOR : 0x000000, ENV_3D ? 1 : 0);
-    this.renderer.shadowMap.enabled = false;
+
+    // Real-time shadows. PCFSoft is the right trade here: the key light is a
+    // single directional source and its penumbra is the main cue for how high
+    // the sun is, which is most of what sells the time of day.
+    this.renderer.shadowMap.enabled = ENV_3D;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = true;
+
+    // ACES filmic: the lighting rig is authored in physical-ish units with a
+    // 3.0-intensity key, which would clip badly under linear/no tone mapping.
+    // Exposure is trimmed slightly below 1 to keep the sky out of pure white.
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 0.95;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const el = this.renderer.domElement;
     el.style.position = 'absolute';
@@ -62,6 +79,35 @@ export class ThreeCanvas {
     if (ENV_3D) {
       this.environment = new ThreeEnvironment(this.scene, this.renderer);
     }
+  }
+
+  /**
+   * Graphics quality. 0 disables post entirely (and hands tone mapping back
+   * to the renderer); 1 is bloom + FXAA; 2 adds SSAO.
+   *
+   * When the composer is active it owns tone mapping via its OutputPass, so
+   * the renderer's own tone mapping MUST be switched to None or the image is
+   * mapped twice and goes grey and flat.
+   */
+  setQuality(level: QualityLevel) {
+    this.quality = level;
+    if (level === 0) {
+      this.post?.dispose();
+      this.post = null;
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+      this.renderer.shadowMap.enabled = ENV_3D;
+      return;
+    }
+    if (!this.post) {
+      const w = this.dom.clientWidth || 1;
+      const h = this.dom.clientHeight || 1;
+      this.post = new ThreePost(this.renderer, this.scene, this.camera, w, h);
+    }
+    this.post.setQuality(level);
+    this.renderer.toneMapping = THREE.NoToneMapping;
+    this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    this.renderer.shadowMap.enabled = ENV_3D;
   }
 
   /**
@@ -127,14 +173,18 @@ export class ThreeCanvas {
     const pr = Math.min(2, window.devicePixelRatio || 1);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
+    this.post?.setSize(w, h);
     return { w, h };
   }
 
-  render() {
-    this.renderer.render(this.scene, this.camera);
+  render(dt = 0.016) {
+    if (this.post) this.post.render(dt);
+    else this.renderer.render(this.scene, this.camera);
   }
 
   dispose() {
+    this.post?.dispose();
+    this.post = null;
     this.environment?.dispose();
     this.environment = null;
     this.renderer.dispose();

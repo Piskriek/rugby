@@ -432,6 +432,8 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'showControls', label: 'CONTROLS PANEL', values: ['OFF', 'TOP LEFT', 'TOP LEFT + ALL'], def: 1, note: 'The live control list at the top left, with the most logical action highlighted.', cat: 'DISPLAY' },
   { id: 'radar', label: 'RADAR', values: ['OFF', 'ON'], def: 1, note: 'The transparent pitch map, top right.', cat: 'DISPLAY' },
   { id: 'autoReplay', label: 'AUTO REPLAY', values: ['OFF', 'SCORES', 'EVERYTHING'], def: 1, note: 'Five replay variants shipped with the original, varying in speed and dimension.', cat: 'DISPLAY' },
+  { id: 'graphics', label: 'GRAPHICS', values: ['PERFORMANCE', 'BALANCED', 'ULTRA'], def: 2, note: 'Bloom, ambient occlusion and anti-aliasing.', cat: 'DISPLAY' },
+  { id: 'timeOfDay', label: 'TIME OF DAY', values: ['AFTERNOON', 'GOLDEN HOUR', 'FLOODLIT', 'OVERCAST'], def: 0, note: 'Sky, sun angle and floodlights.', cat: 'DISPLAY' },
   { id: 'crt', label: 'CRT FILTER', values: ['OFF', 'SUBTLE', 'FULL'], def: 1, note: 'Scanline and phosphor overlay.', cat: 'DISPLAY' },
   { id: 'commentary', label: 'COMMENTARY', values: ['OFF', 'TICKER', 'FULL'], def: 2, note: 'Caption feed under the HUD.', cat: 'DISPLAY' },
   { id: 'crowd', label: 'CROWD NOISE', values: ['OFF', 'LOW', 'FULL'], def: 2, note: 'Mixed by travelling support ratio.', cat: 'DISPLAY' },
