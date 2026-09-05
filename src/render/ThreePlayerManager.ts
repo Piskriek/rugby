@@ -176,6 +176,17 @@ const TILT_RATE = 9;
 
 /** How far the arm bones may be pulled from their animated pose, 0..1. */
 const REACH_WEIGHT = 0.78;
+/** the non-leading arm reaches at this fraction of the lead arm's weight */
+const REACH_TRAIL = 0.55;
+/** the waist is this far below the pelvis bone — a tackle goes in low */
+const LATCH_WAIST_DROP = 0.15;
+/** reach weight ramp: full commitment at this range, REACH_MIN at NO_RANGE */
+const REACH_FULL_RANGE = 0.8;
+const REACH_NO_RANGE = 3.0;
+const REACH_MIN = 0.2;
+/** forward pitch of the torso when fully committed to a reach, radians */
+const DIP_MAX = 0.52;          // ~30 deg, spread over spine_01/02 + neck
+const DIP_RATE = 9;
 const REACH_RATE = 12;
 
 /** Peak spine thrash, radians, at full sprint. */
@@ -223,6 +234,8 @@ interface PlayerInstance {
     reach: number;
     /** 0..1 weight of the spine thrash */
     thrash: number;
+    /** 0..1 weight of the forward torso dip as he closes on the waist */
+    dip: number;
     /** free-running phase for the wobble, so two men never wobble in sync */
     phase: number;
     /** the FSM state resolved this frame, for the post-mixer pass */
@@ -721,7 +734,7 @@ export class ThreePlayerManager {
       actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
       proc: {
-        tilt: 0, reach: 0, thrash: 0,
+        tilt: 0, reach: 0, thrash: 0, dip: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -1115,9 +1128,26 @@ export class ThreePlayerManager {
      * at a patch of grass while the carrier ran away from it. */
     if (!target || p.reach < 0.01) return;
     const rig = this.resolveRig(inst);
+    /* LEAD ARM. Both arms reach, but the one already nearer the target commits
+     * harder — a tackler leads with a shoulder and a hand, he does not present
+     * two symmetrical arms like a zombie. The far arm still follows at
+     * REACH_TRAIL of the weight so the wrap closes from both sides. */
+    let leadIsRight = true;
+    {
+      const r = rig.upperArms[0], l = rig.upperArms[1];
+      if (r && l) {
+        r.updateWorldMatrix(true, false); l.updateWorldMatrix(true, false);
+        const dr = _v1.setFromMatrixPosition(r.matrixWorld).distanceToSquared(target);
+        const dl = _v1.setFromMatrixPosition(l.matrixWorld).distanceToSquared(target);
+        leadIsRight = dr <= dl;
+      }
+    }
     const bones = [...rig.upperArms, ...rig.foreArms];
     for (const bone of bones) {
       if (!bone || !bone.parent) continue;
+      /* rig.upperArms and rig.foreArms are both ordered [right, left] */
+      const isRight = bone === rig.upperArms[0] || bone === rig.foreArms[0];
+      const armScale = isRight === leadIsRight ? 1 : REACH_TRAIL;
       bone.updateWorldMatrix(true, false);
       /* direction from this bone to the carrier's spine, in world space */
       _v1.setFromMatrixPosition(bone.matrixWorld);
@@ -1139,8 +1169,40 @@ export class ThreePlayerManager {
       );
       const wanted = parentWorld.multiply(_q).multiply(boneWorld);
       /* blend, so the animation still reads through the reach */
-      bone.quaternion.slerp(wanted, p.reach * REACH_WEIGHT);
+      bone.quaternion.slerp(wanted, p.reach * REACH_WEIGHT * armScale);
     }
+  }
+
+  /**
+   * 2b — TORSO DIP (the "magnetic lead").
+   *
+   * A forward pitch spread down the spine so the tackler drops his chest and
+   * his eyes onto the waist he is aiming at, instead of reaching with his arms
+   * alone off an upright trunk.
+   *
+   * Distributed across the spine chain the same way the thrash is, and for the
+   * same reason: applying the whole angle to each of three PARENTED bones
+   * compounds into a body folded in half. The neck takes a counter-rotation so
+   * the head stays level and he keeps his eyes on the target rather than
+   * ducking his face into his own chest.
+   *
+   * Runs after mixer.update() like every other override here, and decays to
+   * exactly zero when the weight goes away so no dip is left baked into a man
+   * who has let go.
+   */
+  private applyTorsoDip(inst: PlayerInstance, weight: number, step: number) {
+    const p = inst.proc;
+    p.dip += (weight - p.dip) * (1 - Math.exp(-DIP_RATE * step));
+    if (p.dip < 1e-3) { p.dip = 0; return; }
+    const rig = this.resolveRig(inst);
+    const angle = DIP_MAX * p.dip;
+    const share = [0.45, 0.35];        // spine_01, spine_02 — spine_03 left free
+    for (let i = 0; i < share.length; i++) {
+      const bone = rig.spine[i];
+      if (bone) bone.rotation.x += angle * share[i];
+    }
+    /* head stays up: undo most of what the spine just added */
+    if (rig.neck) rig.neck.rotation.x -= angle * 0.62;
   }
 
   /**
@@ -1213,17 +1275,34 @@ export class ThreePlayerManager {
     /* no procedural lift once the clip itself is putting him on the ground */
     this.applyBodyTilt(inst, wantTilt, step, !grounding);
 
-    /* --- 2. the magnetic latch (tackler's arms onto the carrier) --- */
+    /* --- 2. the magnetic latch (tackler's arms onto the carrier) ---
+     *
+     * The anchor is the carrier's PELVIS dropped 0.15 m, not his chest: a legal
+     * tackle goes in at the waist, and aiming at spine_01 had the arms closing
+     * around the ribs. Falling back to the spine only if the rig has no pelvis.
+     *
+     * The weight RAMPS with distance rather than snapping to 1 — a man still a
+     * couple of metions out is beginning to reach, not already wrapped. */
     if (latching && partner) {
       const prig = this.resolveRig(partner);
-      const anchor = prig.spine[0] ?? prig.pelvis;
+      const anchor = prig.pelvis ?? prig.spine[0];
       if (anchor) {
         anchor.updateWorldMatrix(true, false);
         _target.setFromMatrixPosition(anchor.matrixWorld);
-        this.applyArmReach(inst, _target, 1, step);
+        _target.y -= LATCH_WAIST_DROP * RENDER_SCALE;
+        const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
+        const ramp = 1 - (dist - REACH_FULL_RANGE) / (REACH_NO_RANGE - REACH_FULL_RANGE);
+        const w = REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
+        this.applyArmReach(inst, _target, w, step);
+        /* TORSO DIP. He gets his eyes and his chest down to the height he is
+         * aiming at. This is a small forward pitch spread over the spine, on
+         * top of the whole-body tilt in step 1, and it is what stops the reach
+         * looking like a man bending only at the shoulders. */
+        this.applyTorsoDip(inst, w, step);
       }
     } else {
       this.applyArmReach(inst, null, 0, step);   // no target: decay only
+      this.applyTorsoDip(inst, 0, step);
     }
 
     /* --- 3. the struggle (carrier's spine) --- */
