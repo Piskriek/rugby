@@ -4,6 +4,8 @@ import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
+import { ThreeCanvas } from '../render/ThreeCanvas';
+import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
@@ -39,6 +41,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dirRef = useRef<Director | null>(null);
+  /** The transparent WebGL overlay (GLB squad) and its asset manager. */
+  const threeRef = useRef<ThreeCanvas | null>(null);
+  const playersRef = useRef<ThreePlayerManager | null>(null);
+  const threeDivRef = useRef<HTMLDivElement | null>(null);
   const keys = useRef<Set<string>>(new Set());
   const prev = useRef<Set<string>>(new Set());
   const [, force] = useState(0);
@@ -75,6 +81,23 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     const c = canvasRef.current;
     c?.addEventListener('wheel', wheel, { passive: false });
     return () => c?.removeEventListener('wheel', wheel);
+  }, []);
+
+  /* The 3D layer: one transparent WebGL canvas composited directly over the
+   * 2D pitch canvas, plus the pooled GLB player manager. Created once. */
+  useEffect(() => {
+    const host = threeDivRef.current;
+    if (!host) return;
+    const three = new ThreeCanvas(host);
+    const players = new ThreePlayerManager(three);
+    threeRef.current = three;
+    playersRef.current = players;
+    players.load().catch((e) => console.error('player GLB load failed', e));
+    return () => {
+      three.dispose();
+      threeRef.current = null;
+      playersRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -148,7 +171,18 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         }
         ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
         const view = { w, h };
-        drawMatch(ctx, d, view);
+        drawMatch(ctx, d, view, playersRef.current ?? undefined);
+
+        /* ---- 3D GLB squad overlay (transparent WebGL canvas above) ---- */
+        const three = threeRef.current;
+        if (three) {
+          three.resize();
+          const jx = d.cam.shake ? (Math.random() - 0.5) * d.cam.shake * 14 : 0;
+          const jy = d.cam.shake ? (Math.random() - 0.5) * d.cam.shake * 11 : 0;
+          three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
+          playersRef.current?.update(d, view, d.cam, dt);
+          three.render();
+        }
         drawIndicators(ctx, d, view);
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
@@ -213,6 +247,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   return (
     <div className="relative h-full w-full select-none overflow-hidden bg-black">
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+      {/* Transparent 3D layer — the GLB squad renders here, over the pitch. */}
+      <div ref={threeDivRef} className="pointer-events-none absolute inset-0" style={{ zIndex: 1 }} />
 
       {/* LIVE CONTROL PANEL — top left, most logical action highlighted */}
       {(d.options.showControls ?? 1) > 0 && (

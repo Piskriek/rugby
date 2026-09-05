@@ -1,39 +1,24 @@
 /**
- * SPEC_06 / T-64 follow-on — FACING/STRAFE DEBUG OVERLAY.
+ * SPEC_06 / T-64 follow-on — FACING/GAIT DEBUG OVERLAY (3D era).
  *
- * Phase 1 of SPEC_06: a real-time, per-actor readout of the three data streams
- * that drive the facing/strafe visual:
- *
- *   view  — the paper cut-out side that faces the camera
- *           ('front' | 'back' | 'leftEdge' | 'rightEdge'), from paper.ts.
- *   gait  — the resolved locomotion clip actually being played
- *           (jog / run / sprint / walk / shuffle / strafe / strafeL / idle).
- *   lat   — the lateral velocity component relative to the actor's own facing
- *           (m/s). This is the stream that pushes an actor into the shuffle /
- *           strafe route when `|lat| > 0.9` at sub-sprint speed.
- *
- * The whole point is to SEE the math at the moment a jarring pop happens, so we
- * can design hysteresis from evidence rather than guesswork.
- *
- * IMPORTANT: this module ONLY reads and displays. It does not touch any of the
- * facing / strafe / animation threshold values (END_ON, EDGE_IN, the 0.9 lat
- * gate, the 3.6 m/s speed band), so it can never change the behaviour it is
- * supposed to measure.
+ * Originally a readout of the 2D paper-cut-out view side; with the puppets
+ * replaced by the GLB squad (see ThreePlayerManager) the per-actor streams are
+ * now the 3D heading and the resolved locomotion/one-shot state. This module
+ * stays read-only: it only displays the values the 3D manager reports.
  */
-
-import { PaperView, isEdge, isLying } from './paper';
 
 export interface FacingDebugEntry {
   /** team + shirt, e.g. 'A1' */
   key: string;
   team: string;
   num: number;
-  view: PaperView;
-  /** resolved locomotion clip name (gait) */
+  /** 3D state-machine gait / one-shot actually playing */
   gait: string;
   /** ground speed m/s */
   spd: number;
-  /** lateral velocity relative to facing, m/s */
+  /** true heading, radians */
+  face: number;
+  /** lateral velocity relative to heading, m/s */
   lat: number;
 }
 
@@ -49,34 +34,21 @@ export function recordFacingDebug(entry: FacingDebugEntry): void {
   frame.set(entry.key, entry);
 }
 
-/** The snapshot captured during the last drawMatch() frame, in stable order. */
+/** The snapshot captured during the last frame, in stable order. */
 export function getFacingDebug(): FacingDebugEntry[] {
   return Array.from(frame.values()).sort((a, b) => (a.team === b.team ? a.num - b.num : a.team < b.team ? -1 : 1));
 }
 
-/** The thresholds live in scene.ts/paper.ts. Read-only copies for the HUD. */
 export const FACING_DEBUG_METRICS = {
-  /** |lat| above this (at sub-sprint speed) routes to shuffle/strafe */
   latGate: 0.9,
-  /** below this speed a running gait becomes the shuffle route */
   shuffleSpeedBand: 3.6,
-  /** paper-view facing dead-zone boundaries (degrees) */
-  endOn: 35,
-  edgeIn: 55,
-  edgeOut: 125,
-  backIn: 145,
 } as const;
 
 function pad(s: string, n: number): string {
   return s.length >= n ? s : s + ' '.repeat(n - s.length);
 }
 
-/**
- * Draw the facing/strafe debug HUD on the match canvas.
- * A semi-transparent right-hand panel listing every actor. Marked actors are
- * the ones sitting in a transition-sensitive state (edge view, or a shuffle /
- * strafe gait), which is where the jarring flips occur.
- */
+/** Draw the facing/gait debug HUD on the match canvas. */
 export function drawFacingStrafeOverlay(
   ctx: CanvasRenderingContext2D,
   phase: string,
@@ -85,10 +57,10 @@ export function drawFacingStrafeOverlay(
   const rows = getFacingDebug();
   if (!rows.length) return;
 
-  const panelW = 246;
+  const panelW = 232;
   const padPx = 8;
   const rowH = 15;
-  const headH = 56;
+  const headH = 44;
   const paneX = v.w - panelW - 8;
   const top = 8;
   const paneH = headH + rows.length * rowH + padPx;
@@ -96,80 +68,57 @@ export function drawFacingStrafeOverlay(
   ctx.save();
   ctx.globalAlpha = 0.92;
 
-  /* panel backdrop */
   ctx.fillStyle = 'rgba(10,14,22,0.88)';
   ctx.strokeStyle = 'rgba(127,142,166,0.6)';
   ctx.lineWidth = 1.5;
   ctx.fillRect(paneX, top, panelW, paneH);
   ctx.strokeRect(paneX, top, panelW, paneH);
 
-  /* header */
   ctx.fillStyle = '#e8cf46';
   ctx.font = '900 11px ui-monospace, monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText('FACING / STRAFE — LIVE', paneX + padPx, top + 14);
+  ctx.fillText('FACING / GAIT — LIVE 3D', paneX + padPx, top + 14);
   ctx.fillStyle = '#7f8ea6';
   ctx.font = '700 8px ui-monospace, monospace';
-  ctx.fillText(`${phase.toUpperCase()}  ·  ΓVIEW=paper side  ΓGAIT=clip  ΓLAT=lateral m/s`, paneX + padPx, top + 27);
+  ctx.fillText(`${phase.toUpperCase()}  ·  GAIT=clip state  ·  FACE=heading deg`, paneX + padPx, top + 27);
 
-  /* threshold readout (read-only — the live values we must not change) */
-  const M = FACING_DEBUG_METRICS;
-  ctx.fillStyle = '#8fa0b8';
-  ctx.font = '700 8px ui-monospace, monospace';
-  ctx.fillText(
-    `LAT GATE ${M.latGate.toFixed(1)}  ·  SHUFFLE <${M.shuffleSpeedBand.toFixed(1)} m/s  ·  VIEW dead band ${M.endOn}-${M.edgeIn} / ${M.edgeOut}-${M.backIn}°`,
-    paneX + padPx, top + 40,
-  );
-  /* colon headers */
+  const cx0 = paneX + padPx;
+  const cGait = cx0 + 46;
+  const cSpd = cGait + 96;
+  const cFace = cSpd + 36;
   ctx.fillStyle = '#5f6f86';
   ctx.font = '700 8px ui-monospace, monospace';
-  const cx0 = paneX + padPx;
-  const cView = cx0 + 34;
-  const cGait = cView + 58;
-  const cSpd = cGait + 52;
-  const cLat = cSpd + 42;
-  ctx.fillText('ACTOR', cx0, top + 52);
-  ctx.fillText('VIEW', cView, top + 52);
-  ctx.fillText('GAIT', cGait, top + 52);
-  ctx.fillText('SPD', cSpd, top + 52);
-  ctx.fillText('LAT', cLat, top + 52);
+  ctx.fillText('ACTOR', cx0, top + 40);
+  ctx.fillText('GAIT', cGait, top + 40);
+  ctx.fillText('SPD', cSpd, top + 40);
+  ctx.fillText('FACE', cFace, top + 40);
   ctx.strokeStyle = 'rgba(38,49,74,0.8)';
   ctx.beginPath();
-  ctx.moveTo(paneX + padPx, top + 55.5);
-  ctx.lineTo(paneX + panelW - padPx, top + 55.5);
+  ctx.moveTo(paneX + padPx, top + headH - 3.5);
+  ctx.lineTo(paneX + panelW - padPx, top + headH - 3.5);
   ctx.stroke();
 
   rows.forEach((r, i) => {
     const y = top + headH + i * rowH;
     const rowCenter = y + rowH - 4;
-    /* band the flip-prone keepers: edge view, or a shuffle/strafe gait */
-    const sensitive = isEdge(r.view) || isLying(r.view)
-      || r.gait === 'shuffle' || r.gait === 'strafe' || r.gait === 'strafeL';
-    if (sensitive) {
+    const oneshot = !['idle', 'walk', 'run', 'sprint', 'crouch', 'bind', 'ruck', 'jump'].includes(r.gait);
+    if (oneshot) {
       ctx.fillStyle = 'rgba(232,207,70,0.10)';
       ctx.fillRect(paneX + padPx, y, panelW - padPx * 2, rowH - 1);
     }
-    const gaitCol = r.gait === 'shuffle' || r.gait === 'strafe' || r.gait === 'strafeL' ? '#ffd76a'
-      : r.gait === 'sprint' ? '#6ee7a0' : '#a9b6c8';
-    const viewCol = isEdge(r.view) ? '#ffd76a' : isLying(r.view) ? '#ff6a5a' : '#8fa0b8';
+    const gaitCol = r.gait === 'sprint' ? '#6ee7a0' : oneshot ? '#ffd76a' : '#a9b6c8';
+    const deg = ((r.face * 180) / Math.PI) % 360;
 
     ctx.font = '700 9px ui-monospace, monospace';
-    ctx.fillStyle = r.team === 'A' ? '#e2664f' : '#7fa3e6';
+    ctx.fillStyle = r.team === 'A' ? '#e2664f' : r.team === 'REF' ? '#e8cf46' : '#7fa3e6';
     ctx.fillText(pad(r.key, 5), cx0, rowCenter);
-
-    ctx.fillStyle = viewCol;
-    ctx.fillText(pad(r.view === 'leftEdge' ? 'L-EDGE' : r.view === 'rightEdge' ? 'R-EDGE' : r.view.toUpperCase(), 7), cView, rowCenter);
-
     ctx.fillStyle = gaitCol;
-    ctx.fillText(pad(r.gait === 'strafeL' ? 'strafe-L' : r.gait, 9), cGait, rowCenter);
-
+    ctx.fillText(pad(r.gait, 10), cGait, rowCenter);
     ctx.fillStyle = '#cfd8e6';
     ctx.fillText(r.spd.toFixed(1), cSpd, rowCenter);
-
-    /* lat with a threshold marker above |0.9| (the gate that routes to strafe) */
-    ctx.fillStyle = Math.abs(r.lat) > M.latGate ? '#ff6a5a' : '#a9b6c8';
-    ctx.fillText(r.lat.toFixed(1), cLat, rowCenter);
+    ctx.fillStyle = Math.abs(r.lat) > FACING_DEBUG_METRICS.latGate ? '#ff6a5a' : '#a9b6c8';
+    ctx.fillText(deg.toFixed(0).padStart(3, '0'), cFace, rowCenter);
   });
 
   ctx.restore();

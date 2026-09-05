@@ -1,472 +1,53 @@
 /**
- * SCENE RENDERER — draws the whole match: stadium, the persistent cast of stocky
- * retro actors (depth-sorted, rig-animated), the ball, and in-world mini-game overlays.
+ * SCENE RENDERER — the 2D layer of the match view.
+ *
+ * The 2D canvas paints the stadium, pitch markings, goal posts, in-world
+ * telemetry overlays and the referee speech bubbles. The actors themselves —
+ * the 30 players plus the referee — are GLB humanoids rendered by the
+ * transparent Three.js overlay (see ThreePlayerManager / ThreeCanvas), which
+ * is composited directly above this canvas. This module no longer draws any
+ * character, limb or ball ink; the old vector puppet pipeline
+ * (coronal.ts / paper.ts / rig.ts / clips.ts) is removed.
  */
-import { Director, Actor } from '../game/director';
+import { Director } from '../game/director';
 import {
   drawStadium, project,
-  drawGoalPosts, HOME_POST_Z, Camera, View,
+  drawGoalPosts, Camera, View,
 } from './retro';
-/* THE PAPERCRAFT ANIMATION SYSTEM (animationBuild handoff, verbatim files).
- * Poses/clips: clips.ts. Puppets: coronal.ts. Material/views/characters:
- * paper.ts. The engine keeps its own clip vocabulary; mapAction() below is
- * the single translation point. */
-import { Pose, STAND, sampleC, lerpPose, smooth, actionClip, CLIPS } from './clips';
-/* SPEC_15 — the referee's one-shots. clips.ts is a verbatim handoff file, so
- * his signals are authored alongside it and merged in at load. */
-import { REF_SIGNALS, registerRefClips, refActionClip } from './refClips';
-registerRefClips();
 import { maulUseItClock, maulUseItCall } from '../game/engine/setpieces';
-import { drawPaperActor, drawPaperShadow, PaperDrawArgs } from './coronal';
-import {
-  PALETTES, PaperView, Character, makeCharacter, makeRef,
-  paperViewKey, updatePaperView, resetPaperViews, ballPaper, shadowBlob,
-  upperLowerRun, squashForClip, edgeLegForeshorten,
-  newLeanState, updateLean, updateTurnBias, threeQuarter, facingAngle, updateFootSquash, combineSquash, groundedClearance, type LeanState,
-  BUILDS, paperCard, type Pt,
-} from './paper';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
+import type { ThreePlayerManager } from './ThreePlayerManager';
 
-/** Screen-right vector of the camera in world terms (handoff section 5). */
-function camRightOf(cam: Camera): [number, number] {
-  return [Math.cos(cam.yaw), -Math.sin(cam.yaw)];
-}
-
-/* ============================ THE PUPPET PIPELINE ============================
- * Per-actor, per-frame: engine clip vocabulary -> action -> clip -> pose, with
- * seamless blends (animationBuild handoff section 4.1). State lives here, keyed
- * by team+num; the engine stays untouched. */
-interface Puppet {
-  clipName: string; u: number;
-  pose: Pose; blendFrom: Pose | null; blendT: number; blendDur: number;
-  face: number;                 // true heading, radians (derived from velocity)
-  lx: number; lz: number;       // last position — velocity is derived per frame
-  spd: number;
-  runU: number;                 // SPEC_01 — separate cadence-locked gait phase for the running pass
-  hold: string | null;          // forced action (get-up) with a cycle countdown
-  holdT: number;
-  lie: boolean;                 // sequenced into the lying hold
-  ch: Character; seed: number;
-  /* SPEC_06 — facing/strafe debug readouts (read-only, for the overlay). */
-  lat: number;                  // lateral velocity relative to facing (m/s)
-  view: PaperView;              // paper side currently shown this frame
-  /* SPEC_06 — gait hysteresis state (which locomotion state is being held). */
-  gait: string;
-  /* SPEC_18.3a — kinetic lean/squash filter state. */
-  lean: LeanState;
-  leanAngle: number;
-  turnBias: number;
-  footSquash: number;
-  clock: number;
-}
-const puppets = new Map<string, Puppet>();
-let lastDirector: Director | null = null;
-
-const clamp01p = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
-
-/* ---- SPEC_06 — GAIT HYSTERESIS (Machine 1) ----
- * The reviewed dead bands from SPEC_06_HYSTERESIS_TABLE.md. Entry is the outer
- * bound (a state only leaves when the signal crosses OUT); leave is the inner
- * bound (a signal on the line does not re-enter). Applied to the two gate
- * families that triggered the jarring: the forward speed ladder (idle/walk/jog/
- * run/sprint) and the lateral shuffle/strafe split. */
-const GAIT_DEAD = {
-  walkEnter: 0.7, walkLeave: 0.45,
-  jogEnter: 1.6, jogLeave: 1.25,
-  runEnter: 3.6, runLeave: 3.25,
-  sprintEnter: 6.2, sprintLeave: 5.85,
-  /* lateral: shuffle occupies the band 0.75-1.05; strafe 0.85-1.15 inside it */
-  shuffleEnter: 1.05, shuffleLeave: 0.75,
-  strafeEnter: 1.15, strafeLeave: 0.85,
-  /* shuffle/strafe only while sub-sprint; above this a lateral read is just a run */
-  shuffleSpeedMax: 3.3,
-} as const;
-
-/** One-rung forward speed ladder with entry/hold/leave dead bands. */
-function ladderStep(prev: string, spd: number): string {
-  const D = GAIT_DEAD;
-  switch (prev) {
-    case 'idle':   return spd >= D.walkEnter ? 'walk' : 'idle';
-    case 'walk':   return spd < D.walkLeave ? 'idle' : spd >= D.jogEnter ? 'jog' : 'walk';
-    case 'jog':    return spd < D.jogLeave ? 'walk' : spd >= D.runEnter ? 'run' : 'jog';
-    case 'run':    return spd < D.runLeave ? 'jog' : spd >= D.sprintEnter ? 'sprint' : 'run';
-    case 'sprint': return spd < D.sprintLeave ? 'run' : 'sprint';
-    default:       return spd < D.walkEnter ? 'idle' : spd < D.jogEnter ? 'walk' : spd < D.runEnter ? 'jog' : spd < D.sprintEnter ? 'run' : 'sprint';
-  }
-}
-
-/** Fresh (no prior state) speed mapping — used on the one-shot exit from shuffle. */
-function freshLadder(spd: number): string {
-  const D = GAIT_DEAD;
-  return spd < D.walkEnter ? 'idle' : spd < D.jogEnter ? 'walk' : spd < D.runEnter ? 'jog' : spd < D.sprintEnter ? 'run' : 'sprint';
-}
-
-/** Resolve the locomotion action with SPEC_06 hysteresis. (Exported for the
- * SPEC_06 unit check; a pure function, no side effects.) */
-export function resolveGait(prev: string, spd: number, latRaw: number): { action: string; lat: number | undefined } {
-  const D = GAIT_DEAD;
-  const latMag = Math.abs(latRaw);
-  const prevLateral = prev === 'shuffle' || prev === 'strafe' || prev === 'strafeL';
-
-  if (prevLateral) {
-    /* Hold the lateral state until |lat| collapses below the leave band. The
-     * 0.75-1.05 band is shared by jog↔shuffle and strafe, so an actor does not
-     * hop jog → shuffle → jog around a single frame of |lat| ≈ 0.9. */
-    if (latMag < D.shuffleLeave) {
-      return { action: freshLadder(spd), lat: undefined };
-    }
-    /* Inside shuffle, pick strafe vs shuffle with its own 0.85-1.15 band. */
-    if (latMag >= D.strafeEnter) return { action: latRaw > 0 ? 'strafe' : 'strafeL', lat: latRaw };
-    if (latMag <= D.strafeLeave && (prev === 'strafe' || prev === 'strafeL')) return { action: 'shuffle', lat: latRaw };
-    /* dead band: keep the current side, do not drift the mirror */
-    return { action: prev === 'shuffle' ? 'shuffle' : (latRaw > 0 ? 'strafe' : 'strafeL'), lat: latRaw };
-  }
-
-  /* Not lateral: forward speed ladder (hysteretic), then the shuffle entry. */
-  const action = ladderStep(prev, spd);
-  if (spd < D.shuffleSpeedMax && latMag >= D.shuffleEnter && (action === 'walk' || action === 'jog')) {
-    return { action: latMag >= D.strafeEnter ? (latRaw > 0 ? 'strafe' : 'strafeL') : 'shuffle', lat: latRaw };
-  }
-  return { action, lat: undefined };
-}
-
-/** Engine clip vocabulary -> the system's action strings. */
-function mapAction(clip: string): string {
-  switch (clip) {
-    case 'ready': case 'nineSquat': return 'idle';
-    /* SPEC_15 — the referee's gaits are the existing ones; the two dead
-     * `refReady`/`refSignal` cases that both returned 'idle' are gone, which is
-     * what let him animate at all. */
-    case 'refIdle': return 'idle';
-    case 'refWalk': return 'walk';
-    case 'refJog': return 'jog';
-    case 'refRun': return 'run';
-    case 'jog': return 'jog';
-    case 'sprint': return 'sprint';
-    case 'carry': return 'run';
-    case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
-    case 'catchHigh': case 'lineoutCatch': return 'catch';
-    case 'kick': return 'kick';
-    case 'tackle': return 'tackle';
-    case 'grounded': return 'tackled';
-    case 'dive': return 'dive';
-    case 'jackal': return 'jackal';
-    case 'cleanout': return 'ruck';
-    case 'maulBind': case 'maulDrive': return 'maul';
-    case 'scrumCrouch': case 'scrumBind': return 'scrumBind';
-    case 'scrumDrive': return 'scrumShove';
-    case 'lineoutJump': return 'jump';
-    case 'lineoutLift': return 'lift';
-    default:
-      /* SPEC_15 — a referee one-shot names its own action; any other unknown
-       * clip still falls back to the idle stance. */
-      return REF_SIGNALS.has(clip) ? clip : 'idle';
-  }
-}
-
-function puppetFor(d: Director, a: Actor, dt: number, look: [number, number] | null): Puppet {
-  /* New match (or new Director) — reset every puppet and every paper view. */
-  if (lastDirector !== d) { lastDirector = d; puppets.clear(); resetPaperViews(); }
-  const key = paperViewKey(a.team, a.num);
-  let pg = puppets.get(key);
-  if (!pg) {
-    pg = {
-      clipName: '', u: 0, runU: 0, pose: { ...STAND }, blendFrom: null, blendT: 0, blendDur: 0.16,
-      face: a.rf > 0 ? 0 : Math.PI, lx: a.rx, lz: a.rz, spd: 0,
-      hold: null, holdT: 0, lie: false,
-      ch: a.team === 'REF' ? makeRef() : makeCharacter(a.team === 'B' ? 'B' : 'A', a.num),
-      seed: (a.num * 37 + (a.team === 'B' ? 11 : 3)) % 97,
-      lat: 0, view: 'front', gait: 'idle',   // SPEC_06 — facing/strafe debug + hysteresis
-      lean: newLeanState(), leanAngle: 0, turnBias: 0, footSquash: 0, clock: 0,  // SPEC_18.3a/18.5
-    };
-    puppets.set(key, pg);
-  }
-  /* velocity + true heading from the streamed positions */
-  const vx = (a.rx - pg.lx) / Math.max(dt, 1e-4);
-  const vz = (a.rz - pg.lz) / Math.max(dt, 1e-4);
-  const stepped = Math.hypot(a.rx - pg.lx, a.rz - pg.lz);
-  pg.lx = a.rx; pg.lz = a.rz;
-  pg.spd = Math.hypot(vx, vz);
-  /* SPEC_18.3a — filtered lean. Teleports are rejected inside updateLean. */
-  pg.leanAngle = updateLean(pg.lean, vx, vz, stepped, dt);
-  /* SPEC_18.5 — must run AFTER updateLean, which publishes the smoothed
-   * acceleration this reads. */
-  pg.turnBias = updateTurnBias(pg.lean, dt);
-  /* PLAYTEST 4 — FACING. A moving man walks where he is going; a slow or
-   * stationary man LOOKS AT THE BALL. The old velocity-only heading had
-   * support runners strolling back to marks staring straight at the camera
-   * ("my players are mostly facing me") and defenders square-on to their own
-   * jog instead of the play. */
-  if (a.team === 'REF') {
-    /* SPEC_15 — THE REFEREE WATCHES THE BALL, WHATEVER HIS LEGS ARE DOING.
-     * He is the one man on the pitch whose job is looking, so the
-     * speed-threshold rule that turns a moving player toward his travel does
-     * not apply to him. The engine already holds `ref.face` on the ball's
-     * bearing; this keeps the puppet's facing on it and lets the lateral read
-     * below turn a sideways-travelling official into a side-step on its own. */
-    if (look) {
-      let target = Math.atan2(look[0] - a.rx, look[1] - a.rz);
-      let dy = target - pg.face;
-      while (dy > Math.PI) dy -= Math.PI * 2;
-      while (dy < -Math.PI) dy += Math.PI * 2;
-      pg.face += dy * (1 - Math.exp(-dt * 7));
-    }
-  } else if (pg.spd > 2.2) {
-    let target = Math.atan2(vx, vz);
-    let dy = target - pg.face;
-    while (dy > Math.PI) dy -= Math.PI * 2;
-    while (dy < -Math.PI) dy += Math.PI * 2;
-    pg.face += dy * (1 - Math.exp(-dt * 10));
-  } else if (look) {
-    let target = Math.atan2(look[0] - a.rx, look[1] - a.rz);
-    let dy = target - pg.face;
-    while (dy > Math.PI) dy -= Math.PI * 2;
-    while (dy < -Math.PI) dy += Math.PI * 2;
-    pg.face += dy * (1 - Math.exp(-dt * 6));
-  }
-
-  /* action sequencing: tackles and dives play once, then hold the lying
-   * cycle; getting up plays the unwind once before the gait takes over. */
-  let action = mapAction(a.renderClip);
-  if ((action === 'tackled' || action === 'dive') && pg.u * CLIPS[action === 'dive' ? 'diveFront' : 'tackled'].dur >= 1) {
-    action = 'lieF'; pg.lie = true;
-  }
-  if (pg.lie && action !== 'lieF' && action !== 'tackled' && action !== 'dive') {
-    /* the engine stood him up — play the unwind, then the new action */
-    pg.hold = 'getupF'; pg.holdT = 1 / 0.95; pg.lie = false;
-  }
-  if (pg.hold) {
-    action = pg.hold;
-    pg.holdT -= dt;
-    if (pg.holdT <= 0) pg.hold = null;
-  }
-
-  /* Gait normalisation by REAL speed — and the STRAFE ROUTE: movement at an
-   * angle to the facing at low speed is a side-shuffle, NOT a walk. This is
-   * what kills the long-strides-at-crawling-pace read the user flagged.
-   * SPEC_06: the bare thresholds are replaced with the reviewed hysteresis dead
-   * bands so an actor holds its gait until the signal crosses the outer bound
-   * (no more jog ↔ shuffle ↔ strafe flapping on a hovering |lat|/spd). */
-  let lat: number | undefined;
-  if (action === 'jog' || action === 'sprint' || action === 'run') {
-    const cf = Math.cos(pg.face), sf = Math.sin(pg.face);
-    const latRaw = vx * cf - vz * sf;
-    const resolved = resolveGait(pg.gait, pg.spd, latRaw);
-    action = resolved.action;
-    lat = resolved.lat;
-    pg.gait = action;   // hold the resolved locomotion state across frames
-    pg.lat = latRaw;    // debug: the raw lateral stream, not the resolved one
-  } else {
-    pg.lat = 0;         // not a moving gait — no lateral carry
-  }
-  /* SPEC_15 — a referee signal runs at its authored duration, not at a
-   * speed-derived cadence, and is resolved before the handoff's actionClip(). */
-  const choice = refActionClip(action) ?? actionClip(action, pg.spd, lat);
-  if (choice.name !== pg.clipName) {
-    pg.blendFrom = { ...pg.pose };
-    pg.blendT = 0;
-    pg.blendDur = CLIPS[choice.name].loop ? 0.16 : 0.12;
-    pg.clipName = choice.name;
-    pg.u = 0;
-  }
-  pg.u += choice.rate * dt;
-  // SPEC_01 — keep a cadence-locked gait phase so a running carrier's legs keep
-  // tracking the turf while his upper body plays the pass clip.
-  const gaitAct = pg.spd < 0.7 ? 'idle' : pg.spd < 1.6 ? 'walk' : pg.spd < 3.6 ? 'jog' : pg.spd < 6.2 ? 'run' : 'sprint';
-  pg.runU += actionClip(gaitAct, pg.spd).rate * dt;
-  const sampled = sampleC(pg.clipName, pg.u);
-  if (pg.blendFrom && pg.blendT < pg.blendDur) {
-    pg.blendT += dt;
-    pg.pose = lerpPose(pg.blendFrom, sampled, smooth(clamp01p(pg.blendT / pg.blendDur)));
-  } else { pg.blendFrom = null; pg.pose = sampled; }
-
-  /* SPEC_18.3a footfall — placed AFTER the pose is sampled; reading pg.pose
-   * before this point would test last frame's legs against this frame's clock.
-   * Contact is read from the rig's own clearance helper rather than a
-   * hardcoded phase table, so it cannot drift out of sync with the clip. */
-  const [cl, cr] = groundedClearance(pg.pose.kL, pg.pose.kR);
-  pg.clock += dt;
-  pg.footSquash = updateFootSquash(pg.lean, Math.min(cl, cr) <= 0.005, pg.spd, pg.clock, dt);
-
-  return pg;
-}
-
-export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
-  const ddt = 1 / 60;   // the puppet pipeline only needs a stable beat for velocity
-  resetFacingDebug();   // SPEC_06 — fresh per-actor readout each frame
+export function drawMatch(
+  ctx: CanvasRenderingContext2D, d: Director, v: View,
+  three?: ThreePlayerManager,
+) {
+  resetFacingDebug();
   const cam = d.cam;
   const jx = cam.shake ? (Math.random() - 0.5) * cam.shake * 14 : 0;
   const jy = cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0;
   const cam2: Camera = { ...cam, shake: 0 };
 
+  /* Stadium + pitch markings first (they are the ground the GLB squad stands on). */
   drawStadium(ctx, cam2, v, d.t, d.pitch);
-  drawGoalPosts(ctx, cam2, v, -HOME_POST_Z, false);
+  drawGoalPosts(ctx, cam2, v, -50, false);
 
-  /* Facing-vs-camera is now the paper-view system's job (per-actor). */
-
-  /* --- ball --- */
-  let ballWorld: { x: number; y: number; z: number; spin: number; visible: boolean } = { x: 0, y: 0, z: 0, spin: 0, visible: false };
-  if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
-    const s = d.scrim!;
-    if (s.ball.state !== 'HELD') {
-      ballWorld = { x: d.scrumAnchor.x + s.ball.x, y: s.ball.y + 0.06, z: d.scrumAnchor.z + s.ball.z, spin: s.ball.z * 0.6, visible: true };
-    }
-  } else if ((d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') && d.lo && d.lo.ball.state !== 'HELD') {
-    ballWorld = { x: d.lo.ball.x, y: d.lo.ball.y + 0.05, z: d.lo.ball.z, spin: d.lo.ball.x * 0.35, visible: true };
-  } else if ((d.phase === 'KICK' || d.phase === 'KICK_REPLAY') && d.kk) {
-    const k = d.kk;
-    ballWorld = { x: k.bx, y: k.by + 0.12, z: k.bz, spin: k.t * 3.2, visible: k.stage !== 'SETUP' };
-  } else if (d.phase === 'OPEN_PLAY' && d.op) {
-    const o = d.op;
-    // T-35. While a pass is in flight the ball is live between passer and receiver.
-    if (o.ball.live) {
-      ballWorld = { x: o.ball.x, y: o.ball.y, z: o.ball.z, spin: o.t * 5, visible: true };
-    } else {
-      /* held ball rides at the chest of the carrier's true heading so the
-       * paper layers occlude it correctly (handoff 8.1) */
-      const ck = paperViewKey(o.attacking, o.carrierNum);
-      const cp = puppets.get(ck);
-      /* SPEC_14 — the ball rides the carrier's chest, so its height and its
-       * offset from the spine have to grow with the figure or it ends up at
-       * his waist. Only the CARRIED anchors scale; a ball in flight or on the
-       * turf is world geometry and is untouched. */
-      /* SPEC_16 — chest anchors are logical metres and now draw true through
-       * RENDER_SCALE; the SPEC_14 FIGURE_SCALE inflation would put the ball
-       * 1.65x out from the spine and above the carrier's head. */
-      const hx = cp ? Math.sin(cp.face) * 0.26 : 0.3;
-      const hz = cp ? Math.cos(cp.face) * 0.26 : 0;
-      ballWorld = { x: o.carrierX + hx, y: 1.14, z: o.carrierZ + hz, spin: o.t * 1.6, visible: true };
-    }
-  } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
-    const m = d.ml;
-    const yawRad = (m.yaw * Math.PI) / 180;
-    const lz = -m.dir * m.ballRank * 0.78;
-    ballWorld = {
-      x: m.x - lz * Math.sin(yawRad), y: 1.02,   // SPEC_16: logical metres
-      z: m.z + lz * Math.cos(yawRad), spin: m.t * 0.6, visible: true,
-    };
-  } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
-    const b = d.bd;
-    const carrier = b.players.find((p) => p.role === 'CARRIER');
-    if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
-      ballWorld = { x: b.ball.x, y: 0.16, z: b.ball.z, spin: b.t * 0.5, visible: true };
-    } else if (carrier) {
-      // SPEC_16: chest height in logical metres
-      ballWorld = { x: carrier.x + 0.28, y: carrier.down ? 0.3 : 1.05, z: carrier.z, spin: b.t * 2.2, visible: true };
-    }
-  }
-
-  /* --- collect drawables --- */
-  type Item = { f: number; draw: () => void };
-  const items: Item[] = [];
-
-  /* PLAYTEST 3 / ANIMATION HANDOFF — per-actor paper views, true profiles,
-   * fall rotation, stride-locked gaits. spinDir/gs/fore/headDir are the
-   * screen-direction helpers from the handoff (section 5). */
-  const gs = Math.min(0.95, Math.max(0.42, Math.sin(cam.tilt) * 1.15));
-  const cr = camRightOf(cam);
-  for (const a of d.actors) {
-    const pg = puppetFor(d, a, ddt, ballWorld.visible ? [ballWorld.x, ballWorld.z] : null);
-    const pr = project(cam2, v, a.rx, 0, a.rz, jx, jy);
-    if (!pr || pr.sc < 1.2) continue;
-    if (pr.sx < -260 || pr.sx > v.w + 260 || pr.sy < -320 || pr.sy > v.h + 320) continue;
-    const fx = Math.sin(pg.face), fz = Math.cos(pg.face);
-    let view: PaperView;
-    if (pg.lie) {
-      view = 'lieFaceDown';
-    } else {
-      view = updatePaperView(paperViewKey(a.team, a.num), fx, fz, a.rx, a.rz, cam.x, cam.z, ddt);
-    }
-    pg.view = view;   // SPEC_06 — the paper side shown this frame
-    const dot = fx * cr[0] + fz * cr[1];
-    const sdir = dot >= 0 ? 1 : -1;
-    const perp = Math.abs(dot);
-    const carried = !!d.op && !d.op.ball.live && a.team === d.op.attacking && a.num === d.op.carrierNum;
-
-    /* SPEC_06 — feed the facing/strafe debug HUD (view, gait, lat). */
-    recordFacingDebug({
-      key: paperViewKey(a.team, a.num),
-      team: a.team, num: a.num,
-      view, gait: pg.clipName || (pg.lie ? 'lieF' : mapAction(a.renderClip)),
-      spd: pg.spd, lat: pg.lat,
-    });
-
-    /* SPEC_01 — four dataset demands, layered onto the sampled puppet pose. */
-    let pose = pg.pose;
-    if (pg.clipName === 'passSpin' && pg.spd > 3.6) {
-      // Running pass (R-03 / SM-13 / PR-04): upper/lower separation — legs keep
-      // running while the arms throw the ball.
-      const gc = actionClip(pg.spd < 6.2 ? 'run' : 'sprint', pg.spd);
-      const gait = sampleC(gc.name, pg.runU);
-      pose = upperLowerRun(gait, pg.pose);
-    }
-    /* SPEC_17 — `pinPlantedFoot` deleted. It was dead code: its guard only
-     * corrected a foot that SANK, and measurement showed the foot never sank
-     * (lowest +0.003 m across every gait), so before/after poses were
-     * byte-identical in all five clips. Grounding is now structural — the
-     * coronal rig authors the foot on a clearance arc and pins the stance foot
-     * at y = 0 by construction, which is what that helper only pretended to
-     * do. See SEASON_3_QUEUE.md SPEC_17.1. */
-    /* SPEC_18.3b — 3/4 projection, from the same angle the view machine uses. */
-    const fa = facingAngle(fx, fz, a.rx, a.rz, cam.x, cam.z);
-    /* SPEC_21 Item 1 — `tqSign` is gone with the shear. A symmetric horizontal
-     * foreshortening has no side to pick: narrowing about the spine looks the
-     * same whichever way the actor turns away from camera. */
-    const tqProj = threeQuarter(fa.ang);
-    const squash = squashForClip(pg.clipName, pg.u);                 // Impact Squash (P-01/C-01/W-06)
-    /* SPEC_18.3a — footfall squash, combined MULTIPLICATIVELY with the SPEC_01
-     * impact squash (ruled), so a tackle landing on a footfall compresses once
-     * rather than twice. Contact is read from the rig's own clearance helper,
-     * not from a hardcoded phase table, so it cannot drift out of sync with the
-     * clip. The debounce inside updateFootSquash absorbs the u-loop seam. */
-    const sFoot = pg.footSquash;
-    const sImpact = 1 - (squash?.sy ?? 1);
-    const sTot = combineSquash(sFoot, Math.max(0, sImpact));
-    const squash2 = sTot > 0.0005 ? { sx: 1 + 0.6 * sTot, sy: 1 - sTot } : undefined;
-    const legScale = edgeLegForeshorten(perp, cam.tilt * 180 / Math.PI); // Edge Leg Foreshortening (B-14)
-
-    const args: PaperDrawArgs = {
-      ctx, sx: pr.sx, sy: pr.sy, sc: pr.sc, view, pose,
-      lean: pg.leanAngle, turn: pg.turnBias,
-      /* SPEC_22 — the gait flare's speed gate. Same `pg.spd` the gait chooser
-       * and footfall squash already read, so flare, clip and thud cannot
-       * disagree about how fast the man is moving. */
-      spd: pg.spd,
-      tq: tqProj,
-      /* SPEC_14 — the shadow is projected from world geometry now. */
-      cam: cam2, v, wx: a.rx, wz: a.rz, face: a.rf,
-      pal: PALETTES[a.team], build: pg.ch.build, skin: pg.ch.skin, hair: pg.ch.hair,
-      num: pg.ch.num, seed: pg.seed,
-      carry: carried ? 1 : 0,
-      carryStyle: Math.min(1, Math.max(0, (pg.spd - 3) / 4)),
-      ballSide: pg.pose.ballSide, ballSpin: ballWorld.spin,
-      cap: pg.ch.cap, tape: pg.ch.tape,
-      spinDir: sdir, gs, fore: 0.45 + 0.55 * perp, headDir: sdir || 1, depth: pr.f,
-      squash: squash2, legScale,
-    };
-    items.push({ f: pr.f, draw: () => { drawPaperShadow(args); drawPaperActor(args); } });
-  }
-
-  if (ballWorld.visible) {
-    const p = project(cam2, v, ballWorld.x, ballWorld.y, ballWorld.z, jx, jy);
-    if (p) {
-      const sh = project(cam2, v, ballWorld.x, 0, ballWorld.z, jx, jy);
-      items.push({
-        f: p.f - 0.01,
-        draw: () => {
-          if (sh) shadowBlob(ctx, sh.sx, sh.sy, p.sc * 0.16, p.sc * 0.06, 0.25);
-          ballPaper(ctx, p.sx, p.sy, Math.max(3, p.sc * 0.11), ballWorld.spin);
-        },
+  /* Feed the SPEC_06 debug HUD from the 3D animation state machine. */
+  if (three) {
+    for (const e of three.debugEntries()) {
+      recordFacingDebug({
+        key: e.key, team: e.team, num: e.num,
+        gait: e.gait, spd: e.spd, face: e.face, lat: 0,
       });
     }
   }
 
-  items.sort((a, b) => b.f - a.f);
-  for (const it of items) it.draw();
+  /* The 3D overlay (players + ball) renders on the transparent WebGL canvas
+   * composited above this one; nothing actor-related is painted in 2D now. */
 
-  drawGoalPosts(ctx, cam2, v, HOME_POST_Z, true);
+  drawGoalPosts(ctx, cam2, v, 50, true);
 
-  /* --- mini-game overlays --- */
+  /* --- mini-game overlays (world-space telemetry on the 2D layer) --- */
   if (d.phase === 'SCRUM' || d.phase === 'REPLAY') drawScrumOverlay(ctx, d, v, cam2, jx, jy);
   if (d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') drawLineoutOverlay(ctx, d, v, cam2, jx, jy);
   if (d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') drawBreakdownOverlay(ctx, d, v, cam2, jx, jy);
@@ -474,8 +55,7 @@ export function drawMatch(ctx: CanvasRenderingContext2D, d: Director, v: View) {
   if (d.phase === 'OPEN_PLAY') drawOpenPlayOverlay(ctx, d, v, cam2, jx, jy);
   if (d.phase === 'KICK' || d.phase === 'KICK_REPLAY') drawKickOverlay(ctx, d, v, cam2, jx, jy);
 
-  /* SPEC_15 — the referee speaks last, on top of everything, so a call is
-   * never buried under an overlay. */
+  /* The referee speaks last, on top of everything. */
   drawRefBubbles(ctx, d, v, cam2, jx, jy);
 }
 
@@ -489,8 +69,6 @@ function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View
     ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
     ctx.setLineDash([]);
   }
-  /* (The green carrier-direction stake is GONE — playtest 4: remove the
-   * open-play line with the dot at the end. The gain line stays.) */
   const cp = project(cam, v, s.carrierX, 0, s.carrierZ, jx, jy);
   if (cp) {
     const zone = zoneLabel(s.z, s.dir);
@@ -505,8 +83,6 @@ function drawOpenPlayOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View
       ctx.strokeStyle = 'rgba(244,239,226,0.5)'; ctx.lineWidth = 1;
       ctx.strokeRect(pc.sx - w / 2, pc.sy, w, hgt);
     }
-    /* T-37. The controls belong in the HUD (top-left), not floating above the
-     * carrier. Only live telemetry stays in-world. */
     worldLabel(ctx, cam, v, s.carrierX, 3.1, s.carrierZ,
       `PHASE ${s.phase} · +${s.gained.toFixed(1)} m · ${s.toLine.toFixed(0)} m TO GO · ZONE ${zone}`,
       s.lineBreak ? '#6ee7a0' : '#cfcabb', jx, jy);
@@ -561,12 +137,6 @@ function drawKickOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
         s.goalProb > 0.7 ? '#6ee7a0' : s.goalProb > 0.45 ? '#ffd76a' : '#ff6a5a', jx, jy);
     } else {
       worldLabel(ctx, cam, v, s.bx, s.by + 2.6, s.bz, s.profile.label.toUpperCase(), '#f4efe2', jx, jy);
-      /* SPEC_21 Item 4 — FLIGHT TELEMETRY REMOVED.
-       * `HANG 2.41s · APEX 18.3 m · 42 m` was analytical readout hanging in
-       * world space over the kicker. The kick-type label above is kept: it
-       * names the kick the player chose, which is gameplay, not telemetry.
-       * The interactive power readout and control prompt live in
-       * MatchView.tsx and are deliberately untouched (ruled). */
     }
   }
 }
@@ -589,7 +159,7 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     if (!a || !b) return;
     ctx.strokeStyle = col; ctx.lineWidth = 7; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
-    label(ctx, `${(f / 1000).toFixed(2)} kN`, (a.sx + b.sx) / 2, (a.sy + b.sy) / 2 - 10, col);
+    label(ctx, `${(f / 1000).toFixed(2)} kN`, (a.sx + b.sx) / 2, (a.sy + b.sy) / 2 - 12, col);
   };
   if (s.stage !== 'EXIT' && s.stage !== 'OVER') {
     bar('A', s.forceA, -2.4, '#ff6a5a');
@@ -618,18 +188,9 @@ function drawMaulOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, ca
     const exit = s.exit === 'NONE' ? '' : ` · ${s.exit.replace(/_/g, ' ')}`;
     worldLabel(ctx, cam, v, s.x, 3.5, s.z,
       `${contest}${exit} · ${stall} · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(0)}°`, s.useItCalled ? '#ff6a5a' : '#f4efe2', jx, jy);
-    /* SPEC_08 (T-65): the stall rides the RUCK-COUNTDOWN channel — the same
-     * big number, the same bands, the same stroke, drawn at the maul instead
-     * of the breakdown. Playtest 2: the number is the TIME TO ACT — the time
-     * to the real consequence for this state (the law whistle under defence
-     * control, the 6 s auto-exit under attack control), never ambient
-     * information. The old status line's "/ 5.0s" promised a whistle that
-     * never came in two of the three modes and is gone. The call itself is
-     * one persistent word: USE IT. */
     if (maulUseItCall(s)) {
       const remaining = maulUseItClock(s);
       const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
-      /* SPEC_15 — 'USE IT' is a SITE bubble now; see drawRefBubbles(). */
       ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(14,14,20,0.85)';
@@ -676,25 +237,18 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
     }
   }
 
-  /* T-05 — THE CONTEST BAR. The ruck is a physical contest now, so it is
-   * surfaced like the scrum's drive: the live force on each end of a bar and
-   * the ball's spot on the axis between them. FAIR-09: the player must be
-   * able to see who is winning the ruck and why, not wait for a whistle. */
   if (s.stage === 'RUCK' || s.stage === 'PLACE') {
     const share = s.power.A + s.power.B > 0 ? s.power.A / (s.power.A + s.power.B) : 0.5;
     const cx0 = project(cam, v, s.contactX, 4.2, s.contactZ, jx, jy);
     if (cx0) {
       const w = Math.max(64, cx0.sc * 5.2), h = 7;
       const x0 = cx0.sx - w / 2, y0 = cx0.sy;
-      // frame
       ctx.fillStyle = 'rgba(14,14,20,0.72)';
       ctx.fillRect(x0 - 3, y0 - 3, w + 6, h + 6);
-      // two ends: attack fills from the left, defence from the right
       ctx.fillStyle = '#ff6a5a';
       ctx.fillRect(x0, y0, w * share, h);
       ctx.fillStyle = '#7fa3e6';
       ctx.fillRect(x0 + w * share, y0, w * (1 - share), h);
-      // the ball's spot on the −1..+1 axis, as a bright notch
       const ax = x0 + w * ((s.axis + 1) / 2);
       ctx.fillStyle = '#f4efe2';
       ctx.fillRect(ax - 2.5, y0 - 4, 5, h + 8);
@@ -704,11 +258,6 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
     }
   }
 
-  /* T-38. The ruck read is an ordered sequence, not a stat dump:
-   *   COMMIT - SPACE   (a jackal is on the ball)
-   *   A/D - CLEAROUT   (working to win it)
-   *   SECURED          (the ball is won)
-   * plus a countdown from the ruck clock; at 0 the nine releases to the fly-half. */
   const limit = [1.5, 3, 5][d.options.ruckLaw ?? 2];
   if (s.groundAt >= 0) {
     const elapsed = s.t - s.groundAt;
@@ -716,12 +265,6 @@ function drawBreakdownOverlay(ctx: CanvasRenderingContext2D, d: Director, v: Vie
     const band = remaining > 2 ? '#6ee7a0' : remaining > 1 ? '#ffd76a' : '#ff6a5a';
     const cp = project(cam, v, s.contactX, 0, s.contactZ, jx, jy);
     if (cp) {
-      /* SPEC_15 — the read is a SITE bubble now, drawn by drawRefBubbles() at
-       * this exact world point. The prompt stays where the player is looking;
-       * only the bare floating text is gone. */
-      /* Playtest 2: the big number is the TIME TO PASS — it belongs to the
-       * secured ball (RECYCLE window), not the shove. Over the fight it just
-       * covered the two men on the ground. */
       if (s.stage === 'RECYCLE') {
         ctx.font = '900 22px ui-sans-serif, system-ui, sans-serif';
         ctx.textAlign = 'center';
@@ -798,19 +341,7 @@ function drawLineoutOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View,
   }
 }
 
-/* ==================== SPEC_15 — THE REFEREE'S SPEECH BUBBLE ====================
- *
- * Two anchor modes, one renderer:
- *   REF  — law calls, cards, warnings. Anchored above the official's head.
- *   SITE — the four control affordances (USE IT / SECURED / COMMIT - SPACE /
- *          A/D - CLEAROUT), pinned to the ruck or the maul where the player is
- *          already looking.
- *
- * The card is the papercraft `paperCard()` from the handoff material, so a
- * bubble is unmistakably the same paper language as the figures rather than a
- * UI rectangle pasted over the pitch.
- */
-
+/* ==================== SPEC_15 — THE REFEREE'S SPEECH BUBBLE ==================== */
 const BUBBLE_COLOUR: Record<string, string> = {
   CARD: '#ff6a5a',
   PENALTY: '#ffd76a',
@@ -819,17 +350,12 @@ const BUBBLE_COLOUR: Record<string, string> = {
   NUDGE: '#ffd76a',
 };
 
-/** Above his head. SPEC_16: the figure now draws true against a world carrying
- *  RENDER_SCALE, so the authored build height IS the drawn height in logical
- *  metres and the SPEC_14 FIGURE_SCALE inflation would float the bubble 1.2 m
- *  clear of the referee. */
-const REF_HEAD_Y = BUILDS.REF.h + 0.8;
+/** Above the official's head: GLB referee is ~1.8 m + RENDER_SCALE; keep the
+ *  bubble clear of the 3D model's head regardless of zoom. */
+const REF_HEAD_Y = 3.0;
 
-/**
- * One paper card with a tail. The card is clamped inside the frame so it never
- * rides off the edge, but the tail keeps pointing at the TRUE world point — a
- * bubble that detaches from the thing it belongs to is worse than no bubble.
- */
+type Pt = [number, number];
+
 function drawBubble(
   ctx: CanvasRenderingContext2D, v: View,
   sx: number, sy: number, sc: number,
@@ -842,7 +368,6 @@ function drawBubble(
   const h = size * 2.0;
   const gap = size * 0.95;
 
-  /* Above the head by preference; flip below when there is no room up there. */
   let cy = sy - gap - h / 2;
   const below = cy - h / 2 < 8;
   if (below) cy = sy + gap + h / 2;
@@ -861,9 +386,23 @@ function drawBubble(
   const tw = Math.min(12, w * 0.18);
   const tail: Pt[] = [[cx - tw, ty], [cx + tw, ty], [sx, sy]];
 
-  /* Tail first: the card's own outline covers where they meet. */
-  paperCard(ctx, tail, 'rgba(14,14,20,0.92)', { lw: 2, out: colour, back: 0, jit: 0.35, cut: 0 });
-  paperCard(ctx, pts, 'rgba(14,14,20,0.92)', { lw: 2.4, out: colour, back: 1.6, jit: 0.6, seed: 7 });
+  ctx.fillStyle = 'rgba(14,14,20,0.92)';
+  ctx.strokeStyle = colour;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(tail[0][0], tail[0][1]);
+  ctx.lineTo(tail[2][0], tail[2][1]);
+  ctx.lineTo(tail[1][0], tail[1][1]);
+  ctx.closePath();
+  ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 2.4; ctx.stroke();
 
   ctx.font = `900 ${size}px ui-sans-serif, system-ui, sans-serif`;
   ctx.textAlign = 'center';
@@ -874,9 +413,6 @@ function drawBubble(
   ctx.textAlign = 'left';
 }
 
-/** Exported for the SPEC_15 unit check: a pure function of the director and
- *  the lens, no side effects, so the probe can measure the bubble's ink
- *  without having to render a whole frame twice. */
 export function drawRefBubbles(ctx: CanvasRenderingContext2D, d: Director, v: View, cam: Camera, jx: number, jy: number) {
   const head = d.refBubbleHead();
   if (head) {
@@ -911,7 +447,8 @@ function worldLabel(
   ctx.textAlign = 'center';
   ctx.lineWidth = Math.max(3, size * 0.3); ctx.strokeStyle = 'rgba(14,14,20,0.85)';
   ctx.strokeText(text, p.sx, p.sy);
-  ctx.fillStyle = colour; ctx.fillText(text, p.sx, p.sy);
+  ctx.fillStyle = colour;
+  ctx.fillText(text, p.sx, p.sy);
 }
 
 export { drawMinimap } from './minimap';
