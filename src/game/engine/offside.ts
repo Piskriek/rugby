@@ -430,7 +430,15 @@ export class OffsideLedger {
        * penetration shrinks when `vz · dir` is negative. (The sign here was
        * inverted once, which forgave the man charging into the offside
        * position and blew against the man sprinting back out of it.) */
-      retiring: (candidate.vz * lineForTeam.dir) < -0.5,
+      /* A man getting up off the floor is forgiven on the same principle.
+       * The velocity test cannot see him: the get-up lock holds vz at exactly
+       * 0 so he is physically incapable of retiring, and he was being blown
+       * for an offside position he had no means to leave. The referee's
+       * play-on for a retiring player is about INTENT and CAPABILITY, and a
+       * man on his hands and knees has neither the position nor the ability
+       * to influence play. */
+      retiring: (candidate.vz * lineForTeam.dir) < -0.5
+        || (candidate.recoverT ?? 0) > 0,
     };
   }
 

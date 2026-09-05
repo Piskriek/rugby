@@ -10,3 +10,27 @@ keeps its Universal Rig skeleton; animation clips were remapped onto it by
 bone name and renamed to the state-machine vocabulary
 (Idle, Walk, Run, Sprint, Pass, Tackle, GetUp, SlideStart, Slide, SlideExit,
  Kick, Push, Crouch, DiveRoll, Death, JumpLand).
+
+--------------------------------------------------------------------------
+tackle_pair.glb - Mixamo (Adobe)
+
+Clips:            MX_Tackle, MX_TackleReact
+Source:           github.com/CandyManGames/Enable3dFootball_Prod
+                    animations/Player_Actions/tackle_ip.gltf
+                    animations/Player_Actions/tackle_react_ip.gltf
+Origin:           Mixamo (mixamo.com), Adobe. The clip name inside both source
+                  files is literally "mixamo.com".
+
+LICENCE NOTE - REVIEW BEFORE SHIPPING COMMERCIALLY.
+Mixamo animations are free to use, including commercially, for anyone with an
+Adobe account, but the Adobe terms cover redistribution of the raw animation
+data. These clips were obtained from a third-party public GitHub repository
+rather than downloaded from Mixamo directly, so the upstream repository's own
+right to redistribute them has NOT been verified. The safe path for a public
+release is to download the equivalent clips from mixamo.com under your own
+account and re-run tools/fetch_mixamo.mjs against those local files.
+
+Retargeted onto the Quaternius skeleton by tools/fetch_mixamo.mjs using a
+world-space transfer (the two rigs' bind poses differ by up to 178 degrees, so
+a bone-name remap alone produces an inverted skeleton). Animation data only -
+no mesh - so it rides on the rig in rugby_player.glb.

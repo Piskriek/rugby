@@ -13,6 +13,18 @@
  * The actors themselves — the 30 players plus the referee — are GLB
  * humanoids rendered by ThreePlayerManager / ThreeCanvas. This module no
  * longer draws any character, limb or ball ink.
+ *
+ * BALL OWNERSHIP (Part 1 — hand socketing). The 3D ball is a single mesh
+ * owned by ThreePlayerManager. It has exactly two states and this module
+ * paints neither of them:
+ *   HELD    parented to the ball-carrier's `hand_r` socket bone, so its
+ *           world matrix is the hand's — the 2D simulation's ball
+ *           coordinates are OVERRIDDEN for as long as a man is carrying it.
+ *   IN FLIGHT / LOOSE  re-parented to the scene and synced every frame to
+ *           the 2D simulation's ballistic trajectory (op.ball, kk, lo, bd).
+ * The hand-off between the two happens in ThreePlayerManager.updateBall the
+ * frame the engine flips `op.ball.live`, which is the same frame the passer's
+ * one-shot Pass clip releases. Anything drawn here is telemetry only.
  */
 import { Director } from '../game/director';
 import {
@@ -317,6 +329,23 @@ function drawScrumOverlay(ctx: CanvasRenderingContext2D, d: Director, v: View, c
     label(ctx, `${(f / 1000).toFixed(2)} kN`, (from.sx + to.sx) / 2, (from.sy + to.sy) / 2 - 12, col);
   };
   draw('A'); draw('B');
+
+  /* PART 3 — THE ENGAGEMENT AXIS, DRAWN.
+   *
+   * The packs face down the pitch (world z), never across it: A drives
+   * toward +z, B toward −z. The authored headings live in
+   * game/behaviour/setpiece-overrides.ts and are consumed by BOTH the engine
+   * (Live.face, via scrumFaceSign) and the 3D rig (st.face, via
+   * scrumFacing). Painting the axis here means a pack that is ever rotated
+   * towards a touchline again is visible immediately instead of being
+   * something you have to notice in the models. */
+  const axisA = project(cam, v, ax, 0.05, az - 4.2, jx, jy);
+  const axisB = project(cam, v, ax, 0.05, az + 4.2, jx, jy);
+  if (axisA && axisB) {
+    ctx.strokeStyle = 'rgba(244,239,226,0.35)'; ctx.lineWidth = 2; ctx.setLineDash([5, 6]);
+    ctx.beginPath(); ctx.moveTo(axisA.sx, axisA.sy); ctx.lineTo(axisB.sx, axisB.sy); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   worldLabel(ctx, cam, v, ax, 3.6, az,
     `DRIVE ${(s.netDrive * 100).toFixed(0)} cm · WHEEL ${s.yaw > 0 ? '+' : ''}${s.yaw.toFixed(1)}° · RISK ${(Math.min(1, s.collapseRisk) * 100).toFixed(0)}%`,

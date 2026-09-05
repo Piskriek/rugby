@@ -23,9 +23,14 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
+import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
+import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
+/* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
+ * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
+const TACKLE_PAIR_URL = 'assets/models/tackle_pair.glb';
 
 /* ---------------------------------------------------------------- kits --- */
 export type KitTeam = 'A' | 'B' | 'REF';
@@ -84,6 +89,128 @@ function makeToonGradient(): THREE.DataTexture {
   return tex;
 }
 
+
+/* ================== PROCEDURAL "FAKE RAGDOLL" LAYER ==================
+ *
+ * Canned clips cannot know how far apart two men are, how fast they are
+ * travelling or which way they are twisting, so a latch built purely out of
+ * them reads as a hug between two statues. Rather than a physics engine (a
+ * true ragdoll would fight the AnimationMixer and wreck the skinning), the
+ * chaos is written ON TOP of the sampled pose, every frame, in three layers:
+ *
+ *   1  BODY TILT    the whole mesh pitches forward into the carrier, so the
+ *                   tackler is flying horizontally rather than standing up
+ *   2  ARM POINTING the tackler's arm bones are aimed at the carrier's spine
+ *                   in world space, so his hands track the man he is holding
+ *   3  SPINE THRASH a velocity-scaled sine injected into the carrier's spine
+ *                   and neck, so he fights and lurches under the weight
+ *
+ * ORDER IS EVERYTHING. `mixer.update()` OVERWRITES every bone it animates,
+ * and this rig's clips animate the whole spine and both arms (65 tracks,
+ * confirmed against the GLB). So all three layers must be applied AFTER the
+ * mixer has sampled the frame, and re-applied from scratch on the next one —
+ * they are a post-process on the pose, never a stored state on the bone.
+ *
+ * ── BONE NAMING: THIS RIG IS NOT A MIXAMO RIG ─────────────────────────────
+ * The brief names Mixamo bones (`Spine1`, `RightArm`, `Hips`). This model is
+ * Quaternius' Universal Base Character, which uses the UNREAL skeleton
+ * convention, so those lookups would every one of them return undefined and
+ * the whole layer would silently do nothing:
+ *
+ *      Mixamo            this rig
+ *      Hips              pelvis
+ *      Spine / Spine1    spine_01 / spine_02 / spine_03
+ *      Neck              neck_01
+ *      RightArm          upperarm_r      LeftArm       upperarm_l
+ *      RightForeArm      lowerarm_r      LeftForeArm   lowerarm_l
+ *      RightHand         hand_r          LeftHand      hand_l
+ *
+ * Equally important: Unreal bones point down their local +Y axis, not -Z, so
+ * `Object3D.lookAt()` — which aims local +Z — twists an arm sideways into the
+ * chest. The reach below therefore uses `setFromUnitVectors` on the bone's
+ * own +Y, which is the correct generalisation of "point this bone at that
+ * point" for any rig.
+ */
+
+/** The bones the procedural layer drives, resolved once per player. */
+interface ProceduralRig {
+  pelvis: THREE.Bone | null;
+  spine: (THREE.Bone | null)[];
+  neck: THREE.Bone | null;
+  upperArms: (THREE.Bone | null)[];
+  foreArms: (THREE.Bone | null)[];
+}
+
+/** Unreal-convention bone names, with the Mixamo spellings as fallbacks so a
+ *  future re-export against a Mixamo rig keeps working without a code change. */
+const BONE_NAMES = {
+  pelvis: ['pelvis', 'Hips', 'mixamorigHips'],
+  spine: [
+    ['spine_01', 'Spine', 'mixamorigSpine'],
+    ['spine_02', 'Spine1', 'mixamorigSpine1'],
+    ['spine_03', 'Spine2', 'mixamorigSpine2'],
+  ],
+  neck: ['neck_01', 'Neck', 'mixamorigNeck'],
+  upperArms: [
+    ['upperarm_r', 'RightArm', 'mixamorigRightArm'],
+    ['upperarm_l', 'LeftArm', 'mixamorigLeftArm'],
+  ],
+  foreArms: [
+    ['lowerarm_r', 'RightForeArm', 'mixamorigRightForeArm'],
+    ['lowerarm_l', 'LeftForeArm', 'mixamorigLeftForeArm'],
+  ],
+};
+
+/* --- tuning ------------------------------------------------------------- */
+
+/** Maximum forward pitch of a diving tackler, radians (~63 degrees). */
+const TILT_MAX = 1.1;
+/** Pitch held once the pair are on the ground — flat, face down. */
+const TILT_GROUNDED = Math.PI / 2 - 0.12;
+/** Distance at which a tackler is fully committed/horizontal, metres. */
+const TILT_FULL_RANGE = 0.55;
+/** Distance beyond which he is upright again, metres. */
+const TILT_NO_RANGE = 2.2;
+/** How fast the tilt tracks its target (higher = snappier). */
+const TILT_RATE = 9;
+
+/** How far the arm bones may be pulled from their animated pose, 0..1. */
+const REACH_WEIGHT = 0.78;
+/** the non-leading arm reaches at this fraction of the lead arm's weight */
+const REACH_TRAIL = 0.55;
+/** the waist is this far below the pelvis bone — a tackle goes in low */
+const LATCH_WAIST_DROP = 0.15;
+/** reach weight ramp: full commitment at this range, REACH_MIN at NO_RANGE */
+const REACH_FULL_RANGE = 0.8;
+const REACH_NO_RANGE = 3.0;
+const REACH_MIN = 0.2;
+/** forward pitch of the torso when fully committed to a reach, radians */
+const DIP_MAX = 0.52;          // ~30 deg, spread over spine_01/02 + neck
+const DIP_RATE = 9;
+const REACH_RATE = 12;
+
+/** Peak spine thrash, radians, at full sprint. */
+const THRASH_MAX = 0.3;
+/** Thrash frequency, radians per second. */
+const THRASH_FREQ = 15;
+const THRASH_RATE = 10;
+/** Speed the thrash is scaled against — a rough top sprint, m/s. */
+const THRASH_REF_SPEED = 9;
+
+/* --- scratch objects. Allocated once; a per-frame `new` here would be
+ *     thirty vectors a frame per player and a guaranteed GC stutter. ------ */
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+/** the reach target. MUST NOT be one of the vectors applyArmReach writes —
+ *  passing `_v1` as the target had every arm aiming at its own shoulder. */
+const _target = new THREE.Vector3();
+/** reused rotation scratch, so the reach allocates nothing per bone */
+const _qBone = new THREE.Quaternion();
+const _dir = new THREE.Vector3();
+const _q = new THREE.Quaternion();
+const _qb = new THREE.Quaternion();
+const _mat = new THREE.Matrix4();
+
 /* -------------------------------------------------------------- instance -- */
 interface PlayerInstance {
   actor: Actor;
@@ -93,6 +220,27 @@ interface PlayerInstance {
   mixer: THREE.AnimationMixer;
   clips: Map<string, THREE.AnimationClip>;
   badgeMat: THREE.MeshBasicMaterial;
+  /** cached carrying-hand socket bone (Part 1 ball socketing); null = none */
+  handBone?: THREE.Bone | null;
+  /** contact shadow, kept flat on the turf while the body tilts (procedural) */
+  shadow?: THREE.Mesh;
+  /** lazily-resolved procedural bone set — see resolveRig() */
+  rig?: ProceduralRig;
+  /** smoothed procedural state, so nothing pops between frames */
+  proc: {
+    /** current forward pitch of the whole body, radians */
+    tilt: number;
+    /** 0..1 weight of the arm-pointing override */
+    reach: number;
+    /** 0..1 weight of the spine thrash */
+    thrash: number;
+    /** 0..1 weight of the forward torso dip as he closes on the waist */
+    dip: number;
+    /** free-running phase for the wobble, so two men never wobble in sync */
+    phase: number;
+    /** the FSM state resolved this frame, for the post-mixer pass */
+    state: string;
+  };
   active: { name: string; action: THREE.AnimationAction } | null;
   st: {
     oneShot: string | null;      // non-looping/locked clip state
@@ -101,10 +249,77 @@ interface PlayerInstance {
     lx: number; lz: number;
     spd: number;
     face: number;                // smoothed heading, radians
+    /* PART 1 — THE ONE-SHOT LATCH. A `pass` that is re-`play()`ed on the
+     * frames after the first restarts the clip, which is what read as the
+     * throw looping three times in a third of a second. Once the latch is
+     * set nothing may call play() on that state again until the engine
+     * leaves it. */
+    passLatched: boolean;
+    /* PART 2 — the multi-stage tackle timeline, in seconds since impact.
+     * −1 when no tackle is running. */
+    tackleT: number;
+    /** which side of the collision this man is on, for the stage clips */
+    tackleRole: 'TACKLER' | 'CARRIER' | null;
+    /** true when the engine classed this collision as a standing takedown */
+    standingHit: boolean;
+    /** playhead of the tackle clip, carried across stage boundaries so a
+     *  single authentic clip runs on instead of restarting each stage. */
+    tackleClipT: number;
   };
 }
 
+/* PART 2 — TACKLE ANIMATION TIMELINE (seconds from the impact frame).
+ *   0.00 – 0.15  IMPACT     tackler drives, carrier reacts to the hit
+ *   0.15 – 0.40  GROUNDING  both crossfade to the fall
+ *   > 0.40       RUCK PREP  carrier presents prone, tackler rolls away
+ * The physics half of the same window lives in engine/breakdown.ts, which
+ * shares the carrier's dampened momentum between the two men for 0.3 s so
+ * they slide forward together instead of stopping dead. */
+export const TACKLE_IMPACT_END = 0.15;
+export const TACKLE_GROUND_END = 0.40;
+
+/* LATCH-AND-DRAG — the churn rate. The carrier's Run clip is played well
+ * under the speed it was authored for while he is held, so his legs labour
+ * and drive rather than stride: a man fighting through contact, not a man
+ * jogging. Slow enough to read as effort, fast enough not to read as slow
+ * motion. */
+export const LATCH_CHURN_RATE = 0.72;
+
 /* ================================================================== */
+/**
+ * IN-PLACE CONVERSION — strip horizontal root motion from every clip.
+ *
+ * This is the "In-Place" checkbox, done in code. The 2D engine owns all
+ * spatial movement: `breakdown.ts` slides the pair through the 0.3 s
+ * kinetic-impact window and `latch.ts` snaps the defender onto the carrier's
+ * hip, and then `update()` writes `root.position` from `a.rx/a.rz` every
+ * frame. Any horizontal travel baked into the clip is therefore applied a
+ * SECOND time, on top of the engine's — the double-movement that reads as
+ * skating and rolling in place.
+ *
+ * Measured travel on the shipped rig before this ran:
+ *   DiveRoll 1.10 m, GetUp 0.85 m, Death 0.83 m, Tackle 0.82 m,
+ *   SlideStart/SlideExit 0.78 m, JumpLand 0.50 m, Run 0.24 m.
+ *
+ * Only X and Z are flattened, and only on the root-most translated bone
+ * (`pelvis`). Y is DELIBERATELY LEFT ALONE: the vertical drop of the hips is
+ * how a fall reads as a fall, and it is what replaces the procedural pivot
+ * lift during a tackle. Rotation tracks are untouched.
+ */
+function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const out = clip.clone();
+  for (const track of out.tracks) {
+    const [bone, prop] = track.name.split('.');
+    if (prop !== 'position') continue;
+    if (bone !== 'pelvis' && bone !== 'Hips' && bone !== 'mixamorigHips'
+      && bone !== 'root' && bone !== 'Armature') continue;
+    const v = track.values;            // flat [x,y,z, x,y,z, ...]
+    const x0 = v[0], z0 = v[2];
+    for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
+  }
+  return out;
+}
+
 export class ThreePlayerManager {
   ready = false;
   private template: THREE.Group | null = null;
@@ -140,11 +355,32 @@ export class ThreePlayerManager {
 
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
+    const loader = new GLTFLoader();
+    const one = (url: string) => new Promise<THREE.AnimationClip[] | null>((res) => {
+      loader.load(url, (g) => res(g.animations),
+        undefined, () => res(null));   // optional asset: absent = fall back
+    });
     return new Promise((resolve, reject) => {
-      new GLTFLoader().load(MODEL_URL, (gltf) => {
+      loader.load(MODEL_URL, async (gltf) => {
         this.template = gltf.scene;
-        this.templateClips = gltf.animations;
+        const base = gltf.animations.map(stripRootMotion);
+        /* The retargeted pair is already in-place (the tool drops the source's
+         * horizontal channel) so it does NOT go through stripRootMotion again;
+         * doing so would be harmless but pointless. It is loaded second and
+         * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
+         * more entries in the same clip table. */
+        const extra = await one(TACKLE_PAIR_URL);
+        if (extra && extra.length) {
+          this.templateClips = base.concat(extra);
+        } else {
+          this.templateClips = base;
+          if (import.meta.env?.DEV) {
+            console.warn('[players] tackle_pair.glb missing — falling back to the '
+              + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
+          }
+        }
         this.prepareTemplate();
+        this.checkRecoverSeconds();
         this.ready = true;
         resolve();
       }, undefined, reject);
@@ -491,14 +727,22 @@ export class ThreePlayerManager {
     shadow.scale.set(0.95, 0.42, 1);
     shadow.renderOrder = -1;
     root.add(shadow);
+    // kept so the procedural body tilt can counter-rotate it flat (below)
+    const shadowRef = shadow;
 
     const inst: PlayerInstance = {
-      actor, team, num, root, mixer, clips, badgeMat,
+      actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
+      proc: {
+        tilt: 0, reach: 0, thrash: 0, dip: 0,
+        phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
+      },
       st: {
         oneShot: null, lock: 0, lie: false,
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
+        passLatched: false,
+        tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
       },
     };
     return inst;
@@ -542,6 +786,13 @@ export class ThreePlayerManager {
   /** Engine renderClip -> FSM state. */
   private mapState(engineClip: string, spd: number): string {
     switch (engineClip) {
+      /* LATCH-AND-DRAG: the engine's two struggle clips pass straight
+       * through. They must NOT fall to the locomotion default — a latched
+       * carrier is still moving at two or three metres a second, so the
+       * default would put him back into a clean Run and the whole point of
+       * the drag would be invisible. */
+      case 'latchCarry': return 'latchCarry';
+      case 'latchHang': return 'latchHang';
       case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
       case 'kick': return 'kick';
       case 'tackle': return 'tackle';
@@ -565,6 +816,34 @@ export class ThreePlayerManager {
     }
   }
 
+  /**
+   * The engine's get-up lock is a hard-coded constant because it has to run
+   * headless; this is the only place both numbers exist at once, so it is
+   * where they are checked. A re-exported stand-up clip that changes duration
+   * would otherwise silently leave the man frozen after he is on his feet, or
+   * cut the animation off mid-rise.
+   */
+  private checkRecoverSeconds() {
+    if (!import.meta.env?.DEV) return;
+    const name = this.pick('MX_StandUp', 'GetUp');
+    const clip = this.templateClips.find(c => c.name === name);
+    if (!clip) return;
+    /* The lock is deliberately SHORTER than the clip (see RECOVER_SECONDS):
+     * the clip is sped up to fit. Warn only if that speed-up would be so
+     * extreme the rise reads as a twitch. */
+    const rate = clip.duration / RECOVER_SECONDS;
+    if (rate > 3.5) {
+      console.warn(`[players] get-up clip '${name}' runs ${clip.duration.toFixed(2)}s `
+        + `but the engine lock is only ${RECOVER_SECONDS}s — a ${rate.toFixed(1)}x `
+        + 'speed-up will look like a twitch. Raise RECOVER_SECONDS in director.ts.');
+    }
+  }
+
+  /** `want` if the retargeted pair was loaded, else the stand-in `fallback`. */
+  private pick(want: string, fallback: string): string {
+    return this.templateClips.some(c => c.name === want) ? want : fallback;
+  }
+
   private clipForState(st: string): { name: string; loop: boolean } {
     switch (st) {
       case 'idle': return { name: 'Idle', loop: true };
@@ -577,13 +856,92 @@ export class ThreePlayerManager {
       case 'pass': return { name: 'Pass', loop: false };
       case 'kick': return { name: 'Kick', loop: false };
       case 'tackle': return { name: 'Tackle', loop: false };
+      /* PART 2 — the three stages of a tackle, mapped onto the clips this
+       * rig actually ships (Quaternius UAL): Tackle is the drive/hit,
+       * SlideStart the stumble off it, DiveRoll the grounding and the
+       * roll-away, Death the prone hold. */
+      /* The tackler drives and goes to ground on ONE authentic clip
+       * (MX_Tackle, a real football tackle); the carrier is hit and falls on
+       * its matched partner (MX_TackleReact). Both were retargeted from
+       * Mixamo onto this skeleton by tools/fetch_mixamo.mjs. `??` keeps the
+       * old stand-ins alive if that artefact has not been built. */
+      /* MOMENTUM BRANCH. A standing takedown has no dive in it, so the
+       * running-tackle clip is wrong for it — see BreakdownState.hitKind.
+       * With no bespoke takedown asset available (none exists in any
+       * reachable public repo — see tools/fetch_mixamo.mjs) the standing
+       * branch plays the SAME retargeted pair at a reduced time scale and
+       * without the dive tilt, which reads as a grapple to ground rather
+       * than a launch. `standingHit` is set per-frame from the engine. */
+      case 'tackleDrive': return { name: this.pick('MX_Tackle', 'Tackle'), loop: false };
+      case 'hitReact': return { name: this.pick('MX_TackleReact', 'SlideStart'), loop: false };
+      case 'tackleGround': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
+      case 'carrierFall': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
+      /* Stage 2 stays on the SAME clip as stages 0-1 when the retargeted pair
+       * is present: MX_Tackle / MX_TackleReact each end with the man already
+       * down, and clampWhenFinished holds that final grounded frame as the
+       * prone hold. Cutting to Death/DiveRoll here truncated the fall at ~50%
+       * and threw away the part where he actually lands. */
+      case 'present': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
+      case 'rollAway': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
+      /* LATCH-AND-DRAG. The two halves of the struggle, before the takedown.
+       * The rig ships no bespoke Struggle or Hang, so the illusion is built
+       * out of what it has:
+       *   latchCarry  Run, played heavy — the timeScale in setLocomotion is
+       *               dropped well under ground-lock so the carrier churns
+       *               and labours instead of striding cleanly. He is being
+       *               held, and the legs have to read as fighting for it.
+       *   latchHang   Tackle, CLAMPED on its final frame — the drive pose,
+       *               arms wrapped, held. His 2D coordinates are snapped to
+       *               the carrier's hip by the engine, so a held pose is all
+       *               that is needed to read as a man being towed. */
+      case 'latchCarry': return { name: 'Run', loop: true };
+      case 'latchHang': return { name: 'Tackle', loop: false };
+      /* ASSET NOTE — these tackle states are driven by STAND-IN clips
+       * (Tackle, SlideStart, DiveRoll, Death — see the cases above) with the
+       * procedural layer compensating for what they lack. The real fix
+       * is Mixamo's free PAIRED "American Football Tackle" / "Tackled" clips,
+       * which contain the violent horizontal dive and the twisting ground
+       * impact a rugby collision needs. Swap them in tools/build_player_glb.py
+       * (see the ASSET UPGRADE PATH note there) and only the clip names below
+       * change — every state name is already wired.
+       *
+       * DOWNLOAD THEM WITH "In-Place" TICKED, or if you forget, it no longer
+       * matters: stripRootMotion() flattens the horizontal channel of every
+       * clip at load. Do not "fix" a sliding character by editing the clip's
+       * Y track — the vertical drop is load-bearing (it is what puts a tackled
+       * man on the turf now that the procedural pivot lift is off). */
       case 'grounded': return { name: 'Death', loop: true };
-      case 'dive': return { name: 'SlideStart', loop: false };
+      /* A committed tackle dive is the same horizontal launch as the tackler's
+       * half of a collision, so it uses the retargeted Mixamo tackle rather
+       * than the SlideStart stand-in. A missed dive ends with the engine
+       * setting clip='getup', which picks up MX_StandUp through the get-up
+       * lock — the dive and the consequence are one continuous movement. */
+      case 'dive': return { name: this.pick('MX_Tackle', 'SlideStart'), loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
       case 'tryStart': return { name: 'SlideStart', loop: false };
-      case 'getup': return { name: 'GetUp', loop: false };
+      case 'getup': return { name: this.pick('MX_StandUp', 'GetUp'), loop: false };
       default: return { name: 'Idle', loop: true };
     }
+  }
+
+  /**
+   * Time scale that makes `state`'s clip play through in `window` seconds.
+   * `window <= 0` means the stage is open-ended (the >0.4 s ruck-prep hold),
+   * where the clip should run at its natural speed and clamp. Clamped to a
+   * sane band so a very long clip is not turned into a blur.
+   */
+  private fitTimeScale(state: string, window: number): number {
+    if (window <= 0) return 1;
+    const clip = this.templateClips.find(c => c.name === this.clipForState(state).name);
+    if (!clip || clip.duration <= 0) return 1;
+    /* Clamped at 3x. The uncapped ratio is 5.5-6x here (a 0.83 s clip into a
+     * 0.15 s window), which plays the whole motion but reads as a blur —
+     * faster than a body can move. At 3x the stage shows roughly the first
+     * half to two-thirds of the clip at a violent-but-readable speed, which
+     * is the part that carries the hit; the following stage's crossfade takes
+     * over from there. This is a LOOKS-RIGHT number, not a derived one, and
+     * is the first thing to tune if the collision reads too fast or too slow. */
+    return Math.min(3, Math.max(0.5, clip.duration / window));
   }
 
   /** Crossfade to a clip. Returns the action (already playing). */
@@ -594,8 +952,17 @@ export class ThreePlayerManager {
     const clip = inst.clips.get(info.name);
     if (!clip) return null;
     const action = inst.mixer.clipAction(clip);
-    action.setLoop(info.loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
-    action.clampWhenFinished = !info.loop;
+    /* PART 1 — ONE SHOT MEANS ONE. `LoopOnce` with `Infinity` repetitions is
+     * the three-rapid-throws bug: three.js reads the repetition count even in
+     * LoopOnce mode, so the Pass clip re-fired until the 0.45 s lock expired.
+     * Exactly one repetition, and the last frame is held. */
+    if (info.loop) {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.clampWhenFinished = false;
+    } else {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    }
     action.timeScale = timeScale;
     action.reset();
     action.enabled = true;
@@ -633,12 +1000,328 @@ export class ThreePlayerManager {
     }
   }
 
+
+  /**
+   * The other half of a live latch.
+   *
+   * The engine holds the link (`Live.latchedBy` / `latchingOnto`), but the
+   * render stream is `Actor`, which deliberately carries only presentation
+   * fields — so rather than widen that contract for one effect, the pair is
+   * recovered from the two complementary clip states. There is at most one
+   * latch at a time (engine/latch.ts enforces it), so the nearest opponent
+   * wearing the opposite half of the struggle IS the partner.
+   */
+  private latchPartner(inst: PlayerInstance, pool: PlayerInstance[]): PlayerInstance | null {
+    const want = inst.proc.state === 'latchHang' ? 'latchCarry'
+      : inst.proc.state === 'latchCarry' ? 'latchHang' : null;
+    if (!want) return null;
+    let best: PlayerInstance | null = null;
+    let bestD = Infinity;
+    for (const other of pool) {
+      if (other === inst || other.proc.state !== want || other.team === inst.team) continue;
+      const d = inst.root.position.distanceToSquared(other.root.position);
+      if (d < bestD) { bestD = d; best = other; }
+    }
+    return best;
+  }
+
+  /* ============ PROCEDURAL LAYER — resolution and the three overrides ==== */
+
+  /** Resolve (once, lazily) the bones the procedural layer drives. */
+  private resolveRig(inst: PlayerInstance): ProceduralRig {
+    if (inst.rig) return inst.rig;
+    const find = (names: string[]): THREE.Bone | null => {
+      for (const n of names) { const b = this.findBone(inst.root, n); if (b) return b; }
+      return null;
+    };
+    const rig: ProceduralRig = {
+      pelvis: find(BONE_NAMES.pelvis),
+      spine: BONE_NAMES.spine.map(find),
+      neck: find(BONE_NAMES.neck),
+      upperArms: BONE_NAMES.upperArms.map(find),
+      foreArms: BONE_NAMES.foreArms.map(find),
+    };
+    inst.rig = rig;
+    if (import.meta.env.DEV && !rig.pelvis && !rig.spine.some(Boolean)) {
+      console.warn('[procedural] no spine/pelvis bones matched — the fake-ragdoll '
+        + 'layer is inert. Check the rig naming convention against BONE_NAMES.');
+    }
+    return rig;
+  }
+
+  /**
+   * 1 — PROCEDURAL BODY TILT.
+   *
+   * The tackler is pitched forward into the man he is holding, so that a
+   * standing "hug" becomes a horizontal dive without anyone animating one.
+   * The angle is driven by the DISTANCE between the two (committed and close
+   * = flat out; still reaching = only leaning), and once the takedown fires
+   * it tweens on to flat.
+   *
+   * The tilt is applied to `inst.root`, not to a bone, so the whole skinned
+   * mesh rotates as one rigid body and the skinning is untouched — this is
+   * what makes it safe against the mixer. Two consequences are handled here:
+   * the pivot is the feet (the root origin), so a pure rotation would sink
+   * the chest through the turf — the body is lifted by the sine of the tilt
+   * to compensate — and the contact shadow is counter-rotated so it stays
+   * flat on the grass instead of tipping up into a vertical disc.
+   */
+  private applyBodyTilt(inst: PlayerInstance, want: number, step: number, lift = true) {
+    const p = inst.proc;
+    p.tilt += (want - p.tilt) * (1 - Math.exp(-TILT_RATE * step));
+    if (p.tilt < 1e-3) {
+      /* fully upright again — clear the override rather than leaving the last
+       * fractional tilt baked into the root. Without this reset a man who has
+       * been tackled once stays permanently leaning, because rotation.x is
+       * never otherwise written (only rotation.y is, every frame). */
+      p.tilt = 0;
+      inst.root.rotation.x = 0;
+      inst.root.position.y = 0;
+      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
+      return;
+    }
+    /* rotate about the model's own left-right axis. The root already carries
+     * the heading on Y, so an X rotation applied after it is a clean forward
+     * pitch in the direction he is facing whichever way that is. */
+    inst.root.rotation.x = -p.tilt;
+    /* lift the pivot so the torso does not intersect the pitch: the chest is
+     * roughly 0.9 m up the body, and sin(tilt) is how much of that height the
+     * rotation has just swung downward. */
+    /* `lift` is off once a tackle reaches its grounding stage: from there the
+     * clip's OWN pelvis Y track drops the hips onto the turf (the vertical
+     * channel is deliberately preserved by stripRootMotion), and adding the
+     * procedural lift on top floated the body above the grass. Keep the lift
+     * only while the man is still on his feet leaning in, where the pivot is
+     * genuinely at the feet and the chest would otherwise sink. */
+    const rise = lift ? Math.sin(p.tilt) * 0.62 : 0;
+    inst.root.position.y = rise * RENDER_SCALE;
+    if (inst.shadow) {
+      /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
+       * on the turf under the man. */
+      inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
+      inst.shadow.position.y = 0.02 - rise;
+    }
+  }
+
+  /**
+   * 2 — PROCEDURAL ARM POINTING (the "magnetic latch").
+   *
+   * The tackler's arms are aimed at the carrier's spine in world space, every
+   * frame, so his hands track the body he is holding however it twists —
+   * killing the "air grab" where the arms hug an empty pose.
+   *
+   * NOT `lookAt()`: that aims an object's local +Z, and on this (Unreal)
+   * skeleton bones run down their local +Y, so lookAt twists the arm sideways
+   * into the chest. The rotation is built with `setFromUnitVectors` from the
+   * bone's own +Y onto the direction to the target, then converted out of
+   * world space into the parent's frame — a bone's `quaternion` is relative
+   * to its parent, and writing a world rotation into it is the classic way to
+   * get a limb that spins with the player's heading.
+   *
+   * The result is BLENDED against the animated pose rather than replacing it,
+   * so the clip still supplies the elbow bend and the shoulder still moves
+   * with the body: the arms are pulled toward the target, not snapped to it.
+   */
+  private applyArmReach(
+    inst: PlayerInstance, target: THREE.Vector3 | null, weight: number, step: number,
+  ) {
+    const p = inst.proc;
+    p.reach += (weight - p.reach) * (1 - Math.exp(-REACH_RATE * step));
+    /* No target means the latch is over: let the weight decay to nothing and
+     * write no bones at all. Continuing to aim at the LAST known point (the
+     * scratch vector still holds it) would leave a released tackler reaching
+     * at a patch of grass while the carrier ran away from it. */
+    if (!target || p.reach < 0.01) return;
+    const rig = this.resolveRig(inst);
+    /* LEAD ARM. Both arms reach, but the one already nearer the target commits
+     * harder — a tackler leads with a shoulder and a hand, he does not present
+     * two symmetrical arms like a zombie. The far arm still follows at
+     * REACH_TRAIL of the weight so the wrap closes from both sides. */
+    let leadIsRight = true;
+    {
+      const r = rig.upperArms[0], l = rig.upperArms[1];
+      if (r && l) {
+        r.updateWorldMatrix(true, false); l.updateWorldMatrix(true, false);
+        const dr = _v1.setFromMatrixPosition(r.matrixWorld).distanceToSquared(target);
+        const dl = _v1.setFromMatrixPosition(l.matrixWorld).distanceToSquared(target);
+        leadIsRight = dr <= dl;
+      }
+    }
+    const bones = [...rig.upperArms, ...rig.foreArms];
+    for (const bone of bones) {
+      if (!bone || !bone.parent) continue;
+      /* rig.upperArms and rig.foreArms are both ordered [right, left] */
+      const isRight = bone === rig.upperArms[0] || bone === rig.foreArms[0];
+      const armScale = isRight === leadIsRight ? 1 : REACH_TRAIL;
+      bone.updateWorldMatrix(true, false);
+      /* direction from this bone to the carrier's spine, in world space */
+      _v1.setFromMatrixPosition(bone.matrixWorld);
+      _dir.copy(target).sub(_v1);
+      if (_dir.lengthSq() < 1e-6) continue;
+      _dir.normalize();
+      /* the bone's current world +Y — the direction it is actually pointing */
+      _v2.set(0, 1, 0).applyQuaternion(
+        _qb.setFromRotationMatrix(_mat.extractRotation(bone.matrixWorld)),
+      ).normalize();
+      /* world-space correction that swings +Y onto the target direction */
+      _q.setFromUnitVectors(_v2, _dir);
+      /* into the parent's frame: q_local = inv(parentWorld) * correction * boneWorld */
+      const parentWorld = _qb.setFromRotationMatrix(
+        _mat.extractRotation(bone.parent.matrixWorld),
+      ).invert();
+      const boneWorld = _qBone.setFromRotationMatrix(
+        _mat.extractRotation(bone.matrixWorld),
+      );
+      const wanted = parentWorld.multiply(_q).multiply(boneWorld);
+      /* blend, so the animation still reads through the reach */
+      bone.quaternion.slerp(wanted, p.reach * REACH_WEIGHT * armScale);
+    }
+  }
+
+  /**
+   * 2b — TORSO DIP (the "magnetic lead").
+   *
+   * A forward pitch spread down the spine so the tackler drops his chest and
+   * his eyes onto the waist he is aiming at, instead of reaching with his arms
+   * alone off an upright trunk.
+   *
+   * Distributed across the spine chain the same way the thrash is, and for the
+   * same reason: applying the whole angle to each of three PARENTED bones
+   * compounds into a body folded in half. The neck takes a counter-rotation so
+   * the head stays level and he keeps his eyes on the target rather than
+   * ducking his face into his own chest.
+   *
+   * Runs after mixer.update() like every other override here, and decays to
+   * exactly zero when the weight goes away so no dip is left baked into a man
+   * who has let go.
+   */
+  private applyTorsoDip(inst: PlayerInstance, weight: number, step: number) {
+    const p = inst.proc;
+    p.dip += (weight - p.dip) * (1 - Math.exp(-DIP_RATE * step));
+    if (p.dip < 1e-3) { p.dip = 0; return; }
+    const rig = this.resolveRig(inst);
+    const angle = DIP_MAX * p.dip;
+    const share = [0.45, 0.35];        // spine_01, spine_02 — spine_03 left free
+    for (let i = 0; i < share.length; i++) {
+      const bone = rig.spine[i];
+      if (bone) bone.rotation.x += angle * share[i];
+    }
+    /* head stays up: undo most of what the spine just added */
+    if (rig.neck) rig.neck.rotation.x -= angle * 0.62;
+  }
+
+  /**
+   * 3 — PROCEDURAL SPINE THRASH.
+   *
+   * A high-frequency sine, scaled by how fast the man is actually travelling,
+   * added into the spine and neck so a dragged carrier's upper body lurches
+   * and fights instead of gliding along smoothly.
+   *
+   * Two deliberate departures from a naive `rotation.z += wobble`:
+   *  - the phase is per-player and free-running, so two men latched at the
+   *    same moment do not thrash in perfect unison (which reads as a glitch,
+   *    not as a struggle);
+   *  - the offset is distributed DOWN the chain with a rising weight and the
+   *    neck counter-rotates, because adding the same angle to three parented
+   *    bones compounds into a snapped-in-half spine, and a head that stays
+   *    level is what makes the torso look like it is being fought over.
+   */
+  private applySpineThrash(inst: PlayerInstance, speed: number, weight: number, step: number) {
+    const p = inst.proc;
+    p.thrash += (weight - p.thrash) * (1 - Math.exp(-THRASH_RATE * step));
+    if (p.thrash < 0.01) return;
+    p.phase += step * THRASH_FREQ;
+    const rig = this.resolveRig(inst);
+    const drive = Math.min(1, speed / THRASH_REF_SPEED) * p.thrash;
+    const wobble = Math.sin(p.phase) * drive * THRASH_MAX;
+    /* a second, slower beat on the pitch axis so it is not a clean metronome */
+    const pitch = Math.sin(p.phase * 0.63 + 1.1) * drive * THRASH_MAX * 0.5;
+    const share = [0.34, 0.33, 0.33];
+    rig.spine.forEach((bone, i) => {
+      if (!bone) return;
+      bone.rotation.z += wobble * share[i];
+      bone.rotation.x += pitch * share[i];
+    });
+    /* the head fights to stay level — counter the total the spine just took */
+    if (rig.neck) {
+      rig.neck.rotation.z -= wobble * 0.55;
+      rig.neck.rotation.x -= pitch * 0.55;
+    }
+  }
+
+  /**
+   * The whole procedural pass for one man, run AFTER `mixer.update()` has
+   * sampled his pose for this frame. `partner` is the other half of a live
+   * latch, or null.
+   */
+  private applyProcedural(
+    inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
+  ) {
+    const latching = state === 'latchHang';
+    const latched = state === 'latchCarry';
+    const grounding = state === 'tackleGround' || state === 'rollAway'
+      || state === 'carrierFall' || state === 'present' || state === 'grounded';
+
+    /* --- 1. the dive tilt (tackler), tweening to flat on the takedown --- */
+    let wantTilt = 0;
+    if (latching && partner) {
+      const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
+      /* closer = more committed = flatter. Clamped either side of the band. */
+      const t = 1 - (dist - TILT_FULL_RANGE) / (TILT_NO_RANGE - TILT_FULL_RANGE);
+      wantTilt = TILT_MAX * Math.max(0, Math.min(1, t));
+    } else if (grounding && (state === 'tackleGround' || state === 'rollAway')) {
+      /* the takedown: continue the same rotation on to horizontal, so the
+       * dive and the fall are one continuous movement rather than a cut.
+       * A STANDING takedown gets much less of it: the procedural tilt is what
+       * sells a horizontal dive, and a man wrestling another to the floor
+       * from a standstill should stay far more upright. */
+      wantTilt = TILT_GROUNDED * (inst.st.standingHit ? 0.45 : 1);
+    }
+    /* no procedural lift once the clip itself is putting him on the ground */
+    this.applyBodyTilt(inst, wantTilt, step, !grounding);
+
+    /* --- 2. the magnetic latch (tackler's arms onto the carrier) ---
+     *
+     * The anchor is the carrier's PELVIS dropped 0.15 m, not his chest: a legal
+     * tackle goes in at the waist, and aiming at spine_01 had the arms closing
+     * around the ribs. Falling back to the spine only if the rig has no pelvis.
+     *
+     * The weight RAMPS with distance rather than snapping to 1 — a man still a
+     * couple of metions out is beginning to reach, not already wrapped. */
+    if (latching && partner) {
+      const prig = this.resolveRig(partner);
+      const anchor = prig.pelvis ?? prig.spine[0];
+      if (anchor) {
+        anchor.updateWorldMatrix(true, false);
+        _target.setFromMatrixPosition(anchor.matrixWorld);
+        _target.y -= LATCH_WAIST_DROP * RENDER_SCALE;
+        const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
+        const ramp = 1 - (dist - REACH_FULL_RANGE) / (REACH_NO_RANGE - REACH_FULL_RANGE);
+        const w = REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
+        this.applyArmReach(inst, _target, w, step);
+        /* TORSO DIP. He gets his eyes and his chest down to the height he is
+         * aiming at. This is a small forward pitch spread over the spine, on
+         * top of the whole-body tilt in step 1, and it is what stops the reach
+         * looking like a man bending only at the shoulders. */
+        this.applyTorsoDip(inst, w, step);
+      }
+    } else {
+      this.applyArmReach(inst, null, 0, step);   // no target: decay only
+      this.applyTorsoDip(inst, 0, step);
+    }
+
+    /* --- 3. the struggle (carrier's spine) --- */
+    this.applySpineThrash(inst, inst.st.spd, latched ? 1 : 0, step);
+  }
+
   /* ------------------------------------------------------------- update -- */
   update(d: Director, _v: View, _cam: Camera, dt: number) {
     if (!this.ready) return;
     const s = RENDER_SCALE;
     const active = new Set<string>();
     const step = Math.min(dt, 0.05);
+    /* every instance updated this frame, for the paired procedural pass */
+    const pending: PlayerInstance[] = [];
 
     for (const a of d.actors) {
       const team: KitTeam = a.team === 'REF' ? 'REF' : a.team;
@@ -669,17 +1352,154 @@ export class ThreePlayerManager {
       // stayed on their sideways approach — the pack read as rotated 90°.
       // Hard-hold the engagement heading; the velocity logic still governs
       // open play, mauls (which have a yaw) and lineouts (formed along X).
-      if (d.phase === 'SCRUM' && team !== 'REF') {
-        // A pushes toward +Z pitch (theta 0), B toward -Z (theta pi).
-        const want = a.team === 'A' ? 0 : Math.PI;
+      if ((d.phase === 'SCRUM' || d.phase === 'REPLAY') && team !== 'REF') {
+        /* PART 3: the single authored engagement heading — A faces 0, B
+         * faces π — shared with the engine so the pack cannot be pointing
+         * one way in the simulation and another on screen. Hard-set (not
+         * smoothed) once the pack is set: a bound forward has no heading of
+         * his own, and the exponential blend left the last man in still
+         * square to the touchline for half a second. */
+        const want = scrumFacing(a.team as 'A' | 'B');
         let dy = want - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
-        st.face += dy * (1 - Math.exp(-step * 14));
+        st.face = Math.abs(dy) < 0.02 ? want : st.face + dy * (1 - Math.exp(-step * 14));
       }
 
       const desired = this.mapState(a.renderClip, st.spd);
       const locomoting = ['idle', 'walk', 'run', 'sprint'].includes(desired);
+
+      /* PART 1 — release the pass latch the moment the engine leaves the
+       * pass state, so the NEXT pass gets a fresh single shot. */
+      if (desired !== 'pass') st.passLatched = false;
+
+      /* LATCH-AND-DRAG — THE STRUGGLE, BEFORE THE TAKEDOWN.
+       *
+       * This runs BEFORE the tackle timeline below, and deliberately does not
+       * touch `st.tackleT`. The takedown that follows a latch arrives as an
+       * ordinary transition into `tackle`/`grounded`, so the timeline starts
+       * from stage 0 with a normal crossfade and the struggle flows straight
+       * into the impact → grounding → presentation sequence with no seam. */
+      if (desired === 'latchCarry' || desired === 'latchHang') {
+        if (st.oneShot !== desired) {
+          if (desired === 'latchCarry') {
+            /* the carrier keeps churning. A long crossfade out of the sprint
+             * is what sells the loss of pace: he does not snap into the
+             * struggle, he is dragged down into it over a third of a
+             * second. */
+            const a = this.play(inst, 'latchCarry', 0.3, LATCH_CHURN_RATE);
+            a?.setLoop(THREE.LoopRepeat, Infinity);
+          } else {
+            /* the hanger holds the drive pose. LoopOnce + clampWhenFinished
+             * (set in play()) freezes him wrapped around the carrier's
+             * waist, and the engine's coordinate snap does the travelling. */
+            this.play(inst, 'latchHang', 0.12, 1.35);
+          }
+          st.oneShot = desired;
+          st.lock = 0;
+        }
+        st.lie = false;
+        st.passLatched = false;
+        st.tackleRole = null; st.tackleT = -1;
+        inst.proc.state = desired;
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+        inst.root.rotation.y = Math.PI - st.face;
+        inst.mixer.update(step);
+        /* remember where the tackle clip actually got to, so the next stage
+         * can resume from here instead of rewinding to frame 0 */
+        if (inst.active) st.tackleClipT = inst.active.action.time;
+        pending.push(inst);
+        continue;
+      }
+      if (st.oneShot === 'latchCarry' || st.oneShot === 'latchHang') {
+        /* the latch broke or the takedown fired — release the hold so the
+         * branches below own the body again. */
+        st.oneShot = null; st.lock = 0;
+      }
+
+      /* PART 2 — THE TACKLE TIMELINE.
+       *
+       * A tackle used to be one 0.8 s clip fired on the impact frame while
+       * the physics had already zeroed both men: they stopped dead, then
+       * slowly folded over on the spot. It is now a three-stage sequence
+       * driven by a clock that starts on impact and runs alongside the
+       * kinetic-impact window in engine/breakdown.ts. */
+      const tackleSide: 'TACKLER' | 'CARRIER' | null =
+        desired === 'tackle' ? 'TACKLER'
+          : desired === 'grounded' ? 'CARRIER' : null;
+      if (tackleSide && st.tackleRole !== tackleSide) {
+        // fresh collision for this man — restart the sequence
+        st.tackleRole = tackleSide;
+        /* MOMENTUM BRANCH: latch the engine's verdict for this collision now,
+         * so the whole three-stage sequence plays as one kind of hit even if
+         * the breakdown is torn down underneath it mid-fall. */
+        st.standingHit = d.bd?.hitKind === 'STANDING';
+        st.tackleT = 0;
+        st.tackleClipT = 0;
+        st.oneShot = null;
+      } else if (!tackleSide && st.tackleRole) {
+        st.tackleRole = null; st.tackleT = -1;
+      }
+
+      if (st.tackleRole) {
+        const prev = st.tackleT;
+        st.tackleT += step;
+        const stageOf = (t: number) => (t < TACKLE_IMPACT_END ? 0 : t < TACKLE_GROUND_END ? 1 : 2);
+        const wantStage = stageOf(st.tackleT);
+        if (prev < 0 || stageOf(prev) !== wantStage) {
+          const carrier = st.tackleRole === 'CARRIER';
+          const state = wantStage === 0
+            ? (carrier ? 'hitReact' : 'tackleDrive')       // 0.00–0.15 IMPACT
+            : wantStage === 1
+              ? (carrier ? 'carrierFall' : 'tackleGround') // 0.15–0.40 GROUNDING
+              : (carrier ? 'present' : 'rollAway');        // > 0.40 RUCK PREP
+          /* DYNAMIC TIME SCALING — fit the clip to the stage.
+           *
+           * The stage windows are short (IMPACT 0.15 s, GROUNDING 0.25 s) but
+           * the clips are long: Tackle 0.83 s, DiveRoll 1.47 s, Death 2.40 s.
+           * At timeScale 1 each stage showed only the first 10-18% of its
+           * clip and was then cut off mid-motion by the next crossfade — the
+           * man never got as far as the part where he goes to ground, which
+           * is why the grounding read as a fold-in-place. Scaling each clip
+           * by (its duration / its window) makes it play through COMPLETELY
+           * inside the stage, so the mesh reaches the turf exactly as the
+           * engine's kinetic-impact momentum reaches zero. */
+          const win = wantStage === 0
+            ? TACKLE_IMPACT_END
+            : wantStage === 1 ? TACKLE_GROUND_END - TACKLE_IMPACT_END : 0;
+          const prevName = st.oneShot ? this.clipForState(st.oneShot).name : null;
+          const nextName = this.clipForState(state).name;
+          /* A takedown on the spot is a slower, heavier movement than a dive
+           * at 10 m/s. Same clip, stretched, so the two hits do not read as
+           * the same event replayed. */
+          const rate = this.fitTimeScale(state, win) * (st.standingHit ? 0.62 : 1);
+          const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, rate);
+          /* CONTINUE, DO NOT RESTART.
+           *
+           * Stage 0 and stage 1 now resolve to the SAME retargeted clip: one
+           * authentic tackle contains both the drive and the fall, where the
+           * old stand-ins needed a different clip per stage. play() calls
+           * reset(), so without this the stage-1 crossfade would rewind to
+           * frame 0 and replay the wind-up — the man would hit, then wind up
+           * and hit again, never reaching the ground. When the clip is
+           * unchanged across a stage boundary the playhead is carried over so
+           * the motion runs on continuously into the grounding. */
+          if (act && prevName && prevName === nextName) act.time = st.tackleClipT;
+          st.oneShot = state;
+          st.lock = 0;
+        }
+        st.lie = true;
+        inst.proc.state = wantStage === 0
+          ? (st.tackleRole === 'CARRIER' ? 'hitReact' : 'tackleDrive')
+          : wantStage === 1
+            ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
+            : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+        inst.root.rotation.y = Math.PI - st.face;
+        inst.mixer.update(step);
+        pending.push(inst);
+        continue;
+      }
 
       // ---- one-shots & downed sequencing ----
       if (desired === 'tackle' && !st.lie) {
@@ -691,15 +1511,21 @@ export class ThreePlayerManager {
       } else if (desired === 'try' && st.oneShot !== 'tryStart' && st.oneShot !== 'tryLoop') {
         this.play(inst, 'tryStart', 0.1, 1.05);
         st.oneShot = 'tryStart'; st.lock = 0.55;
-      } else if (desired === 'pass' && st.oneShot !== 'pass') {
+      } else if (desired === 'pass' && st.oneShot !== 'pass' && !st.passLatched) {
+        /* PART 1 — fire it once, latch it, hold the final frame. The latch is
+         * what stops a re-trigger on the frames the engine is still reporting
+         * `pass`; it clears above when the state leaves `pass`. */
         this.play(inst, 'pass', 0.1, 1.1);
-        st.oneShot = 'pass'; st.lock = 0.45;
+        st.oneShot = 'pass'; st.lock = 0.45; st.passLatched = true;
       } else if (desired === 'kick' && st.oneShot !== 'kick') {
         this.play(inst, 'kick', 0.12, 1);
         st.oneShot = 'kick'; st.lock = 0.7;
       } else if (desired === 'getup' && st.oneShot !== 'getup') {
-        this.play(inst, 'getup', 0.18, 1);
-        st.oneShot = 'getup'; st.lock = 1.0; st.lie = false;
+        /* Fit the stand-up to the engine's lock so he is upright exactly as
+         * the AI regains control of him — otherwise the clip is cut off
+         * mid-rise and he snaps to a run from a crouch. */
+        this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+        st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
       } else if (desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup')) {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
@@ -716,8 +1542,8 @@ export class ThreePlayerManager {
         if (st.oneShot === 'getup') { /* held until lock expires */ }
         else {
           if (st.lie && st.oneShot !== 'getup') {
-            this.play(inst, 'getup', 0.18, 1);
-            st.oneShot = 'getup'; st.lock = 1.0; st.lie = false;
+            this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+            st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
           } else {
             st.oneShot = null;
             st.lie = false;
@@ -750,11 +1576,28 @@ export class ThreePlayerManager {
       }
 
       // ---- transform: logical pitch -> scaled 3D world ----
+      inst.proc.state = desired;
       inst.root.position.set(a.rx * s, 0, -a.rz * s);
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 
       inst.mixer.update(step);
+      pending.push(inst);
+    }
+
+    /* ---- THE PROCEDURAL PASS ----
+     *
+     * Runs after EVERY man has been sampled, for two reasons. The mixer
+     * overwrites each bone it animates, so the overrides can only be written
+     * afterwards or they are erased the moment they are applied; and the
+     * latch overrides are PAIRED — the tackler's arms are aimed at the
+     * carrier's spine — so the carrier's pose for this frame has to already
+     * exist before the tackler can be pointed at it. Doing it inside the
+     * main loop would aim him at wherever the carrier stood last frame,
+     * which at seven metres a second is a visible hand-lag. */
+    for (const inst of pending) {
+      const partner = this.latchPartner(inst, pending);
+      this.applyProcedural(inst, inst.proc.state, partner, step);
     }
 
     for (const [k, inst] of this.pool) {
@@ -801,9 +1644,15 @@ export class ThreePlayerManager {
 
     this.ball.visible = free.visible || !!carrier;
     if (carrier) {
-      // Attach to the forearm/hand socket bone; its transform then drives the
-      // ball through the carry. Parent root already carries RENDER_SCALE.
-      const hand = this.findBone(carrier.root, 'hand_r') ?? this.findBone(carrier.root, 'hand_l');
+      /* PART 2 (BALL SOCKETING). The ball used to be synced to the 2D
+       * simulation's ground coordinates even while a man was carrying it, so
+       * it slid along the floor beside him. A carried ball is not a simulated
+       * body: its world matrix is OVERRIDDEN by the carrying hand's. Parent
+       * it to the hand bone (Quaternius rig: hand_r, with the forearm and the
+       * left hand as fallbacks) and let the skeleton drive it; the parent
+       * root already carries RENDER_SCALE, so the socket offsets below are in
+       * model metres. */
+      const hand = this.carryBone(carrier);
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
         this.ball.position.set(0, 0.05, 0.03);
@@ -823,6 +1672,21 @@ export class ThreePlayerManager {
       this.ball.parent?.remove(this.ball);
       this.scene.add(this.ball);
     }
+  }
+
+  /**
+   * The carrying-hand socket bone of a player, cached per instance.
+   * Quaternius' rig names the wrist `hand_r`; the forearm (`lowerarm_r`) is
+   * the fallback when a clip's hand track is missing, and the left hand the
+   * last resort.
+   */
+  private carryBone(inst: PlayerInstance): THREE.Bone | null {
+    if (inst.handBone !== undefined) return inst.handBone;
+    const bone = this.findBone(inst.root, 'hand_r')
+      ?? this.findBone(inst.root, 'lowerarm_r')
+      ?? this.findBone(inst.root, 'hand_l');
+    inst.handBone = bone;
+    return bone;
   }
 
   private findBone(root: THREE.Object3D, name: string): THREE.Bone | null {
