@@ -112,6 +112,12 @@ export const LATCH_TRAIL_METRES = 0.5;
  * someone. Metres.
  */
 export const LATCH_DIVE_REACH = 2.4;
+/** How long a committed tackle dive stays in the air before he lands. */
+export const DIVE_FLIGHT_SECONDS = 0.42;
+/** A dive extends his reach: he is stretched out, not standing. */
+export const DIVE_REACH_BONUS = 1.5;
+/** Seconds face-down after a dive that caught nobody. */
+export const DIVE_MISS_RECOVERY = 1.6;
 /** He only dives if he is genuinely closing — metres per second. */
 export const LATCH_DIVE_CLOSING_SPEED = 3.2;
 

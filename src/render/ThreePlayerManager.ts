@@ -911,7 +911,12 @@ export class ThreePlayerManager {
        * Y track — the vertical drop is load-bearing (it is what puts a tackled
        * man on the turf now that the procedural pivot lift is off). */
       case 'grounded': return { name: 'Death', loop: true };
-      case 'dive': return { name: 'SlideStart', loop: false };
+      /* A committed tackle dive is the same horizontal launch as the tackler's
+       * half of a collision, so it uses the retargeted Mixamo tackle rather
+       * than the SlideStart stand-in. A missed dive ends with the engine
+       * setting clip='getup', which picks up MX_StandUp through the get-up
+       * lock — the dive and the consequence are one continuous movement. */
+      case 'dive': return { name: this.pick('MX_Tackle', 'SlideStart'), loop: false };
       case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
       case 'tryStart': return { name: 'SlideStart', loop: false };
       case 'getup': return { name: this.pick('MX_StandUp', 'GetUp'), loop: false };

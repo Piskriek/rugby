@@ -82,6 +82,11 @@ export interface Live {
    * next formation slot while still on the floor — measured at 33% of
    * post-ruck frames moving faster than 3 m/s, peaking at 10 m/s. */
   recoverT?: number;
+  /* THE COMMITTED DIVE. Seconds left of a defender's tackle dive. While it
+   * runs his trajectory is locked (he cannot steer) and his reach is extended;
+   * if it expires without him getting hands on anyone he has missed, and he
+   * pays for it by landing on the floor. 0/undefined when he is on his feet. */
+  diveT?: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:

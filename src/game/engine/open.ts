@@ -21,7 +21,10 @@ import { wetnessOf, windOf, WEATHERS } from './weather';
 import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal, PASS_SPEED } from './throwforward';
 import { approach } from './approach';
 import { clamp } from './clamp';
-import { beginLatch, clearLatch, tickLatch, shouldDive } from './latch';
+import {
+  beginLatch, clearLatch, tickLatch, shouldDive,
+  DIVE_FLIGHT_SECONDS, DIVE_REACH_BONUS,
+} from './latch';
 import {
   anticipates, passIntersection, runOnVelocity, RUN_ON_SPEED_FRACTION,
 } from '../behaviour/backline-echelon';
@@ -472,6 +475,13 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     if (diver && shouldDive(diver, car, tackler1.d, 1.1)) {
       diver.clip = 'dive';
       diver.clipT = 0;
+      /* THE DIVE IS A COMMITMENT. Arming this clock is what turns the leap
+       * from free presentation into a risk: while it runs he cannot steer
+       * (see the lock in think()), his reach is extended, and if it expires
+       * with nobody in his hands he lands face-down and is out of the line.
+       * Measured before this existed: 69% of defender dives missed and the
+       * man simply jogged on, so diving was strictly better than not. */
+      diver.diveT = DIVE_FLIGHT_SECONDS;
       /* he commits his body along the line to the man — the lunge is what
        * carries him the last metre into the radius. */
       const lx = car.x - diver.x, lz = car.z - diver.z;
@@ -486,8 +496,13 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * snap him onto the carrier's hip while tickRecovery held his velocity at
    * zero — two owners for one player, which showed up as a leaked latch
    * frame and 29 stalled drag frames in the probe. */
-  if (tackler1 && tackler1.d < 1.1 && s.protect <= 0
-    && (d.L(dTeam, tackler1.num).recoverT ?? 0) <= 0) {
+  /* A diving man is stretched out, so he reaches further than a standing one:
+   * this is the reward half of the risk. */
+  const t1 = tackler1 ? d.L(dTeam, tackler1.num) : null;
+  const reachRadius = t1 && (t1.diveT ?? 0) > 0 ? 1.1 * DIVE_REACH_BONUS : 1.1;
+  if (tackler1 && tackler1.d < reachRadius && s.protect <= 0
+    && (d.L(dTeam, tackler1.num).recoverT ?? 0) <= 0
+    && (car.recoverT ?? 0) <= 0) {
     const carrierP = car;
     const tackler = d.L(dTeam, tackler1.num);
     const grip = tackler.attrs.PWR;

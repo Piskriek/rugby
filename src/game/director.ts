@@ -66,7 +66,7 @@ import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
 import type { LatchState } from './engine/latch';
-import { inLatch, isLatching, clearLatch } from './engine/latch';
+import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
@@ -493,6 +493,8 @@ const percentile = (values: readonly number[], p: number) => {
 const FORMATION_SAMPLE_SECONDS = 0.25;
 /* The existing no-teleport retreat needs a real, finite settle window before
  * normal formation observations begin. It is not display-clock scaling. */
+/** Most defenders that may abandon the line to chase a break at once. */
+const COVER_CHASE_MAX = 3;
 const OFFSIDE_EPSILON_METRES = 0.35;
 const OFFSIDE_SUSTAINED_SECONDS = 0.30;
 
@@ -1429,6 +1431,7 @@ export class Director {
     /* GET-UP LOCK — runs BEFORE think() so a recovering man is already at zero
      * velocity when the AI is asked where everyone should go, and before
      * placeBound so no phase writer can drag him either. */
+    this.tickDive(dt);
     this.tickRecovery(dt);
     this.think(dt, input);
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
@@ -3008,6 +3011,30 @@ export class Director {
          * not been beaten by. */
         if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
       }
+      /* THE CHASE IS NOT THE WHOLE TEAM.
+       *
+       * Any beaten man within 16 m joined the chase, and because a line break
+       * beats most of a flat line at once that meant up to TWELVE defenders
+       * abandoning their channels together (measured avg 6.9, p90 10). They
+       * converged into one clump around the ball — 30% of open-play frames had
+       * six or more defenders inside 3 m of the carrier, and COVER CHASE was
+       * the job on 50565 of those clustered frames, twice every other cause
+       * combined. That is the honey-pot.
+       *
+       * Real cover defence is two or three men: the nearest chasers plus the
+       * sweeper. Everyone else holds the line and trusts the shape, because a
+       * line that dissolves into a chase concedes the next phase even if this
+       * one is stopped. Keep the closest few and give the rest their channel
+       * back. */
+      if (coverChase.size > COVER_CHASE_MAX) {
+        const ranked = [...coverChase]
+          .map((num) => { const q = this.L(def, num); return { num, d: Math.hypot(q.x - carC.x, q.z - carC.z) }; })
+          .sort((a, b) => a.d - b.d);
+        coverChase.clear();
+        for (const r of ranked.slice(0, COVER_CHASE_MAX)) coverChase.add(r.num);
+      }
+      /* The sweeper never joins a chase — he IS the cover behind it. */
+      coverChase.delete(15);
       const carLat = this.op.carrierX - f.x;
       for (const r of DEFENCE_CHANNELS
         .map((c) => ({ num: c.num, d: Math.abs(c.lat - carLat) }))
@@ -3135,6 +3162,18 @@ export class Director {
        * than 3 m/s. He holds his ground, at zero velocity, for exactly as
        * long as the stand-up animation takes. The timer is decremented in
        * one place (tickRecovery) so nothing here can leak it. */
+      /* AIRBORNE. A committed dive has no steering: he goes where he launched.
+       * Leaving him steerable let the AI curve him onto the carrier in mid-air,
+       * which is what made diving free — the whole risk is that a good runner
+       * can step inside the trajectory and leave him grasping. */
+      if ((p.diveT ?? 0) > 0) {
+        this.writeThinkPlayer(gate, `think:diving:${p.team}${p.num}`, p,
+          ['urgency', 'job'] as const, () => {
+            p.urgency = 0;
+            p.job = 'COMMITTED — HE HAS LEFT HIS FEET';
+          });
+        continue;
+      }
       if ((p.recoverT ?? 0) > 0) {
         this.writeThinkPlayer(gate, `think:recovering:${p.team}${p.num}`, p,
           ['urgency', 'job', 'tx', 'tz'] as const, () => {
@@ -4005,6 +4044,56 @@ export class Director {
    * Velocity is hard-zeroed here rather than trusted to the steering, so no
    * later writer can slide a man who is still on the floor.
    */
+  /**
+   * Run the committed-dive clock. A diving defender is airborne: he keeps the
+   * velocity he launched with, he cannot steer, and when he lands he has
+   * either got hands on someone or he has missed and eats dirt.
+   *
+   * Runs before think() for the same reason tickRecovery does — so a man who
+   * has just landed is already locked when the AI is asked where he should go.
+   */
+  tickDive(dt: number) {
+    /* A dive only exists inside open play. Once a breakdown, a set piece or a
+     * whistle has taken over, the phase owns the player — `latch` and `bound`
+     * were both writing airborne men (928 and 698 frames), which is what made
+     * the "locked trajectory" test report 177 deg of drift. Landing the dive
+     * here also stops the miss penalty firing on a man who is already in a
+     * ruck, which accounted for every unpunished miss. */
+    if (this.phase !== 'OPEN_PLAY') {
+      for (const p of this.live) {
+        if ((p.diveT ?? 0) > 0) {
+          p.diveT = 0;
+          if (p.clip === 'dive') { p.clip = 'ready'; p.clipT = 0; }
+        }
+      }
+      return;
+    }
+    for (const p of this.live) {
+      const t = p.diveT ?? 0;
+      if (t <= 0) continue;
+      /* hands on already: the dive did its job, land him without penalty */
+      if (p.latchingOnto) {
+        p.diveT = 0;
+        if (p.clip === 'dive') { p.clip = 'ready'; p.clipT = 0; }
+        continue;
+      }
+      const left = t - dt;
+      if (left > 0) { p.diveT = left; continue; }
+      p.diveT = 0;
+      /* HANDS ON? The latch is the only success condition — it is what the
+       * dive was for. Anything else is a miss. */
+      if (p.latchingOnto) { if (p.clip === 'dive') { p.clip = 'ready'; p.clipT = 0; } continue; }
+      /* MISSED. He is on the floor and out of the defensive line until he is
+       * back on his feet — the cost that makes diving a decision rather than
+       * a free action. Reuses the get-up lock so there is ONE way to be down
+       * and getting up, rather than two subtly different ones. */
+      p.recoverT = DIVE_MISS_RECOVERY;
+      p.vx = 0; p.vz = 0;
+      p.clip = 'getup'; p.clipT = 0;
+      p.beatenT = Math.max(p.beatenT, 0.4);   // cannot instantly re-tackle
+    }
+  }
+
   tickRecovery(dt: number) {
     /* The lock is an OPEN-PLAY concept. Every other phase either pins players
      * itself (scrum, lineout, kick, maul) or is walking them to a mark, and a
