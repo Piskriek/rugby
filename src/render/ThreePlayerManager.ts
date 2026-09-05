@@ -211,15 +211,14 @@ export class ThreePlayerManager {
       const jAttr = (geo.attributes.skinIndex ?? (geo.attributes as Record<string, THREE.BufferAttribute>).joints0) as THREE.BufferAttribute | undefined;
       const wAttr = (geo.attributes.skinWeight ?? (geo.attributes as Record<string, THREE.BufferAttribute>).weights0) as THREE.BufferAttribute | undefined;
       const skel = body.skeleton;
+      const index = geo.index;
 
-      // Bug-fix #5b: clamp cross-foot weight bleed. A vertex weighted to BOTH
-      // feet stretches between them as the stride opens. Snap each foot/toe
-      // vertex fully to its dominant foot, and zero a limb's opposite-side
-      // bone weight so a left-foot vertex can never ride the right foot.
-      this.sanitizeFootWeights(skel, jAttr, wAttr);
+      // Cross-leg weight bleed fix (see sanitizeLegWeights): a calf/foot vertex
+      // weighted to the opposite-side ankle stretches across the stride.
+      this.sanitizeLegWeights(skel, jAttr, wAttr);
 
-      // Bucket every vertex by the region of its dominant-weight bone.
-      const buckets = new Map<Slot, number[]>();
+      // Region of each source vertex from its dominant-weight bone.
+      const vtxSlot: Slot[] = new Array(pos.count);
       for (let vi = 0; vi < pos.count; vi++) {
         let slot: Slot = 'jersey';
         if (jAttr && wAttr) {
@@ -231,13 +230,33 @@ export class ThreePlayerManager {
           const bName = skel.bones[best]?.name ?? '';
           slot = boneRegion(bName, restY.get(bName) ?? 1);
         }
-        if (!buckets.has(slot)) buckets.set(slot, []);
-        buckets.get(slot)!.push(vi);
+        vtxSlot[vi] = slot;
       }
 
-      // Build one SkinnedMesh per region, remapping vertices compactly and
-      // keeping the skeleton + bind matrix identical to the source mesh so
-      // every clip skins the recoloured regions exactly as the original.
+      // Walk TRIANGLES and assign each whole triangle to one region (majority
+      // of its three vertices). The body mesh is INDEXED; the old path filtered
+      // the vertex buffer and emitted it as triangle soup, which discarded the
+      // index buffer and scrambled connectivity — that left the holes/gaps in
+      // the characters. Emitting per-triangle vertices (duplicating shared
+      // verts) keeps every region mesh watertight with correct normals/weights.
+      const triCount = index ? index.count / 3 : pos.count / 3;
+      const srcIdx = (n: number) => (index ? index.getX(n) : n);
+      const buckets = new Map<Slot, number[]>();
+      for (let t = 0; t < triCount; t++) {
+        const a = srcIdx(t * 3), b = srcIdx(t * 3 + 1), c = srcIdx(t * 3 + 2);
+        const sa = vtxSlot[a], sb = vtxSlot[b], sc = vtxSlot[c];
+        // majority region; a boundary triangle goes to whichever region owns
+        // at least two of its verts (ties fall back to the first vert).
+        let slot: Slot = sa;
+        if (sb === sc) slot = sb;
+        else if (sa === sb || sa === sc) slot = sa;
+        if (!buckets.has(slot)) buckets.set(slot, []);
+        buckets.get(slot)!.push(a, b, c);
+      }
+
+      // Build one SkinnedMesh per region from the triangle soup, keeping the
+      // skeleton + bind matrix identical to the source so every clip skins the
+      // recoloured regions exactly as the original.
       const bindMatrix = body.bindMatrix.clone();
       const bindMode = body.bindMode;
       const parent = body.parent!;
@@ -309,40 +328,63 @@ export class ThreePlayerManager {
   }
 
   /**
-   * Bug-fix #5b: remove cross-foot skinning bleed. For every vertex whose
-   * dominant bone is a foot/toe, (a) snap it entirely to that one foot and
-   * (b) zero any weight on the opposite-side foot bones. Mutates the
-   * geometry attributes in place before the region split.
+   * Remove cross-leg skinning bleed. The authored rig leaves stray weights on
+   * the opposite leg (e.g. a left-calf vertex weighted a few percent to the
+   * right ankle); as the stride opens that vertex is torn across the body and
+   * a single point stretches between the feet / sticks a calf to the far
+   * ankle. For any vertex whose dominant influence is a LEFT or RIGHT leg
+   * bone, drop every weight on the opposite side's leg bones (thigh, calf,
+   * foot, toe) and renormalise so the remaining (same-side + shared hip/
+   * spine) weights sum to 1. The pelvis/spine are shared midline bones and
+   * are intentionally kept, so the hip still bends naturally.
    */
-  private sanitizeFootWeights(
+  private sanitizeLegWeights(
     skel: THREE.Skeleton,
     jAttr: THREE.BufferAttribute | undefined,
     wAttr: THREE.BufferAttribute | undefined,
   ) {
     if (!jAttr || !wAttr) return;
-    const idx: Record<string, number> = {};
-    skel.bones.forEach((b, i) => { idx[b.name] = i; });
-    const footL = ['foot_l', 'ball_l', 'ball_leaf_l'].map((n) => idx[n]).filter((n) => n !== undefined);
-    const footR = ['foot_r', 'ball_r', 'ball_leaf_r'].map((n) => idx[n]).filter((n) => n !== undefined);
-    const isFoot = (bi: number, side: 'l' | 'r') =>
-      (side === 'l' ? footL : footR).includes(bi);
+    // 'L' = left leg bone, 'R' = right leg bone, null = midline/upper body.
+    const legSide: Record<number, 'L' | 'R' | null> = {};
+    const classify = (name: string): 'L' | 'R' | null => {
+      if (/_(thigh|calf|foot|ball)_[lr]$/.test(name)) return name.endsWith('_l') ? 'L' : 'R';
+      if (/^ball_leaf_[lr]$/.test(name)) return name.endsWith('_l') ? 'L' : 'R';
+      return null;
+    };
+    skel.bones.forEach((b, i) => { legSide[i] = classify(b.name); });
+
     for (let vi = 0; vi < jAttr.count; vi++) {
-      // dominant bone
+      // dominant bone determines which leg this vertex belongs to
       let dom = 0, domW = -1;
       for (let k = 0; k < 4; k++) {
         const w = wAttr.getComponent(vi, k);
         if (w > domW) { domW = w; dom = jAttr.getComponent(vi, k); }
       }
-      const dName = skel.bones[dom]?.name ?? '';
-      const side = /_(l|leaf_l)$/.test(dName) || dName.endsWith('_l') ? 'l'
-        : /_(r|leaf_r)$/.test(dName) || dName.endsWith('_r') ? 'r' : null;
-      if (!side || !isFoot(dom, side)) continue;
-      // This vertex belongs to a foot. Rebuild weights: keep the dominant foot
-      // at 1.0, null the other three slots (kills opposite-foot bleed).
-      for (let k = 0; k < 4; k++) jAttr.setComponent(vi, k, 0);
-      for (let k = 0; k < 4; k++) wAttr.setComponent(vi, k, 0);
-      jAttr.setComponent(vi, 0, dom);
-      wAttr.setComponent(vi, 0, 1);
+      const side = legSide[dom];
+      if (!side) continue;   // not a leg vertex
+
+      // zero weights on the OPPOSITE leg's bones, keep the rest
+      let sum = 0;
+      for (let k = 0; k < 4; k++) {
+        const bi = jAttr.getComponent(vi, k);
+        let w = wAttr.getComponent(vi, k);
+        if (legSide[bi] && legSide[bi] !== side) { w = 0; wAttr.setComponent(vi, k, 0); }
+        sum += w;
+      }
+      // renormalise the surviving weights
+      if (sum > 1e-4) {
+        for (let k = 0; k < 4; k++) {
+          const bi = jAttr.getComponent(vi, k);
+          if (legSide[bi] && legSide[bi] !== side) continue;
+          wAttr.setComponent(vi, k, wAttr.getComponent(vi, k) / sum);
+        }
+      } else {
+        // all weights were cross-leg (degenerate): pin fully to the dominant
+        // same-side bone.
+        for (let k = 0; k < 4; k++) { jAttr.setComponent(vi, k, 0); wAttr.setComponent(vi, k, 0); }
+        jAttr.setComponent(vi, 0, dom);
+        wAttr.setComponent(vi, 0, 1);
+      }
     }
     jAttr.needsUpdate = true;
     wAttr.needsUpdate = true;
