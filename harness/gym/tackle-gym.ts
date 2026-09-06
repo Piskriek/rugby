@@ -238,7 +238,7 @@ async function main(): Promise<number> {
 
   console.log('=== TARCS HEADLESS TACKLE STRESS GYM ===');
   console.log(`physics          Rapier3D (WASM, no Three.js / DOM)`);
-  console.log('solver           numSolverIterations=8 numInternalPgsIterations=2 ccdSubsteps=8');
+  console.log('solver           numSolverIterations=4 numInternalPgsIterations=1 ccdSubsteps=4');
   console.log('                 normalizedAllowedLinearError=0.0001 predictionDistance=0.1');
   console.log(`collision groups PLAYER=${PhysicsGroup.PLAYER} PITCH=${PhysicsGroup.PITCH} BALL=${PhysicsGroup.BALL}`);
   console.log('mass dist        hips=32 chest=32 arm=1.5 thigh=2 calf=1.5 kg');

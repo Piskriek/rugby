@@ -195,11 +195,11 @@ export class RapierWorld {
      * 5 cm of overlap (measured: even 8/2 iterations give a 12 cm first-impact
      * chest overlap at 12 m/s unless predictive contacts start further out;
      * predictionDistance 0.1 leaves the worst contact at ~2 cm). */
-    world.integrationParameters.numSolverIterations = 8;
-    world.integrationParameters.numInternalPgsIterations = 2;
+    world.integrationParameters.numSolverIterations = 4;
+    world.integrationParameters.numInternalPgsIterations = 1;
     world.integrationParameters.normalizedAllowedLinearError = 0.0001;
     world.integrationParameters.normalizedPredictionDistance = 0.1;
-    world.integrationParameters.maxCcdSubsteps = 8;
+    world.integrationParameters.maxCcdSubsteps = 4;
     return wrapped;
   }
 
