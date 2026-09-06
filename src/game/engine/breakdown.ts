@@ -69,6 +69,28 @@ const RUCK_AXES = {
  * do not wear out from an ordinary shove. */
 const TACKLE_BREAK_N = 15000, TACKLE_BREAK_NM = 1500;
 const RUCK_BREAK_N = 13000, RUCK_BREAK_NM = 1300;
+/* SUSTAINED HANDS — how long the defence must hold the ball below −0.5
+ * before the law gives the jackal a rip. 0.85 s is a real beat: a set
+ * jackal earns it, a rush that never set cannot. */
+const SUSTAINED_HANDS_SECONDS = 0.85;
+/* RIP_BASE — the probability a rip attempt converts with the numbers on
+ * the jackal's side (defence outnumbers the attack). The density
+ * multiplier halves it when the attack's support counts equal his. A
+ * failed rip releases him: no second bite, the referee paces it. */
+const RIP_BASE = 1.0;
+/* A pile in motion (the drive, a bind collapse) moves the hindmost-foot
+ * line with it. Above this body speed the ruck is "moving" for the offside
+ * measurement: a man a frame past a lurching line is a lurch, not a breach. */
+const RUCK_PILE_MOTION_M_S = 1.0;
+
+/** Attacking arrival density at the ruck: the attack's support count vs the
+ *  defence's contesting jackals. When the attack has at least as many bodies
+ *  in the pile as the defence, the clearout is on the jackal — his rip
+ *  attempt is HALF as likely to stick. Outnumbered support does not scale
+ *  the roll: a set jackal either rips it or he does not. */
+function jackalDensityMul(s: BreakdownState): number {
+  return s.crew.length >= s.defCrew.length ? 0.5 : 1;
+}
 
 function bodyMass(p: { attrs: { PWR: number } }): number {
   return 88 + p.attrs.PWR * 0.22;   // 88-115 kg, heavier props push heavier
@@ -402,7 +424,14 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
    * Legality is the gate: a man beyond his offside line pushes nothing. */
   if (s.stage === 'RUCK' && s.groundAt >= 0) {
     const fwd = s.attacking === 'A' ? 1 : -1;
-    const atkLine = s.contactZ - fwd * 1.0;
+    /* Law 16 — the offside lines RIDE THE BALL: the contest pile moves up to
+     * a metre while it is driven, and a line pinned to the breakdown's fixed
+     * contact mark puts the winning clearout offside the moment it shoves
+     * (measured atkF=0 on every re-clear, which deadlocked the ruck to the
+     * 3 s clock). The hindmost foot moves with the ball body the lattice
+     * solves. */
+    const ballZ = d.latches.byKind('BALL')?.z ?? s.contactZ;
+    const atkLine = ballZ - fwd * 1.0;
 
     const sideForce = (nums: number[], team: 'A' | 'B') => {
       let f = 0;
@@ -418,7 +447,13 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
          * enforces it there); a man through the gate pushes nothing. */
         if (team === s.attacking) {
           if ((p.z - atkLine) * fwd > 0.4) continue;
-        } else if ((s.contactZ - p.z) * fwd > 0.3) continue;
+        } else if ((ballZ - p.z) * fwd > 0.3) continue;
+        /* T-80 — a RELEASED jackal is not a contestant: the referee told
+         * him to roll away, so he stops pushing (his hands, his weight and
+         * his shove all leave the contest). Without this the force model
+         * re-drove the axis back on top after a failed rip and the ruck
+         * deadlocked on the 3 s clock. */
+        if (team !== s.attacking && !s.jackalActive && n === s.defCrew[0]) continue;
         const dist = Math.hypot(p.x - s.contactX, p.z - s.contactZ);
         /* Playtest P2.6/P2.8: the human ruck won itself — the 1.32 attack
          * quality is a CPU-model constant (it prices the committed CPU
@@ -467,7 +502,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * carrier — no hip rider within three metres — loses that race; a
      * supported one never sees it. This is where breakdown turnovers are
      * earned, not rolled. */
-    const jackalRush = 1 + 1.0 * Math.max(0, 1 - s.contestT / 1.0);
+    const jackalRush = 1 + 1.0 * Math.max(0, 1 - s.contestT / 1.3);
     const defFactor = (0.78 + diff.reaction * 0.22)
       * (1 + (jackal ? jackal.attrs.AWA : 40) / 350)
       * (s.commitA <= 1 ? 1.22 : 1)    // a one-man ruck is a stealable ruck
@@ -501,6 +536,12 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
     s.axisVel += net * recover * dt;
     s.axisVel *= Math.exp(-0.8 * dt);
     s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
+    /* T-80 — once the referee releases the jackal the contest is decided:
+     * the ball is the attack's to play and no defensive shove can take it
+     * back. Without this floor a released jackal's counters re-drove the
+     * axis to −1.0 and the ruck deadlocked to the 3 s clock (the post-rip
+     * STALL burst). The attack wins it on the next clear. */
+    if (!s.jackalActive) s.axis = Math.max(s.axis, -0.2);
     /* `contestMeter` is written by the latch pass (the physical net force);
      * the axis above is the resolution model the thresholds read. */
     /* SUSTAINED HANDS — the second steal path. A defence that holds the ball
@@ -509,25 +550,46 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * his weight past the ball. An instant dip to −0.75 is a rip (the
      * numbers path below); this is a grind-out, and both are steals.
      * The numbers call stays law-true: with equal or more men over the ball
-     * a set jackal may take it; a man alone in there only slows it. */
-      if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
-    if (s.axis <= -0.6 && s.redT >= 0.6 && s.jackalActive
-      && s.defCrew.length >= s.crew.length && s.stage === 'RUCK') {
-      d.teams[dTeam].stats.turnovers++;
-      if (jackal) { d.run(dTeam, jackal.num).jackals++; d.teams[dTeam].stats.jackals++; }
-      d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
-      d.commentate('TURNOVER');
-      s.resultWhy = `JACKAL WON — SUSTAINED HANDS ACROSS THE BALL, AXIS ${s.axis.toFixed(2)}`;
-      d.clearRuck();
-      d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
-      return;
+     * a set jackal may take it; a man alone in there only slows it.
+     * T-80: the rip is ONE ATTEMPT per breakdown, and the attempt is scaled
+     * by the attacking arrival density — a clearout already on the jackal
+     * halves the chance the hold converts; outnumbered, a set jackal rips
+     * it outright (the roll is the density multiplier, not a coin flip on
+     * top of the law). A failed rip is not a second chance: the referee
+     * manages it (use-it / not-releasing), and the attack's clearout time
+     * is what it earned. */
+    if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
+    if (s.axis <= -0.6 && s.redT >= SUSTAINED_HANDS_SECONDS && s.jackalActive
+      && s.defCrew.length >= s.crew.length && s.stage === 'RUCK' && !s.stealAttempted) {
+      s.stealAttempted = true;
+      if (R() < RIP_BASE * jackalDensityMul(s)) {
+        d.teams[dTeam].stats.turnovers++;
+        if (jackal) { d.run(dTeam, jackal.num).jackals++; d.teams[dTeam].stats.jackals++; }
+        d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
+        d.commentate('TURNOVER');
+        s.resultWhy = `JACKAL WON — SUSTAINED HANDS ACROSS THE BALL, AXIS ${s.axis.toFixed(2)}`;
+        d.clearRuck();
+        d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
+        return;
+      }
+      /* The jam failed: the clearout broke his grip. The referee tells him
+       * to release — he is done for this breakdown (no second bite, the
+       * law's "release or the ball goes"), the attack re-clears the pile
+       * and the contest resolves cleanly. The re-clear wins the axis back:
+       * the ball was on his side only while he had hands on it. */
+      s.jackalActive = false;
+      s.redT = 0;
+      s.axis = Math.max(s.axis, -0.3);
     }
 
     /* defence on top → the not-releasing hazard rises with their dominance
      * (the attack is the side holding the man off the ball). The old roll
-     * fired once per ruck regardless of the contest; this one is honest. */
+     * fired once per ruck regardless of the contest; this one is honest.
+     * T-80 ledger: this is a PENALTY, not a turnover — the defence did not
+     * win the ball, so the turnover stat must not move (the audit's
+     * outcome line used to read these as steals and the ruck ledger was
+     * inflated by it). */
     if (s.axis < -0.45 && R() < dt * 0.05) {
-      d.teams[dTeam].stats.turnovers++;
       s.resultWhy = `NOT RELEASING — THE DEFENCE HAD THE UPPER HAND (AXIS ${s.axis.toFixed(2)})`;
       d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
       return;
@@ -567,23 +629,50 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * lone jackal cannot steal, he can only slow the ball — and holding on
      * alone is how hands-in penalties happen. The old gate was force-only,
      * so the CPU stole automatically and the rule was invisible. */
-    else if (s.axis <= -0.75 && s.defCrew.length > s.crew.length) {
-      s.axis = Math.min(s.axis, -0.75);
-      if (s.jackalActive && jackal) {
-        d.teams[dTeam].stats.turnovers++;
-        d.run(dTeam, jackal.num).jackals++;
-        d.teams[dTeam].stats.jackals++;
-        d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
-        d.commentate('TURNOVER');
-        s.resultWhy = `JACKAL WON — ${d.teams[dTeam].nation.short} SHOVED IT BACK, FORCE ${(defF / 100).toFixed(1)} v ${(atkF / 100).toFixed(1)} kN`;
-        d.clearRuck();
-        d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
-        return;
+    else if (s.axis <= -0.75) {
+      /* T-80 — one jackal rip per breakdown, shared with sustained hands:
+       * a failed poach is not a second bite at the ball. When the defence
+       * outnumbers the attack the density multiplier is 1 (the roll is
+       * exactly the numbers call the PLAYTEST 3 rule asked for). When the
+       * numbers are AGAINST him, a jackal has hands on but can never take
+       * it — the referee releases him and the attack re-clears, instead of
+       * the contest deadlocking to the 3 s clock. */
+      if (s.defCrew.length > s.crew.length && !s.stealAttempted) {
+        s.stealAttempted = true;
+        s.axis = Math.min(s.axis, -0.75);
+        if (s.jackalActive && jackal && R() < RIP_BASE * jackalDensityMul(s)) {
+          d.teams[dTeam].stats.turnovers++;
+          d.run(dTeam, jackal.num).jackals++;
+          d.teams[dTeam].stats.jackals++;
+          d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
+          d.commentate('TURNOVER');
+          s.resultWhy = `JACKAL WON — ${d.teams[dTeam].nation.short} SHOVED IT BACK, FORCE ${(defF / 100).toFixed(1)} v ${(atkF / 100).toFixed(1)} kN`;
+          d.clearRuck();
+          d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
+          return;
+        }
+        /* The rip was beaten off — the jackal is released (same law as the
+         * sustained-hands path: one attempt), the shove is over and the
+         * attack gets the re-clear: the ball comes back off his side. */
+        s.jackalActive = false;
+        s.redT = 0;
+        s.axis = Math.max(s.axis, -0.3);
+      } else if (s.jackalActive && s.defCrew.length < s.crew.length && s.redT >= SUSTAINED_HANDS_SECONDS) {
+        /* The numbers are AGAINST him (a man alone in there, or a crew that
+         * outnumbers him): he may slow the ball, never take it. After the
+         * same sustained beat the law lets the referee tell him to release —
+         * the ball comes back and the attack re-clears, instead of the
+         * contest deadlocking to the 3 s clock. Equal numbers never take
+         * this path: the sustained-hands attempt above is his by law. */
+        s.jackalActive = false;
+        s.redT = 0;
+        s.axis = Math.max(s.axis, -0.3);
       }
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
-       * other phase. */
-      if (R() < 0.02 + (d.slider(atk, 'aggression') / 100) * 0.02) {
+       * other phase. Per-second, not per-frame: a hazard that rolls 2-4%
+       * every 16 ms is a lottery, 2-4% a second is the referee's whistle. */
+      if (R() < dt * (0.02 + (d.slider(atk, 'aggression') / 100) * 0.02)) {
         s.resultWhy = `NOT RELEASING — THE JACKAL HELD UNDER THE SHOVE (AXIS ${s.axis.toFixed(2)})`;
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
@@ -601,20 +690,29 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * sustained breach. The writer owns the `offsides` stat; the physical
      * walk-back below remains a no-teleport formation correction. Name the
      * reason for the audit/handoff ledger (the whistle owns the stat, the
-     * breakdown owns the narrative). */
-    if (d.sampleFormedRuckOffside(s, dt)) {
+     * breakdown owns the narrative).
+     * T-80: while the pile is MOVING (the drive, a bind collapse), the
+     * hindmost-foot line moves with the bodies — a defender a frame past a
+     * lurching line is a lurch, not a breach. Suspend the sustained clock so
+     * only a breach held against a still pile can whistle. */
+    const pileMoving = d.latches.bodies.some(
+      (q) => Math.hypot(q.vx, q.vz) > RUCK_PILE_MOTION_M_S,
+    );
+    if (d.sampleFormedRuckOffside(s, dt, pileMoving)) {
       s.resultWhy = 'OFFSIDE AT THE RUCK — THE DEFENCE NEVER WENT BACK';
       return;
     }
     const fwd = s.attacking === 'A' ? 1 : -1;
-    const atkLine = s.contactZ - fwd * 1.0;
+    const ballZ0 = d.latches.byKind('BALL')?.z ?? s.contactZ;
+    const atkLine = ballZ0 - fwd * 1.0;
     /* T-18. The hindmost foot is the LAW, but a defender does not set a
      * tackle standing on it — the guard comes from two metres behind the
      * line, arriving as the carrier does. With the guard on the foot
      * itself the carrier was contacted the frame he caught a flat ball,
      * every phase lost a metre and a half, and attacks marched slowly
-     * backwards out of the red zone. */
-    const defLine = s.contactZ + fwd * 3.0;
+     * backwards out of the red zone. Same Law 16 rule as the contest above:
+     * the line rides the ball body the lattice is solving. */
+    const defLine = ballZ0 + fwd * 3.0;
     const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
     for (const p of d.live) {
       if (p.sinbin > 0 || p.down) continue;
@@ -848,7 +946,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     power: { A: 40 + d.L(atk, 8).attrs.PWR * 0.5, B: 40 + d.L(dTeam, 7).attrs.PWR * 0.5 },
     window: 0, result: '', resultWhy: '',
     contestMeter: 0.5, meterDir: 1, meterOn: false, waggle: 0,
-    commitA, commitB: 2, advantageOf: 0,
+    commitA, commitB: 2, advantageOf: 0, stealAttempted: false,
     axis: 0, axisVel: 0, contestT: 0, redT: 0,
   };
   d.phase = 'BREAKDOWN';

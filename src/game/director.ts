@@ -255,6 +255,8 @@ export interface BreakdownState {
   players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean; mx?: number; mz?: number }[];
   /** T-80 — spring-bind fend-offs counted this breakdown. */
   latchedBreaks?: number;
+  /** T-80 — the jackal has used his one rip attempt (density-scaled). */
+  stealAttempted?: boolean;
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck
@@ -1285,10 +1287,19 @@ export class Director {
     direction: number,
     candidates: Live[],
     dt: number,
+    pileMoving = false,
   ) {
     /* A newly formed ruck/reset is a real walk-back transition. Start the
      * sustained-breach clock only after that fixed engine-time allowance. */
     if (this.t - window.openedAt < FORMATION_RESET_SETTLE_SECONDS) return false;
+    /* T-80 — a pile in motion (the drive, a bind collapse) carries the
+     * hindmost-foot line with it. Reset the sustained clocks so a breach is
+     * only accumulated against a still pile: a man a frame past a lurching
+     * line is the pile moving, not him offside. */
+    if (pileMoving) {
+      window.tracks.clear();
+      return false;
+    }
     const seen = new Set<number>();
     let worst: { player: Live; penetration: number } | null = null;
     for (const p of candidates) {
@@ -1328,7 +1339,7 @@ export class Director {
    * The legal line is the engine's declared hindmost defending ruck slot, not
    * the intentionally deeper 3 m defensive guard target used for positioning.
    */
-  sampleFormedRuckOffside(s: BreakdownState, dt: number) {
+  sampleFormedRuckOffside(s: BreakdownState, dt: number, pileMoving = false) {
     const window = this.startRuckOffsideWindow(s);
     const fwd = s.attacking === 'A' ? 1 : -1;
     const defenders = s.players.filter((q) => q.team === window.defending);
@@ -1344,7 +1355,7 @@ export class Director {
       }
       this.pendingTargetSlotSample = { token: window.token, defending: window.defending, kind: 'RUCK' };
     }
-    const whistle = this.evaluateOffsideWindow(window, s.attacking, legalLineZ, fwd, candidates, dt);
+    const whistle = this.evaluateOffsideWindow(window, s.attacking, legalLineZ, fwd, candidates, dt, pileMoving);
     if (whistle && this.pendingTargetSlotSample?.token === window.token) this.pendingTargetSlotSample = null;
     return whistle;
   }
