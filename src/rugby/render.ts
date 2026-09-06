@@ -304,7 +304,7 @@ function drawBall(ctx: CanvasRenderingContext2D, view: View, cam: Camera, sim: R
 
 /** drawMinimap — tactical radar in the top-right corner */
 export function drawMinimap(ctx: CanvasRenderingContext2D, view: View, sim: RugbySim, ctrlId: number) {
-  const W = 150, H = 106, PX = view.w - W - 12, PY = 12;
+  const W = 150, H = 106, PX = view.w - W - 12, PY = 96;   // below the performance HUD
   const fx = (x: number) => PX + ((x + DEAD_X) / (DEAD_X * 2)) * W;
   const fy = (y: number) => PY + ((y + TOUCH_Y) / (TOUCH_Y * 2)) * H;
 

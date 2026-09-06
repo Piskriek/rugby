@@ -19,6 +19,7 @@ import { SpatialGrid } from './spatial';
 import { plan } from './ai';
 import { SET_PLAYS, commentaryPair } from './design';
 import type { SetPlay, PlayBias } from './design';
+import { Breakdown } from './breakdown';
 
 const G = 9.8;
 
@@ -65,6 +66,8 @@ export class RugbySim {
   lineout: LineoutState | null = null;
   kick: KickState | null = null;
   trySide: Side | null = null;      // who just scored, awaiting conversion
+  /** the pre-simulated breakdown (tackle → clearout → ball out) */
+  breakdown: Breakdown | null = null;
 
   adv: { side: Side; t: number } | null = null;
 
@@ -125,26 +128,26 @@ export class RugbySim {
     return { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, owner: null, last: null, spin: 0, flight: 0, forwardTouch: false, trail: [] };
   }
 
-  private say(text: string, side: Side | null = null, text2?: string) {
+  public say(text: string, side: Side | null = null, text2?: string) {
     this.feed.unshift({ t: this.clock, text, text2, side });
     if (this.feed.length > 40) this.feed.pop();
     this.msg = text;
   }
 
   /** The two-hander: a McLaren/Beaumont pair for a named moment. */
-  private sayPair(key: string, side: Side | null = null) {
+  public sayPair(key: string, side: Side | null = null) {
     const [a, b] = commentaryPair(key, this.rng());
     this.say(a, side, b);
   }
 
   /** A factual headline (with the score, the shirt, the call) plus the
    * Beaumont banter as the second voice. */
-  private sayWithBanter(key: string, headline: string, side: Side | null = null) {
+  public sayWithBanter(key: string, headline: string, side: Side | null = null) {
     const [, b] = commentaryPair(key, this.rng());
     this.say(headline, side, b);
   }
 
-  private count(k: string) { this.counts[k] = (this.counts[k] ?? 0) + 1; }
+  public count(k: string) { this.counts[k] = (this.counts[k] ?? 0) + 1; }
 
   /** AWARENESS with the GENERAL trait applied: nearby teammates get +8. */
   awa(p: Player): number {
@@ -190,7 +193,7 @@ export class RugbySim {
       case 'DROP_KICK': this.stepKick(dt, held); break;
       case 'PLACE_KICK': this.stepKick(dt, held); break;
       case 'OPEN': this.stepOpen(dt, held, pressed); break;
-      case 'RUCK': this.stepRuck(dt); break;
+      case 'RUCK': this.breakdown ? this.breakdown.step(this, dt) : this.stepRuck(dt); break;
       case 'MAUL': this.stepMaul(dt); break;
       case 'SCRUM': this.stepScrum(dt); break;
       case 'LINEOUT': this.stepLineout(dt); break;
@@ -380,7 +383,7 @@ export class RugbySim {
     }
   }
 
-  private steer(p: Player, tx: number, ty: number, spd: number, dt: number) {
+  public steer(p: Player, tx: number, ty: number, spd: number, dt: number) {
     const d = dist(p.x, p.y, tx, ty);
     if (d > 0.05) {
       const want = Math.atan2(ty - p.y, tx - p.x);
@@ -398,7 +401,7 @@ export class RugbySim {
     p.vy = Math.sin(p.face) * targetV;
   }
 
-  private integrate(dt: number) {
+  public integrate(dt: number) {
     for (const p of this.all) {
       if (p.bind >= 0 || p.down > 0) { p.vx *= 0.5; p.vy *= 0.5; }
       p.x += p.vx * dt;
@@ -705,30 +708,32 @@ export class RugbySim {
       this.count('tackle');
       if (this.rng() < 0.12) this.sayPair('BIG_HIT', d.side);
       else this.say(`${d.name} brings down ${c.name}`, d.side);
-      // offload before the ground (skill + support)
+      // offload before the ground (skill + support) — a real offload is a
+      // rarity, not every third tackle: the breakdown is the default
       const support = this.team(c.side).players.find((q) => q !== c && q.down <= 0 && dist(q.x, q.y, c.x, c.y) < 3.2);
-      if (support && this.rng() < 0.2 + (c.att.skl / 100) * 0.22) {
+      if (support && this.rng() < 0.06 + (c.att.skl / 100) * 0.14) {
         this.ball.owner = support.id; this.ball.last = support.id;
         this.ball.z = 0.9; this.ball.vx = 0; this.ball.vy = 0; this.ball.forwardTouch = false;
         this.say(`Offload! ${c.name} to ${support.name}`, c.side);
         this.count('offload');
         return;
       }
-      // otherwise the ball is presented at the tackle: a ruck if support is
-      // there, a genuine turnover chance if not. Only a rare knock-on in the
-      // contact is whistled — clean recycling beats a loose-ball scramble.
+      // otherwise the ball goes to ground and the pre-simulated breakdown
+      // owns everything from here: placement, the jackal, the clearout, and
+      // how the ball comes out. Only a rare knock-on in the contact is
+      // whistled — clean recycling beats a loose-ball scramble.
       this.ball.owner = null; this.ball.last = c.id;
       this.ball.x = c.x; this.ball.y = c.y; this.ball.z = 0.2;
       this.ball.vx = 0; this.ball.vy = 0;
-      if (this.rng() < 0.1) {
+      if (this.rng() < 0.08) {
         this.ball.forwardTouch = true;
         this.whistleKnockOn();
         return;
       }
       this.ball.forwardTouch = false;
-      const sup = this.team(c.side).players.filter((q) => q !== c && q.down <= 0 && q.bind < 0 && dist(q.x, q.y, c.x, c.y) < 2.0);
-      if (sup.length >= 1) this.beginRuck();
-      else this.say('Isolated — turnover chance', this.other(c.side));
+      const closing = Math.hypot(c.vx - d.vx, c.vy - d.vy);
+      this.breakdown = new Breakdown();
+      this.breakdown.begin(this, c, d, closing);
     } else {
       // missed: either the defender clings (held up) or is BEATEN outright —
       // a beaten defender is the engine's line break. SPD + AWA read the step;
@@ -846,6 +851,7 @@ export class RugbySim {
   /* ---------------- breakdowns: ruck & maul ---------------- */
 
   private beginRuck() {
+    this.breakdown = null;   // the loose-ball cluster uses the legacy ruck path
     this.phase = 'RUCK'; this.phaseT = 0;
     this.ruck = { x: this.ball.x, y: this.ball.y, t: 0, attackers: [], defenders: [], winner: null };
     const atk = this.possession ?? 'A';
@@ -940,6 +946,7 @@ export class RugbySim {
   }
 
   private beginMaul(side: Side) {
+    this.breakdown = null;
     this.phase = 'MAUL'; this.phaseT = 0;
     const c = this.carrier();
     this.maul = { x: c?.x ?? this.ball.x, y: c?.y ?? this.ball.y, side, t: 0, stall: 0, bound: [] };
@@ -999,6 +1006,7 @@ export class RugbySim {
   /* ---------------- set pieces: scrum & lineout ---------------- */
 
   private beginScrum(feed: Side, x: number, y: number) {
+    this.breakdown = null;
     this.phase = 'SCRUM'; this.phaseT = 0;
     this.scrum = { x: clamp(x, -40, 40), y: clamp(y, -26, 26), feed, t: 0, stage: 'FORM', winner: null };
     this.possession = feed;
@@ -1041,6 +1049,7 @@ export class RugbySim {
   }
 
   private beginLineout(thrower: Side, x: number, y: number) {
+    this.breakdown = null;
     this.phase = 'LINEOUT'; this.phaseT = 0;
     this.lineout = { x: clamp(x, -46, 46), y: y >= 0 ? TOUCH_Y : -TOUCH_Y, thrower, t: 0, stage: 'FORM', winner: null };
     this.possession = thrower;
@@ -1084,6 +1093,7 @@ export class RugbySim {
   /* ---------------- kicks & restarts ---------------- */
 
   private beginKickoff(side: Side) {
+    this.breakdown = null;
     this.phase = 'KICKOFF'; this.phaseT = 0;
     this.possession = side;
     this.play = null;
@@ -1096,6 +1106,7 @@ export class RugbySim {
   }
 
   private beginDropout(side: Side) {
+    this.breakdown = null;
     this.phase = 'DROP_KICK'; this.phaseT = 0;
     this.possession = side;
     this.kick = { kind: 'DROPOUT', side, x: side === 'A' ? -28 : 28, y: 0, t: 0, aim: 0, power: 0, kicked: false, tryX: 0 };
@@ -1103,7 +1114,8 @@ export class RugbySim {
     this.say(`22 DROPOUT — ${this.team(side).short}`, side);
   }
 
-  private awardPenalty(side: Side, x: number, y: number) {
+  public awardPenalty(side: Side, x: number, y: number) {
+    this.breakdown = null;
     this.adv = null;
     const ad = this.ad(side);
     const goalDist = TRY_X - x * ad;
@@ -1267,6 +1279,7 @@ export class RugbySim {
   }
 
   private awardTry(side: Side, x: number, y: number) {
+    this.breakdown = null;
     const team = this.team(side);
     team.score += POINTS.TRY;
     this.trySide = side;
@@ -1336,7 +1349,8 @@ export class RugbySim {
     this.count(`setPlay:${best.id}`);
   }
 
-  private startOpen(side: Side, num: number) {
+  public startOpen(side: Side, num: number) {
+    this.breakdown = null;
     this.phase = 'OPEN'; this.phaseT = 0;
     this.possession = side;
     this.releaseGrace = 0.9; // defenders must get onside before pressuring
@@ -1351,7 +1365,7 @@ export class RugbySim {
     }
   }
 
-  private nearestPlayer(side: Side, x: number, y: number): Player {
+  public nearestPlayer(side: Side, x: number, y: number): Player {
     const team = this.team(side).players.filter((p) => p.sinbin <= 0 && p.down <= 0);
     if (!team.length) return this.team(side).players[0];
     return team.slice().sort((a, b) => dist(a.x, a.y, x, y) - dist(b.x, b.y, x, y))[0];

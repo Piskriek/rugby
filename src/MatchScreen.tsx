@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { RugbySim } from './rugby/engine';
 import { Camera, draw, drawMinimap } from './rugby/render';
+import { RugbyView3D } from './rugby/view3d';
 import type { InputState, MatchOpts } from './rugby/types';
 import { NO_INPUT } from './rugby/types';
 
@@ -23,6 +24,8 @@ const STEP = 1 / 60;
 
 export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const view3dRef = useRef<RugbyView3D | null>(null);
   const simRef = useRef<RugbySim | null>(null);
   const camRef = useRef<Camera | null>(null);
   const keys = useRef<Set<string>>(new Set());
@@ -50,6 +53,22 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+  }, []);
+
+  // Mount the WebGL viewport (reuses the shipped Three.js layer). It lives in
+  // its own effect so it is torn down and disposed with the screen.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const view = new RugbyView3D(host);
+    view3dRef.current = view;
+    const onResize = () => view.resize();
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      view3dRef.current = null;
+      view.dispose();
+    };
   }, []);
 
   useEffect(() => {
@@ -96,7 +115,15 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
         cam.update(dt, sim, view);
       }
 
-      draw(ctx, view, sim, cam, now / 1000);
+      // The 3D viewport is the primary render. When it is not ready (GLB still
+      // streaming) or failed (no WebGL), fall back to the 2D retro painter so
+      // the match is never a black screen.
+      const v3 = view3dRef.current;
+      if (v3 && !v3.failed) {
+        v3.update(sim, pausedRef.current ? 0 : dt);
+      } else {
+        draw(ctx, view, sim, cam, now / 1000);
+      }
       drawMinimap(ctx, view, sim, sim.ctrlId);
 
       perfRef.current = { fps, stepMs: sim.lastStepMs };
@@ -116,6 +143,9 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#0b0f16]">
+      {/* WebGL viewport (ThreeCanvas appends its canvas here) */}
+      <div ref={hostRef} className="absolute inset-0" />
+      {/* transparent 2D overlay — minimap + retro fallback */}
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
       {/* SCOREBOARD */}

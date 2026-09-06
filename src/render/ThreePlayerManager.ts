@@ -23,9 +23,16 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
-import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
-import { scrumFacing } from '../game/behaviour/setpiece-overrides';
+
+/* DECOUPLED FROM THE LEGACY DIRECTOR.
+ * The 2026 engine (src/rugby) drives this renderer through a thin adapter, so
+ * the only two VALUES it needed from the old build are pinned here as local
+ * constants instead — the type import above is erased at build time and pulls
+ * nothing in. `RECOVER_SECONDS` is the get-up window (director.ts:330) and
+ * `scrumFacing` is the pack engagement heading (setpiece-overrides.ts). */
+const RECOVER_SECONDS = 1.53;
+function scrumFacing(team: 'A' | 'B'): number { return team === 'A' ? 0 : Math.PI; }
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
