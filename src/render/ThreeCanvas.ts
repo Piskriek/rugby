@@ -45,6 +45,16 @@ import { conditionsFor, qualityFor } from './conditions';
 /** Feature flag: 3D dual-plane pitch, fog and uprights. */
 export const ENV_3D: boolean = true;
 
+/** Render-path bisection switches, read once from the query string. */
+export const DIAG = (() => {
+  const q = typeof location !== 'undefined' ? location.search : '';
+  return {
+    nopost: /[?&]nopost\b/.test(q),
+    noibl: /[?&]noibl\b/.test(q),
+    basic: /[?&]basic\b/.test(q),
+  };
+})();
+
 const FOG_COLOR = 0x1a2634;
 
 /* ------------------------------------------------------------- grade pass --- */
@@ -258,6 +268,25 @@ export class ThreeCanvas {
     this.matchDay = new ThreeMatchDay(this.scene);
     this.particles = new ThreeParticles(this.scene);
 
+    /* ?basic — swap every lit material for an unlit one carrying the same
+     * colour and map. If the frame comes back correct under this, the
+     * geometry and the textures are fine and the fault is in the LIGHTING
+     * (or the environment map feeding it); if it is still one flat colour,
+     * the fault is downstream in the composer. One reload, one bit. */
+    if (DIAG.basic) {
+      this.scene.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const src = m.material as THREE.MeshStandardMaterial;
+        if (!src || !(src as THREE.Material).isMaterial) return;
+        if (!(src instanceof THREE.MeshStandardMaterial)) return;
+        m.material = new THREE.MeshBasicMaterial({
+          color: src.color, map: src.map, transparent: src.transparent,
+          opacity: src.opacity, side: src.side,
+        });
+      });
+    }
+
     /* SIZE. `init()` runs immediately after the canvas is appended, BEFORE the
      * browser has laid it out, so clientWidth/clientHeight are still 0 and the
      * old `|| 2` fallback built the composer's target at 2x2 pixels. resize()
@@ -338,7 +367,16 @@ export class ThreeCanvas {
     this.matchDay.update(cam, v, cond, dt);
     if (this.envStale) {
       this.envStale = false;
-      const env = this.matchDay.refreshEnvironment(this.renderer, cond);
+      /* PMREM binds its own render targets and allocates fresh ones on every
+       * call. It restores the previously-bound target on the way out, but it
+       * does NOT restore the viewport/scissor state the composer relies on,
+       * and it is being run in the middle of the frame immediately before
+       * composer.render(). Bake the environment, then hand the renderer back
+       * to a known state explicitly rather than trusting the library to. */
+      const env = DIAG.noibl ? null : this.matchDay.refreshEnvironment(this.renderer, cond);
+      this.renderer.setRenderTarget(null);
+      this.renderer.setViewport(0, 0, this.dom.clientWidth || v.w, this.dom.clientHeight || v.h);
+      this.renderer.setScissorTest(false);
       this.scene.environment = env;
       /* One number drives the whole indirect term, and it is the number the
        * flat fills used to fake: an overcast sky is a softbox, a clear noon is
@@ -448,7 +486,18 @@ export class ThreeCanvas {
     if (this.renderer.shadowMap.enabled) {
       this.renderer.shadowMap.needsUpdate = this.frame % this.shadowEvery === 0;
     }
-    if (this.composer && ENV_3D) this.composer.render();
+    /* RENDER-PATH BISECTION SWITCHES.
+     *
+     * The blank-frame bug could not be reproduced headlessly (no GPU in the
+     * build sandbox) and every component checked out in isolation, so these
+     * exist to isolate it in ONE reload instead of a guess per round trip:
+     *
+     *   ?nopost   bypass the EffectComposer entirely, draw straight to screen
+     *   ?noibl    drop the PMREM environment map off every PBR material
+     *   ?basic    replace every material with a flat unlit one
+     *
+     * They are query-string only and cost nothing when absent. */
+    if (this.composer && ENV_3D && !DIAG.nopost) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
   }
 
