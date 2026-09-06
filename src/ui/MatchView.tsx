@@ -8,6 +8,11 @@ import {
   type RigInput,
 } from '../render/camera';
 import { PointerLock } from '../render/pointerLock';
+import TARCSHud from './TARCSHud';
+import {
+  RollingTimer, bodyMetrics, physicsMetrics, ruckMetrics,
+  type TarcsSnapshot,
+} from './tarcsMetrics';
 import { drawCRT, project, type Camera } from '../render/retro';
 import { ENV_3D, ThreeCanvas, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
@@ -67,6 +72,8 @@ export const KEYMAP: Record<string, string> = {
   b: 'animDebug',
   /* V toggles the player-driven first/third person rig (src/render/camera.ts). */
   v: 'viewMode',
+  /* F3 toggles the TARCS physics/ruck/body telemetry overlay. */
+  f3: 'tarcs',
   /* SPEC_25 — the two mouse buttons are keys by another name here: the same edge
    * sets, the same hold semantics, the same remap table. Synthetic tokens so a
    * `keys.current` entry means exactly one thing: something is being held.
@@ -113,6 +120,30 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [slow, setSlow] = useState(1);
   /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
   const [showAnimDebug, setShowAnimDebug] = useState(false);
+
+  /* ---- TARCS debug telemetry (F3) ---------------------------------------
+   * The samplers are refs, not state: they are written every frame, and
+   * putting them in state would re-render React 60 times a second just to
+   * display a frame-time counter — the measurement would distort the thing
+   * being measured. `tarcs` state is refreshed on a slow interval instead. */
+  const [showTarcs, setShowTarcs] = useState(false);
+  const showTarcsRef = useRef(false);
+  const simTimer = useRef(new RollingTimer(90));
+  const frameTimer = useRef(new RollingTimer(90));
+  const [tarcs, setTarcs] = useState<TarcsSnapshot | null>(null);
+  const tarcsLive = useRef<TarcsSnapshot | null>(null);
+
+  /* Publish the telemetry to React at 10 Hz. The panel is sampled every frame
+   * but only RENDERED ten times a second: fast enough to read a spike, slow
+   * enough that the debug tool is not itself a measurable cost, and slow
+   * enough that the digits are legible rather than a blur. */
+  useEffect(() => {
+    if (!showTarcs) { setTarcs(null); return; }
+    const id = window.setInterval(() => {
+      if (tarcsLive.current) setTarcs({ ...tarcsLive.current });
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [showTarcs]);
   /* AAA broadcast — match-day intro card and gamepad connection badge. */
   const [intro, setIntro] = useState(true);
   /* null once the world is built; drives the loading overlay until then. */
@@ -462,6 +493,14 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       if (pressed.has('replay')) { if (!d.phase.includes('REPLAY')) d.enterReplay('REPLAY'); }
       /* SPEC_06 — B toggles the facing/strafe debug overlay. */
       if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
+      if (pressed.has('tarcs')) {
+        const on = !showTarcsRef.current;
+        showTarcsRef.current = on;
+        setShowTarcs(on);
+        /* Start each session clean so the first reading is this run's, not a
+         * stale mean from the last time the panel was open. */
+        if (on) { simTimer.current.reset(); frameTimer.current.reset(); }
+      }
 
       /* ---- V: take or hand back the camera ------------------------------
        * First V arms the rig and requests pointer lock. Subsequent presses
@@ -494,7 +533,19 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* AAA — the world stays in the kickoff frame until the matchday card is
        * dismissed; the presentation is a curtain, not a running clock behind
        * the text. */
-      if (!introRef.current && !loadingRef.current) d.update(dt, inp, pressed, released);
+      /* Time the SIM STEP specifically, not the whole frame: the frame also
+       * carries rendering and React, and a physics readout that includes them
+       * cannot tell you whether the engine or the renderer is the cost. */
+      if (!introRef.current && !loadingRef.current) {
+        if (showTarcsRef.current) {
+          const t0 = performance.now();
+          d.update(dt, inp, pressed, released);
+          simTimer.current.push(performance.now() - t0);
+        } else {
+          d.update(dt, inp, pressed, released);
+        }
+      }
+      if (showTarcsRef.current) frameTimer.current.push(dt * 1000);
 
       /* While the loading screen is up the world is still being assembled, so
        * there is nothing worth drawing and the boot stages need the main
@@ -533,6 +584,29 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         /* Keep the director's own shake so impacts still register. */
         res.camera.shake = d.cam.shake;
         Object.assign(d.cam, res.camera);
+      }
+
+      /* ---- TARCS telemetry ------------------------------------------------
+       * Composed every frame into a ref (cheap, no re-render); the interval
+       * below publishes it to React at a readable rate. */
+      if (showTarcsRef.current) {
+        const carrierNum = d.op ? d.op.carrierNum : null;
+        const carrierTeam = d.op ? d.op.attacking : null;
+        tarcsLive.current = {
+          physics: physicsMetrics(simTimer.current, frameTimer.current),
+          ruck: ruckMetrics(d.bd ?? null),
+          bodies: bodyMetrics(
+            d.live.map((q) => ({
+              team: q.team, num: q.num, vx: q.vx, vz: q.vz,
+              stamina: q.stamina,
+              /* A body is "ACTIVE" when the ragdoll solver owns it. The
+               * renderer is the only thing that knows, so ask it; when the
+               * 3D layer is absent (headless/2D) nobody is ragdolled. */
+              ragdoll: playersRef.current?.isRagdolled(q.team, q.num) ?? false,
+            })),
+            carrierNum, carrierTeam,
+          ),
+        };
       }
 
       /* ---- draw ---- */
@@ -743,6 +817,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
        * the 2D canvas paints the pitch and WebGL is a transparent actor layer. */}
       <canvas ref={canvasRef} className={`absolute inset-0 h-full w-full ${ENV_3D ? 'z-[2]' : 'z-0'}`} />
       <div ref={threeDivRef} className={`pointer-events-none absolute inset-0 ${ENV_3D ? 'z-0' : 'z-[1]'}`} />
+      {/* TARCS telemetry. z-50, click-through, so it can never interfere with
+        * pointer lock or the interactive menu layers above it. */}
+      {showTarcs && tarcs && <TARCSHud snapshot={tarcs} />}
       {/* Player-camera status. Tells you which rig owns the view and, when the
         * pointer is not locked, how to get it back — a pointer-locked mode
         * with no visible way to re-enter it after ESC is a trap. */}
@@ -1009,6 +1086,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         <div className="mt-0.5 text-[#5f6f86]">GAMEPAD: STICK MOVE · <Kbd>A</Kbd> ACTION · <Kbd>X</Kbd>/<Kbd>Y</Kbd> PASS · <Kbd>B</Kbd> TACKLE · <Kbd>RB</Kbd> KICK</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
+        {showTarcs && <div className="mt-0.5 text-[#ffd76a]"><Kbd>F3</Kbd> TARCS TELEMETRY ON — TOGGLE</div>}
       </div>
 
       {/* STATS */}
