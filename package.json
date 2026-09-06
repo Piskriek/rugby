@@ -11,7 +11,7 @@
     "gym:tackle": "tsx harness/gym/tackle-gym.ts"
   },
   "dependencies": {
-    "@dimforge/rapier3d-compat": "^0.14.0",
+    "@dimforge/rapier3d-compat": "0.20.0",
     "@types/three": "^0.185.4",
     "clsx": "2.1.1",
     "react": "19.2.6",
