@@ -384,3 +384,55 @@ to the tree it was merged from — PASS 5407, WARN 2, FAIL 2, 0 teleports, 0 wat
 trips. No engine file was touched: the ragdoll writes bones, never positions in
 `live`. What still needs a human eye is the one thing no harness here can do:
 whether a fall now *looks* right.
+### Reconciled with the baked-fall pass (`d16bff1`, `936d105`)
+
+The same brief was worked from the other side while this was being written, and
+the two landed on the same file name. What arrived: an 11-node Verlet kernel in
+flat `Float32Array`s, a 36-take library of falls simulated **offline** and played
+back as a yaw-rotated table lookup (`ragdollClips.ts`, `scripts/ragdollbake.ts`),
+and a claim worth checking rather than arguing with — playback at 0.0004 ms per
+body per frame against a live solve at ~0.02 ms per body.
+
+The split is by tier, because the two answers are right about different things:
+
+| | STANDARD / FULL | LEGACY |
+| --- | --- | --- |
+| fall | `render/ragdoll.ts`, solved live from the pose, the opponent and the actual speeds | `render/ragdollClips.ts`, the nearest baked take, rotated to the heading, scaled to the pace |
+| cost | 0.083 ms for eight bodies | 0.0014 ms for whatever is falling |
+| why | a fall can be *about* this hit: joint limits, pair contact, the wrap held by the solver | the tier that cannot afford a solve still gets a body that obeys the ground |
+
+They never run together: `ragdollEnabled` (set by `MatchView` from
+`cond.quality !== 'LEGACY'`) chooses one, and the two guards in
+`spawnBakedFall` / `startFall` make each path exclusive, because a pose written by
+a table lookup and a pose written by a solver in the same frame is a shuffle, not
+a blend. The kernel the library was baked from was moved to
+`render/ragdollKernel.ts` and its harnesses repointed; `scripts/ragdollverify.ts`
+still passes, including the two properties that make the bake legitimate at all —
+yaw invariance to 0.45 mm, and bit-exact determinism. Both solvers now coexist
+because each is testable without a browser and neither is load-bearing for the
+other.
+
+Three things that came in with it and are now part of this picture:
+
+- **The pitch was sunk under itself.** The crown displaced local −Z on a mesh
+  laid flat with `rotation.x = -π/2`, which maps that onto world **−Y**: the
+  centre of the pitch sat 0.3 m below the outer ground plane, z-fighting it and
+  eating the markings. Fixed to +Z, and `scripts/renderverify.ts` now asserts the
+  sign, because a comment was not enough to keep it pointed the right way. This is
+  a real part of "grey shit": a pitch fighting its own surround renders as one flat
+  grey field with a shimmer.
+- **The game defaulted to its flattest light.** `weather` opened on OVERCAST and
+  `timeofday` on TWILIGHT — a grey sky at dusk, out of seven weathers and four
+  kick-off times. Both defaults moved (`data.ts`), which is the cheapest fix in
+  either pass and the only one that touches what a first frame is.
+- **`audit-cli.ts 90 3 1` is unchanged by all of it**: PASS 5407, WARN 2, FAIL 2,
+  points 997, 0 teleports, 0 watchdog trips — same as the tree merged into. The
+  option defaults are read by the menus, not by the audit, so the simulation
+  numbers could not move; that is the check, not the reassurance.
+
+The price of the library is paid in the bundle, not the frame: `ragdollClips.json`
+is 140 kB of quantised int16 (1,846.89 kB → 1,987.05 kB built, 531 → 616 kB gzipped),
+inlined by the single-file build and read by one tier. It decodes lazily on first
+fall, which is the right call and already done; moving the bytes themselves out of
+the bundle would mean a second file, which is what the single-file build exists to
+avoid.

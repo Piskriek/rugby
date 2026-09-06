@@ -347,10 +347,16 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             d.audio.setSurface(d.pitch.firm);
           }
           playersRef.current?.setSoiling(cond.mud, cond.wetness);
-          /* FLAT 16-BIT is a frame without weather, shadows or physics; a solved
-           * fall would be the only moving thing in it that the sprite tier has
-           * no answer for, so the falls are handed back to the animator. */
+          /* FLAT 16-BIT drops the live solve along with the bloom and the
+           * shadows — but it does not go back to a canned hug: the tier replays a
+           * fall that was solved offline instead (ragdollClips.ts). Any fall
+           * already in progress is released here, because the switch can move
+           * mid-match from the menu. */
+          if (playersRef.current) playersRef.current.ragdollEnabled = cond.quality !== 'LEGACY';
           if (cond.quality === 'LEGACY') playersRef.current?.clearFalls();
+          /* LEGACY is the budget tier: it drops physics fall-down along with
+           * the bloom and the shadows, and the men keep their canned tackle. */
+          if (playersRef.current) playersRef.current.ragdollEnabled = cond.quality !== 'LEGACY';
           playersRef.current?.setShadowStrength(cond.shadowStrength * (cond.shadows ? 0.55 : 1));
           const env = three.environment;
           if (env) {

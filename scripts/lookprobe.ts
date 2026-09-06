@@ -107,6 +107,9 @@ function litFromRig(o: {
 
 const conditions = [
   { label: 'MIDDAY / CLEAR / FIRM', weather: 0, timeofday: 0, pitch: 0, wind: 1 },
+  /* The shipped default, first. Whatever the game opens with is the look that
+   * gets judged, so it is the one row that must not clip or sink. */
+  { label: 'AFTERNOON / CLEAR / STANDARD  (default)', weather: 0, timeofday: 1, pitch: 1, wind: 1 },
   { label: 'AFTERNOON / DRIZZLE / STANDARD', weather: 2, timeofday: 1, pitch: 1, wind: 2 },
   { label: 'FLOODLIT / RAIN / MUDDY', weather: 3, timeofday: 3, pitch: 3, wind: 3 },
   { label: 'TWILIGHT / FOG / FROZEN', weather: 4, timeofday: 2, pitch: 4, wind: 1 },

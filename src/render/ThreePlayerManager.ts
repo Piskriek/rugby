@@ -27,6 +27,10 @@ import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 import { Ragdoll } from './ragdoll';
+import { NODE_COUNT, NODE } from './ragdollKernel';
+import { RagdollPlayback, pickClip } from './ragdollClips';
+import { resolveRagBones, captureRestDirs, seedFromPose, driveRig } from './ragdollRig';
+import type { RagBones, RestDirs } from './ragdollRig';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
@@ -224,6 +228,17 @@ interface PlayerInstance {
   rig?: ProceduralRig;
   /** the solved fall, or null while the clip owns this man (render/ragdoll.ts) */
   rag?: Ragdoll | null;
+  /** lazily-resolved ragdoll bone set and its rest directions */
+  ragBones?: RagBones;
+  ragRest?: RestDirs;
+  /** the fall being replayed, or null when animation owns this body */
+  ragPlay?: RagdollPlayback | null;
+  /** playback speed, so identical takes do not move in lockstep */
+  ragRate: number;
+  /** 0..1 authority the solver has over the rig; ramps at both ends */
+  ragBlend: number;
+  /** world point (metres) the fall was seeded at — physics is a delta on this */
+  ragOrigin?: THREE.Vector3;
   /** smoothed procedural state, so nothing pops between frames */
   proc: {
     /** current forward pitch of the whole body, radians */
@@ -264,6 +279,8 @@ interface PlayerInstance {
     standingHit: boolean;
     /** streamed velocity in pitch metres/second, the fall's initial conditions */
     svx: number; svz: number;
+    /** one-shot latch: the ragdoll fires once per takedown, not once per frame */
+    ragFired: boolean;
     /** playhead of the tackle clip, carried across stage boundaries so a
      *  single authentic clip runs on instead of restarting each stage. */
     tackleClipT: number;
@@ -355,6 +372,24 @@ export class ThreePlayerManager {
   private static readonly MUD = new THREE.Color('#5a4227');
   private static readonly SOAK = new THREE.Color('#0e1620');
   private badgeTextures = new Map<string, THREE.Texture>();
+  /* RAGDOLL. Two fall systems, one per tier.
+   *
+   *   STANDARD and FULL   `render/ragdoll.ts`, solved live at 0.08 ms/frame for
+   *                       eight bodies at once. It can be seeded from THIS pose,
+   *                       aimed at THIS opponent, and told how hard the man was
+   *                       actually moving — which is the whole difference between
+   *                       a fall and a repeat of a fall.
+   *   LEGACY              the falls are PRECOMPUTED (scripts/ragdollbake) and
+   *                       replayed — see ragdollClips.ts. A table lookup and a yaw
+   *                       rotation, so the tier that cannot afford a solve still
+   *                       gets a body that obeys the ground.
+   *
+   * The kernel the library was baked from lives in `render/ragdollKernel.ts`, and
+   * stays there: it is a solver with no view in it, which is what makes it both
+   * bakes well and testable at 10,000 falls a second. */
+  private ragSeed = new Float32Array(NODE_COUNT * 3);
+  /** Master switch — GRAPHICS: PERFORMANCE turns physics fall-down off. */
+  ragdollEnabled = true;
 
   constructor(three: import('./ThreeCanvas').ThreeCanvas) {
     this.scene = three.scene;
@@ -737,6 +772,8 @@ export class ThreePlayerManager {
    */
   private startFall(inst: PlayerInstance, partner: PlayerInstance | null) {
     if (inst.rag || !inst.root) return;
+    /* FLAT 16-BIT does not solve a body; it replays one — see spawnBakedFall. */
+    if (!this.ragdollEnabled) return;
     /* The pair's mean drift is the ENGINE's business (`breakdown.ts` slides both
      * men through the impact window), so it is subtracted out here: the fall owns
      * the difference between the two, which is the violent part. */
@@ -924,6 +961,7 @@ export class ThreePlayerManager {
       kitMats, kitBase, soil: 0, soilShown: -1,
       actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
+      ragPlay: null, ragBlend: 0, ragRate: 1,
       proc: {
         tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
@@ -935,6 +973,7 @@ export class ThreePlayerManager {
         passLatched: false,
         tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
         svx: 0, svz: 0,
+        ragFired: false,
       },
     };
     return inst;
@@ -1215,6 +1254,98 @@ export class ThreePlayerManager {
       if (d < bestD) { bestD = d; best = other; }
     }
     return best;
+  }
+
+  /* ==================== RAGDOLL — spawn, drive, release ==================
+   *
+   * The handover is the whole problem. A ragdoll that begins from a canonical
+   * pose snaps visibly, so this one is SEEDED FROM THE LIVE ANIMATED POSE: at
+   * the instant the takedown fires we read the 11 joint positions the mixer
+   * has just produced and hand those to the solver as its initial state. The
+   * first physics frame is therefore identical to the last animated one, and
+   * the only thing that changes is what is computing it.
+   *
+   * Authority then RAMPS (ragBlend) over ~0.12 s rather than switching, which
+   * covers the discontinuity in the derivative — the animation had one
+   * velocity, physics has another — that would otherwise read as a twitch. */
+
+  /** Queue the replayed fall for this man, matched to the hit that happened. */
+  private spawnBakedFall(inst: PlayerInstance, vx: number, vz: number, standing: boolean): void {
+  /* THE LEGACY FALL. `render/ragdoll.ts` solves a body per frame on every tier
+   * that can afford it; this tier cannot, which is the entire reason the baked
+   * library exists. So the two are split by QUALITY and never run at once, and
+   * each one's authority over the bones is exclusive: a pose written by a table
+   * lookup and a pose written by a solver in the same frame is a shuffle, not a
+   * blend. */
+    if (this.ragdollEnabled || inst.ragPlay) return;
+    if (!inst.ragBones) {
+      inst.ragBones = resolveRagBones(inst.root);
+      inst.ragRest = captureRestDirs(inst.ragBones);
+    }
+    // Make sure the world matrices reflect the pose the mixer just wrote.
+    inst.root.updateWorldMatrix(true, true);
+    if (!seedFromPose(inst.ragBones, RENDER_SCALE, this.ragSeed)) return;
+
+    /* Match the baked cell to the hit that actually happened. The clip is
+     * stored in body-local space, so what we need is the angle of the hit
+     * RELATIVE to the way this man is facing — the absolute heading is
+     * applied afterwards as a rotation, which is why direction costs nothing
+     * to bake. */
+    const facing = Math.PI - inst.root.rotation.y;
+    const hitDir = Math.atan2(vz, vx);
+    const rel = hitDir - facing;
+    const speed = Math.hypot(vx, vz) / RENDER_SCALE;
+    /* A standing takedown is a wrestle; a man cleaned out at full pace is a
+     * different event. Power drives both which clip is chosen and how fast it
+     * is played back. */
+    const power = standing ? 0.5 : Math.min(1.35, 0.55 + speed * 0.11);
+
+    if (!inst.ragPlay) inst.ragPlay = new RagdollPlayback();
+    const clip = pickClip(rel, power, inst.num);
+    const ox = this.ragSeed[NODE.PELVIS * 3];
+    const oy = this.ragSeed[NODE.PELVIS * 3 + 1];
+    const oz = this.ragSeed[NODE.PELVIS * 3 + 2];
+    inst.ragPlay.start(clip, hitDir, [ox, oy, oz], 1);
+
+    /* Playback rate carries the pace the clip itself cannot: a heavy hit is
+     * played a touch fast, a slow wrestle noticeably slower, so two men going
+     * down off the same baked take do not move in lockstep. */
+    inst.ragRate = standing ? 0.78 : Math.min(1.25, 0.9 + speed * 0.03);
+
+    /* Remember where the fall began. driveRig applies the fall as a delta from
+     * this point, so the engine can keep owning root.position without the two
+     * authorities fighting over the same body. */
+    if (!inst.ragOrigin) inst.ragOrigin = new THREE.Vector3();
+    inst.ragOrigin.set(ox, oy, oz);
+    inst.ragBlend = 0;
+  }
+
+  /** Hand this man back to the animation system. */
+  private releaseRagdoll(inst: PlayerInstance): void {
+    inst.ragPlay = null;
+    inst.ragBlend = 0;
+  }
+
+  /**
+   * Advance and apply one replayed fall. Returns true if it owns this man's
+   * bones this frame (and so the procedural overrides must not also write).
+   */
+  private updateRagdoll(inst: PlayerInstance, step: number): boolean {
+    const play = inst.ragPlay;
+    if (!play) return false;
+    play.update(step, inst.ragRate || 1);
+
+    /* Ramp authority in, and back out again once the fall has finished, so
+     * the return to the canned grounded idle is as soft as the entry. */
+    const target = play.asleep ? 0 : 1;
+    const rate = play.asleep ? 3.5 : 9;
+    inst.ragBlend += (target - inst.ragBlend) * (1 - Math.exp(-rate * step));
+
+    if (play.asleep && inst.ragBlend < 0.02) { this.releaseRagdoll(inst); return false; }
+
+    driveRig(inst.ragBones!, inst.ragRest!, play, inst.root, RENDER_SCALE,
+      inst.ragBlend, inst.ragOrigin);
+    return inst.ragBlend > 0.5;
   }
 
   /* ============ PROCEDURAL LAYER — resolution and the three overrides ==== */
@@ -1621,6 +1752,7 @@ export class ThreePlayerManager {
         st.lie = false;
         st.passLatched = false;
         st.tackleRole = null; st.tackleT = -1;
+        st.ragFired = false;   // arm the next hit, or a man ragdolls only once
         inst.proc.state = desired;
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
@@ -1659,6 +1791,7 @@ export class ThreePlayerManager {
         st.oneShot = null;
       } else if (!tackleSide && st.tackleRole) {
         st.tackleRole = null; st.tackleT = -1;
+        st.ragFired = false;   // arm the next hit, or a man ragdolls only once
       }
       /* A man getting to his feet hands his body back to the animator; the
        * weight below fades it out rather than snapping the pose. */
@@ -1700,6 +1833,17 @@ export class ThreePlayerManager {
            * at 10 m/s. Same clip, stretched, so the two hits do not read as
            * the same event replayed. */
           const rate = this.fitTimeScale(state, win) * (st.standingHit ? 0.62 : 1);
+          /* RAGDOLL HANDOVER. Stage 1 is the GROUNDING — the moment the canned
+           * clip would start folding the man to the turf. That is exactly where
+           * a physical fall is both cheapest (he is committed, nothing left to
+           * steer) and most valuable (it is the part every canned tackle makes
+           * look identical). World-space velocity: the renderer maps logical z
+           * to world -z, so vz is negated or the body is thrown back up-field
+           * against the tackle. */
+          if (wantStage === 1 && !st.ragFired) {
+            st.ragFired = true;
+            this.spawnBakedFall(inst, vx * RENDER_SCALE, -vz * RENDER_SCALE, st.standingHit);
+          }
           const act = this.play(inst, state, wantStage === 0 ? 0.05 : 0.12, rate);
           /* CONTINUE, DO NOT RESTART.
            *
@@ -1831,6 +1975,11 @@ export class ThreePlayerManager {
      * main loop would aim him at wherever the carrier stood last frame,
      * which at seven metres a second is a visible hand-lag. */
     for (const inst of pending) {
+      /* RAGDOLL FIRST. A physics-driven man owns his bones completely —
+       * running the procedural tilt/reach/thrash on top would be two systems
+       * writing the same rotations, the render-side twin of the T-02
+       * double-move the simulation already forbids. */
+      if (this.updateRagdoll(inst, step)) continue;
       const partner = this.latchPartner(inst, pending);
       this.applyProcedural(inst, inst.proc.state, partner, step);
     }
@@ -1911,7 +2060,11 @@ export class ThreePlayerManager {
     }
 
     for (const [k, inst] of this.pool) {
-      if (!active.has(k)) inst.root.visible = false;
+      if (!active.has(k)) {
+        inst.root.visible = false;
+        /* A man who left the field must not hold a pool slot hostage. */
+        if (inst.ragPlay) this.releaseRagdoll(inst);
+      }
     }
 
     this.updateBall(d, step);

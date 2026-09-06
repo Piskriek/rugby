@@ -91,6 +91,18 @@ simulation already owned: `graphics` (PERFORMANCE/BALANCED/ULTRA → the existin
 `timeofday` KICK-OFF setting, which `conditions.ts` now reads). Anyone wanting a
 second lighting switch should first explain what the match's own kick-off time is for.
 
+A third merge followed the same rule, this one of two solvers that had been written
+into the same file name on purpose. `render/ragdoll.ts` (mine) solves a fall live on
+STANDARD and FULL; the pass that baked 36 falls and plays them back as a yaw-rotated
+table lookup now lives in `render/ragdollKernel.ts` + `ragdollClips.ts` and is what
+LEGACY gets, with `ragdollEnabled` choosing between them so no body is ever written
+by both in one frame. Nothing was thrown away in that merge and the reason is in the
+table above: the bake is strictly cheaper and strictly less responsive, and the two
+claims are not in competition — the tier that cannot afford to solve a body should
+not be the tier that gets the worst physics. Verification of the merged pair is in
+`SPEC_24_MATCHDAY.md`'s second addendum, including the two harnesses that keep the
+bake honest (yaw invariance to 0.45 mm, bit-exact determinism).
+
 Verification after the merge (and after `6bcbd54`, the NO TELEPORTS engine fix, merged
 on top of it): `tsc --noEmit` clean, `scripts/glslcheck.ts` 10 shaders / 0 failing,
 `scripts/matchdayheadless.ts` all green, `scripts/spec07-contracts.ts` ALL GREEN,
