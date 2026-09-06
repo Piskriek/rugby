@@ -26,8 +26,15 @@ import type { Director, Actor } from '../game/director';
 import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
+import {
+  TackleBank, TacklePlayback,
+  speedBinFor, relativeAngle, angleBinFor,
+  TackleRole, TackleKind,
+} from './tackleTrajectory';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
+/* Baked offline by scripts/bakeTackles.ts. Played back, never solved live. */
+const TACKLE_TRAJECTORY_URL = 'assets/tackles/tackles.bin';
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
  * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
 const TACKLE_PAIR_URL = 'assets/models/tackle_pair.glb';
@@ -90,14 +97,20 @@ function makeToonGradient(): THREE.DataTexture {
 }
 
 
-/* ================== PROCEDURAL "FAKE RAGDOLL" LAYER ==================
+/* ============ PROCEDURAL POSE + BAKED TACKLE LAYER ============
  *
  * Canned clips cannot know how far apart two men are, how fast they are
  * travelling or which way they are twisting, so a latch built purely out of
  * them reads as a hug between two statues. Rather than a physics engine (a
  * true ragdoll would fight the AnimationMixer and wreck the skinning), the
- * chaos is written ON TOP of the sampled pose, every frame, in three layers:
+ * chaos is written ON TOP of the sampled pose, every frame, in four layers:
  *
+ *   0  BAKED TACKLE   the grounded fall is NOT solved live. scripts/bakeTackles.ts
+ *                   ran offline over a grid of roles / hit kinds / speeds /
+ *                   angles, and the field just plays back the nearest recording
+ *                   (one position lerp + one quaternion slerp per joint). See
+ *                   tackleTrajectory.ts. If the bank is missing the legacy
+ *                   layers below cover the fall.
  *   1  BODY TILT    the whole mesh pitches forward into the carrier, so the
  *                   tackler is flying horizontally rather than standing up
  *   2  ARM POINTING the tackler's arm bones are aimed at the carrier's spine
@@ -107,7 +120,7 @@ function makeToonGradient(): THREE.DataTexture {
  *
  * ORDER IS EVERYTHING. `mixer.update()` OVERWRITES every bone it animates,
  * and this rig's clips animate the whole spine and both arms (65 tracks,
- * confirmed against the GLB). So all three layers must be applied AFTER the
+ * confirmed against the GLB). So all four layers must be applied AFTER the
  * mixer has sampled the frame, and re-applied from scratch on the next one —
  * they are a post-process on the pose, never a stored state on the bone.
  *
@@ -178,8 +191,6 @@ const TILT_RATE = 9;
 const REACH_WEIGHT = 0.78;
 /** the non-leading arm reaches at this fraction of the lead arm's weight */
 const REACH_TRAIL = 0.55;
-/** the waist is this far below the pelvis bone — a tackle goes in low */
-const LATCH_WAIST_DROP = 0.15;
 /** reach weight ramp: full commitment at this range, REACH_MIN at NO_RANGE */
 const REACH_FULL_RANGE = 0.8;
 const REACH_NO_RANGE = 3.0;
@@ -207,6 +218,9 @@ const _target = new THREE.Vector3();
 /** reused rotation scratch, so the reach allocates nothing per bone */
 const _qBone = new THREE.Quaternion();
 const _dir = new THREE.Vector3();
+/** standalone ball target for a breakdown contest (jackal/cleaner/ruck),
+ *  kept separate from `_target` so a latch pass never overwrites it mid-frame. */
+const _breakdownBall = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qb = new THREE.Quaternion();
 const _mat = new THREE.Matrix4();
@@ -240,7 +254,14 @@ interface PlayerInstance {
     phase: number;
     /** the FSM state resolved this frame, for the post-mixer pass */
     state: string;
+    /** the engine's raw render-clip for this frame, so the post-mixer pass
+     *  can tell a jackal from a cleaner / ruck body when they all resolve to
+     *  the same `ruck` FSM state. */
+    clip: string;
   };
+  /** precomputed tackle recording while this man is grounded (one per downed
+   *  player). Baked offline, replayed live — no solver runs on the field. */
+  tackle?: TacklePlayback | null;
   active: { name: string; action: THREE.AnimationAction } | null;
   st: {
     oneShot: string | null;      // non-looping/locked clip state
@@ -325,6 +346,7 @@ export class ThreePlayerManager {
   private template: THREE.Group | null = null;
   private templateClips: THREE.AnimationClip[] = [];
   private gradient = makeToonGradient();
+  private tackleBank: TackleBank | null = null;
   private pool = new Map<string, PlayerInstance>();
   private readonly scene: THREE.Scene;
   private ball: THREE.Group;
@@ -356,6 +378,7 @@ export class ThreePlayerManager {
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
     const loader = new GLTFLoader();
+    const bankPromise = TackleBank.load(TACKLE_TRAJECTORY_URL);
     const one = (url: string) => new Promise<THREE.AnimationClip[] | null>((res) => {
       loader.load(url, (g) => res(g.animations),
         undefined, () => res(null));   // optional asset: absent = fall back
@@ -381,6 +404,10 @@ export class ThreePlayerManager {
         }
         this.prepareTemplate();
         this.checkRecoverSeconds();
+        this.tackleBank = await bankPromise;
+        if (!this.tackleBank && import.meta.env?.DEV) {
+          console.warn('[players] tackles.bin missing — grounded falls fall back to the legacy pose layers.');
+        }
         this.ready = true;
         resolve();
       }, undefined, reject);
@@ -736,7 +763,9 @@ export class ThreePlayerManager {
       proc: {
         tilt: 0, reach: 0, thrash: 0, dip: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
+        clip: 'idle',
       },
+      tackle: null,
       st: {
         oneShot: null, lock: 0, lie: false,
         lx: actor.rx, lz: actor.rz, spd: 0,
@@ -1025,6 +1054,53 @@ export class ThreePlayerManager {
     return best;
   }
 
+  /**
+   * The world position of the 3D ball for a latch, or null.
+   *
+   * The ball is parented to the carrier's carrying hand while a man holds it,
+   * so the most precise target is the ball's own world matrix. Falling back
+   * to the carrying hand, then to the pelvis, lets the magnet work even on a
+   * frame where the socket has not been re-parented yet (e.g. just after a
+   * pass or a ruck exit).
+   */
+  private ballTargetFor(partner: PlayerInstance | null, fallback: THREE.Vector3 | null): THREE.Vector3 | null {
+    if ((this.ball as THREE.Object3D).parent && (this.ball as THREE.Object3D) !== this.scene) {
+      this.ball.updateWorldMatrix(true, false);
+      return _v1.setFromMatrixPosition(this.ball.matrixWorld);
+    }
+    if (partner) {
+      const hand = this.findBone(partner.root, 'hand_r')
+        ?? this.findBone(partner.root, 'lowerarm_r')
+        ?? this.findBone(partner.root, 'hand_l');
+      if (hand) {
+        hand.updateWorldMatrix(true, false);
+        return _v1.setFromMatrixPosition(hand.matrixWorld);
+      }
+      const prig = this.resolveRig(partner);
+      const anchor = prig.pelvis ?? prig.spine[0];
+      if (anchor) {
+        anchor.updateWorldMatrix(true, false);
+        return _v1.setFromMatrixPosition(anchor.matrixWorld);
+      }
+    }
+    return fallback ? _v1.copy(fallback) : null;
+  }
+
+  /** World-space target for hands during a breakdown contest, or null when
+   *  the ball is not a live, grounded object to fight over. Mirrors `updateBall`
+   *  so the arms and the rendered ball agree without a per-frame allocation. */
+  private breakdownBallTarget(d: Director): THREE.Vector3 | null {
+    if (!d.bd || (d.phase !== 'BREAKDOWN' && d.phase !== 'BREAKDOWN_REPLAY')) return null;
+    const b = d.bd;
+    const s = RENDER_SCALE;
+    if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
+      return _breakdownBall.set(b.ball.x * s, 0.16 * s, -b.ball.z * s);
+    }
+    const cr = b.players.find((p) => p.role === 'CARRIER');
+    if (cr) return _breakdownBall.set((cr.x + 0.28) * s, (cr.down ? 0.3 : 1.05) * s, -cr.z * s);
+    return null;
+  }
+
   /* ============ PROCEDURAL LAYER — resolution and the three overrides ==== */
 
   /** Resolve (once, lazily) the bones the procedural layer drives. */
@@ -1249,6 +1325,44 @@ export class ThreePlayerManager {
     }
   }
 
+  /** Which bake role a downed man maps to, even if the timeline already gave
+   *  him a role (fall back on the state name for ordinary `grounded`). */
+  private tackleRoleFor(inst: PlayerInstance, state: string): TackleRole {
+    if (inst.st.tackleRole === 'CARRIER') return 'carrier';
+    if (inst.st.tackleRole === 'TACKLER') return 'tackler';
+    return (state === 'present' || state === 'grounded') ? 'carrier' : 'tackler';
+  }
+
+  /** Direction the hit is throwing him, as a logical-space heading. Prefer the
+   *  live partner (the actual impulse direction); fall back to his own facing
+   *  so a slow present still has an angle. */
+  private tackleHeadingFor(inst: PlayerInstance, partner: PlayerInstance | null): number {
+    if (partner) {
+      const dx = partner.root.position.x - inst.root.position.x;
+      const dzl = -(partner.root.position.z - inst.root.position.z); // world z → logical z
+      if (Math.hypot(dx, dzl) > 0.05) return Math.atan2(dx, dzl);
+    }
+    return inst.st.face;
+  }
+
+  /** Start (or re-start) a downed man's baked recording when his state first
+   *  becomes grounded. The clip is keyed by role/hit-kind/speed/angle and
+   *  played back from frame 0 into the current mixer pose. */
+  private startTacklePlayback(
+    inst: PlayerInstance, partner: PlayerInstance | null, state: string,
+  ) {
+    if (!this.tackleBank) return;
+    const role = this.tackleRoleFor(inst, state);
+    const kind: TackleKind = inst.st.standingHit ? 'standing' : 'dive';
+    const speedBin = speedBinFor(inst.st.spd);
+    const heading = this.tackleHeadingFor(inst, partner);
+    const angle = relativeAngle(inst.st.face, heading);
+    const angleBin = angleBinFor(angle);
+    const clip = this.tackleBank.pick(role, kind, speedBin, angleBin);
+    if (!clip) return;
+    inst.tackle = new TacklePlayback(inst.root, clip, this.tackleBank.data);
+  }
+
   /**
    * The whole procedural pass for one man, run AFTER `mixer.update()` has
    * sampled his pose for this frame. `partner` is the other half of a live
@@ -1256,11 +1370,44 @@ export class ThreePlayerManager {
    */
   private applyProcedural(
     inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
+    breakdownBall: THREE.Vector3 | null = null,
   ) {
     const latching = state === 'latchHang';
     const latched = state === 'latchCarry';
     const grounding = state === 'tackleGround' || state === 'rollAway'
       || state === 'carrierFall' || state === 'present' || state === 'grounded';
+
+    /* --- 0. BAKED TACKLE RECORDING (grounded tackle) ---
+     *
+     * The fall is not solved here: it was solved offline (scripts/bakeTackles.ts)
+     * over a grid of roles / hit kinds / speeds / approach angles, and this man
+     * just plays back the recording whose keys match the collision. The field
+     * cost is a lookup + one position lerp + one quaternion slerp per joint —
+     * no solver, no matrix inverse, no per-frame allocation. It runs in LOCAL
+     * space so the actor root stays the single spatial truth, and it writes
+     * INTO the mixer pose after `mixer.update`. While it owns the body the
+     * canned tilt / reach / thrash overrides are skipped — they would be
+     * fighting the same recorded pose. */
+    if (grounding) {
+      if (!inst.tackle) this.startTacklePlayback(inst, partner, state);
+      if (inst.tackle) {
+        inst.tackle.advance(step);
+        return;
+      }
+      /* no recording available (database not loaded): fall through to the
+       * legacy pose layers so the man still goes to ground. */
+    }
+    if (inst.tackle) {
+      /* he is getting up (or a state with a different owner has taken the
+       * body): fade the recording out over a fraction of a second so the
+       * get-up / gait clip emerges naturally instead of snapping to it. */
+      inst.tackle.cool(step);
+      if (inst.tackle.weight > 0.001) {
+        inst.tackle.advance(step);
+        return;
+      }
+      inst.tackle = null;
+    }
 
     /* --- 1. the dive tilt (tackler), tweening to flat on the takedown --- */
     let wantTilt = 0;
@@ -1288,23 +1435,61 @@ export class ThreePlayerManager {
      *
      * The weight RAMPS with distance rather than snapping to 1 — a man still a
      * couple of metions out is beginning to reach, not already wrapped. */
-    if (latching && partner) {
-      const prig = this.resolveRig(partner);
-      const anchor = prig.pelvis ?? prig.spine[0];
-      if (anchor) {
-        anchor.updateWorldMatrix(true, false);
-        _target.setFromMatrixPosition(anchor.matrixWorld);
-        _target.y -= LATCH_WAIST_DROP * RENDER_SCALE;
-        const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
-        const ramp = 1 - (dist - REACH_FULL_RANGE) / (REACH_NO_RANGE - REACH_FULL_RANGE);
-        const w = REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
-        this.applyArmReach(inst, _target, w, step);
-        /* TORSO DIP. He gets his eyes and his chest down to the height he is
-         * aiming at. This is a small forward pitch spread over the spine, on
-         * top of the whole-body tilt in step 1, and it is what stops the reach
-         * looking like a man bending only at the shoulders. */
-        this.applyTorsoDip(inst, w, step);
+    /* THE MAGNET. Both halves of the struggle aim their hands at the BALL,
+     * not at a body part, so the arm magnet reads as two men fighting over
+     * one object. The tackler is trying to get hands on it (and strip); the
+     * carrier is protecting it with his off-hand. Fall back to the carrying
+     * hand / waist only while the ball is mid-air or the socket is stale.
+     */
+    if ((latching || latched) && partner) {
+      const target = this.ballTargetFor(partner, null);
+      if (target) {
+        _target.copy(target);
+        if (latching) {
+          /* the tackler: his arms are the arm-pointing override, so the
+           * target becomes the ball itself. */
+          const dist = inst.root.position.distanceTo(partner.root.position) / RENDER_SCALE;
+          const ramp = 1 - (dist - REACH_FULL_RANGE) / (REACH_NO_RANGE - REACH_FULL_RANGE);
+          const w = REACH_MIN + (1 - REACH_MIN) * Math.max(0, Math.min(1, ramp));
+          this.applyArmReach(inst, _target, w, step);
+          /* TORSO DIP — he lowers his chest and eyes onto the ball. */
+          this.applyTorsoDip(inst, w, step);
+        } else {
+          /* the carrier: he cannot bring his own targeted arms in (they would
+           * fight the ball socket), so a light reach wraps and protects the
+           * ball without yanking the socket. */
+          this.applyArmReach(inst, _target, 0.4, step);
+          this.applyTorsoDip(inst, 0, step);
+        }
+      } else {
+        this.applyArmReach(inst, null, 0, step);
+        this.applyTorsoDip(inst, 0, step);
       }
+    } else if (state === 'ruck' && breakdownBall) {
+      /* --- 2c. THE RUCK MAGNET (jackal / cleaner / ruck body) ---
+       *
+       * The same "hands are magnets" rule as the latch, extended into the
+       * breakdown. A jackal's whole job is getting his hands on the ball, a
+       * cleaner drives through that ball, and the attackers binding over it
+       * are all reaching towards the one object the phase is about. The ball
+       * is the target (not the opponent's pelvis), so two men on opposite
+       * sides of the pile both aim at the same point and the contest reads as
+       * a fight over the ball rather than a scrum of players pushing each
+       * other.
+       *
+       * Weights are role-intentional: the jackal commits hardest (he is
+       * actually contesting), the first cleaner is second (he is the
+       * clear-out hit), and the ruck bodies bind at partial weight so their
+       * hands follow the ball without leaving a static "clamp" pose. */
+      _target.copy(breakdownBall);
+      const clip = inst.proc.clip;
+      const w = clip === 'jackal' ? 0.85
+        : clip === 'cleanout' ? 0.6
+          : 0.35;
+      this.applyArmReach(inst, _target, w, step);
+      /* a jackal digs his chest down onto the ball; a cleaner drives through
+       * it at a much lower dip so he still reads as a rolling clear-out. */
+      this.applyTorsoDip(inst, clip === 'jackal' ? 0.5 : 0.2, step);
     } else {
       this.applyArmReach(inst, null, 0, step);   // no target: decay only
       this.applyTorsoDip(inst, 0, step);
@@ -1402,6 +1587,7 @@ export class ThreePlayerManager {
         st.passLatched = false;
         st.tackleRole = null; st.tackleT = -1;
         inst.proc.state = desired;
+        inst.proc.clip = a.renderClip;
         inst.root.position.set(a.rx * s, 0, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
@@ -1577,6 +1763,7 @@ export class ThreePlayerManager {
 
       // ---- transform: logical pitch -> scaled 3D world ----
       inst.proc.state = desired;
+      inst.proc.clip = a.renderClip;
       inst.root.position.set(a.rx * s, 0, -a.rz * s);
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
@@ -1595,9 +1782,10 @@ export class ThreePlayerManager {
      * exist before the tackler can be pointed at it. Doing it inside the
      * main loop would aim him at wherever the carrier stood last frame,
      * which at seven metres a second is a visible hand-lag. */
+    const breakdownBall = this.breakdownBallTarget(d);
     for (const inst of pending) {
       const partner = this.latchPartner(inst, pending);
-      this.applyProcedural(inst, inst.proc.state, partner, step);
+      this.applyProcedural(inst, inst.proc.state, partner, step, breakdownBall);
     }
 
     for (const [k, inst] of this.pool) {

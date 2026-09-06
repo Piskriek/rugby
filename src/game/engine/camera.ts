@@ -171,7 +171,13 @@ export function updateCamera(d: Director, dt: number) {
   /* Cap the per-frame travel at 5.5 m: the cut is fast but the rig is still
    * a rig — it never moves more than a real gantry could survive. */
   const kPos = Math.min(1 - Math.exp(-dt * (far ? 8 : 3.0)), dist > 0.01 ? 5.5 / dist : 1);
-  const kZoom = 1 - Math.exp(-dt * (far ? 7 : 2.2));
+  /* A kick in flight climbs 6-10 m in under a second; the tilt and lens have
+   * to track that ascent or the ball rides out the top of frame while the
+   * rig is still pointing at the launch spot. Rate 2.2 (the near-band ease)
+   * is too slow for that. Use a dedicated fast zoom/tilt rate on a high
+   * kick. */
+  const kZoomRate = d.kk?.stage === 'FLIGHT' && (d.kk?.by ?? 0) > 0.6 ? 10 : (far ? 7 : 2.2);
+  const kZoom = 1 - Math.exp(-dt * kZoomRate);
   const kYaw = 1 - Math.exp(-dt * 3.0);
   d.cam.x += (target.x - d.cam.x) * kPos;
   d.cam.z += (target.z - d.cam.z) * kPos;
@@ -232,13 +238,16 @@ export function cableRig(
   const k = d.kk;
   const inFlight = k?.stage === 'FLIGHT';
   const aiming = k?.stage === 'AIM' || k?.stage === 'METER';
+  const high = inFlight && !!k && k.by > 0.6;
 
   // Lock the end-on side unless the player asked it to swap on turnover.
   const rigDir = d.cableSwapOnTurnover ? dir : 1;
 
   /* On a kick the rig backs off and climbs so the flight and the chase are
-   * both in frame. `cableEase` ramps that in and out rather than snapping. */
-  const wantKickWide = inFlight || aiming ? 1 : 0;
+   * both in frame. `cableEase` ramps that in and out rather than snapping.
+   * Only an actually-high flight needs the wide aerial framing; a low grubber
+   * is a running chase and must close onto the contest. */
+  const wantKickWide = high || aiming ? 1 : 0;
   d.cableEase += (wantKickWide - d.cableEase) * (1 - Math.exp(-dt * 1.8));
   const wide = d.cableEase;
 
@@ -249,8 +258,14 @@ export function cableRig(
    * ball trickled away at shin height — riding the bottom edge of the
    * frame for seconds at a time. After the first bounce the wide EXTRAS
    * (trail, height, the lens widening) release by rollK and the rig closes
-   * onto the contest for the ball. The hang is untouched: bounces == 0. */
-  const rollK = k && inFlight && k.bounces > 0 ? 0.35 : 1;
+   * onto the contest for the ball. The hang is untouched: bounces == 0.
+   *
+   * FRAMING AUDIT: a grubber/roll reaches y≈0.2 and never "bounces", so the
+   * old `bounces > 0` test kept the wide rig up until the flight stage ended
+   * — a grounded ball rode the bottom edge for the whole chase. A ball is
+   * only airborne enough to need the wide lens while it is actually high;
+   * anything at ankle height is grounded regardless of the bounce counter. */
+  const rollK = k && inFlight && !high ? 0.35 : 1;
   const trail = spec.standback * z.standbackMul * (1 + wide * 0.85 * rollK);
   const height = spec.height * z.heightMul * (1 + wide * 0.7 * rollK);
 
@@ -263,7 +278,7 @@ export function cableRig(
    * the yaw several degrees in one frame. The anchor is now eased like every
    * other axis, so the rig glides to the new subject instead of whipping. */
   let anchorX = tx, anchorZ = tz;
-  if (inFlight) {
+  if (high) {
     const lp = d.landingPrediction();
     if (lp) { anchorX = (tx + lp.x) / 2; anchorZ = (tz + lp.z) / 2; }
   }
@@ -305,7 +320,12 @@ export function cableRig(
    * collapses onto the landing point. Height-scaled, so the frame leads
    * again the moment the next kick goes up. */
   const aimX = anchorX;
-  const dropK = k && inFlight ? clamp(k.by / 9, 0.3, 1) : 1;
+  /* As the ball comes down the lead must collapse onto it, all the way to
+   * zero: a grounded roll is not a target to be led — leading a 0.2 m ball by
+   * six metres put it back on the bottom edge of frame (measured remaining
+   * BALL-ON-SCREEN faults). Once it has bounced and rolls at shin height the
+   * lens rides the ball itself. */
+  const dropK = (inFlight && k) ? clamp((k.by - 0.5) / 8, 0, 1) : 1;
   /* THE LEAD IS EARNED BY SPEED. The aim leads the subject so a running
    * attack reads into space — but a STOPPED or crawling ball needs no lead,
    * and holding one put every grounded ruck-ball at the bottom edge of the
@@ -316,13 +336,20 @@ export function cableRig(
   const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
-  const pxC = spec.pxPerMetre * z.pxMul * (1 - wide * 0.28 * rollK);
+  const pxC = spec.pxPerMetre * z.pxMul * (1 - wide * 0.62 * rollK);
   const ground = Math.max(4, Math.hypot(dx, dz));
 
   // Tilt down onto the play. Extra downward angle when wide, so a kick reads
   // as an aerial view of the whole contest.
-  const tilt = Math.atan2(d.cableH - 1.2, ground) * (1 + wide * 0.10);
-  const slant = Math.hypot(ground, d.cableH - 1.2);
+  // T-KICK-FRAMING: while the ball is in FLIGHT aim at the BALL's own height,
+  // not the turf behind it. A drop-out from the dead-ball zone peaks ~9-12 m
+  // up; a rig tilting at ground level 30 m away points underneath it and the
+  // ball rides out the top of frame (measured off-target frames on PUNT/FLIGHT
+  // with sy<0). Clamp the aim height so a ball briefly above the lens still
+  // keeps the pitch, not the sky, in shot.
+  const aimH = (inFlight && k) ? clamp(k.by, 0.4, 12) : 1.2;
+  const tilt = Math.atan2(d.cableH - aimH, ground) * (1 + wide * 0.10);
+  const slant = Math.hypot(ground, d.cableH - aimH);
   const focal = Math.max(1, pxC * slant);
 
   return {

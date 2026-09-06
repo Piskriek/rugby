@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { pollGamepad, emptyPrev, PrevGp } from '../game/gamepad';
 import {
   TEAMS, TEAM_BY_ID, KITS, OPTION_ITEMS, FORMATIONS, TACTIC_PRESETS, DEFAULT_SLIDERS,
   MANUAL, dataPointCount, DIFFICULTY_TABLE, LAW_ENTRIES, AI_ARCHETYPES, AI_WEIGHTS,
@@ -26,10 +27,24 @@ export type Mode = 'FRIENDLY' | 'LEAGUE' | 'WORLD_CUP' | 'FIVE_NATIONS' | 'CLINI
 
 export function TitleScreen({ onStart }: { onStart: () => void }) {
   const [tick, setTick] = useState(0);
+  const padRef = useRef<PrevGp>(emptyPrev());
   React.useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 90);
     return () => clearInterval(id);
   }, []);
+  /* AAA — the title starts on ENTER, SPACE or a controller START / A. */
+  React.useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onStart(); }
+    };
+    window.addEventListener('keydown', key);
+    const id = window.setInterval(() => {
+      const f = pollGamepad(padRef.current);
+      padRef.current = f;
+      if (f.connected && (f.pressed.includes('pause') || f.pressed.includes('action'))) onStart();
+    }, 80);
+    return () => { window.removeEventListener('keydown', key); window.clearInterval(id); };
+  }, [onStart]);
   const hue = (Math.sin(tick / 9) * 36 + 46) | 0;
   return (
     <div className="flex h-full w-full flex-col items-center justify-center bg-[#0a0e16]">
@@ -45,7 +60,7 @@ export function TitleScreen({ onStart }: { onStart: () => void }) {
           RUGBY
         </h1>
         <div className="mt-4 border-y-2 border-[#e8cf46] py-1 text-[11px] font-black tracking-[0.34em] text-[#e8cf46]">
-          SIXTEEN NATIONS · SIX MINI GAMES · ONE CUP
+          SIXTEEN NATIONS · SIX MINI GAMES · ONE CUP · AAA BROADCAST
         </div>
         <div className="mt-8 flex flex-col items-center gap-2">
           <Btn onClick={onStart}>PRESS FIRE TO CONTINUE</Btn>

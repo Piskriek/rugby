@@ -12,6 +12,7 @@
 
 import { MatchConfig } from './director';
 import { runDeep, DeepReport } from './trace';
+import { seedRng } from './seed';
 import { DEFAULT_SLIDERS, OPTION_ITEMS } from './data';
 
 export interface Gate {
@@ -84,7 +85,15 @@ export function gateConfig(diff: number): MatchConfig {
 /** Run the fault hunt across three difficulties and grade every gate. */
 export function runGates(seconds = 60): GatesReport {
   const levels = [0, 3, 6];
-  const reports: Array<{ diff: number; r: DeepReport }> = levels.map((d) => ({ diff: d, r: runDeep(gateConfig(d), seconds) }));
+  /* Each difficulty is an independent condition, not a continuation of the
+   * previous one. Reseeding per level keeps the RNG stream from letting the
+   * outcome of one difficulty (and the shared ambient stream) decide the next;
+   * without this the "strictest across 0/3/6" gate was really comparing one
+   * arbitrarily long stream against itself. */
+  const reports: Array<{ diff: number; r: DeepReport }> = levels.map((d) => {
+    seedRng(d);
+    return { diff: d, r: runDeep(gateConfig(d), seconds) };
+  });
   const results: GateResult[] = GATES.map((g) => {
     // Aggregate the strictest (worst) value across the three levels.
     const vals = reports.map((x) => x.r[g.field] as number);

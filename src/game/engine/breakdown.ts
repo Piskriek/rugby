@@ -7,9 +7,10 @@
 import { Director, Input, BreakdownState } from '../director';
 import { FIELD } from '../../render/retro';
 import { REFEREE_CALLS, DIFFICULTY_TABLE } from '../data';
-import { ruckDistributor, assignCrew } from '../intelligence';
+import { ruckDistributor, assignCrew, FORWARDS } from '../intelligence';
 import { R } from './rng';
 import { clamp } from './clamp';
+import { breakdownSlot, BreakdownRole, releaseMark } from './breakdownChoreo';
 
 /* PART 2 — MULTI-STAGE TACKLE PHYSICS.
  *
@@ -19,7 +20,13 @@ import { clamp } from './clamp';
  * of the window. The 3D animation timeline in ThreePlayerManager is cut
  * against exactly these numbers. */
 export const KINETIC_WINDOW = 0.3;
-export const KINETIC_DAMPING = 0.7;
+/* D-3/MOMENTUM AUDIT — this was 0.7, i.e. only 30% of the carrier's speed
+ * survived the hit, and the 0.3 s slide then carried the pair roughly
+ * 0.45 m at a 5 m/s carry. That is why a tackle read as two men stopping on
+ * the spot and folding: the fall had no travel. A 0.2 loss keeps 80% of the
+ * momentum through the hit, so a running tackle travels a metre or more
+ * before the ruck forms. */
+export const KINETIC_DAMPING = 0.2;
 
 /* MOMENTUM BRANCH — see BreakdownState.hitKind.
  * Closing speed at the contact frame, above which the hit is a running
@@ -144,7 +151,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * other phase. This baseline roll lives at the PLACE→RUCK transition
        * (the tackle, not the contest); the contest adds its own hazard
        * below when the defence is actually on top. */
-      if (R() < 0.036 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.010 + (d.slider(atk, 'aggression') / 100) * 0.018) {
         s.resultWhy = 'NOT RELEASING AT THE TACKLE';
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
@@ -305,8 +312,19 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
           return;
         }
       }
-      const margin = s.axis - 0.75;                     // 0 .. 0.25
-      s.window = clamp(0.12 + (0.25 - margin) * 1.12, 0.12, 0.28);
+      /* T-05 (audit): this used to clamp 0.12–0.28 s, but the RECYCLE path
+       * tested `window > 0.9` for slow ball — a condition the window could
+       * never meet, so slowBall was dead code and the release pitch was a
+       * roof for every ruck. Two things were conflated:
+       *   1. `window` — the real "present before the nine plays it" beat, a
+       *      short pick-up delay after the ruck is WON;
+       *   2. slow ball — whether the CONTEST took a long time to win, which
+       *      is what a slow ruck actually means.
+       * The window now keys on how dominant the winning force is (a clearout
+       * that drove the jackal off releases inside a beat; a scrape needs a
+       * longer presentation). Slow ball is read off `contestT` below. */
+      const dominance = Math.max(0, net);
+      s.window = clamp(0.12 + (1 - dominance) * 0.3, 0.12, 0.42);
       s.ballOutAt = s.t + s.window;   // T-05: the presentation window starts when the ball is WON
       s.jackalActive = false;
       s.resultWhy = `BALL WON — ${s.crew.length} v ${s.defCrew.length} CLEARED, FORCE ${(atkF / 100).toFixed(1)} v ${(defF / 100).toFixed(1)} kN`;
@@ -335,7 +353,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
        * other phase. */
-      if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.014 + (d.slider(atk, 'aggression') / 100) * 0.02) {
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
       }
@@ -412,32 +430,65 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
   if (s.stage === 'RECYCLE') {
     const outAt = s.ballOutAt > 0 ? s.ballOutAt : s.groundAt + s.window + 0.05;
     if (s.t >= outAt) {
-      /* T-05. Window range moved with the contest: a scraped win (axis at
-       * the threshold) releases around 1.35 s, a dominant shove around 0.35.
-       * Slow ball is the bottom half of that spread. */
-      const slow = s.window > 0.9;
+      /* T-05. Slow ball is a property of the CONTEST, not the pick-up delay:
+       * a ruck that took more than a second to win is slow ball, whether the
+       * nine then snaps it up or not. The presentation window above is short
+       * (0.12–0.42 s) so a won ruck does not stall the match, while this flag
+       * keeps the statistic honest. */
+      const slow = s.contestT > 1.0;
       d.teams[atk].stats.rucks++;
       if (slow) d.teams[atk].stats.slowBall++;
       /* T-09: the attack retained the ball — the build grows. */
       d.phasesGained++;
       if (d.phasesGained >= 3) d.seqState = 'BUILDUP';
-      // The nine, or the nearest eligible forward, plays it. Never a distant back.
-      const dist = ruckDistributor(d.live, atk, s.contactX, s.contactZ);
+      // The man the phase has been walking to the base all along. If the
+      // stored receiver has gone off / down since the tackle, fall back to
+      // the nearest eligible forward — but never a distant back.
+      let distNum = s.distNum ?? ruckDistributor(d.live, atk, s.contactX, s.contactZ).num;
+      let pick = d.L(atk, distNum);
+      if (pick.down || pick.sinbin > 0 || (pick.recoverT ?? 0) > 0) {
+        distNum = ruckDistributor(d.live, atk, s.contactX, s.contactZ).num;
+        pick = d.L(atk, distNum);
+      }
       const fwd = atk === 'A' ? 1 : -1;
+      const nearLine = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 20;
+      const rm = releaseMark(s.contactX, s.contactZ, fwd as 1 | -1, nearLine);
+      /* RUCK-RELEASE PROXIMITY. If the walked receiver still is not at the
+       * base (a very quick win, or he got pinned), do NOT hand the ball to a
+       * man ten metres behind the ruck — that reads as the ball flying off the
+       * contest. Hand it to the nearest forward who is actually standing there,
+       * which is what a pick-up from the base is. Standing is preferred; if
+       * nobody standing is close enough, an attacker who is upright but still
+       * in his get-to-feet recovery at the base is a legal pick-up in real
+       * rugby — holding out for a man several metres away is what used to make
+       * the ball leave the contest. Only a down / binned attacker is ruled out. */
+      if (Math.hypot(pick.x - rm.x, pick.z - rm.z) > 3.0) {
+        /* `down` is not a disqualifier here: clearRuck is about to stand every
+         * ground body up (`down=false`, `recoverT>0`) and startOpen will take
+         * the ball from the man's actual feet — a grounded nine at the base is
+         * a legal pick-up, a standing man ten metres away is not. */
+        const attackers = d.live.filter((p) => p.team === atk && p.sinbin <= 0);
+        const rank = (list: typeof attackers) => list
+          .map((p) => ({ p, d: Math.hypot(p.x - rm.x, p.z - rm.z) }))
+          .sort((a, b) => (FORWARDS.includes(a.p.num) ? -1 : 0) - (FORWARDS.includes(b.p.num) ? -1 : 0) || a.d - b.d);
+        const near = rank(attackers.filter((p) => !p.down && (p.recoverT ?? 0) <= 0)).find((c) => c.d <= 3.0)
+          ?? rank(attackers).find((c) => c.d <= 3.0);
+        if (near) { distNum = near.p.num; pick = near.p; }
+      }
       /* LAW 16 — the defence must be behind the hindmost foot when the ball
        * leaves the ruck. The ruck-formed clamp above has already been walking
        * them there all phase; nothing more is needed here, and the old
        * one-shot teleport (several metres, one frame) is exactly the fault
        * class the hunt exists to catch. */
       d.clearRuck();
-      // The nine plays it from the side of the ruck, a stride behind the ball,
-      // which is where he actually stands — not on top of the contact point.
-      const side = s.contactX > 0 ? -1.8 : 1.8;
-      const nearLine = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 20;
+      /* The nine plays it from the side of the ruck, a stride behind the ball,
+       * which is where he actually stands — not on top of the contact point.
+       * The release mark is the same choreography the nine has been walking to
+       * all phase, so RECYCLE cannot hand play back in a place nobody is in. */
       /* Playtest 3: the countdown said 3 but the tackle came in under a
        * second — the use-it window now BELONGS to the nine, and the losing
        * side must actually RELEASE AND RETREAT before they may race back. */
-      d.startOpen(atk, clamp(s.contactX + side, -32, 32), s.contactZ - fwd * (nearLine ? 0.5 : 1.4), dist.num, s.phase + 1, s.gainLine,
+      d.startOpen(atk, rm.x, rm.z, distNum, s.phase + 1, s.gainLine,
         Math.max(1.0, limit - (s.t - s.groundAt)));
       d.releaseBeat = { z: s.contactZ, dir: fwd, until: d.t + 0.9 };
       /* The buffered distribution fires the instant the ball is out. */
@@ -557,6 +608,23 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     return;
   }
 
+  /* AAA-calibration — THE BALL COMES LOOSE IN THE CONTACT. A professional
+   * tackle spills possession a handful of times a match; the engine recycled
+   * every single tackle into a ruck, which is why RUCKS PER MATCH sat at the
+   * ceiling while SCRUMS and SCRUM RESTARTS needed the pass errors alone to
+   * keep up. This is a genuine knock-on under the hit, not a coin-flip: the
+   * better the ball-carrier's hands (SKL) and the more he is trained to
+   * offload, the less likely the spill, and it costs a scrum and a turnover
+   * exactly as the law does. */
+  const knockOnSkill = clamp(car.attrs.SKL ?? 0.7, 0.4, 1);
+  if (R() < clamp(0.020 - knockOnSkill * 0.012, 0.006, 0.018)) {
+    d.teams[dTeam].stats.turnovers++;
+    d.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, atk);
+    d.say('LOST POSSESSION IN THE TACKLE');
+    d.startScrum(dTeam, cx, cz);
+    return;
+  }
+
   /* PART 2 — THE KINETIC IMPACT WINDOW.
    *
    * A tackle used to zero both men on the collision frame: fifteen stone of
@@ -598,37 +666,50 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   // T-39. Send three defenders so the CPU genuinely contests the ruck instead
   // of watching it. The first is the jackal, the other two counter-ruck.
   const defCrew = assignCrew(d.live, dTeam, cx, cz, 3);
-  const players: BreakdownState['players'] = [
-    { role: 'CARRIER', num: s.carrierNum, team: atk, x: cx, z: cz, down: true },
-  ];
-  if (tackler) players.push({ role: 'TACKLER', num: tackler.num, team: dTeam, x: cx + 0.6, z: cz - dir * 0.5, down: true });
-  crew.forEach((p, i) => {
+  /* CREW REACH — a man twenty metres away cannot clean out. Assigning him to
+   * the breakdown made the phase play as a distant sprinter arriving after the
+   * ruck had already gone (measured 11 of 1613 crew members >10 m, one at
+   * 19 m). He simply does not join this ruck; the crew is whoever is actually
+   * close enough to be a body over the ball. */
+  const inReach = (p: { x: number; z: number }, m: number) => Math.hypot(p.x - cx, p.z - cz) <= m;
+  const reachableCrew = crew.filter((p) => inReach(p, 12));
+  const reachableDef = defCrew.filter((p) => inReach(p, 12));
+  const crewFin = (reachableCrew.length ? reachableCrew : crew.slice(0, 1)).slice(0, commitA + 1);
+  const defFin = (reachableDef.length ? reachableDef : defCrew.slice(0, 1)).slice(0, 3);
+  const players: BreakdownState['players'] = [];
+  const add = <T extends BreakdownRole>(
+    role: T, num: number, team: 'A' | 'B', i: number,
+  ) => {
+    const slot = breakdownSlot(role, i, cx, cz, dir as 1 | -1);
+    players.push({ role, num, team, x: slot.x, z: slot.z, down: slot.down, idx: i });
+  };
+  /* The precomputed ruck shape replaces the ad-hoc `-0.8 - i * 0.5` slots
+   * the breakdown used to own. Critically, the clearers arrive ON THEIR FEET:
+   * a cleaner who drives in is not a second grounded body, so he never picks
+   * up a get-up lock the instant the ruck clears. */
+  add('CARRIER', s.carrierNum, atk, 0);
+  if (tackler) add('TACKLER', tackler.num, dTeam, 1);
+  crewFin.forEach((p, i) => {
     if (p.num === s.carrierNum || (tackler && p.num === tackler.num)) return;
-    p.down = i < 1;
-    players.push({
-      role: i === 0 ? 'FIRST CLEARER' : 'CLEANER', num: p.num, team: atk,
-      x: cx - 0.8 - i * 0.5, z: cz - dir * (1.3 + i * 0.4), down: i < 1,
-    });
+    p.down = false;
+    add(i === 0 ? 'FIRST CLEARER' : 'CLEANER', p.num, atk, i);
   });
   /* T-24c. The first defender to a breakdown ALWAYS contests the ball. The old
    * code rolled a 25-65% chance of sending a jackal, so most rucks had nobody
    * over the ball and the defence could never win it. A defender over the ball
    * is the default, not the exception. */
-  defCrew.forEach((p, i) => {
+  defFin.forEach((p, i) => {
     if (tackler && p.num === tackler.num) return;
-    players.push({
-      role: i === 0 ? 'JACKAL' : 'COUNTER', num: p.num, team: dTeam,
-      x: cx + 0.5 + i * 0.4, z: cz + dir * (1.0 + i * 0.5), down: false,
-    });
+    add(i === 0 ? 'JACKAL' : 'COUNTER', p.num, dTeam, i);
   });
 
   const zone = dir > 0 ? 50 - cz : 50 + cz;
   const ep = clamp(0.12 + Math.max(0, (75 - zone) / 75) * 4.2, 0.05, 4.3);
   d.bd = {
     t: 0, stage: 'CONTACT', attacking: atk, contactX: cx, contactZ: cz,
-    gainLine: s.gained, ruckFormed: false, jackalActive: defCrew.length > 0,
+    gainLine: s.gained, ruckFormed: false, jackalActive: defFin.length > 0,
     ball: { x: cx, z: cz, placed: false }, players,
-    crew: crew.map((p) => p.num), defCrew: defCrew.map((p) => p.num),
+    crew: crewFin.map((p) => p.num), defCrew: defFin.map((p) => p.num),
     groundAt: -1, ballOutAt: 0, phase: s.phase, expectedPoints: ep,
     power: { A: 40 + d.L(atk, 8).attrs.PWR * 0.5, B: 40 + d.L(dTeam, 7).attrs.PWR * 0.5 },
     window: 0, result: '', resultWhy: '',
@@ -636,6 +717,10 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     commitA, commitB: 2, advantageOf: 0,
     axis: 0, axisVel: 0, contestT: 0, redT: 0,
     hitKind, hitSpeed: closing,
+    /* Pick the receiver ONCE at the tackle so the phase can walk THAT man to
+     * the base. Re-asking `ruckDistributor` at the release frame let the ball
+     * go to a different forward who had never walked there. */
+    distNum: ruckDistributor(d.live, atk, cx, cz).num,
   };
   d.phase = 'BREAKDOWN';
   d.op = undefined;

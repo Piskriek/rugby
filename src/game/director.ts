@@ -65,6 +65,8 @@ import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
+import { breakdownDriveTarget, nineBase } from './engine/breakdownChoreo';
+import type { BreakdownRole } from './engine/breakdownChoreo';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
@@ -280,7 +282,10 @@ export interface BreakdownState {
   attacking: 'A' | 'B'; contactX: number; contactZ: number;
   gainLine: number; ruckFormed: boolean; jackalActive: boolean;
   ball: { x: number; z: number; placed: boolean };
-  players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean }[];
+  /** `idx` is the arrival index inside the player's own crew (0 = first
+   *  cleaner / jackal), which the breakdown choreography reads to place and
+   *  drive each man. It is NOT the `players` array ordinal. */
+  players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean; idx: number }[];
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck
@@ -310,6 +315,10 @@ export interface BreakdownState {
   hitKind: 'RUNNING' | 'STANDING';
   /** closing speed at the contact frame, m/s (diagnostics + renderer). */
   hitSpeed: number;
+  /** T-RUCK-RELEASE. The one man the phase walks to the base and who will be
+   * handed the ball at RECYCLE. Choosing afresh at the release frame is what
+   * let the ball jump to a different man who had never walked there. */
+  distNum?: number;
 }
 
 /**
@@ -378,7 +387,7 @@ export interface MatchStats {
   /** SPEC_12: scrum restarts, free kicks and turnover scrums conceded. These
    * are NOT penalties and must not spend the match's penalty budget. */
   restarts: number;
-  tacklesBroke: number; offloads: number; jackals: number;
+  tacklesBroke: number; offloads: number; jackals: number; strips: number;
 }
 
 /** A two-side count used by set-piece and formation telemetry. */
@@ -458,7 +467,7 @@ const blankStats = (): MatchStats => ({
   possession: 0, tackles: 0, missed: 0, turnovers: 0, scrumsWon: 0, scrumsLost: 0,
   lineoutsWon: 0, lineoutsLost: 0, rucks: 0, slowBall: 0, metres: 0, carries: 0,
   passes: 0, kicks: 0, penaltiesConceded: 0, lineBreaks: 0, offsides: 0, restarts: 0,
-  tacklesBroke: 0, offloads: 0, jackals: 0,
+  tacklesBroke: 0, offloads: 0, jackals: 0, strips: 0,
 });
 
 export interface MatchEvent { min: number; team: 'A' | 'B' | '-'; kind: string; text: string }
@@ -467,7 +476,7 @@ export interface PlayerRun {
   num: number; name: string; pos: string;
   carries: number; metres: number; tackles: number; turnovers: number;
   kicks: number; passes: number; rating: number; stamina: number; on: boolean; star: number;
-  breaks: number; offloads: number; jackals: number;
+  breaks: number; offloads: number; jackals: number; strips: number;
 }
 
 export interface TeamRun {
@@ -718,10 +727,14 @@ export class Director {
      * is per 80-minute MATCH, and at 12x the engine only got ~400 s to produce
      * a full match's worth of tackles, rucks and passes — the per-event rates
      * were already hyper-dense and the totals still read at half strength.
-     * 8x gives the match the seconds it needs (five real-time minutes a
-     * half — a normal video-game rugby pace) without touching any law, speed
-     * or difficulty table. */
-    this.clockScale = clamp(this.halfLength / 150, 1, 8);
+     * 8x was the next step in that same direction, but a 40-minute half still
+     * resolved to only ~480 engine-seconds, so a full match produced ~78 rucks
+     * and ~54 tackles a team while the realism benchmark asks for 120-200 and
+     * 90-220. The match was running out of time, not out of rugby.
+     * AAA-calibration: 4x gives an 80-minute match its full two thousand
+     * engine-seconds of play, which is exactly where the event density lands
+     * in the published ranges, at a (10-minute) video-game session pace. */
+    this.clockScale = clamp(this.halfLength / 150, 1, 4);
     this.pitch = pitchConditions(['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'][cfg.options.pitch ?? 1]);
     this.teams = {
       A: this.makeRun(cfg.homeId, cfg.kitA, cfg.slidersA, cfg.backlineA, cfg.defenceA, cfg.lineoutA, cfg.scrumA, cfg.cpuA, cfg.kickerA),
@@ -759,7 +772,7 @@ export class Director {
       players: n.squad.map((p: SquadPlayer) => ({
         num: p.num, name: p.name, pos: p.pos, carries: 0, metres: 0, tackles: 0,
         turnovers: 0, kicks: 0, passes: 0, rating: 6, stamina: 100, on: true, star: p.star,
-        breaks: 0, offloads: 0, jackals: 0,
+        breaks: 0, offloads: 0, jackals: 0, strips: 0,
       })),
     };
   }
@@ -1794,7 +1807,7 @@ export class Director {
             const tk = `${team}:${line.kind}`;
             byTeamKind[tk] = (byTeamKind[tk] ?? 0) + 1;
           }
-          const verdict = offsideVerdict(profile, breach, !this.isHuman(team), forceAiClean);
+          const verdict = offsideVerdict(profile, breach, !this.isHuman(team), forceAiClean, this.clockScale);
           /* OBSERVE keeps looking. This was a `break` once, which meant the
            * first sustained offender in the team decided the matter: a man
            * loitering half a metre past the line hid the man five metres past
@@ -2332,9 +2345,15 @@ export class Director {
 
     if (this.bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY')) {
       const s = this.bd;
+      /* One geometry for the whole phase: the clearout driving lane, the jackal
+       * digging in, the tackler rolling clear, and the nine's base. The old
+       * code had three copies of the ruck shape (breakdown.ts slots, placeBound
+       * pin, RECYCLE release) that could drift. */
+      const fwdA = s.attacking === 'A' ? 1 : -1;
       for (const q of s.players) {
         const p = this.L(q.team, q.num);
         if (p.sinbin > 0) continue;
+        let wantClip = 'ready';
         /* T-29. The carrier and tackler are already at the contact point, so they
          * pin there. The arriving crew used to be snapped to their ruck slots too,
          * which read as players teleporting into the breakdown. They now close the
@@ -2362,29 +2381,35 @@ export class Director {
             p.vx = 0; p.vz = 0;
           }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+          wantClip = 'grounded';
         } else if (q.role === 'TACKLER' && inKineticImpact(s)) {
           /* he is riding the carrier down — breakdown.ts moved him. */
+          wantClip = 'tackle';
         } else {
+          /* The slot is not a freeze — it DRIVES. A clearer starts behind the
+           * ball and works through the jackal as the contest develops; the
+           * jackal digs in; the tackler peels away. All of that motion is drawn
+           * from the one breakdown choreography table. */
+          const target = breakdownDriveTarget(
+            q.role as BreakdownRole, q.idx, s.contactX, s.contactZ,
+            fwdA as 1 | -1, s.contestT, s.ruckFormed,
+          );
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
            * at a sprint per frame — he runs in, he does not lurch. */
-          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(q.x - p.x, q.z - p.z)));
-          p.x += (q.x - p.x) * k;
-          p.z += (q.z - p.z) * k;
+          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(target.x - p.x, target.z - p.z)));
+          p.x += (target.x - p.x) * k;
+          p.z += (target.z - p.z) * k;
           p.movedBy = 'bound';   // T-02: the ease is a writer too — own it
-          if (Math.hypot(q.x - p.x, q.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
+          if (Math.hypot(target.x - p.x, target.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
+          wantClip = target.clip;
         }
         p.face = q.team === s.attacking ? 1 : -1;
-        if (q.role === 'CARRIER') clip(p, 'grounded');
-        else if (q.role === 'JACKAL') clip(p, 'jackal');
-        else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');
-        else if (q.role === 'CLEANER') clip(p, s.stage === 'PLACE' ? 'cleanout' : 'maulBind');
-        /* PART 2: the tackler wears 'tackle' from the impact frame. The
-         * renderer's tackle timeline (impact / grounding / roll-away) is what
-         * gives the hit its beat now, so holding the old dive one-shot for
-         * 0.45 s here would only delay the first stage of it. */
-        else if (q.role === 'TACKLER') clip(p, 'tackle');
-        else if (q.role !== 'TACKLER') clip(p, s.ruckFormed ? 'maulBind' : 'ready');
+        /* The clip stays honest through the whole clearout: the cleaner does
+         * not turn into a binding maul body on the frame the ruck closes. The
+         * choreography hands back `cleanout` while he is still driving and
+         * `maulBind` once he has bound onto the body. */
+        clip(p, wantClip);
         p.job = q.role === 'CARRIER' ? 'PRESENT THE BALL BACK TO YOUR NINE'
           : q.role === 'JACKAL' ? 'GET YOUR HANDS ON THE BALL, LEGALLY'
             : q.role === 'TACKLER' ? 'ROLL AWAY AND GET BACK ON SIDE'
@@ -2396,22 +2421,24 @@ export class Director {
        * so (a) the ruck countdown reads against a real body standing over the
        * ball, and (b) when RECYCLE fires, startOpen does not have to snap him
        * there — he walked. */
-      const fwdA = s.attacking === 'A' ? 1 : -1;
-      const dist9 = s.stage !== 'OVER' ? ruckDistributor(this.live, s.attacking, s.contactX, s.contactZ) : null;
-      if (dist9 && dist9.sinbin <= 0 && !dist9.down
+      /* Prefer the receiver chosen at the tackle so the SAME man walks to the
+       * base; the per-frame fallback is only for when he has left the field. */
+      const dist9 = s.stage !== 'OVER'
+        ? (s.distNum ? this.L(s.attacking, s.distNum) : ruckDistributor(this.live, s.attacking, s.contactX, s.contactZ))
+        : null;
+      if (dist9 && dist9.sinbin <= 0 && !dist9.down && (dist9.recoverT ?? 0) <= 0
         && !s.players.some((q) => q.team === s.attacking && q.num === dist9.num)) {
-        const baseX = clamp(s.contactX + (s.contactX > 0 ? -1.8 : 1.8), -32, 32);
-        const baseZ = s.contactZ - fwdA * 1.4;
-        const off = Math.hypot(baseX - dist9.x, baseZ - dist9.z);
+        const base = nineBase(s.contactX, s.contactZ, fwdA as 1 | -1);
+        const off = Math.hypot(base.x - dist9.x, base.z - dist9.z);
         if (off > 0.45) {
-          dist9.tx = baseX; dist9.tz = baseZ; dist9.urgency = 1;
+          dist9.tx = base.x; dist9.tz = base.z; dist9.urgency = 1;
           dist9.job = 'GET TO THE BASE — YOUR BALL';
           steer(dist9, dt, true);
         } else {
           /* D-2 — bounded; this was the last unbounded set-piece place, and it
            * showed up as shirt 9 moving 1.12 m in one frame under the gate
            * harness's bot input (a path NO_INPUT probing never exercised). */
-          if (this.settleToward(dist9, baseX, baseZ, dt, 'bound')) { dist9.vx = 0; dist9.vz = 0; }
+          if (this.settleToward(dist9, base.x, base.z, dt, 'bound')) { dist9.vx = 0; dist9.vz = 0; }
           clip(dist9, 'nineSquat');
           dist9.job = 'HANDS ON THE BALL — WAIT FOR IT TO COME';
         }
@@ -2473,7 +2500,13 @@ export class Director {
         apply(defenders, true);
 
         /* the kicker himself keeps his existing walk-up ritual below. */
-        if (s.stage === 'WALKUP' && Math.hypot(k.x - s.bx, k.z - (s.bz - s.dir * 1.1)) > 0.8) {
+        /* NO-TELEPORT: the goal-kick branch used to `place()` the kicker onto
+         * the tee whenever he was not in WALKUP — at AIM that closure was
+         * unconditional and closed the whole remaining gap in one frame
+         * (measured 1.88 m). He now walks to the tee while he is setting too,
+         * and the last metre is closed with the same bounded settle as every
+         * other set piece. */
+        if (Math.hypot(k.x - s.bx, k.z - (s.bz - s.dir * 1.1)) > 0.8) {
           k.tx = s.bx; k.tz = s.bz - s.dir * 1.1;
           k.urgency = clamp(1.15, 0, 1);
           k.job = 'WALK TO THE TEE';
@@ -2481,8 +2514,10 @@ export class Director {
           steer(k, dt, false);
           clip(k, 'jog');
         } else {
-          this.place(k, s.bx, s.bz - s.dir * 1.1, 'kicker');
-          k.vx = 0; k.vz = 0; k.face = s.dir;
+          if (this.settleToward(k, s.bx, s.bz - s.dir * 1.1, dt, 'kicker')) {
+            k.vx = 0; k.vz = 0;
+          }
+          k.face = s.dir;
           clip(k, 'ready');
         }
         return;
@@ -2564,8 +2599,12 @@ export class Director {
           k.job = 'GET TO THE BALL';
           steer(k, dt, false);
         } else {
-          this.place(k, kx, kz, 'kicker');
-          k.vx = 0; k.vz = 0; k.face = s.dir;
+          /* D-2 — bounded settle on the last sub-half-metre; the whole-gap
+           * `place` below closed up to 0.5 m in one frame. */
+          if (this.settleToward(k, kx, kz, dt, 'kicker')) {
+            k.vx = 0; k.vz = 0;
+          }
+          k.face = s.dir;
           clip(k, 'ready');
         }
         if (s.form && (s.type === 'RESTART' || s.type === 'DROP_OUT')) {
@@ -2805,7 +2844,12 @@ export class Director {
    */
   place(p: Live, x: number, z: number, who: string) {
     const ddx = x - p.x, ddz = z - p.z;
-    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
+    /* A strip hands the ball straight from the latch to the tackler on the
+     * same frame clearLatch ran. He is already at arm's length (latch owns his
+     * placement), so carrier placement there is the phase handoff, not a
+     * teleport. */
+    const handoff = who === 'carrier' && p.movedBy === 'latch';
+    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && !handoff && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
     }
     p.movedBy = who;
@@ -3819,6 +3863,11 @@ export class Director {
     car.face = dir;
     car.down = false;
     car.bound = false;
+    /* A man handed the ball is no longer locked in a get-up recovery. The ruck
+     * release can now pick an attacker who is still finishing his get-to-feet at
+     * the base (instead of a man several metres away); without this the nine
+     * would be handed the ball and then held in place by the recovery lock. */
+    car.recoverT = 0;
     this.live.forEach((p) => { p.passRank = 0; });
 
     this.op = {
@@ -3993,7 +4042,24 @@ export class Director {
      * the fielding side did not fail at anything, and 3 of the ladder's 4
      * rungs are kicks. */
     const justFielded = this.receipt && this.receipt.team === t && this.t - this.receipt.at < 7;
-    const kickBiasAdj = justFielded ? -80 : this.slider(t, 'kickFreq');
+    /* SCORE-AWARE TEMPO (T-18/momentum). Rugby sides change what they call
+     * with the scoreboard, and the sim was score-blind in open play: the team
+     * ahead kept carrying and stacking rucks while the trailing side spent its
+     * energy chasing, which is how equal-squad matches degenerated into 70-13
+     * scores with a 60/40 ruck split. A side protecting a lead looks for
+     * territory (kick more, and hand the ball back deep); a side chasing keeps
+     * the ball in hand and attacks. The switches are off in the first 25
+     * minutes so the shape/playbook still owns the opening, and the margin
+     * hooks are deliberately wide enough that a one-score lead does not mutate
+     * the call tree. */
+    const oppT: 'A' | 'B' = t === 'A' ? 'B' : 'A';
+    const margin = this.teams[t].score - this.teams[oppT].score;
+    let scoreBias = 0;
+    if (this.minute > 25) {
+      if (margin > 10) scoreBias = 35;        // protect the lead: hunt territory
+      else if (margin < -10) scoreBias = -35; // chasing: keep the ball in hand
+    }
+    const kickBiasAdj = (justFielded ? -80 : this.slider(t, 'kickFreq')) + scoreBias;
     const chosen = callPlay(
       zoneOf(toLine), this.op.phase, shape, arch,
       kickBiasAdj, this.slider(t, 'width'),
@@ -4503,6 +4569,16 @@ export class Director {
     if (s.type === 'GOAL') this.conversionPending = false;
     const pts = s.type === 'GOAL' ? (isConv ? POINTS.CONVERSION : POINTS.PENALTY) : POINTS.DROP_GOAL;
     this.teams[s.kicker].score += pts;
+    /* AAA broadcast: a kick score must also be a spotlight. This also fixes
+     * the lingering T-13 lastScorer hang — a penalty after a converted try no
+     * longer attributes the +3 to the earlier try scorer. */
+    this.lastScorer = {
+      num: s.kickerNum,
+      name: s.kickerName,
+      team: s.kicker,
+      min: this.minute,
+      kind: isConv ? 'CONVERSION' : s.type === 'GOAL' ? 'PENALTY' : 'DROP',
+    };
     this.events.push({ min: this.minute, team: s.kicker, kind: s.type, text: `${this.teams[s.kicker].nation.short} +${pts} — ${s.kickerName}` });
     this.commentate('KICK');
     this.banner_(`${this.teams[s.kicker].nation.short} +${pts} — ${s.kickerName}`);
@@ -4512,6 +4588,10 @@ export class Director {
 
   kickMissed( /* T-03: engine-internal */s: KickState, why: string) {
     s.stage = 'RESULT'; s.result = 'MISSED';
+    /* SPEC_07 — a missed conversion ends the try's set-piece window, exactly
+     * as a made one does. Without this a subsequent penalty goal inherited
+     * the pending conversion flag and was credited (and spotlighted) as +2. */
+    if (s.type === 'GOAL') this.conversionPending = false;
     this.commentate('KICK', `— ${why}`);
     this.banner_('NO GOOD');
     this.kk = undefined;
@@ -4639,7 +4719,7 @@ export class Director {
       /* T-18. Outside kicking range a penalty is kicked to TOUCH — that is
        * where lineouts come from. The old 40/20/40 split taken from the
        * centre spot produced almost no territory and no lineouts. */
-      if (r < (dist >= 42 ? 0.75 : 0.35) && !free) { this.penaltyTouchKick = true; this.startKick(team, 'PUNT', { x, z }); return; }
+      if (r < (dist >= 42 ? 0.82 : 0.45) && !free) { this.penaltyTouchKick = true; this.startKick(team, 'PUNT', { x, z }); return; }
       if (r < 0.9 && !free) { this.startScrum(team, x, z); return; }
     }
     this.startOpen(team, x, z + dir * 1.5, 9, 1, 0, 0.6);
