@@ -48,6 +48,23 @@ function packGroups(group: number, mask: number): number {
   return ((group & 0xffff) << 16) | (mask & 0xffff);
 }
 
+/**
+ * Point a rig's colliders at another rig's bodies (multi-rig contact for
+ * tackles). `ownBit` is this rig's membership bit, `alsoBits` the foreign
+ * bits its bodies may touch. The ground bit (0) always stays in the mask,
+ * so the rig still lands on the pitch.
+ *
+ * Rigs built by buildRagdollWorld all default to bit 7 with a ground-only
+ * mask and therefore never collide with each other — the flailing dive
+ * needs one call per side (defender: own 7 / also 8, carrier: own 8 / also
+ * 7) so the dive has something to hit.
+ */
+export function setRagdollGroups(rig: RagdollRig, ownBit: number, alsoBits: number): void {
+  const mask = 1 | alsoBits;
+  for (const b of rig.bodies) b.collider.setCollisionGroups(packGroups(ownBit, mask));
+  for (const pad of rig.pads) pad.collider.setCollisionGroups(packGroups(ownBit, mask));
+}
+
 /* ---------------------------------------------------------- the rig ------ */
 export interface RagdollBody {
   part: BodyPart;
@@ -90,31 +107,51 @@ export interface RagdollRig {
   pads: RagdollPad[];
 }
 
-/** Build the world, ground and a 15-body ragdoll at the bind pose. */
-export function buildRagdollWorld(opts?: { gravityY?: number; ground?: boolean; groundFriction?: number }): RagdollRig {
-  const world = new RAPIER.World({ x: 0, y: opts?.gravityY ?? -9.81, z: 0 });
-  world.timestep = 1 / 120;
-  world.integrationParameters.numSolverIterations = 12;
-  world.integrationParameters.numInternalPgsIterations = 2;
+export interface RagdollWorldOpts {
+  gravityY?: number;
+  ground?: boolean;
+  groundFriction?: number;
+  /** Build into an EXISTING world instead of creating one (multi-rig
+   *  scenes — the flailing-dive probe shares one world between defender
+   *  and carrier so their colliders can actually meet). The existing
+   *  world's timestep / solver settings are left untouched. */
+  world?: World;
+  /** World offset of the bind pose (multi-rig scenes). */
+  x?: number;
+  z?: number;
+}
 
-  // ground plate (fixed) — top surface at y = 0
-  if (opts?.ground !== false) {
-    const groundBody = world.createRigidBody(
-      RAPIER.RigidBodyDesc.fixed().setTranslation(0, -3, 0),
-    );
-    const ground = world.createCollider(
-      RAPIER.ColliderDesc.cuboid(12, 3, 12).setFriction(opts?.groundFriction ?? 1.2).setRestitution(0.0),
-      groundBody,
-    );
-    void ground;
+/** Build the world, ground and a 15-body ragdoll at the bind pose. */
+export function buildRagdollWorld(opts?: RagdollWorldOpts): RagdollRig {
+  const world = opts?.world ?? new RAPIER.World({ x: 0, y: opts?.gravityY ?? -9.81, z: 0 });
+  if (!opts?.world) {
+    world.timestep = 1 / 120;
+    world.integrationParameters.numSolverIterations = 12;
+    world.integrationParameters.numInternalPgsIterations = 2;
+
+    // ground plate (fixed) — top surface at y = 0
+    if (opts?.ground !== false) {
+      const groundBody = world.createRigidBody(
+        RAPIER.RigidBodyDesc.fixed().setTranslation(0, -3, 0),
+      );
+      const ground = world.createCollider(
+        RAPIER.ColliderDesc.cuboid(12, 3, 12).setFriction(opts?.groundFriction ?? 1.2).setRestitution(0.0),
+        groundBody,
+      );
+      void ground;
+    }
   }
+
+  const ox = opts?.x ?? 0;
+  const oz = opts?.z ?? 0;
 
   const bodies: RagdollBody[] = [];
   const byPart = new Map<BodyPart, RagdollBody>();
   const rig = { world, bodies, byPart, joints: [] as RagdollJoint[], byName: new Map(), pads: [] as RagdollPad[] } as RagdollRig;
 
   for (const c of COLLIDERS) {
-    const bind = BIND[c.part];
+    // offset bind so the stored transform equals the real spawn transform
+    const bind = { p: { x: BIND[c.part].p.x + ox, y: BIND[c.part].p.y, z: BIND[c.part].p.z + oz }, q: BIND[c.part].q };
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(bind.p.x, bind.p.y, bind.p.z)
