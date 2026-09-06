@@ -6,15 +6,17 @@
  * action. The human-controlled player is deliberately left alone — the engine
  * overrides his wish with live input.
  *
- * Attack: forwards set pods behind the ball, backs spread with depth, the
- * carrier decides run/pass/kick/grubber/drop from pressure and field position.
- * Defence: a sliding line anchored behind the ball, nearest man to the carrier
- * makes the tackle, the fullback sweeps deep.
+ * Positioning is driven by the thesis's ROLE CONTRACTS (each shirt has an
+ * authored lateral/depth for open play and for the defensive line) and by the
+ * live SET PLAY (a named call whose runners override the stock shape). Every
+ * verb reads the attribute that the design doc assigns it: AWA positions and
+ * arrives, AGG sets the line speed, SKL throws, PWR contests, SPD breaks.
  */
 import type { RugbySim } from './engine';
 import type { Player, Wish, Act } from './types';
 import { TRY_X } from './consts';
 import { dist } from './consts';
+import { contractFor } from './design';
 
 function clamp(v: number, lo: number, hi: number): number { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -24,6 +26,7 @@ export function plan(sim: RugbySim, wishes: Wish[]) {
   const attacking: 'A' | 'B' = carrier?.side ?? sim.possession ?? 'A';
   const ad = sim.attackDir(attacking);
   const all = [...sim.A.players, ...sim.B.players];
+  const openSign = b.y >= 0 ? -1 : 1; // openside = away from the nearer touchline
 
   const idxOf = (p: Player) => (p.id < 100 ? p.id - 1 : p.id - 101 + 15);
 
@@ -40,8 +43,9 @@ export function plan(sim: RugbySim, wishes: Wish[]) {
       const near = defendersNear(sim, p, 4.5);
       const ch = openChannel(sim, p, ad);
       w.tx = ch.tx; w.ty = ch.ty;
-      w.speed = 1; w.sprint = near === 0;
-      // deliberate decisions on a cooldown — no per-frame dice spam
+      w.speed = 1;
+      // sprint in space, and hard at the line — a try is worth the burn
+      w.sprint = near === 0 || TRY_X - p.x * ad < 5;
       if (p.id !== sim.ctrlId) {
         if (p.decide <= 0) {
           w.act = carrierDecision(sim, p);
@@ -60,10 +64,13 @@ export function plan(sim: RugbySim, wishes: Wish[]) {
       continue;
     }
 
-    /* --- attack support --- */
+    /* --- attack support (role contract + set play) --- */
     if (p.side === attacking) {
-      const t = supportPoint(p, carrier!, ad);
-      w.tx = t.x; w.ty = t.y; w.speed = 0.92; w.sprint = false;
+      const t = supportPoint(sim, p, carrier!, ad, openSign);
+      w.tx = t.x; w.ty = t.y;
+      // AWARENESS: a smart support runner arrives at pace, a slow one ambles
+      w.speed = 0.82 + (sim.awa(p) / 100) * 0.18;
+      w.sprint = p.num === 9 || p.num === 14 || p.num === 11;
       continue;
     }
 
@@ -74,11 +81,14 @@ export function plan(sim: RugbySim, wishes: Wish[]) {
       w.tx = carrier!.x; w.ty = carrier!.y; w.speed = 1; w.sprint = true;
       continue;
     }
-    const t = defensePoint(p, carrier!, ad);
+    const t = defensePoint(p, carrier!, ad, openSign);
     // after a line break the cover defence is flat-footed — only the near man
     // still runs at full pace
-    const shocked = sim.defenseShock > 0 && dist(p.x, p.y, carrier!.x, carrier!.y) > 5;
-    w.tx = t.x; w.ty = t.y; w.speed = shocked ? 0.5 : 0.85; w.sprint = false;
+    const shocked = sim.defenseShock > 0 && dist(p.x, p.y, carrier!.x, carrier!.y) > 4;
+    // AGGRESSION sets the line speed; a soft defender drifts, a hard one shoots
+    w.tx = t.x; w.ty = t.y;
+    w.speed = shocked ? 0.4 : 0.7 + (p.att.agg / 100) * 0.3;
+    w.sprint = !shocked && p.att.agg > 78 && dist(p.x, p.y, carrier!.x, carrier!.y) < 9;
   }
 }
 
@@ -104,6 +114,7 @@ function pickReceiver(sim: RugbySim, p: Player): Player | null {
     const d = Math.hypot(dx, dy);
     if (d > 22) continue;
     const nearby = defendersNear(sim, q, 3);
+    // SKL makes the throw stick; a smart runner finds space (fewer defenders)
     const score = -nearby * 2.6 - d * 0.12 + q.att.skl * 0.03 - Math.max(0, -fwd) * 0.08;
     if (score > bestScore) { bestScore = score; best = q; }
   }
@@ -116,6 +127,16 @@ function carrierDecision(sim: RugbySim, p: Player): Act | null {
   const r = sim.rng();
   const recv = pickReceiver(sim, p);
   const skl = p.att.skl / 100;
+  const x = p.x * ad; // +ve = opposition half
+  const play = sim.play;
+
+  // the SET PLAY bias steers the first decision off a breakdown
+  if (play && play.side === p.side && sim.phasesSinceBreak <= 1) {
+    if (play.bias === 'PASS' && recv && r < 0.85) return { kind: 'PASS', target: recv.id };
+    if (play.bias === 'CARRY' && near <= 2) return null; // hold it, take contact on terms
+    if (play.bias === 'KICK_CROSS' && p.num === 10 && r < 0.5) return { kind: 'PUNT' };
+    if (play.bias === 'KICK_DROP' && p.num === 10 && near >= 1) return { kind: 'DROP' };
+  }
 
   // a fresh release is a distribution moment: the 9 (or 10) moves it fast
   if (sim.releaseGrace > 0 && recv && p.num <= 10 && r < 0.9) {
@@ -125,15 +146,15 @@ function carrierDecision(sim: RugbySim, p: Player): Act | null {
     return { kind: 'PASS', target: recv.id };
   }
   // exit kick out of your own 22 under heavy pressure with no outlet
-  if (p.x * ad < -12 && near >= 3 && !recv && r < 0.25) {
+  if (x < -12 && near >= 3 && !recv && r < 0.25) {
     return { kind: 'PUNT' };
   }
   // grubber behind a flat defence in the attacking half
-  if (p.x * ad > 24 && r < 0.08) {
+  if (x > 24 && r < 0.08) {
     return { kind: 'GRUBBER' };
   }
   // drop goal in range, and only when the move is being contested
-  const goalDist = TRY_X - p.x * ad;
+  const goalDist = TRY_X - x;
   if (goalDist > 14 && goalDist < 40 && near >= 1 && r < 0.02 + p.att.kik / 100 * 0.015) {
     return { kind: 'DROP' };
   }
@@ -158,37 +179,41 @@ function openChannel(sim: RugbySim, p: Player, ad: number): { tx: number; ty: nu
   return { tx: ahead, ty: bestY };
 }
 
-function supportPoint(p: Player, carrier: Player, ad: number): { x: number; y: number } {
-  if (p.num <= 8) {
-    // forwards pod: tight and flat, a metre off the carrier's shoulder
-    return {
-      x: carrier.x - ad * 1.2 + (p.num % 2 === 0 ? 1.8 : -1.8),
-      y: clamp(carrier.y + (p.num % 3 - 1) * 2.2, -32, 32),
-    };
+/** Attack support from the ROLE CONTRACTS, overridden by the live set play's
+ * runner offsets. The anchor is the carrier; depth is behind the gain line,
+ * lateral is across the openside. */
+function supportPoint(sim: RugbySim, p: Player, carrier: Player, ad: number, openSign: number): { x: number; y: number } {
+  const play = sim.play;
+  if (play && play.side === p.side) {
+    const run = play.runners.find((rp) => rp.num === p.num);
+    if (run) {
+      return {
+        x: carrier.x - ad * run.dx,   // dx = metres behind the ball
+        y: clamp(carrier.y + run.dy * openSign, -32, 32),
+      };
+    }
   }
-  const [depth, across] = backPos(p.num);
-  return { x: carrier.x - ad * depth, y: clamp(carrier.y + across, -32, 32) };
+  const rc = contractFor(p.num);
+  // OPEN_PLAY depth is a *set* depth; in live open play the line must be flat
+  // (FLOW-05: three or four passes from turnover ball). Keep the authored
+  // LATERAL — that is what stops props drifting to flyhalf — and flatten depth.
+  const depth = (rc.depth.OPEN ?? (p.num <= 8 ? 4.5 : 8)) * 0.5;
+  const lateral = rc.lateral.OPEN ?? 0;
+  return {
+    x: carrier.x - ad * depth,
+    y: clamp(carrier.y + lateral * openSign, -32, 32),
+  };
 }
 
-function backPos(num: number): [number, number] {
-  switch (num) {
-    case 9: return [1.2, 2.2];
-    case 10: return [2.6, 0];
-    case 12: return [3.6, -4.5];
-    case 13: return [3.6, 4.5];
-    case 11: return [4.6, -13];
-    case 14: return [4.6, 13];
-    case 15: return [6.5, 0];
-    default: return [3.6, (num - 11) * 5];
-  }
-}
-
-function defensePoint(p: Player, carrier: Player, ad: number): { x: number; y: number } {
-  const lineX = carrier.x - ad * 2.6;
-  let spread = 0;
-  if (p.num <= 8) spread = p.num % 2 === 0 ? 2.2 : -2.2;
-  else if (p.num === 9 || p.num === 10 || p.num === 15) spread = 0;
-  else spread = (p.num - 12.5) * 7;
-  const deep = p.num === 15 ? 9 : 0;
-  return { x: lineX - ad * deep, y: clamp(carrier.y + spread, -32, 32) };
+/** The defensive line from the ROLE CONTRACTS' DEFENCE_LINE row: each shirt
+ * has an authored lateral and depth behind the gain line (the ball). The
+ * fullback sweeps deepest, the front five set the first line. */
+function defensePoint(p: Player, carrier: Player, ad: number, openSign: number): { x: number; y: number } {
+  const rc = contractFor(p.num);
+  const depth = rc.depth.DEFENCE ?? (p.num === 15 ? 9 : 0);
+  const lateral = rc.lateral.DEFENCE ?? 0;
+  return {
+    x: carrier.x - ad * depth,
+    y: clamp(carrier.y + lateral * openSign, -32, 32),
+  };
 }

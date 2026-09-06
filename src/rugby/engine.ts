@@ -17,6 +17,8 @@ import { buildTeam, nationById } from './teams';
 import { mulberry32, type RNG } from './rng';
 import { SpatialGrid } from './spatial';
 import { plan } from './ai';
+import { SET_PLAYS, commentaryPair } from './design';
+import type { SetPlay, PlayBias } from './design';
 
 const G = 9.8;
 
@@ -66,6 +68,9 @@ export class RugbySim {
 
   adv: { side: Side; t: number } | null = null;
 
+  /** the attacking side's live set-play call (named, with a risk/reward) */
+  play: { id: string; name: string; call: string; bias: PlayBias; side: Side; runners: { num: number; dx: number; dy: number }[] } | null = null;
+
   feed: Evt[] = [];
   msg = '';
   counts: Record<string, number> = {};
@@ -87,6 +92,8 @@ export class RugbySim {
   releaseGrace = 0;
   /** after a line break, the cover defence is briefly flat-footed */
   defenseShock = 0;
+  /** consecutive phases without a break — drives BUILDUP/TRY_BUILT commentary */
+  phasesSinceBreak = 0;
 
   constructor(opts: MatchOpts) {
     this.opts = opts;
@@ -110,7 +117,7 @@ export class RugbySim {
 
   private team(s: Side): Team { return s === 'A' ? this.A : this.B; }
   private other(s: Side): Side { return s === 'A' ? 'B' : 'A'; }
-  private player(id: number): Player | undefined { return this.byId.get(id); }
+  player(id: number): Player | undefined { return this.byId.get(id); }
   carrier(): Player | null { return this.ball.owner != null ? (this.byId.get(this.ball.owner) ?? null) : null; }
   private ad(s: Side): number { return attackDir(s); }
 
@@ -118,13 +125,37 @@ export class RugbySim {
     return { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, owner: null, last: null, spin: 0, flight: 0, forwardTouch: false, trail: [] };
   }
 
-  private say(text: string, side: Side | null = null) {
-    this.feed.unshift({ t: this.clock, text, side });
+  private say(text: string, side: Side | null = null, text2?: string) {
+    this.feed.unshift({ t: this.clock, text, text2, side });
     if (this.feed.length > 40) this.feed.pop();
     this.msg = text;
   }
 
+  /** The two-hander: a McLaren/Beaumont pair for a named moment. */
+  private sayPair(key: string, side: Side | null = null) {
+    const [a, b] = commentaryPair(key, this.rng());
+    this.say(a, side, b);
+  }
+
+  /** A factual headline (with the score, the shirt, the call) plus the
+   * Beaumont banter as the second voice. */
+  private sayWithBanter(key: string, headline: string, side: Side | null = null) {
+    const [, b] = commentaryPair(key, this.rng());
+    this.say(headline, side, b);
+  }
+
   private count(k: string) { this.counts[k] = (this.counts[k] ?? 0) + 1; }
+
+  /** AWARENESS with the GENERAL trait applied: nearby teammates get +8. */
+  awa(p: Player): number {
+    let boost = 0;
+    if (p.trait !== 'GENERAL') {
+      for (const q of this.team(p.side).players) {
+        if (q.trait === 'GENERAL' && q.sinbin <= 0 && q.down <= 0 && dist(q.x, q.y, p.x, p.y) < 14) { boost = 8; break; }
+      }
+    }
+    return p.att.awa + boost;
+  }
 
   /* ---------------- main loop ---------------- */
 
@@ -142,8 +173,11 @@ export class RugbySim {
       if (p.held > 0) p.held = Math.max(0, p.held - dt);
       if (p.burst > 0) p.burst = Math.max(0, p.burst - dt);
       if (p.decide > 0) p.decide = Math.max(0, p.decide - dt);
-      if (p.sprinting && p.stamina > 0) p.stamina = Math.max(0, p.stamina - 26 * dt);
-      else p.stamina = Math.min(100, p.stamina + 7 * dt);
+      // LIVE FATIGUE — the visible meter (FTG). Sprinting burns it; the STA
+      // rating slows the burn, and forwards pay four times the wing's price.
+      const burn = (p.num <= 8 ? 4 : 1) * (1.25 - (p.att.sta / 100) * 1.0);
+      if (p.sprinting) p.ftg = Math.min(100, p.ftg + 10 * burn * dt);
+      else p.ftg = Math.max(0, p.ftg - 3.5 * dt);
     }
     if (this.releaseGrace > 0) this.releaseGrace = Math.max(0, this.releaseGrace - dt);
     if (this.defenseShock > 0) this.defenseShock = Math.max(0, this.defenseShock - dt);
@@ -355,8 +389,8 @@ export class RugbySim {
     const carry = this.ball.owner === p.id;
     const base = (3.0 + (p.att.spd / 100) * 4.2) * (1 - (p.size - 1) * 0.25);
     let max = base * (carry ? 0.9 : 1);
-    const stam = 0.6 + 0.4 * Math.max(0, p.stamina / 100);
-    max *= stam;
+    // a tired man is a slow man — the visible fatigue meter costs real pace
+    max *= 1 - 0.38 * (p.ftg / 100);
     if (p.sprinting) max *= 1.26;
     let targetV = d > 0.25 ? max * clamp(spd, 0, 1) : 0;
     if (p.burst > 0) targetV *= 1.32;
@@ -581,7 +615,7 @@ export class RugbySim {
         const dd2 = dist(d2.x, d2.y, ix, iy);
         if (dd2 < bestDist) { bestDist = dd2; bestD = d2; }
       }
-      if (bestD && bestDist < 0.9 && this.rng() < 0.05 + (bestD.att.skl / 100) * 0.07) {
+      if (bestD && bestDist < 0.9 && this.rng() < 0.05 + (this.awa(bestD) / 100) * 0.07) {
         this.ball.owner = bestD.id; this.ball.last = bestD.id;
         this.ball.vx = 0; this.ball.vy = 0; this.ball.z = 0.9;
         this.pendingReceiver = null;
@@ -616,6 +650,7 @@ export class RugbySim {
     this.ball.flight = isDrop ? 3 : (kind === 'PUNT' ? 3.2 : 1.6);
     this.ball.forwardTouch = false;
     this.ball.spin = kind === 'GRUBBER' ? 30 : 6;
+    this.phasesSinceBreak = 0; // a kick ends the build-up
     this.count(kind === 'DROP' ? 'dropGoalAttempt' : kind === 'GRUBBER' ? 'grubber' : 'punt');
     if (isDrop) {
       this.dropAttempt = p.side;
@@ -627,24 +662,49 @@ export class RugbySim {
     if (!c || c.down > 0 || this.ball.owner !== c.id) return;
     if (dist(d.x, d.y, c.x, c.y) > 1.6) return;
     this.count('tackleAttempt');
-    // onside check: defender must be behind the ball line for the attacking dir
     const ad = this.ad(c.side);
-    if (d.x * ad > this.ball.x * ad + 1.0 && this.adv === null) {
-      this.say('OFFSIDE — penalty', c.side);
-      this.count('offsidePenalty');
-      this.awardPenalty(c.side, d.x, d.y);
+    // the goal-line: a carrier at pace dives for the line rather than take the
+    // contact — PWR + momentum against the covering defender decides it
+    const toLine = TRY_X - c.x * ad;
+    if (toLine < 3 && Math.hypot(c.vx, c.vy) > 1.5) {
+      const drive = c.att.pwr / 100 * 0.09 + Math.hypot(c.vx, c.vy) / 42;
+      if (this.rng() < clamp(0.07 + drive, 0.05, 0.22)) {
+        this.awardTry(c.side, ad * TRY_X, c.y);
+        return;
+      }
+      // held up over the line: 5m scrum to the attack, pressure kept
+      this.sayWithBanter('MISSED', 'Held up over the line — 5m scrum', c.side);
+      this.count('heldUp');
+      this.beginScrum(c.side, (TRY_X - 5) * ad, clamp(c.y, -20, 20));
       return;
     }
-    const fend = (this.human === c.side && this.ctrlId === c.id);
-    const powerD = d.att.str + d.att.skl * 0.4 + Math.hypot(d.vx, d.vy) * 2;
-    const powerC = c.att.str * 1.1 + c.att.skl * 0.5 + (fend ? 26 : 0);
+    // onside check: defender must be behind the ball line for the attacking dir
+    if (d.x * ad > this.ball.x * ad + 1.0 && this.adv === null) {
+      // AGGRESSION raises the penalty risk: a hot-headed chaser jumps the gun
+      const hot = d.att.agg > 80 && this.rng() < 0.35;
+      if (hot) {
+        this.say('OFFSIDE — penalty', c.side);
+        this.count('offsidePenalty');
+        this.awardPenalty(c.side, d.x, d.y);
+        return;
+      }
+      this.say('Offside — pulled back onside', null);
+      d.vx *= 0.4; d.vy *= 0.4;
+      return;
+    }
+    const fending = (this.human === c.side && this.ctrlId === c.id) || c.burst > 0.4;
+    // PWR governs the contest; AGG adds a little collision dominance, momentum
+    // counts. Balanced so a clean carrier beats an upright tackler as often as not.
+    const powerD = d.att.pwr + d.att.agg * 0.2 + d.att.skl * 0.2 + Math.hypot(d.vx, d.vy) * 2;
+    const powerC = c.att.pwr + c.att.spd * 0.3 + c.att.skl * 0.3 + (fending ? 24 : 0);
     const tackleRoll = powerD / (powerD + powerC) * 1.05;
     if (this.rng() < tackleRoll) {
       // tackle lands
       c.down = 1.1; c.vx *= 0.3; c.vy *= 0.3;
       this.pendingReceiver = null;
       this.count('tackle');
-      this.say(`${d.name} brings down ${c.name}`, d.side);
+      if (this.rng() < 0.12) this.sayPair('BIG_HIT', d.side);
+      else this.say(`${d.name} brings down ${c.name}`, d.side);
       // offload before the ground (skill + support)
       const support = this.team(c.side).players.find((q) => q !== c && q.down <= 0 && dist(q.x, q.y, c.x, c.y) < 3.2);
       if (support && this.rng() < 0.2 + (c.att.skl / 100) * 0.22) {
@@ -671,13 +731,28 @@ export class RugbySim {
       else this.say('Isolated — turnover chance', this.other(c.side));
     } else {
       // missed: either the defender clings (held up) or is BEATEN outright —
-      // a beaten defender is the engine's line break
-      const beat = 0.34 + (c.att.skl - d.att.skl) * 0.003 + (c.att.spd - d.att.spd) * 0.002 + (c.sprinting ? 0.12 : 0);
-      if (this.rng() < clamp(beat, 0.08, 0.72)) {
+      // a beaten defender is the engine's line break. SPD + AWA read the step;
+      // STEP KING widens the window by 40%, RAMPAGE compounds after the first.
+      let beat = 0.34
+        + (c.att.skl - d.att.skl) * 0.003
+        + (c.att.spd - d.att.spd) * 0.002
+        + (this.awa(c) - this.awa(d)) * 0.002
+        + (c.sprinting ? 0.12 : 0);
+      if (c.trait === 'STEP_KING') beat *= 1.4;
+      if (c.trait === 'RAMPAGE' && c.burst > 0.4) beat = Math.max(beat, 0.7);
+      if (this.rng() < clamp(beat, 0.08, 0.78)) {
         d.down = 0.7; d.vx *= 0.5; d.vy *= 0.5;
-        c.burst = 1.3;              // the break: a sudden, lasting injection of pace
-        this.defenseShock = 1.1;    // the cover defence is caught flat-footed
-        this.say(`${c.name} beats ${d.name}!`, c.side);
+        // the break: a sudden, lasting injection of pace. If there is no cover
+        // between the carrier and the line it is a breakaway, not a half-break.
+        const ahead = this.team(this.other(c.side)).players
+          .filter((q) => q.down <= 0 && q.sinbin <= 0 && (q.x - c.x) * ad > 0);
+        let clear = 30;
+        for (const q of ahead) clear = Math.min(clear, (q.x - c.x) * ad);
+        c.burst = clear > 12 ? 1.7 : 1.4;
+        this.defenseShock = 1.25;   // the cover defence is caught flat-footed
+        this.phasesSinceBreak = 0;
+        this.play = null;
+        this.sayPair('LINE_BREAK', c.side);
         this.count('lineBreak');
       } else {
         c.held = 0.8;
@@ -783,7 +858,9 @@ export class RugbySim {
       }
     }
     this.ball.owner = null; this.ball.vx = 0; this.ball.vy = 0; this.ball.z = 0.15;
-    this.say('RUCK — contest for the ball');
+    this.phasesSinceBreak++;
+    if (this.phasesSinceBreak >= 5) this.sayWithBanter('BUILDUP', 'RUCK — phase after phase', null);
+    else this.say('RUCK — contest for the ball');
     this.count('ruck');
   }
 
@@ -807,22 +884,49 @@ export class RugbySim {
     this.integrate(dt);
     this.separate();
 
-    // contest resolution: shove accumulates, winner at settle time
+    // contest resolution: the shove accumulates, but the JACKAL — the most
+    // aggressive unbound man over the ball — is what actually steals it.
     if (r.t > 1.6 && !r.winner) {
       const pow = (side: Side) => {
         let s = 0;
         const arr = side === atk ? r.attackers : r.defenders;
-        for (const id of arr) { const p = this.player(id); if (p) s += p.att.str + p.att.skl * 0.3; }
+        for (const id of arr) { const p = this.player(id); if (p) s += p.att.pwr + p.att.skl * 0.3; }
         return s;
       };
+      let steal = 0; // the jackal's chance, 0..1
+      let jackal: Player | null = null;
+      for (const p of this.team(this.other(atk)).players) {
+        if (p.bind >= 0 || p.down > 0 || p.sinbin > 0) continue;
+        if (dist(p.x, p.y, r.x, r.y) > 2.2) continue;
+        // the jackal window: a real steal is rare and skill-gated — a great
+        // openside might pinch one ruck in five, not every other one
+        let win = (p.att.agg / 100) * 0.10 + (p.att.skl / 100) * 0.08;
+        if (p.trait === 'THIEF') win = Math.min(0.42, win * 2);
+        if (win > steal) { steal = win; jackal = p; }
+      }
       const a = pow(atk) + (this.rng() < 0.5 ? 8 : 0);
       const b = pow(this.other(atk)) + (this.rng() < 0.5 ? 8 : 0);
-      r.winner = a >= b ? atk : this.other(atk);
-      if (r.winner !== atk) {
-        this.say('TURNOVER — jackal wins it!', r.winner);
+      const shove = a >= b ? atk : this.other(atk);
+      // the jackal converts a defensive shove into a clean steal; a hot jackal
+      // (high AGG, no THIEF) sometimes kills the ball and gives away a penalty
+      if (jackal && this.rng() < steal) {
+        if (jackal.trait !== 'THIEF' && jackal.att.agg > 82 && this.rng() < 0.28) {
+          this.say(`${jackal.name} kills it — penalty`, atk);
+          this.count('jackalPenalty');
+          for (const id of [...r.attackers, ...r.defenders]) { const p = this.player(id); if (p) p.bind = -1; }
+          this.ruck = null;
+          this.awardPenalty(atk, r.x, r.y);
+          return;
+        }
+        r.winner = this.other(atk);
+        this.phasesSinceBreak = 0; this.play = null;
+        this.sayPair('TURNOVER', r.winner);
+        this.count('jackal');
         this.count('turnover');
       } else {
-        this.say('Ruck secured', atk);
+        r.winner = shove;
+        if (r.winner !== atk) { this.phasesSinceBreak = 0; this.play = null; this.sayPair('TURNOVER', r.winner); this.count('turnover'); }
+        else this.say('Ruck secured', atk);
       }
       this.possession = r.winner;
     }
@@ -830,6 +934,7 @@ export class RugbySim {
       const winner = r.winner ?? atk;
       for (const id of [...r.attackers, ...r.defenders]) { const p = this.player(id); if (p) p.bind = -1; }
       this.ruck = null;
+      this.callPlay(winner, 'RUCK');
       this.startOpen(winner, 9);
     }
   }
@@ -845,6 +950,7 @@ export class RugbySim {
         if (this.maul.bound.length >= 8) break;
       }
     }
+    this.phasesSinceBreak++;
     this.say('MAUL — drive it forward', side);
     this.count('maul');
   }
@@ -861,7 +967,7 @@ export class RugbySim {
       p.bind = 1;
       const aheadX = m.x + ad * (p.side === m.side ? 0.5 : -0.5);
       this.steer(p, aheadX, m.y + (p.y - m.y) * 0.4, 0.7, dt);
-      if (p.side === m.side) powA += p.att.str; else powD += p.att.str;
+      if (p.side === m.side) powA += p.att.pwr; else powD += p.att.pwr;
     }
     // free players position for the drive or the exit
     for (const p of this.all) {
@@ -897,7 +1003,8 @@ export class RugbySim {
     this.scrum = { x: clamp(x, -40, 40), y: clamp(y, -26, 26), feed, t: 0, stage: 'FORM', winner: null };
     this.possession = feed;
     this.ball.owner = null; this.ball.x = this.scrum.x; this.ball.y = this.scrum.y; this.ball.z = 0.2;
-    this.say(`SCRUM — ${this.team(feed).short} to feed`, feed);
+    this.phasesSinceBreak++;
+    this.sayWithBanter('SCRUM', `SCRUM — ${this.team(feed).short} to feed`, feed);
     this.count('scrum');
   }
 
@@ -918,8 +1025,8 @@ export class RugbySim {
     if (s.stage === 'FORM' && s.t > 1.4) { s.stage = 'FEED'; this.say('Crouch… bind… SET'); }
     else if (s.stage === 'FEED' && s.t > 2.2) {
       // feed and hook: feed side heavily favoured but contestable
-      const feedPow = this.team(s.feed).players.filter((p) => p.num <= 8).reduce((a, p) => a + p.att.str, 0);
-      const oppPow = this.team(this.other(s.feed)).players.filter((p) => p.num <= 8).reduce((a, p) => a + p.att.str, 0);
+      const feedPow = this.team(s.feed).players.filter((p) => p.num <= 8).reduce((a, p) => a + p.att.pwr, 0);
+      const oppPow = this.team(this.other(s.feed)).players.filter((p) => p.num <= 8).reduce((a, p) => a + p.att.pwr, 0);
       const roll = feedPow / (feedPow + oppPow) * 0.85 + this.rng() * 0.3;
       s.winner = roll >= 0.5 ? s.feed : this.other(s.feed);
       s.stage = 'PLAY';
@@ -928,6 +1035,7 @@ export class RugbySim {
       const win = s.winner ?? s.feed;
       for (const p of this.all) p.bind = -1;
       this.scrum = null;
+      this.callPlay(win, 'SCRUM');
       this.startOpen(win, 9);
     }
   }
@@ -937,7 +1045,8 @@ export class RugbySim {
     this.lineout = { x: clamp(x, -46, 46), y: y >= 0 ? TOUCH_Y : -TOUCH_Y, thrower, t: 0, stage: 'FORM', winner: null };
     this.possession = thrower;
     this.ball.owner = null; this.ball.x = this.lineout.x; this.ball.y = this.lineout.y; this.ball.z = 0.2;
-    this.say(`LINEOUT — ${this.team(thrower).short} to throw`, thrower);
+    this.phasesSinceBreak++;
+    this.sayWithBanter('LINEOUT', `LINEOUT — ${this.team(thrower).short} to throw`, thrower);
     this.count('lineout');
   }
 
@@ -967,6 +1076,7 @@ export class RugbySim {
       const win = lo.winner ?? lo.thrower;
       for (const p of this.all) p.bind = -1;
       this.lineout = null;
+      this.callPlay(win, 'LINEOUT');
       this.startOpen(win, 9);
     }
   }
@@ -976,6 +1086,8 @@ export class RugbySim {
   private beginKickoff(side: Side) {
     this.phase = 'KICKOFF'; this.phaseT = 0;
     this.possession = side;
+    this.play = null;
+    this.phasesSinceBreak = 0;
     this.prevKickHeld = false;
     this.ball.flight = 0;
     this.kick = { kind: 'KICKOFF', side, x: 0, y: 0, t: 0, aim: 0, power: 0, kicked: false, tryX: 0 };
@@ -1094,7 +1206,8 @@ export class RugbySim {
       if (k.kind === 'PENALTY' || k.kind === 'CONVERSION') {
         // accuracy: harder kicker, longer kick → more likely to pull it wide
         const acc = kicker.att.kik / 100;
-        const make = acc - d * 0.006;
+        let make = acc - d * 0.006;
+        if (kicker.trait === 'METRONOME') make = Math.max(make, 0.78); // never below 78%
         if (this.rng() > make) {
           ang += (this.rng() < 0.5 ? -1 : 1) * (0.05 + this.rng() * 0.09);
         }
@@ -1137,9 +1250,9 @@ export class RugbySim {
       team.score += pts;
       this.count(scoring.kind === 'DROP' ? 'dropGoal' : scoring.kind === 'PENALTY' ? 'penaltyGoal' : 'conversion');
       const label = scoring.kind === 'DROP' ? 'DROP GOAL' : scoring.kind === 'PENALTY' ? 'PENALTY GOAL' : 'CONVERSION';
-      this.say(`${label}! ${team.name} ${team.score}–${this.team(this.other(scoring.side)).score}`, scoring.side);
+      this.sayWithBanter('KICK', `${label}! ${team.name} ${team.score}–${this.team(this.other(scoring.side)).score}`, scoring.side);
     } else {
-      this.say(scoring.kind === 'CONVERSION' ? 'Conversion missed' : 'Pushed wide', null);
+      this.sayWithBanter('MISSED', scoring.kind === 'CONVERSION' ? 'Conversion missed' : 'Pushed wide', null);
       this.count(scoring.kind === 'DROP' ? 'dropGoalMiss' : scoring.kind === 'PENALTY' ? 'penaltyGoalMiss' : 'conversionMiss');
     }
     this.placeAttempt = null;
@@ -1159,7 +1272,11 @@ export class RugbySim {
     this.trySide = side;
     this.phase = 'TRY'; this.phaseT = 0;
     this.ball.owner = null; this.ball.x = x; this.ball.y = y; this.ball.z = 0.2;
-    this.say(`TRY! ${team.name} — ${team.score}–${this.team(this.other(side)).score}`, side);
+    // a try the build EARNED draws from the TRY_BUILT bank, not the snapshot bank
+    if (this.phasesSinceBreak >= 5) this.sayPair('TRY_BUILT', side);
+    else this.sayPair('TRY', side);
+    this.say(`${team.name} ${team.score}–${this.team(this.other(side)).score}`, side, 'Five points on the board.');
+    this.phasesSinceBreak = 0;
     this.count('try');
   }
 
@@ -1193,6 +1310,31 @@ export class RugbySim {
   }
 
   /* ---------------- transitions ---------------- */
+
+  /** Call the next set play off a breakdown, weighted by field position,
+   * risk/reward and the difficulty. Named and legible — the thesis's plays. */
+  private callPlay(side: Side, from: 'RUCK' | 'SCRUM' | 'LINEOUT') {
+    const ad = this.ad(side);
+    const x = this.ball.x * ad; // +ve = in the opposition half
+    const pool = SET_PLAYS.filter((p) => p.from === from);
+    let best: SetPlay | null = null;
+    let bestW = -Infinity;
+    for (const sp of pool) {
+      let w = sp.reward - sp.risk + this.rng() * 0.5;
+      if (x < -20) w += sp.bias === 'PASS' ? 0.25 : 0;                          // own 22: get out
+      if (x > 15) w += (sp.bias === 'CARRY' || sp.bias === 'MAUL' || sp.bias === 'KICK_DROP') ? 0.4 : 0;
+      if (x > 30) w += (sp.bias === 'KICK_DROP' || sp.bias === 'CARRY') ? 0.3 : 0; // in goal range
+      if (sp.bias === 'KICK_CROSS') w += x > 25 ? 0.35 : -0.4;                 // cross-kick needs field position
+      // better teams (and higher difficulty) call the riskier plays more often
+      if (sp.reward > 0.7) w += (this.team(side).players[0].att.skl / 100 - 0.7) * 0.4;
+      if (w > bestW) { bestW = w; best = sp; }
+    }
+    if (!best) { this.play = null; return; }
+    this.play = { id: best.id, name: best.name, call: best.call, bias: best.bias, side, runners: best.runners };
+    this.say(`SET PLAY — ${best.name} (${best.call})`, side);
+    this.count('setPlay');
+    this.count(`setPlay:${best.id}`);
+  }
 
   private startOpen(side: Side, num: number) {
     this.phase = 'OPEN'; this.phaseT = 0;

@@ -110,6 +110,9 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
 
   const sim = simRef.current!;
   const top = sim.feed[0]?.text ?? 'AND WE ARE UNDER WAY';
+  const second = sim.feed[0]?.text2;
+  // the player the camera follows: your man, or the carrier in watch mode
+  const focus = sim.ctrlId >= 0 ? sim.player(sim.ctrlId) : sim.carrier();
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#0b0f16]">
@@ -125,13 +128,18 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
         <ScoreBlock name={sim.B.name} short={sim.B.short} score={sim.B.score} color={sim.B.color} align="right" />
       </div>
 
-      {/* PHASE + POSSESSION */}
+      {/* PHASE + POSSESSION + SET PLAY */}
       <div className="pointer-events-none absolute left-3 top-3 border-2 border-[#26314a] bg-[#0d1220]/85 px-2 py-1 text-[9px] font-black tracking-[0.18em] text-[#7f8ea6]">
         <div className="text-[#e8cf46]">{sim.phase}</div>
         <div className="mt-0.5 text-[#8fa0b8]">
           POSSESSION: <span style={{ color: (sim.possession === 'A' ? sim.A.color : sim.B.color) }}>{sim.possession ? (sim.possession === 'A' ? sim.A.short : sim.B.short) : '—'}</span>
         </div>
-        {sim.adv && <div className="mt-0.5 text-[#6ee7a0]">ADVANTAGE {(sim.adv.t ? '' : '')}</div>}
+        {sim.play && (
+          <div className="mt-0.5 text-[#f0b429]">
+            SET PLAY: {sim.play.name} <span className="text-[#8fa0b8]">({sim.play.call})</span>
+          </div>
+        )}
+        {sim.adv && <div className="mt-0.5 text-[#6ee7a0]">ADVANTAGE</div>}
       </div>
 
       {/* PERFORMANCE (the "optimised" receipt) */}
@@ -142,10 +150,37 @@ export function MatchScreen({ cfg, onExit }: { cfg: MatchOpts; onExit: () => voi
         <div className="text-[8px] text-[#5f6f86]">FIXED 60Hz TIMESTEP · GRID INDEX</div>
       </div>
 
-      {/* COMMENTARY FEED */}
-      <div className="pointer-events-none absolute bottom-3 left-1/2 w-[min(640px,80%)] -translate-x-1/2 border-2 border-[#26314a] bg-[#0d1220]/92 px-3 py-1 text-center">
+      {/* COMMENTARY FEED — the two-hander */}
+      <div className="pointer-events-none absolute bottom-3 left-1/2 w-[min(680px,84%)] -translate-x-1/2 border-2 border-[#26314a] bg-[#0d1220]/92 px-3 py-1 text-center">
         <div className="text-[11px] font-black leading-tight text-[#f4efe2]">{top}</div>
+        {second && <div className="text-[10px] italic leading-tight text-[#9fb0c8]">{second}</div>}
       </div>
+
+      {/* PLAYER CARD — the thesis's seven visible attributes + live fatigue */}
+      {focus && (
+        <div className="pointer-events-none absolute bottom-3 right-3 w-[190px] border-2 border-[#26314a] bg-[#0d1220]/88 px-2 py-1.5 text-[9px] leading-relaxed">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-black text-[#f4efe2]">{focus.num} · {focus.name}</span>
+            <span className="text-[8px] font-black tracking-wider text-[#7f8ea6]">{focus.role}</span>
+          </div>
+          {focus.trait && (
+            <div className="mt-0.5 text-[8px] font-black tracking-wider text-[#f0b429]">★ {focus.trait}</div>
+          )}
+          <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5">
+            <Stat label="SPD" v={focus.att.spd} />
+            <Stat label="PWR" v={focus.att.pwr} />
+            <Stat label="SKL" v={focus.att.skl} />
+            <Stat label="AGG" v={focus.att.agg} />
+            <Stat label="AWA" v={focus.att.awa} />
+            <Stat label="STA" v={focus.att.sta} />
+            <Stat label="KIK" v={focus.att.kik} />
+          </div>
+          <div className="mt-1">
+            <div className="flex justify-between text-[8px] text-[#7f8ea6]"><span>FATIGUE</span><span className="tabular-nums">{Math.round(focus.ftg)}%</span></div>
+            <div className="h-1 w-full bg-[#1a2334]"><div className="h-1 bg-[#e8cf46]" style={{ width: `${focus.ftg}%` }} /></div>
+          </div>
+        </div>
+      )}
 
       {/* CONTROLS HINT */}
       <div className="pointer-events-none absolute bottom-3 left-3 text-[9px] leading-relaxed text-[#6f7f96]">
@@ -215,6 +250,17 @@ function ScoreBlock({ name, short, score, color, align }: {
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return <span className="mx-0.5 rounded border border-[#3d4b66] bg-[#101724] px-1 py-0.5 text-[#e8cf46]">{children}</span>;
+}
+
+function Stat({ label, v }: { label: string; v: number }) {
+  const color = v >= 85 ? '#6ee7a0' : v >= 70 ? '#e8cf46' : '#c98a3d';
+  return (
+    <div className="flex items-center gap-1">
+      <span className="w-6 text-[8px] font-black text-[#7f8ea6]">{label}</span>
+      <div className="h-[3px] flex-1 bg-[#1a2334]"><div className="h-[3px]" style={{ width: `${v}%`, background: color }} /></div>
+      <span className="w-4 text-right tabular-nums text-[#9fb0c8]">{v}</span>
+    </div>
+  );
 }
 
 function fmtClock(t: number): string {

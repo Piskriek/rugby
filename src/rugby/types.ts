@@ -3,8 +3,9 @@
  *
  * A clean-room, optimised rugby-union simulation built on the design thesis:
  * true to the laws, easy to pick up. This module holds the shared types only;
- * no logic, no imports.
+ * no logic beyond the type vocabulary.
  */
+import type { Trait } from './design';
 
 export type Side = 'A' | 'B';
 
@@ -26,12 +27,20 @@ export type Role =
   | 'PROP' | 'HOOKER' | 'LOCK' | 'FLANKER' | 'NO8'
   | 'SH' | 'FH' | 'CTR' | 'WING' | 'FB';
 
-/** A player's physical / technical ratings, 0..99. */
+/**
+ * A player's ratings, 0..99. The seven from the thesis: three Lomu primary
+ * (SPD, PWR, SKL) plus the four modern players ask for (AGG, AWA, STA, and
+ * the live FTG meter). Kicking is kept as an eighth so the kicking verbs have
+ * their own lever; every attribute drives at least one verb the player feels.
+ */
 export interface Attr {
-  spd: number; // speed
-  str: number; // strength
-  skl: number; // handling / passing skill
-  kik: number; // kicking
+  spd: number; // SPEED     — acceleration, top speed, evasion
+  pwr: number; // STRENGTH  — tackle success, fend, yardage in contact
+  skl: number; // HANDLING  — pass accuracy, ball control under pressure
+  agg: number; // AGGRESSION— line speed, jackal window, collision (+ penalty risk)
+  awa: number; // AWARENESS — positioning, support arrival, intercept read
+  sta: number; // STAMINA   — time before pace/tackle decay
+  kik: number; // KICKING   — goal / field kicking
 }
 
 export interface Player {
@@ -47,7 +56,8 @@ export interface Player {
   face: number;     // facing angle (radians)
   att: Attr;
   size: number;     // visual scale factor
-  stamina: number;  // 0..100
+  ftg: number;      // LIVE FATIGUE 0..100 (0 = fresh). The visible meter.
+  trait: Trait | null; // signature trait — one rule, never free
   sprinting: boolean;
   burst: number;    // > 0 → temporary speed boost (line break / momentum)
   decide: number;   // decision cooldown — the AI only re-plans when this hits 0
@@ -73,6 +83,7 @@ export interface Ball {
 export interface Evt {
   t: number;
   text: string;
+  text2?: string;      // the second half of the two-hander commentary
   side: Side | null;   // team the event favours (or null for neutral)
 }
 

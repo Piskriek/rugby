@@ -5,6 +5,7 @@
  */
 import { ROLES, NAMES } from './consts';
 import type { Side, Team, Player } from './types';
+import type { Trait } from './design';
 import type { RNG } from './rng';
 import { range, irange } from './rng';
 
@@ -57,8 +58,11 @@ export function buildSquad(side: Side, nation: Nation, rng: RNG): Player[] {
       Math.round(Math.max(35, Math.min(99, v + lift + range(rng, -w, w))));
     const att = {
       spd: jit(rd.att.spd, 3),
-      str: jit(rd.att.str, 3),
+      pwr: jit(rd.att.pwr, 3),
       skl: jit(rd.att.skl, 3),
+      agg: jit(rd.att.agg, 3),
+      awa: jit(rd.att.awa, 3),
+      sta: jit(rd.att.sta, 3),
       kik: jit(rd.att.kik, 4),
     };
     players.push({
@@ -67,11 +71,37 @@ export function buildSquad(side: Side, nation: Nation, rng: RNG): Player[] {
       name: NAMES[ni],
       x: 0, y: 0, vx: 0, vy: 0, face: side === 'A' ? 0 : Math.PI,
       att, size: rd.size,
-      stamina: 100, sprinting: false, burst: 0, decide: 0,
+      ftg: 0, trait: null,
+      sprinting: false, burst: 0, decide: 0,
       down: 0, held: 0, bind: -1, slot: -1, sinbin: 0, ctrl: false,
     });
   }
+  // Signature players: one or two per squad, picked from the top of the
+  // attribute profile, so the trait always lands on somebody who can use it.
+  const ranked = [...players].sort((a, b) => total(b) - total(a));
+  const n = ranked.length >= 12 ? 2 : 1;
+  for (let k = 0; k < n; k++) {
+    const p = ranked[k];
+    p.trait = traitFor(p.att, rng);
+  }
   return players;
+}
+
+function total(p: Player): number {
+  return p.att.spd + p.att.pwr + p.att.skl + p.att.agg + p.att.awa + p.att.sta + p.att.kik;
+}
+
+/** The trait follows the player's shape: a monster carrier rampages, a flyer
+ * steps, a goal-kicker keeps his metronome, a jackal steals, a leader generals. */
+function traitFor(a: { spd: number; pwr: number; skl: number; agg: number; awa: number; kik: number }, rng: RNG): Trait {
+  const options: Trait[] = [];
+  if (a.pwr >= 88 || (a.pwr >= 82 && a.spd >= 74)) options.push('RAMPAGE');
+  if (a.spd >= 90) options.push('STEP_KING');
+  if (a.kik >= 82) options.push('METRONOME');
+  if (a.agg >= 84 && a.skl >= 68) options.push('THIEF');
+  if (a.awa >= 84) options.push('GENERAL');
+  if (options.length === 0) options.push('STEP_KING', 'GENERAL', 'THIEF');
+  return options[irange(rng, 0, options.length - 1)];
 }
 
 export function buildTeam(side: Side, nation: Nation, rng: RNG): Team {
