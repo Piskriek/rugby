@@ -452,11 +452,22 @@ export function doFend(d: Director, ) {
   if (!near || Math.hypot(near.x - car.x, near.z - car.z) > 1.6) { d.showHint('NOBODY TO FEND', 1.4); return; }
   const contest = car.attrs.PWR / (car.attrs.PWR + near.attrs.PWR);
   if (R() < contest) {
+    /* T-80 — the fend goes THROUGH the bind lattice: the impulse hits the
+     * carrier body and the tackle joint either snaps (he blew past the
+     * shoulder — a genuine break) or holds (the tackler hangs on and the
+     * tackle is still coming). The credit follows the physics, and a
+     * carrier who is not yet bound simply accelerates away as before. */
+    const b = d.latches.byTeamNum(s.attacking, s.carrierNum);
+    const broke = b ? d.latches.fend(b.id, 520 + car.attrs.PWR * 5.2) : false;
     car.vz = Math.max(car.vz, s.dir * 5.4);
-    d.teams[s.attacking].stats.tacklesBroke++;
-    d.run(s.attacking, s.carrierNum).breaks++;
-    d.commentate('BIG_HIT', '— FENDED OFF');
-    d.shake(0.3);
+    if (broke) {
+      d.teams[s.attacking].stats.tacklesBroke++;
+      d.run(s.attacking, s.carrierNum).breaks++;
+      d.commentate('BIG_HIT', '— FENDED OFF');
+      d.shake(0.3);
+    } else {
+      d.say('HE FENDS — THE TACKLER HANGS ON');
+    }
   } else {
     d.startBreakdown(near.num);
   }

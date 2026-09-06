@@ -57,6 +57,7 @@ import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown } from './engine/breakdown';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
+import { LatchSystem } from './engine/latch';
 
 /* ============================ INPUT ============================ */
 
@@ -251,7 +252,9 @@ export interface BreakdownState {
   attacking: 'A' | 'B'; contactX: number; contactZ: number;
   gainLine: number; ruckFormed: boolean; jackalActive: boolean;
   ball: { x: number; z: number; placed: boolean };
-  players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean }[];
+  players: { role: string; num: number; team: 'A' | 'B'; x: number; z: number; down: boolean; mx?: number; mz?: number }[];
+  /** T-80 — spring-bind fend-offs counted this breakdown. */
+  latchedBreaks?: number;
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck
@@ -416,6 +419,9 @@ export class Director {
   op?: OpenPlayState;
   ml?: MaulState;
   bd?: BreakdownState;
+  /** T-80 — multi-body compliant spring binds for the tackle/ruck contest.
+   *  Reset on every breakdown start, released on whistle/phase teardown. */
+  latches = new LatchSystem();
   pitch: PitchConditions;
   zoom = 0.34;
   camMode: CamMode = 'CABLE';
@@ -3014,6 +3020,8 @@ export class Director {
   clearRuck() { /* T-03: engine-internal */
     for (const p of this.live) { p.down = false; p.bound = false; }
     this.bd = undefined;
+    /* T-80 — tackle completed: every bind releases (RECYCLE reason). */
+    this.latches.clear('RECYCLE');
   }
 
   /**
@@ -3033,6 +3041,8 @@ export class Director {
     this.ml = undefined;
     this.scrim = undefined;
     this.lo = undefined;
+    /* T-80 — the whistle / phase teardown releases every bind. */
+    this.latches.clear('WHISTLE');
   }
 
   /* ============================ MAUL ============================ */
@@ -3248,6 +3258,8 @@ export class Director {
     this.penaltyTouchKick = false;
     this.phase = 'KICK';
     this.op = undefined; this.bd = undefined;
+    /* T-80 — a whistle/restart never leaves a frame of bind behind. */
+    this.latches.clear('WHISTLE');
     this.teams[team].stats.kicks++;
     this.run(team, num).kicks++;
     if (type === 'RESTART' || type === 'DROP_OUT') this.kickoffFormation(team, z);

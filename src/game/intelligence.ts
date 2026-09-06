@@ -240,9 +240,15 @@ export function separate(
        * resolved the contact by the time it matters), the carrier brushes through
        * and the defender yields — the actual tackle stays owned by the radius
        * test in upOpen, so there is no double-fire.
-       */
+       *
+       * T-80. A BOUND pair — anywhere in the pod, either side — is exempt from
+       * the projection pass entirely: the ruck's overlap is real contact being
+       * resolved by the 6DOF bind lattice, not two men occupying one metre of
+       * grass, and shoving bound bodies apart here fights the solver (the
+       * scrum/maul packs are pinned afterwards anyway, so the exemption changes
+       * nothing there). */
+      if (a.bound || b.bound) continue;
       if (a.team === b.team) {
-        if (a.bound || b.bound) continue;
         const min = 1.05;
         if (d > min) continue;
         const push = (min - d) * 0.5;

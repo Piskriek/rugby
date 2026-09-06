@@ -279,7 +279,15 @@ export function cableRig(
    * faults). The lead scales with the subject's own velocity. */
   const spd = k ? Math.hypot(k.vx, k.vz) : (d.op ? Math.hypot(d.op.vx, d.op.vz) : 0);
   const leadK = clamp(0.35 + spd / 9, 0.35, 1);
-  const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
+  /* The LEAD follows the PLAY, never the rig's side. With the end-on side
+   * locked (cableSwapOnTurnover off) an attack running INTO the lens needs
+   * its lead reversed — the old rigDir lead pointed the lens PAST an
+   * oncoming carry, and a long straight run spent six seconds with the ball
+   * riding the bottom edge of the frame (the 400-frame d0 off-target burst
+   * in the fault hunt). A run away from the lens leads as before; a run at
+   * the lens rides a touch short so the ball sits above the line. */
+  const leadDir = rigDir === dir ? dir : dir * 0.45;
+  const aimZ = anchorZ + leadDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
   const ground = Math.max(5, Math.hypot(dx, dz));
