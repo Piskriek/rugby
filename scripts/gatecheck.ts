@@ -82,6 +82,12 @@ const GATES: Gate[] = [
     budget: 420,
   },
   {
+    id: 'ballikprobe', file: 'ballikprobe',
+    asks: 'SPEC_25 — the catch state machine, the two-bone IK, the 300 ms drop window and the punt impulse',
+    cmd: [...VN, 'scripts/ballikprobe.ts', '20', '3', '1 2'],
+    budget: 420,
+  },
+  {
     id: 'bootcheck', file: 'bootcheck',
     asks: 'the boot never hangs and never goes blank: staged, budgeted, and it explains itself when it cuts short',
     cmd: [...VN, 'scripts/bootcheck.ts'],

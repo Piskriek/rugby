@@ -60,6 +60,10 @@ export const KEYMAP: Record<string, string> = {
   r: 'replay', tab: 'stats', escape: 'pause',
   /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
   b: 'animDebug',
+  /* SPEC_25 — the two mouse buttons are keys by another name here: the same edge
+   * sets, the same hold semantics, the same remap table. Synthetic tokens so a
+   * `keys.current` entry means exactly one thing: something is being held. */
+  mouse0: 'secure', mouse2: 'handsUp',
 };
 
 export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }: {
@@ -140,9 +144,35 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       e.preventDefault();
       dirRef.current?.setZoom(dirRef.current.zoom + Math.sign(e.deltaY) * 0.08);
     };
+    /* SPEC_25 — the mouse. Right button brings the hands up, left button takes the
+     * ball and releasing it drops it. `contextmenu` is suppressed on the canvas only,
+     * because the browser's own menu over the pitch would both eat the hold and make
+     * the game look broken; every other element keeps its menu. Mouseup is listened to
+     * on the window as well as the canvas, since a button released outside the frame
+     * still has to let the hands down — a stuck right button is a player permanently
+     * reaching, which is the kind of bug that reads as "the game froze". */
+    const down = (e: MouseEvent) => {
+      const b = e.button === 2 ? 'mouse2' : e.button === 0 ? 'mouse0' : null;
+      if (!b) return;
+      e.preventDefault();
+      keys.current.add(b);
+      dirRef.current?.audio.userGesture();
+    };
+    const up = (e: MouseEvent) => {
+      keys.current.delete(e.button === 2 ? 'mouse2' : e.button === 0 ? 'mouse0' : '');
+    };
+    const menu = (e: Event) => e.preventDefault();
     const c = canvasRef.current;
     c?.addEventListener('wheel', wheel, { passive: false });
-    return () => c?.removeEventListener('wheel', wheel);
+    c?.addEventListener('mousedown', down);
+    c?.addEventListener('contextmenu', menu);
+    window.addEventListener('mouseup', up);
+    return () => {
+      c?.removeEventListener('wheel', wheel);
+      c?.removeEventListener('mousedown', down);
+      c?.removeEventListener('contextmenu', menu);
+      window.removeEventListener('mouseup', up);
+    };
   }, []);
 
   /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
@@ -337,11 +367,18 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           case 'tackleDive': inp.tackleDive = true; break;
           case 'tackleSmother': inp.tackleSmother = true; break;
           case 'switchPlayer': inp.switchPlayer = true; break;
+          case 'handsUp': inp.handsUp = true; break;
+          case 'secure': inp.secure = true; break;
         }
       }
       // space is sprint while held and action on the edge
       const pressed = new Set<string>();
       for (const raw of keys.current) if (!prev.current.has(raw)) pressed.add(KEYMAP[raw] ?? raw);
+      /* SPEC_25 — Space doubles as the punt trigger. The engine only honours it inside
+       * the 300 ms drop window, so sprint and every other Space verb are untouched
+       * outside it: one physical key, two meanings, and the state machine is the only
+       * thing that decides which. */
+      if (pressed.has('action')) pressed.add('punt');
       /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
@@ -853,6 +890,16 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
+        {/* SPEC_25 — the catch and the punt, on the one surface a player reads. The
+            window is printed because 300 ms is not a number anyone can feel, and a
+            control that fails silently reads as a broken game. */}
+        <div className="mt-0.5">
+          <Kbd>RMB</Kbd> HANDS UP · <Kbd>LMB</Kbd> SECURE · RELEASE <Kbd>LMB</Kbd> DROP ·{' '}
+          <Kbd>SPACE</Kbd> PUNT IN{' '}
+          <span className={d.bc.state === 'DROP_BALL' ? 'text-[#ffd76a]' : 'text-[#5f6f86]'}>
+            {(d.bc.window * 1000).toFixed(0)} MS
+          </span>
+        </div>
         <div className="mt-0.5 text-[#5f6f86]">GAMEPAD: STICK MOVE · <Kbd>A</Kbd> ACTION · <Kbd>X</Kbd>/<Kbd>Y</Kbd> PASS · <Kbd>B</Kbd> TACKLE · <Kbd>RB</Kbd> KICK</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}

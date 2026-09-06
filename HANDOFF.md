@@ -2267,6 +2267,13 @@ The following specification documents have been drafted for the upcoming work qu
   watching a rainy Tuesday at 3 p.m. and deciding whether the grade is right.
 
 
+## 12. THE CATCH AND THE BOOT — 2026-09-06 (session 13, `arena/01a072cf-rugby`)
+
+Mouse verbs, an analytical two-bone IK and a punt that aims where the lens aims:
+**`HANDOFF_13_BALL_IK.md`**, specification in **`SPEC_25_BALL_IK.md`**. Read it before
+touching `ballcraft.ts`: it names the two flags that look reusable and are not
+(`s.ball.live`, `startKick`), and the reason the ball is not a ragdoll.
+
 ## 11. THE CONTEST AND THE BOOT — 2026-09-06 (this Arena session, `arena/01a072cf-rugby`)
 
 Two things were wrong when this session started: the field went silent at 66%, and

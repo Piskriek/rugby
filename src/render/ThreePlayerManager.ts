@@ -24,6 +24,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
+import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
 import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
@@ -234,6 +235,10 @@ const _target = new THREE.Vector3();
  *  and at a body in the same frame, and one scratch shared by both is one of the
  *  two aiming at the other. */
 const _ballAim = new THREE.Vector3();
+/** how hard the solved elbow is written onto the forearm. Not 1: the clip's own
+ *  elbow curve is still the animation, and an override that replaces it makes a
+ *  reaching man look like a stop-motion puppet for as long as he holds the button. */
+const CRAFT_ELBOW_WEIGHT = 0.62;
 /** how far a man with hands on the ball pitches his chest over it, radians.
  *  Deliberately near the diving tackler's own tilt: the jackal's whole skill is
  *  getting his body between the defence and the ball, and an upright man reaching
@@ -297,6 +302,15 @@ interface PlayerInstance {
     thrash: number;
     /** 0..1 weight of the forward torso dip as he closes on the waist */
     dip: number;
+    /** SPEC_25 — 1 while the catch/punt IK owns this man's arms, else 0. A separate
+     *  weight from `reach` because the latch and the catch aim at different things and
+     *  a latch must not be able to cancel a catch mid-air. */
+    craftW: number;
+    /** the solved elbow/hand pairs, in pitch metres, for the forearm pass. Plain
+     *  numbers rather than THREE.Vector3s: this is written every frame for one player
+     *  and allocating six fields a frame in the hot path is how a GC pause gets made. */
+    craftL: BallCraftArm | null;
+    craftR: BallCraftArm | null;
     /** free-running phase for the wobble, so two men never wobble in sync */
     phase: number;
     /** 0..1 how much of this man's pose the fall solver owns */
@@ -979,6 +993,34 @@ export class ThreePlayerManager {
     for (const inst of this.pool.values()) {
       if (inst.st.hand !== 0) inst.st.hand = 0;
       if (inst.st.strip !== 0) inst.st.strip = 0;
+      if (inst.proc.craftW !== 0) inst.proc.craftW = 0;
+    }
+    /* SPEC_25 — THE CATCH. Two-bone IK lives in the engine (`engine/ballcraft.ts`)
+     * because it decides where the hands and the ball are; what the rig needs is the
+     * aim point and a weight, and it gets both from the solved pose rather than
+     * inventing a second reach that could disagree. The weight is the solver's own
+     * `reach`, so a man a metre short of the ball reaches at LESS than a man on top of
+     * it — the strain is the mechanic, and a hand that snaps onto an unreachable ball
+     * would delete the whole reason to hold the button early. */
+    const bc = d.bc;
+    if (bc && bc.state !== 'IDLE') {
+      const inst = this.pool.get(this.key(bc.team as KitTeam, bc.num));
+      if (inst) {
+        const b = bc.free ?? bc.chest;
+        const s = RENDER_SCALE;
+        _ballAim.set(b.x * s, b.y * s + this.groundY(b.x), -b.z * s);
+        inst.st.hand = bc.state === 'BALL_SECURED'
+          ? 0.5
+          : Math.max(0.2, (bc.l.reach + bc.r.reach) * 0.5);
+        inst.proc.craftW = bc.state === 'HANDS_READY' || bc.state === 'DROP_BALL' ? 1 : 0;
+        /* The elbow is the half of a two-bone chain that a single aim-at-a-point
+         * cannot express, so it is passed through as data and applied to the forearm
+         * after the reach has done its work. */
+        inst.proc.craftL = { ex: bc.l.elbow.x, ey: bc.l.elbow.y, ez: bc.l.elbow.z,
+          hx: bc.l.hand.x, hy: bc.l.hand.y, hz: bc.l.hand.z };
+        inst.proc.craftR = { ex: bc.r.elbow.x, ey: bc.r.elbow.y, ez: bc.r.elbow.z,
+          hx: bc.r.hand.x, hy: bc.r.hand.y, hz: bc.r.hand.z };
+      }
     }
     const bd = d.bd;
     if (!bd || (d.phase !== 'BREAKDOWN' && d.phase !== 'BREAKDOWN_REPLAY')) { this.ruckTug = 0; return; }
@@ -1354,6 +1396,7 @@ export class ThreePlayerManager {
       ragPlay: null, ragBlend: 0, ragRate: 1,
       proc: {
         tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0, stagA: 0,
+        craftW: 0, craftL: null, craftR: null,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -1955,6 +1998,51 @@ export class ThreePlayerManager {
    * exactly zero when the weight goes away so no dip is left baked into a man
    * who has let go.
    */
+  /**
+   * SPEC_25 — THE FOREARM HALF OF THE TWO-BONE SOLVE.
+   *
+   * `applyArmReach` swings a bone's +Y onto a target point, which is correct for an
+   * upper arm and wrong for a forearm: the forearm's job is to run FROM the elbow, and
+   * the elbow is decided by the limb lengths, not by the ball. So the engine solves
+   * the chain (analytically, in `engine/ballcraft.ts`) and this writes only the
+   * residual the reach cannot express — the forearm aligned on the solved elbow→hand
+   * segment, blended by the same rate so nothing pops.
+   */
+  private applyCatchElbow(inst: PlayerInstance, weight: number, step: number) {
+    const rig = this.resolveRig(inst);
+    const s = RENDER_SCALE;
+    const sides: [typeof rig.foreArms[number], BallCraftArm | null][] = [
+      [rig.foreArms[0], inst.proc.craftR],
+      [rig.foreArms[1], inst.proc.craftL],
+    ];
+    const blend = 1 - Math.exp(-REACH_RATE * step);
+    for (const [bone, arm] of sides) {
+      if (!bone || !bone.parent || !arm) continue;
+      bone.updateWorldMatrix(true, false);
+      _v1.setFromMatrixPosition(bone.matrixWorld);
+      _dir.set((arm.hx - arm.ex) * s, arm.hy - arm.ey, -(arm.hz - arm.ez) * s);
+      if (_dir.lengthSq() < 1e-6) continue;
+      _dir.normalize();
+      _v2.set(0, 1, 0).applyQuaternion(
+        _qb.setFromRotationMatrix(_mat.extractRotation(bone.matrixWorld)),
+      ).normalize();
+      _q.setFromUnitVectors(_v2, _dir);
+      const parentWorld = _qb.setFromRotationMatrix(
+        _mat.extractRotation(bone.parent.matrixWorld),
+      ).invert();
+      const boneWorld = _qBone.setFromRotationMatrix(
+        _mat.extractRotation(bone.matrixWorld),
+      );
+      const wanted = parentWorld.multiply(_q).multiply(boneWorld);
+      bone.quaternion.slerp(wanted, weight * CRAFT_ELBOW_WEIGHT * blend);
+    }
+    /* Keep the solved elbow honest: the reach pass may have moved the upper arm since
+     * this ran last frame, and a bone that has swung away leaves its forearm aiming at
+     * a joint that is no longer there. The weight decays with the pose, so the two
+     * converge rather than fight. */
+    inst.proc.craftW = weight;
+  }
+
   private applyTorsoDip(inst: PlayerInstance, weight: number, step: number) {
     const p = inst.proc;
     p.dip += (weight - p.dip) * (1 - Math.exp(-DIP_RATE * step));
@@ -2095,6 +2183,15 @@ export class ThreePlayerManager {
        * the defence. It shares `applyBodyTilt` with the diving tackler, so it
        * counter-rotates the shadow and lifts the pivot on the same rules. */
       this.applyBodyTilt(inst, Math.max(wantTilt, HAND_OVER_BALL_TILT * w), step, true);
+    } else if (inst.proc.craftW > 0.01) {
+      /* A CATCH IS NOT A LATCH. The reach above aims a bone at a point; a two-bone
+       * chain also needs the elbow in the right plane, or the forearm cuts across the
+       * chest and the hands meet the ball backwards. The engine's solver already
+       * produced that elbow, so the rig's only job is to rotate the forearm onto the
+       * elbow→hand axis with the same blend discipline the reach uses. */
+      this.applyCatchElbow(inst, inst.proc.craftW, step);
+      this.applyArmReach(inst, null, 0, step);
+      this.applyTorsoDip(inst, 0.35 * inst.proc.craftW, step);
     } else {
       this.applyArmReach(inst, null, 0, step);   // no target: decay only
       this.applyTorsoDip(inst, 0, step);
@@ -2578,7 +2675,15 @@ export class ThreePlayerManager {
       if (k.stage !== 'SETUP') { free.x = k.bx; free.y = k.by + 0.12; free.z = k.bz; free.visible = true; }
     } else if (d.phase === 'OPEN_PLAY' && d.op) {
       const o = d.op;
-      if (o.ball.live) { free.x = o.ball.x; free.y = o.ball.y; free.z = o.ball.z; free.visible = true; }
+      /* SPEC_25 — a ball that has been dropped or punted is a loose ball on screen
+       * even though the phase still counts the catcher as its owner (that is how the
+       * laws and the watchdogs stay satisfied through a 0.3 s drop). `ball.live` is
+       * the PASS flag and cannot be reused for it, so the craft's own free body is
+       * what the ball is drawn from. */
+      if (d.bc?.free) {
+        const f = d.bc.free;
+        free.x = f.x; free.y = f.y; free.z = f.z; free.visible = true;
+      } else if (o.ball.live) { free.x = o.ball.x; free.y = o.ball.y; free.z = o.ball.z; free.visible = true; }
       else carrier = this.pool.get(this.key(o.attacking === 'A' ? 'A' : 'B', o.carrierNum)) ?? null;
     } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
       const m = d.ml;

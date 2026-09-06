@@ -52,6 +52,7 @@ import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate
 import type { HandsState } from './engine/hands';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
+import { makeCraft, stepCraft, type BallCraft } from './engine/ballcraft';
 import {
   RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
 } from './engine/referee';
@@ -86,6 +87,12 @@ export interface Input {
   contact: boolean; fend: boolean; step: boolean; dummy: boolean;
   tackleDive: boolean; tackleSmother: boolean; switchPlayer: boolean;
   action: boolean;
+  /* SPEC_25 — the catch/punt verbs. `handsUp` is a HOLD (right mouse), `secure` is a
+   * HOLD whose release is the drop (left mouse), and `punt` is the edge press of the
+   * kick key inside the drop window. They are here rather than in a side channel so a
+   * gamepad, a tutorial script and the headless probes can drive the mechanic exactly
+   * the way the mouse does. */
+  handsUp: boolean; secure: boolean; punt: boolean;
 }
 export const NO_INPUT: Input = {
   left: false, right: false, up: false, down: false, run: false, sprint: false,
@@ -93,6 +100,7 @@ export const NO_INPUT: Input = {
   kick: false, grubber: false, drop: false,
   contact: false, fend: false, step: false, dummy: false,
   tackleDive: false, tackleSmother: false, switchPlayer: false, action: false,
+  handsUp: false, secure: false, punt: false,
 };
 
 /* ============================ PHASES & STATE ============================ */
@@ -599,6 +607,14 @@ export class Director {
   phase: Phase = 'KICK';
   possession: 'A' | 'B' = 'A';
   actors: Actor[] = [];
+  /** SPEC_25 — the interactive catch / security / drop-punt machine. Owned by the
+   *  engine because it decides where the ball is; the rig only reads `bc`. */
+  bc: BallCraft = makeCraft();
+  /** SPEC_25 — LMB is held this frame. Separate from `bc.state` because the grip is
+   *  an input fact and the state is a rules fact: a man can be securing the ball in
+   *  the middle of a ruck that ended his possession, and only one of those two should
+   *  be able to make him hard to strip. */
+  bcGrip = false;
   cam: Camera;
   scrumAnchor = { x: 0, z: 0 };
   scrim?: ScrumState;
@@ -1453,6 +1469,13 @@ export class Director {
         case 'LINEOUT': case 'LINEOUT_REPLAY': this.upLineout(dt, input, pressed); break;
         case 'KICK': case 'KICK_REPLAY': this.upKick(dt, input, pressed); break;
       }
+      /* SPEC_25 — the catch and the punt run AFTER the phase handler and inside the
+       * same containment, for two reasons. The phase has already moved the world, so
+       * the craft measures a ball and a body that are where this frame says they are;
+       * and its resolution path starts open play, which must not re-enter the switch
+       * that is still unwinding. */
+      this.bcGrip = input.secure;
+      stepCraft(this, dt, input.handsUp, input.secure, input.punt, pressed, released);
       /* SPEC_12: the referee is asked ONCE per frame, over every live line in
        * the registry. He used to be asked from two phase hooks — a ruck hook
        * in the breakdown and a release-beat hook in open play — which is why
