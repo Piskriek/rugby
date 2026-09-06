@@ -27,6 +27,16 @@ export class MatchAudio {
   private master: GainNode | null = null;
   private bedGain: GainNode | null = null;
   private bedFilter: BiquadFilterNode | null = null;
+  /** THE WEATHER BED. Rain is not loud, it is everywhere: a band of hiss
+   *  sitting ABOVE the crowd in spectrum (1.4–3.4 kHz) so it never muddies the
+   *  roar, gated by the same CROWD NOISE level so OFF means OFF. */
+  private rainGain: GainNode | null = null;
+  private rainFilter: BiquadFilterNode | null = null;
+  /** presentation-side inputs, applied in update() */
+  private rainWant = 0;
+  private windWant = 0;
+  /** 0 = mud, 1 = firm. Reshapes an impact: a dry-slap or a dull thud. */
+  private surface = 0.7;
   /** eased bed amplitude 0..~0.3 */
   private swell = 0;
   /** one-shot swell added by breaks and tries, decays over ~1.5 s */
@@ -78,6 +88,42 @@ export class MatchAudio {
     this.bedGain.gain.value = 0;
     src.connect(this.bedFilter).connect(this.bedGain).connect(this.master);
     src.start();
+    this.startRain();
+  }
+
+  /**
+   * The rain bed. A second looping noise source, band-passed and deliberately
+   * quiet: the design doc's mix ruling (D-5) established that the WHISTLE is
+   * the peak of this mix at -11.4 dBFS and the tackle sits at -19.0, so weather
+   * has to live under both. 0.045 gain peaks near -27 dBFS: audible on a
+   * headset, never loud enough to hide a call.
+   */
+  private startRain() {
+    if (!this.ctx || !this.master) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(3.1);
+    if (!src.buffer) return;
+    src.loop = true;
+    this.rainFilter = this.ctx.createBiquadFilter();
+    this.rainFilter.type = 'bandpass';
+    this.rainFilter.frequency.value = 2200;
+    this.rainFilter.Q.value = 0.6;
+    this.rainGain = this.ctx.createGain();
+    this.rainGain.gain.value = 0;
+    src.connect(this.rainFilter).connect(this.rainGain).connect(this.master);
+    src.start();
+  }
+
+  /** Called by the view from the resolved conditions. Presentation only — the
+   *  engine's own wetness numbers are untouched by this. */
+  setWeather(rainLevel: number, windSpeed: number) {
+    this.rainWant = Math.max(0, Math.min(1, rainLevel));
+    this.windWant = Math.max(0, Math.min(1, windSpeed / 18));
+  }
+
+  /** 0 = a mud bath, 1 = a hard firm. See `impact`. */
+  setSurface(firmness: number) {
+    this.surface = Math.max(0, Math.min(1, firmness));
   }
 
   /* ---------- per frame ---------- */
@@ -102,7 +148,21 @@ export class MatchAudio {
     this.bedGain.gain.value = this.swell * (0.55 + crowdRatio * 0.55);
     // a stadium brightens as it gets louder
     this.bedFilter.frequency.value = 600 + this.swell * 1100;
+
+    /* Weather follows the crowd rather than overriding it: the rain ducks a
+     * little when the bowl roars, because 50 000 people shouting IS louder than
+     * the weather, and a mix that forgets that sounds like a screensaver. */
+    if (this.rainGain && this.rainFilter) {
+      const gust = 0.75 + 0.25 * Math.sin(this.swellT * 0.9) * (0.4 + this.windWant);
+      const target = this.level === 0 ? 0 : this.rainWant * 0.045 * gate * gust
+        * (1 - Math.min(0.45, this.swell * 1.2));
+      this.rainGain.gain.value += (target - this.rainGain.gain.value) * Math.min(1, dt * 2.2);
+      this.rainFilter.frequency.value = 1400 + this.rainWant * 1200 + this.windWant * 700;
+      this.rainFilter.Q.value = 0.6 + this.windWant * 0.5;
+    }
+    this.swellT += dt;
   }
+  private swellT = 0;
 
   /* ---------- events (the T-08 bus) ---------- */
 
@@ -115,8 +175,11 @@ export class MatchAudio {
      * boosted whistle and a simultaneous tackle, left only 0.2 dB of headroom
      * against a chain that has NO limiter. Trimmed to 0.24: the try is still
      * by far the loudest the crowd gets, with room for the whistle over it. */
-    else if (type === 'TRY') { this.spike = 0.24; this.whistle('DOUBLE'); }
+    else if (type === 'TRY') { this.spike = 0.24; this.whistle('DOUBLE'); this.roar(); }
     else if (type === 'CARD') this.whistle('LONG');
+    /* T-40 — a cleanout is a lower, duller sound than a tackle: body into a
+     * body that is braced for it, at the ground rather than at the chest. */
+    else if (type === 'CLEANOUT') this.impact(0.28 + force * 0.3);
   }
 
   /* ---------- one-shots ---------- */
@@ -130,7 +193,10 @@ export class MatchAudio {
     if (!src.buffer) return;
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 260 + force * 860;
+    /* A tackle on a FIRM pitch is a slap through the shoulder; on MUDDY ground
+     * the pitch is absorbed and the contact is a low, dead thud. Same event,
+     * different filter — the cheapest realism available in a synthesiser. */
+    lp.frequency.value = (260 + force * 860) * (0.55 + this.surface * 0.55);
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
     /* D-5 — SUBTRACTIVE MIX. Impacts were the loudest one-shot in the game at
@@ -178,6 +244,35 @@ export class MatchAudio {
     if (kind === 'LONG') blast(0, 0.55);
     else if (kind === 'SHORT') blast(0, 0.22);
     else { blast(0, 0.16); blast(0.24, 0.16); }
+  }
+
+  /**
+   * THE ROAR. A try already gets the bed spike and the double whistle; what it
+   * has never had is the stadium arriving a beat LATE, which is the actual
+   * shape of a crowd reaction — 0.35 s of swell, 2.4 s of decay, and a band
+   * that opens as it peaks. Kept at 0.13 so it stays under the whistle's
+   * ruled-peak and above the rain.
+   */
+  roar() {
+    if (!this.ctx || !this.master) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(3.2);
+    if (!src.buffer) return;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 0.8;
+    bp.frequency.setValueAtTime(320, t);
+    bp.frequency.exponentialRampToValueAtTime(1500, t + 0.5);
+    bp.frequency.exponentialRampToValueAtTime(520, t + 2.9);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.05, t + 0.35);
+    g.gain.exponentialRampToValueAtTime(0.13, t + 0.75);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 2.9);
+    src.connect(bp).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 3.1);
   }
 
   /**

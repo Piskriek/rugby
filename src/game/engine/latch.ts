@@ -106,6 +106,20 @@ export const LATCH_MIN_DRAG = 0.12;
 export const LATCH_TRAIL_METRES = 0.5;
 
 /**
+ * THE CLOSE. A latch begins at the contact radius, but a defender who dived
+ * for it committed from up to `LATCH_DIVE_REACH` (2.4 m) away — and the snap
+ * below puts him on the carrier's hip. Writing that in one frame moved him
+ * up to 1.73 m in 16 ms (measured), which is twice a sprint and exactly the
+ * "impossible instantaneous movement" the NO-TELEPORTS gate exists to catch.
+ *
+ * So the gap is CLOSED rather than jumped: the offset between where he
+ * actually is and where the hip is decays to zero over this many seconds.
+ * That is also what really happens — he is in the air, reaching, and arrives
+ * a moment later. Short enough to still read as one continuous grab.
+ */
+export const LATCH_CLOSE_SECONDS = 0.14;
+
+/**
  * The reach of the committed dive. Outside the contact radius but inside
  * this, a defender leaves his feet: the dive animation fires BEFORE contact,
  * so the grab reads as the end of a leap rather than a man walking into
@@ -139,6 +153,13 @@ export interface LatchState {
   dragged: number;
   /** true when the defender left his feet to make it (Part 3 polish) */
   dived: boolean;
+  /**
+   * Offset from the hip to where the tackler actually was when the hands went
+   * on, metres. Decays to zero over LATCH_CLOSE_SECONDS so he converges onto
+   * the carrier instead of teleporting onto him. See LATCH_CLOSE_SECONDS.
+   */
+  closeX: number;
+  closeZ: number;
 }
 
 /* ====================== PRESENTATION CLIP NAMES ====================== */
@@ -165,6 +186,9 @@ export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived
   carrier.latchedBy = playerId(tackler);
   carrier.latchDrag = LATCH_SPEED_MULT;
   tackler.latchingOnto = playerId(carrier);
+  /* Where the hip is right now, and therefore how far he still has to travel.
+   * Held as an offset and decayed, so the very first tick does not jump him. */
+  const a0 = latchAnchor(carrier);
   const latch: LatchState = {
     carrierNum: carrier.num,
     tacklerNum: tackler.num,
@@ -173,6 +197,8 @@ export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived
     t: 0,
     dragged: 0,
     dived,
+    closeX: tackler.x - a0.x,
+    closeZ: tackler.z - a0.z,
   };
   s.latch = latch;
   /* He is not tackled yet — he is being held. The clips say exactly that, and
@@ -266,8 +292,13 @@ export function tickLatch(
    * write that `think()` has been told to stay out of. */
   const before = { x: tackler.x, z: tackler.z };
   const anchor = latchAnchor(carrier);
-  tackler.x = anchor.x;
-  tackler.z = anchor.z;
+  /* The residual gap from the moment of contact, easing out. `k` is 1 on the
+   * contact frame and 0 once LATCH_CLOSE_SECONDS has elapsed, after which he
+   * is welded to the hip exactly as before. */
+  const k = latch.t < LATCH_CLOSE_SECONDS ? 1 - latch.t / LATCH_CLOSE_SECONDS : 0;
+  const ease = k * k;          // quadratic: quick at first, gentle on arrival
+  tackler.x = anchor.x + latch.closeX * ease;
+  tackler.z = anchor.z + latch.closeZ * ease;
   tackler.vx = anchor.vx;
   tackler.vz = anchor.vz;
   tackler.movedBy = 'latch';
