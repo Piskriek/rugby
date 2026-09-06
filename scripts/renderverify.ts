@@ -43,5 +43,32 @@ const canvas = fs.readFileSync('src/render/ThreeCanvas.ts', 'utf8');
     documented ? 'rationale present in the header' : 'undocumented — the next reader will "fix" it');
 }
 
+/* 3. THE COMPOSER TARGET MUST NOT BE MULTISAMPLED.
+ * A HalfFloat colour target with `samples > 0` is ~4x the memory (380 MB at
+ * DPR 2 when measured). Where the driver refuses the allocation it does not
+ * throw — it yields an incomplete framebuffer that resolves to one flat
+ * colour, and the whole game renders as a single uniform fill with a working
+ * HUD on top. That is a very expensive bug to diagnose from a screenshot. */
+{
+  const initBlock = canvas.slice(canvas.indexOf('init()'), canvas.indexOf('applyConditions('));
+  /* Strip comments first: this file DOCUMENTS the mistake at length, and a
+   * naive scan matches the explanation rather than the code. */
+  const code = initBlock
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+  const msaa = /samples:\s*([1-9])/.exec(code);
+  check('composer target is not multisampled', !msaa,
+    msaa ? `samples: ${msaa[1]} — flat-colour risk` : 'no MSAA on the HalfFloat target');
+}
+
+/* 4. THE TARGET MUST NOT BE ALLOCATED AT 2x2.
+ * init() runs before layout, so clientWidth is 0. Falling back to 2 pixels
+ * allocates the entire post chain at 2x2 and then resizes it on frame 1. */
+{
+  const twoPx = /clientWidth \|\| 2\b/.test(canvas);
+  check('composer size falls back sanely', !twoPx,
+    twoPx ? 'falls back to 2px — allocate at window size instead' : 'falls back to window size');
+}
+
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');
 if (!ok) process.exit(1);

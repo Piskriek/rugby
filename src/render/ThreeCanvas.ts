@@ -258,11 +258,26 @@ export class ThreeCanvas {
     this.matchDay = new ThreeMatchDay(this.scene);
     this.particles = new ThreeParticles(this.scene);
 
-    const w = Math.max(2, this.dom.clientWidth || 2);
-    const h = Math.max(2, this.dom.clientHeight || 2);
+    /* SIZE. `init()` runs immediately after the canvas is appended, BEFORE the
+     * browser has laid it out, so clientWidth/clientHeight are still 0 and the
+     * old `|| 2` fallback built the composer's target at 2x2 pixels. resize()
+     * corrects it on the first frame, but a HalfFloat multisample target
+     * allocated at 2x2 and then resized is the case drivers handle worst.
+     * Fall back to the window, which is always the right order of magnitude. */
+    const w = Math.max(2, this.dom.clientWidth || window.innerWidth || 1280);
+    const h = Math.max(2, this.dom.clientHeight || window.innerHeight || 720);
+    /* NO MSAA ON THIS TARGET.
+     *
+     * `samples: 4` asks for a multisampled half-float colour buffer at the
+     * full device pixel ratio. It costs roughly 4x the memory of the plain
+     * target (380 MB at DPR 2 when this was last measured), and on drivers
+     * that will not allocate it the failure is NOT an exception — it is an
+     * incomplete framebuffer that resolves to a single flat colour, which is
+     * exactly the uniform brown frame this produced. The grade pass already
+     * smooths edges, so the quality this bought was marginal even when it
+     * worked. Guarded by scripts/renderverify. */
     const rt = new THREE.WebGLRenderTarget(w, h, {
       type: THREE.HalfFloatType,
-      samples: 4,
       colorSpace: THREE.LinearSRGBColorSpace,
     });
     this.composer = new EffectComposer(this.renderer, rt);
