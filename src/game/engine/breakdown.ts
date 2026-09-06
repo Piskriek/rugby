@@ -263,7 +263,25 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * past it — is pried off slowly, because that is what a set jackal is:
      * the fight the defending side wanted. This is where sustained hands
      * becomes a steal instead of a race the attack always wins. */
-    const recover = net > 0 ? (s.redT > 0.15 ? 12.0 : 24.0) : 3.6;
+    /* AUDIT (scripts/breakdownaudit): the axis was measured across 81 real
+     * breakdowns and NEVER went below -0.45, while the steal threshold is
+     * -0.75. The defence could not reach its own win condition, so the
+     * turnover rate was exactly 0.0% and the jackal — present at 100% of
+     * breakdowns — was decorative.
+     *
+     * This asymmetry is why. The attack's recovery rate was 24.0 against the
+     * defence's 3.6, a 6.7x advantage, on top of an attacking ramp that
+     * reaches full strength in 0.3 s while the jackal's rush decays over
+     * 1.0 s. Any net advantage the jackal won early was erased faster than
+     * he could build on it.
+     *
+     * The asymmetry is CORRECT in direction — driving a man off the ball is
+     * easier than prying it loose, and the attack should usually win its own
+     * ball. It was simply too steep to leave the defence a reachable win.
+     * 24.0 -> 15.0 and 3.6 -> 7.2 keeps the attack clearly favoured (a little
+     * over 2x) while making -0.75 attainable for a jackal who has genuinely
+     * won the early window. */
+    const recover = net > 0 ? (s.redT > 0.15 ? 9.0 : 15.0) : 7.2;
     s.axisVel += net * recover * dt;
     s.axisVel *= Math.exp(-0.8 * dt);
     s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
@@ -275,10 +293,35 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * is a grind-out, and both are steals. */
     if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
 
+    /* THE BALL MOVES WITH THE CONTEST.
+     *
+     * AUDIT: ball drift from the contact point measured mean 0.00, max 0.00
+     * across every breakdown — once `placed` was set the ball was pinned to
+     * the contact coordinates for the whole ruck, no matter what the axis
+     * did. So a ruck the attack drove twenty metres and a ruck going
+     * backwards presented the ball in exactly the same place, and the nine
+     * always picked up from the same spot.
+     *
+     * The axis already models which way the contest is going; the ball is
+     * where that becomes visible. A dominant clearout walks it forward, a
+     * jackal drags it back. Kept deliberately small — a ruck is a shove of
+     * a metre or so, not a maul — and it feeds the presentation position,
+     * so the nine's pickup follows the fight. */
+    const fwdDir = atk === 'A' ? 1 : -1;
+    const drive = clamp(s.axis, -1, 1) * 0.75;
+    s.ball.x = s.contactX;
+    s.ball.z = s.contactZ + fwdDir * drive;
+
     /* defence on top → the not-releasing hazard rises with their dominance
      * (the attack is the side holding the man off the ball). The old roll
      * fired once per ruck regardless of the contest; this one is honest. */
-    if (s.axis < -0.45 && R() < dt * 0.05) {
+    /* AUDIT: with the axis now able to reach the defensive end (it could not
+     * before — see the recover comment), this per-frame roll started firing
+     * far more often than it was tuned for, pushing breakdown penalties to
+     * ~15% against a real rate near 7-8%. The trigger is also raised to
+     * -0.55 so it marks genuine defensive dominance rather than routine
+     * pressure. */
+    if (s.axis < -0.55 && R() < dt * 0.018) {
       d.teams[dTeam].stats.turnovers++;
       s.resultWhy = `NOT RELEASING — THE DEFENCE HAD THE UPPER HAND (AXIS ${s.axis.toFixed(2)})`;
       d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
@@ -319,7 +362,39 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * lone jackal cannot steal, he can only slow the ball — and holding on
      * alone is how hands-in penalties happen. The old gate was force-only,
      * so the CPU stole automatically and the rule was invisible. */
-    else if (s.axis <= -0.75 && s.defCrew.length > s.crew.length) {
+    /* THE STEAL GATE.
+     *
+     * This was `s.defCrew.length > s.crew.length` — a strict numerical
+     * majority. The audit showed why that never fired: both sides arrived
+     * with exactly 3 men at all 75 measured breakdowns, so the condition was
+     * false every time and the turnover rate was 0.0%. Tuning the crew sizes
+     * alone could not fix it either — the counts are small integers, so the
+     * gate is all-or-nothing and flips straight from 0% to 45%.
+     *
+     * The real fault is that a jackal turnover is not a headcount. A lone
+     * openside over the ball beats three arriving cleaners if he got there
+     * first and got his hands on it; that is the entire point of the role.
+     * What decides it is whether he WON THE CONTEST — which `axis` already
+     * models, and which already had to cross -0.75 to get here.
+     *
+     * So numbers now WEIGHT the contest instead of gating it. Being
+     * outnumbered makes a steal harder, not impossible, and a decisively won
+     * axis can still rip the ball against the odds. */
+    else if (s.axis <= -0.75) {
+      /* How far past the threshold the defence drove it: 0 at the line,
+       * 1 when the contest was completely one-sided. */
+      const dominance = clamp((-s.axis - 0.75) / 0.25, 0, 1);
+      const outnumbered = s.crew.length - s.defCrew.length;   // >0 = attack has more
+      /* A lone jackal against a cleared-out ruck needs to have won the
+       * contest outright; even numbers make it routine. Calibrated to the
+       * professional rate of roughly 3-5% of breakdowns ending in a
+       * turnover — see scripts/breakdownaudit. */
+      const steal = clamp(0.14 + dominance * 0.34 - outnumbered * 0.16, 0.02, 0.80);
+      if (R() >= steal) {
+        /* He got over it and slowed it, but could not rip it away. That is
+         * slow ball, not a turnover — the attack keeps it. */
+        s.axis = -0.70;
+      } else {
       s.axis = Math.min(s.axis, -0.75);
       if (s.jackalActive && jackal) {
         d.teams[dTeam].stats.turnovers++;
@@ -329,7 +404,20 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
         d.commentate('TURNOVER');
         s.resultWhy = `JACKAL WON — ${d.teams[dTeam].nation.short} SHOVED IT BACK, FORCE ${(defF / 100).toFixed(1)} v ${(atkF / 100).toFixed(1)} kN`;
         d.clearRuck();
-        d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
+        /* THE MAN WHO WON IT CARRIES IT.
+         *
+         * This handed the ball to shirt 9 of the defending side. At a ruck the
+         * defending scrum-half is typically 15-25 m away covering the fringe,
+         * so the ball teleported across the pitch to a man who had nothing to
+         * do with the turnover — and the camera, which tracks the ball,
+         * whipped off the breakdown to follow it. The fault hunt measured 112
+         * off-screen frames against a 60 limit; with this path disabled it was
+         * 19. It also made no sense as rugby: the jackal has his hands on the
+         * ball, and he is the one who gets up with it.
+         *
+         * Fall back to the nine only if the jackal somehow cannot carry. */
+        const winner = (!jackal.down && jackal.sinbin <= 0) ? jackal.num : 9;
+        d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), winner, 1, 0, 0.75);
         return;
       }
       /* T-18. Real referees ping not-releasing two to four times a match,
@@ -338,6 +426,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06) {
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
+      }
       }
     }
   }
@@ -592,22 +681,77 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   car.vx = shareVx; car.vz = shareVz;
   if (tackler) { tackler.down = true; tackler.vx = shareVx; tackler.vz = shareVz; }
 
-  // three named attackers, in arrival order, assigned before the whistle
-  const commitA = clamp(1 + Math.round((d.slider(atk, 'ruckCommit') / 100) * 2), 1, 3);
-  const crew = assignCrew(d.live, atk, cx, cz, commitA + 1);
-  // T-39. Send three defenders so the CPU genuinely contests the ruck instead
-  // of watching it. The first is the jackal, the other two counter-ruck.
-  const defCrew = assignCrew(d.live, dTeam, cx, cz, 3);
+  /* HOW MANY MEN EACH SIDE COMMITS.
+   *
+   * AUDIT (scripts/breakdownaudit): both sides committed EXACTLY 3 at every
+   * single breakdown — 75 of 75, zero variance. Both the AI steal (line ~322)
+   * and the human steal (line ~94) are gated on
+   * `defCrew.length > crew.length`, which is strictly greater, so with both
+   * sides permanently equal the gate could never once open. The measured
+   * turnover rate was 0.0% across 5 seeds. The jackal existed, contested, and
+   * could not win, because the numbers that decide it were a constant.
+   *
+   * The attack's count already responded to the ruckCommit slider — but then
+   * `commitA + 1` requested 4 and assignCrew only ever returned 3, because
+   * RUCK_FORBIDDEN plus the forwards-first bias leaves about that many
+   * plausible bodies near the ball. The slider was being silently swallowed.
+   *
+   * So: ask for what we actually want, and let the DEFENCE vary too. A
+   * defence that has numbers arrives with numbers; one that is scrambling
+   * after a line break does not. That is what makes a jackal a numbers call
+   * rather than a dice roll, which is what the comment at line ~316 always
+   * claimed it was. */
+  /* The attacking side commits 2-4. The carrier's own support arrives first
+   * and in numbers: securing your own ball is the default in rugby, and the
+   * defence has to earn the exception. */
+  const commitA = clamp(2 + Math.round((d.slider(atk, 'ruckCommit') / 100) * 2), 2, 4);
+  const crew = assignCrew(d.live, atk, cx, cz, commitA);
+
+  /* The defence sends men according to how well set it is. Count the covering
+   * defenders who are genuinely near the contact: a set line can afford to
+   * post a jackal and two cleaners, a broken one gets whoever is closest. */
+  let nearDef = 0;
+  for (const p of d.live) {
+    if (p.team !== dTeam || p.sinbin > 0 || p.down) continue;
+    if (Math.hypot(p.x - cx, p.z - cz) < 12) nearDef++;
+  }
+  const lineSpeed = d.slider(dTeam, 'lineSpeed') / 100;
+  /* 1 when isolated, up to 4 when the defence is set and aggressive. The
+   * attack can be outnumbered — which is the whole point. */
+  /* 1-4, but usually one FEWER than the attack: a defence normally posts a
+   * jackal and moves on, because committing bodies to a ruck it does not
+   * expect to win is how you get carved up on the next phase. It outnumbers
+   * the attack only when the attack is genuinely isolated. Calibrated
+   * against the real professional turnover rate of 3-5% of breakdowns. */
+  const commitB = clamp(Math.round(nearDef * 0.18 + lineSpeed * 1.1), 1, 4);
+  const defCrew = assignCrew(d.live, dTeam, cx, cz, commitB);
+  /* RUCK SLOTS MUST BE ON THE PITCH.
+   *
+   * The slot offsets fan out from the contact point (the furthest cleaner
+   * sits at cx - 2.3), and none of them were clamped. At a ruck near a
+   * touchline that puts men outside the field of play — and because
+   * `steer()` clamps x to +-34.5 the moment the phase returns to open play,
+   * the engine yanked them back onto the pitch in a single frame. The fault
+   * hunt caught exactly this: shirts 1 and 5 jumping 0.89 m and 0.86 m from
+   * x=-35.36 to the -34.50 touchline, both on the RECYCLE -> OPEN_PLAY
+   * frame, both attributed to `steer`.
+   *
+   * It surfaced only once the ruck could commit a fourth man that far out,
+   * but the slots were always unbounded — the extra body just reached
+   * further. Clamp where the slots are AUTHORED so the position is legal
+   * from the moment it is written, rather than letting open play discover
+   * it later. */
+  const onPitch = (v: number): number => clamp(v, -34.2, 34.2);
   const players: BreakdownState['players'] = [
-    { role: 'CARRIER', num: s.carrierNum, team: atk, x: cx, z: cz, down: true },
+    { role: 'CARRIER', num: s.carrierNum, team: atk, x: onPitch(cx), z: cz, down: true },
   ];
-  if (tackler) players.push({ role: 'TACKLER', num: tackler.num, team: dTeam, x: cx + 0.6, z: cz - dir * 0.5, down: true });
+  if (tackler) players.push({ role: 'TACKLER', num: tackler.num, team: dTeam, x: onPitch(cx + 0.6), z: cz - dir * 0.5, down: true });
   crew.forEach((p, i) => {
     if (p.num === s.carrierNum || (tackler && p.num === tackler.num)) return;
     p.down = i < 1;
     players.push({
       role: i === 0 ? 'FIRST CLEARER' : 'CLEANER', num: p.num, team: atk,
-      x: cx - 0.8 - i * 0.5, z: cz - dir * (1.3 + i * 0.4), down: i < 1,
+      x: onPitch(cx - 0.8 - i * 0.5), z: cz - dir * (1.3 + i * 0.4), down: i < 1,
     });
   });
   /* T-24c. The first defender to a breakdown ALWAYS contests the ball. The old
@@ -618,7 +762,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     if (tackler && p.num === tackler.num) return;
     players.push({
       role: i === 0 ? 'JACKAL' : 'COUNTER', num: p.num, team: dTeam,
-      x: cx + 0.5 + i * 0.4, z: cz + dir * (1.0 + i * 0.5), down: false,
+      x: onPitch(cx + 0.5 + i * 0.4), z: cz + dir * (1.0 + i * 0.5), down: false,
     });
   });
 
@@ -633,7 +777,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     power: { A: 40 + d.L(atk, 8).attrs.PWR * 0.5, B: 40 + d.L(dTeam, 7).attrs.PWR * 0.5 },
     window: 0, result: '', resultWhy: '',
     contestMeter: 0.5, meterDir: 1, meterOn: false, waggle: 0,
-    commitA, commitB: 2, advantageOf: 0,
+    commitA, commitB, advantageOf: 0,
     axis: 0, axisVel: 0, contestT: 0, redT: 0,
     hitKind, hitSpeed: closing,
   };

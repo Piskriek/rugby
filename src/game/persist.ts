@@ -13,7 +13,12 @@
  */
 
 const KEY = 'rugby.save';
-const VERSION = 1;
+const VERSION = 2;
+
+/* Versions this loader can migrate forward rather than discard. A bumped
+ * VERSION must never silently bin a player's squads and tactics just because
+ * one unrelated field changed meaning. */
+const MIGRATABLE = [1];
 
 export interface SaveBlob {
   v: number;
@@ -40,7 +45,9 @@ export function loadSave(): SaveBlob | null {
     const raw = localStorage.getItem(KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<SaveBlob>;
-    if (!parsed || typeof parsed !== 'object' || parsed.v !== VERSION) return null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const fromVersion = parsed.v;
+    if (fromVersion !== VERSION && !MIGRATABLE.includes(fromVersion as number)) return null;
     const b = parsed as SaveBlob;
     // shape guards — every field the menus will read
     if (typeof b.squads?.home !== 'string' || typeof b.squads?.away !== 'string') return null;
@@ -55,6 +62,25 @@ export function loadSave(): SaveBlob | null {
      * its countdown could never mean TIME TO ACT. Saved 2s load as STOP ONCE
      * (0); 0 and 1 are untouched. */
     if (b.options.maulLaw === 2) b.options.maulLaw = 0;
+
+    /* v1 -> v2: THE PRESENTATION DEFAULTS CHANGED.
+     *
+     * v1 shipped WEATHER=OVERCAST and KICK-OFF=TWILIGHT as defaults. Overcast
+     * cuts the key light to 0.38, shadows to 0.18 and saturation to 0.9, so
+     * the stock game looked deliberately grey — and because those values were
+     * SAVED, simply changing the defaults fixed nothing for anyone who had
+     * already launched the game once. Their blob kept overriding it.
+     *
+     * So: a v1 save that still holds the old defaults is treated as "never
+     * chosen" and moved to the new ones. A v1 save with anything else in
+     * those fields is a deliberate choice and is left completely alone.
+     * Everything else in the blob — squads, tactics, kicker, progress —
+     * carries across untouched either way. */
+    if (fromVersion === 1) {
+      if (b.options.weather === 1) b.options.weather = 0;      // OVERCAST -> CLEAR
+      if (b.options.timeofday === 2) b.options.timeofday = 1;  // TWILIGHT -> AFTERNOON
+      b.v = VERSION;
+    }
     return b;
   } catch {
     return null;
