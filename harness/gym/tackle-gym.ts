@@ -10,6 +10,10 @@
  *   b) 2v1 flanking tackles (carrier + head-on + flanking defender)
  *   c) 3v3 breakdown ruck piles converging on a ball
  *
+ * Every player is a TABS ragdoll: Hips and Chest carry >= 80% of the mass,
+ * Arms / Thighs / Calves are near-weightless, the limbs are held together with
+ * spherical joints, and intra-player limbs are culled by InteractionGroups.
+ *
  * Each scenario runs its own Rapier world (fresh body set, no state leaking
  * between tackles) for a fixed number of ticks. The benchmark measures:
  *
@@ -20,12 +24,17 @@
  *     finite, or the angular speed exceeds 100 rad/s)
  *
  * Exit code is 0 whenever the run completes; the metric table reports
- * PASS/FAIL per target so CI (or a human) can read it without the harness
- * aborting mid-sweep.
+ * PASS/FAIL per target so CI (or a human) can read it without aborting.
  */
 
 import { performance } from 'node:perf_hooks';
-import { RapierWorld, PhysicsGroup } from '../../src/core/physics/RapierWorld';
+import {
+  RapierWorld,
+  PhysicsGroup,
+  TABS_TOTAL_MASS,
+  TABS_TRUNK_SHARE,
+  type TabsPlayer,
+} from '../../src/core/physics/RapierWorld';
 import type { RigidBody, Collider } from '@dimforge/rapier3d-compat';
 
 /* ------------------------------- constants ------------------------------- */
@@ -41,22 +50,36 @@ const PENETRATION_THRESHOLD = 0.05;
 /** Angular speed considered "unbounded" for a humanoid proxy, rad/s. */
 const ANGVEL_LIMIT = 100;
 
+interface ScenarioSetup {
+  bodies: RigidBody[];
+  colliders: Collider[];
+}
+
 interface ScenarioClass {
   id: string;
   label: string;
   count: number;
-  build(world: RapierWorld): RigidBody[];
+  build(world: RapierWorld): ScenarioSetup;
 }
 
 /* ------------------------------ scene builders --------------------------- */
 
-/** Player half extents (≈ a 0.7 × 1.8 × 0.56 m torso proxy). */
-const PLAYER_HALF = { hx: 0.35, hy: 0.9, hz: 0.28 };
+function tabsPlayer(world: RapierWorld, x: number, z: number, vx: number, vz: number): TabsPlayer {
+  return world.addTabsPlayer({ x, y: 0, z, vx, vz });
+}
 
-function player(world: RapierWorld, x: number, z: number, vx: number, vz: number): RigidBody {
-  const body = world.addPlayer({ ...PLAYER_HALF, x, y: 0.9, z });
-  body.setLinvel({ x: vx, y: 0, z: vz }, true);
-  return body;
+function scenarioFrom(players: TabsPlayer[], balls: RigidBody[]): ScenarioSetup {
+  const bodies: RigidBody[] = [];
+  const colliders: Collider[] = [];
+  for (const p of players) {
+    bodies.push(...p.bodies);
+    colliders.push(...p.colliders);
+  }
+  for (const b of balls) {
+    bodies.push(b);
+    colliders.push(b.collider(0));
+  }
+  return { bodies, colliders };
 }
 
 function ball(world: RapierWorld, x: number, z: number, vy = 0.8): RigidBody {
@@ -66,40 +89,33 @@ function ball(world: RapierWorld, x: number, z: number, vy = 0.8): RigidBody {
 }
 
 /** a) 1v1 head-on hit at 6.0 m/s each, with a ball in the path. */
-function buildHeadOn(world: RapierWorld): RigidBody[] {
-  const bodies = [
-    player(world, 0, -4, 0, 6.0),
-    player(world, 0, 4, 0, -6.0),
-    ball(world, 0, -2.0),
-  ];
-  return bodies;
+function buildHeadOn(world: RapierWorld): ScenarioSetup {
+  const a = tabsPlayer(world, 0, -4, 0, 6.0);
+  const b = tabsPlayer(world, 0, 4, 0, -6.0);
+  return scenarioFrom([a, b], [ball(world, 0, -2.0)]);
 }
 
 /** b) 2v1 flanking tackle — carrier sprinted into by a head-on and a side man. */
-function buildFlank(world: RapierWorld): RigidBody[] {
-  const carrier = player(world, 0, 0, 0, 6.0);
-  const headOn = player(world, 0, 4, 0, -6.0);
-  // Flanking defender closes diagonally on the carrier at 6.0 m/s.
+function buildFlank(world: RapierWorld): ScenarioSetup {
+  const carrier = tabsPlayer(world, 0, 0, 0, 6.0);
+  const headOn = tabsPlayer(world, 0, 4, 0, -6.0);
   const dx = -2.5, dz = -2.0;
   const len = Math.hypot(dx, dz);
-  const flank = player(world, 2.5, 2.0, (dx / len) * 6.0, (dz / len) * 6.0);
-  return [carrier, headOn, flank, ball(world, 0, -0.6, 0.6)];
+  const flank = tabsPlayer(world, 2.5, 2.0, (dx / len) * 6.0, (dz / len) * 6.0);
+  return scenarioFrom([carrier, headOn, flank], [ball(world, 0, -0.6, 0.6)]);
 }
 
-/** c) 3v3 breakdown ruck pile — six bodies converge on a grounded ball. */
-function buildRuck(world: RapierWorld): RigidBody[] {
-  const bodies: RigidBody[] = [];
-  // Attack drives upfield (+z) into the pile.
-  bodies.push(player(world, -0.5, -2.5, 0.0, 3.5));
-  bodies.push(player(world, 0.7, -2.0, -0.5, 3.2));
-  bodies.push(player(world, -1.2, -1.8, 0.6, 3.0));
-  // Defence counter-ruck downfield (−z).
-  bodies.push(player(world, 0.5, 2.5, 0.0, -3.5));
-  bodies.push(player(world, -0.7, 2.0, 0.5, -3.2));
-  bodies.push(player(world, 1.2, 1.8, -0.6, -3.0));
-  // The loose ball in the middle of the pile.
-  bodies.push(ball(world, 0, 0, 0.4));
-  return bodies;
+/** c) 3v3 breakdown ruck pile — six TABS bodies converge on a grounded ball. */
+function buildRuck(world: RapierWorld): ScenarioSetup {
+  const players: TabsPlayer[] = [
+    tabsPlayer(world, -0.5, -2.5, 0.0, 3.5),
+    tabsPlayer(world, 0.7, -2.0, -0.5, 3.2),
+    tabsPlayer(world, -1.2, -1.8, 0.6, 3.0),
+    tabsPlayer(world, 0.5, 2.5, 0.0, -3.5),
+    tabsPlayer(world, -0.7, 2.0, 0.5, -3.2),
+    tabsPlayer(world, 1.2, 1.8, -0.6, -3.0),
+  ];
+  return scenarioFrom(players, [ball(world, 0, 0, 0.4)]);
 }
 
 const SCENARIO_CLASSES: ScenarioClass[] = [
@@ -110,10 +126,7 @@ const SCENARIO_CLASSES: ScenarioClass[] = [
 
 /* ------------------------------ measurement ------------------------------ */
 
-function scanPenetrations(
-  world: RapierWorld,
-  colliders: Collider[],
-): number {
+function scanPenetrations(world: RapierWorld, colliders: Collider[]): number {
   let events = 0;
   for (let i = 0; i < colliders.length; i++) {
     for (let j = i + 1; j < colliders.length; j++) {
@@ -179,7 +192,6 @@ async function main(): Promise<number> {
   let totalAngularIssues = 0;
   let scenarioNumber = 0;
 
-  // Sanity guard: exactly 100 scenarios across the three classes.
   const totalConfigured = SCENARIO_CLASSES.reduce((sum, c) => sum + c.count, 0);
   if (totalConfigured !== TOTAL_SCENARIOS) {
     throw new Error(`scenario counts sum to ${totalConfigured}, expected ${TOTAL_SCENARIOS}`);
@@ -193,13 +205,12 @@ async function main(): Promise<number> {
 
     for (let n = 0; n < cls.count; n++) {
       const world = await RapierWorld.create();
-      // Flat 100 m × 60 m pitch, top surface at y = 0.
       const pitch = world.addPitch({ hx: 50, hy: 0.5, hz: 30, x: 0, y: -0.5, z: 0 });
 
-      const bodies = cls.build(world);
-      const colliders = [...bodies.map((b) => b.collider(0)), pitch];
+      const setup = cls.build(world);
+      const colliders = [...setup.colliders, pitch];
 
-      const result = runScenario(world, bodies, colliders);
+      const result = runScenario(world, setup.bodies, colliders);
 
       allTimes.push(...result.times);
       agg.scenarios++;
@@ -222,10 +233,16 @@ async function main(): Promise<number> {
   const max = sorted[sorted.length - 1] ?? 0;
 
   const avgOk = avg < 2.0;
+  const penOk = totalPenetrations === 0;
+  const angOk = totalAngularIssues === 0;
 
   console.log('=== TARCS HEADLESS TACKLE STRESS GYM ===');
   console.log(`physics          Rapier3D (WASM, no Three.js / DOM)`);
+  console.log('solver           numSolverIterations=8 numInternalPgsIterations=2 ccdSubsteps=8');
+  console.log('                 normalizedAllowedLinearError=0.0001 predictionDistance=0.1');
   console.log(`collision groups PLAYER=${PhysicsGroup.PLAYER} PITCH=${PhysicsGroup.PITCH} BALL=${PhysicsGroup.BALL}`);
+  console.log('mass dist        hips=32 chest=32 arm=1.5 thigh=2 calf=1.5 kg');
+  console.log(`mass trunk share ${(TABS_TRUNK_SHARE * 100).toFixed(1)}% of ${TABS_TOTAL_MASS.toFixed(1)} kg`);
   console.log(`gravity          [0, -9.81, 0]`);
   console.log(`scenarios        ${scenarioNumber} (configured ${totalConfigured})`);
   for (const cls of SCENARIO_CLASSES) {
@@ -241,8 +258,8 @@ async function main(): Promise<number> {
   console.log('p50 tick time'.padEnd(30) + `${p50.toFixed(3)} ms`);
   console.log('p95 tick time'.padEnd(30) + `${p95.toFixed(3)} ms`);
   console.log('max tick time'.padEnd(30) + `${max.toFixed(3)} ms`);
-  console.log('interpenetration events'.padEnd(30) + `${totalPenetrations}`.padEnd(14) + '0 (depth > 5 cm)'.padEnd(14) + (totalPenetrations === 0 ? 'PASS' : 'FAIL'));
-  console.log('NaN / unbounded angvel'.padEnd(30) + `${totalAngularIssues}`.padEnd(14) + '0 (>100 rad/s)'.padEnd(14) + (totalAngularIssues === 0 ? 'PASS' : 'FAIL'));
+  console.log('interpenetration events'.padEnd(30) + `${totalPenetrations}`.padEnd(14) + '0 (depth > 5 cm)'.padEnd(14) + (penOk ? 'PASS' : 'FAIL'));
+  console.log('NaN / unbounded angvel'.padEnd(30) + `${totalAngularIssues}`.padEnd(14) + '0 (>100 rad/s)'.padEnd(14) + (angOk ? 'PASS' : 'FAIL'));
   console.log('');
 
   console.log('--- PER-CLASS HEALTH ---');
@@ -252,10 +269,10 @@ async function main(): Promise<number> {
   }
   console.log('');
 
-  console.log(avgOk
-    ? 'RESULT: PASS — average tick time under 2.0 ms'
-    : `RESULT: FAIL — average tick time ${avg.toFixed(2)} ms >= 2.0 ms`);
-  console.log(`exit 0`);
+  console.log(avgOk ? 'RESULT: PASS — average tick time under 2.0 ms' : `RESULT: FAIL — average tick time ${avg.toFixed(2)} ms >= 2.0 ms`);
+  console.log(penOk ? 'RESULT: PASS — no interpenetration events > 5 cm' : `RESULT: FAIL — ${totalPenetrations} interpenetration events > 5 cm`);
+  console.log(angOk ? 'RESULT: PASS — no NaN / unbounded angular velocity' : `RESULT: FAIL — ${totalAngularIssues} NaN / unbounded angular velocity`);
+  console.log('exit 0');
 
   return 0;
 }
