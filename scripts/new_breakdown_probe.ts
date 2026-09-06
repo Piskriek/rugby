@@ -20,7 +20,7 @@ const agg = {
   quick: 0, slow: 0, jackalFirst: 0, clearFirst: 0,
   ballOutAttack: 0, ballOutDefence: 0, ruckDur: 0, ruckN: 0,
   tries: 0, pens: 0, drops: 0, conv: 0, totalScore: 0,
-  turnoverProbMean: 0, turnoverProbN: 0,
+  turnoverProbMean: 0, turnoverProbN: 0, stripAttempt: 0, stripWin: 0,
 };
 const perSeed: string[] = [];
 
@@ -46,6 +46,8 @@ for (let s = 0; s < N; s++) {
   agg.breakdowns += d; agg.clean += clean; agg.turnover += turnover;
   agg.penAttack += penA; agg.penDefence += penD;
   agg.quick += c.bdQuick ?? 0; agg.slow += c.bdSlow ?? 0;
+  (agg as Record<string, number>).stripAttempt += c.stripAttempt ?? 0;
+  (agg as Record<string, number>).stripWin += c.stripWin ?? 0;
   agg.tackles += c.tackle ?? 0; agg.offloads += c.offload ?? 0; agg.knockOns += c.knockOn ?? 0;
   agg.heldUp += c.holdUp ?? 0; agg.lineBreaks += c.lineBreak ?? 0; agg.mauls += c.maul ?? 0;
   agg.tries += c.try ?? 0; agg.pens += c.penaltyGoal ?? 0; agg.drops += c.dropGoal ?? 0; agg.conv += c.conversion ?? 0;
@@ -73,6 +75,8 @@ console.log(`mauls              ${agg.mauls}`);
 console.log('');
 console.log('--- the breakdown (pre-simulated) ---');
 console.log(`breakdowns         ${agg.breakdowns}`);
+console.log(`strip attempts     ${agg.stripAttempt}   (${(agg.stripAttempt / total * 100).toFixed(1)}% of breakdowns)`);
+console.log(`strip wins         ${agg.stripWin}   (${(agg.stripWin / Math.max(1, agg.stripAttempt) * 100).toFixed(1)}% of attempts)`);
 console.log(`  clean (attack)   ${agg.clean}   (${(agg.clean / total * 100).toFixed(1)}%)`);
 console.log(`  turnover         ${agg.turnover}   (${(agg.turnover / total * 100).toFixed(1)}%)`);
 console.log(`  penalty attack   ${agg.penAttack}   (not releasing)`);

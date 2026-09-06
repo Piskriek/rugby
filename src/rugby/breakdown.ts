@@ -70,6 +70,14 @@ export interface BreakdownState {
   winner: Side;
   reason: string;
   nineId: number | null;
+  /** THE GRAPPLE — the pre-simulated strip contest. Rolled once at the tackle:
+   * does the tackler try to rip the ball in the contact, and does he get it?
+   * The result drives the magnetic-hands visuals in the 3D layer. */
+  strip: {
+    attempt: boolean;   // the tackler grapples for the ball in the contact
+    win: boolean;       // the ball is ripped free (instant turnover)
+    by: number | null;  // tackler id (the man doing the ripping)
+  };
   // telemetry for the audit harness
   raceGap: number;       // clearerTime − jackalTime (s, +ve = jackal first)
   turnoverProb: number;
@@ -158,15 +166,30 @@ export class Breakdown {
     const jackalT = jackal ? arrivalTime(jackal, bx, by) : 9;
     const raceGap = clearerT - jackalT;   // +ve ⇒ the jackal is there first
 
+    // --- THE GRAPPLE: the tackler's strip attempt, rolled once at the tackle.
+    // A ripper is a hard, skilful tackler — or a THIEF — who attacks the ball
+    // in the contact; the carrier's grip is his PWR + SKL shielding it. The
+    // strip is a REAL, pre-simulated contest, not a visual garnish: if it
+    // comes off the ball is gone before the ruck ever forms.
+    const tacklerRip = tackler ? (tackler.att.agg + tackler.att.skl) / 2 : 0;
+    const carrierGrip = carrier ? (carrier.att.pwr + carrier.att.skl) / 2 : 50;
+    const thiefBoost = tackler?.trait === 'THIEF' ? 16 : 0;
+    const stripAttempt = tackler != null && carrier != null
+      && (hitKind === 'RUNNING' || tackler.att.agg > 72 || tackler.trait === 'THIEF')
+      && sim.rng() < 0.55;
+    const stripProb = clamp(0.06 + (tacklerRip + thiefBoost - carrierGrip) * 0.006, 0.02, 0.28);
+    const stripWin = stripAttempt && sim.rng() < stripProb;
+
     // --- resolve the contest ONCE ---
     // The attack keeps the ball unless the jackal genuinely beats the clearout
-    // to the ball. A dominant, early jackal (or a THIEF) flips it; a late or
-    // outmuscled jackal is driven off and the attack plays quick ball.
+    // to the ball, or the ball has already been ripped free in the contact. A
+    // dominant, early jackal (or a THIEF) flips it; a late or outmuscled
+    // jackal is driven off and the attack plays quick ball.
     const jSkill = jackal ? (jackal.att.agg + jackal.att.skl) / 2 : 0;
     const traitBoost = jackal?.trait === 'THIEF' ? 0.15 : 0;
     const turnoverProb = clamp(0.07 + raceGap * 1.25 + (jSkill - 70) * 0.004 + traitBoost, 0.04, 0.85);
     const roll = sim.rng();
-    const turnover = jackal != null && roll < turnoverProb;
+    const turnover = !stripWin && jackal != null && roll < turnoverProb;
 
     // penalties — the two breakdown crimes, both rare and both honest
     const hotJackal = jackal && jackal.trait !== 'THIEF' && jackal.att.agg > 82 && roll > 0.80 && roll < 0.84;
@@ -174,12 +197,13 @@ export class Breakdown {
 
     let outcome: BreakdownOutcome;
     let winner: Side;
-    if (hotJackal) { outcome = 'PENALTY_DEFENCE'; winner = side; }
+    if (stripWin) { outcome = 'TURNOVER'; winner = defSide; }
+    else if (hotJackal) { outcome = 'PENALTY_DEFENCE'; winner = side; }
     else if (notReleasing) { outcome = 'PENALTY_ATTACK'; winner = defSide; }
     else if (turnover) { outcome = 'TURNOVER'; winner = defSide; }
     else { outcome = 'CLEAN'; winner = side; }
 
-    const ballSpeed: 'QUICK' | 'SLOW' = outcome === 'CLEAN' && raceGap < 0.05 ? 'QUICK' : 'SLOW';
+    const ballSpeed: 'QUICK' | 'SLOW' = (outcome === 'CLEAN' && raceGap < 0.05) || stripWin ? 'QUICK' : 'SLOW';
 
     // --- author the slots (absolute metres) ---
     const plan = beatPlan(ballSpeed);
@@ -208,6 +232,7 @@ export class Breakdown {
       outcome, ballSpeed, hitKind,
       slots, winner, reason: '',
       nineId: nine?.id ?? null,
+      strip: { attempt: stripAttempt, win: stripWin, by: tackler?.id ?? null },
       raceGap, turnoverProb, dur,
       ball: { x: bx - ad * 0.5, y: by, placed: false, out: false },
     };
@@ -219,8 +244,8 @@ export class Breakdown {
     sim.ball.owner = null;
     sim.ball.vx = 0; sim.ball.vy = 0; sim.ball.z = 0.15;
     sim.ball.x = this.state.ball.x; sim.ball.y = this.state.ball.y;
-    if (carrier) { carrier.down = 1.1; carrier.vx *= 0.3; carrier.vy *= 0.3; }
-    if (tackler) { tackler.down = 1.1; tackler.vx *= 0.3; tackler.vy *= 0.3; }
+    if (carrier) { carrier.down = 0; carrier.vx *= 0.3; carrier.vy *= 0.3; }   // upright through IMPACT (the grapple)
+    if (tackler) { tackler.down = 0; tackler.vx *= 0.3; tackler.vy *= 0.3; }
     sim.count('breakdown');
     sim.count(outcome === 'CLEAN' ? 'bdClean' : outcome === 'TURNOVER' ? 'bdTurnover'
       : outcome === 'PENALTY_ATTACK' ? 'bdPenAttack' : 'bdPenDefence');
@@ -229,6 +254,8 @@ export class Breakdown {
     if (outcome === 'TURNOVER') sim.count('jackal');
     if (outcome === 'PENALTY_DEFENCE') sim.count('handsIn');
     if (outcome === 'PENALTY_ATTACK') sim.count('notReleasing');
+    if (stripAttempt) sim.count('stripAttempt');
+    if (stripWin) sim.count('stripWin');
 
     sim.say(
       carrier ? `${tackler ? tackler.name : 'The defence'} brings down ${carrier.name}` : 'Contest for the loose ball',
@@ -254,6 +281,12 @@ export class Breakdown {
     const stage = (s.t >= s.dur ? 'DONE' : plan[Math.min(beatIdx, plan.length - 1)].name) as BreakdownStage;
     if (stage !== s.stage) {
       s.stage = stage;
+      if (stage === 'GROUND' && s.strip.win) {
+        const rip = s.strip.by != null ? sim.player(s.strip.by) : null;
+        sim.sayPair('TURNOVER', s.winner);
+        if (rip) sim.say(`RIPPED! ${rip.name} rips the ball free in the tackle`, s.winner);
+        else sim.say('RIPPED — the ball is torn free in the contact', s.winner);
+      }
       if (stage === 'RUCK') {
         s.ball.placed = true;
         if (s.outcome === 'CLEAN') sim.say('Ruck formed — ' + (s.ballSpeed === 'QUICK' ? 'quick ball' : 'slow ball'), s.side);
@@ -284,9 +317,17 @@ export class Breakdown {
       const moving = s.t >= slotT(slot.moveBeat, plan) || s.stage === 'DONE';
       if (moving) {
         if (slot.role === 'CARRIER' || slot.role === 'TACKLER') {
-          // grounded: lie still at the slot, keep the downed pose
-          p.down = Math.max(p.down, 0.6);
-          sim.steer(p, slot.tx, slot.ty, 0.2, dt);
+          if (s.stage === 'IMPACT') {
+            // THE GRAPPLE — both men are still on their feet in the contact:
+            // the tackler wrestles for the ball, the carrier shields it. They
+            // only go to ground from the GROUND beat on.
+            p.down = 0;
+            sim.steer(p, slot.tx, slot.ty, 0.5, dt);
+          } else {
+            // grounded: lie still at the slot, keep the downed pose
+            p.down = Math.max(p.down, 0.6);
+            sim.steer(p, slot.tx, slot.ty, 0.2, dt);
+          }
         } else {
           const d = dist(p.x, p.y, slot.tx, slot.ty);
           const spd = d > 0.25 ? slot.speed : 0;
@@ -315,7 +356,17 @@ export class Breakdown {
 
     // the ball: presented back during GROUND, moves to the nine's base in EXTRACT
     const carrierSlot = s.slots.find((q) => q.role === 'CARRIER');
-    if (s.stage === 'GROUND' && carrierSlot) {
+    const tacklerSlot = s.slots.find((q) => q.role === 'TACKLER');
+    if (s.strip.win && tacklerSlot && (s.stage === 'GROUND' || s.stage === 'ARRIVE' || s.stage === 'CLEANOUT')) {
+      // ripped free: the ball pops loose onto the tackler's side and stays
+      // under him until the ruck forms over it
+      const tk = sim.player(tacklerSlot.id);
+      const tx = tk ? tk.x + s.ad * 0.35 : s.x + s.ad * 0.35;
+      const ty = tk ? tk.y : s.y;
+      s.ball.x += (tx - s.ball.x) * Math.min(1, 7 * dt);
+      s.ball.y += (ty - s.ball.y) * Math.min(1, 7 * dt);
+      s.ball.placed = false;
+    } else if (s.stage === 'GROUND' && carrierSlot) {
       const c = sim.player(carrierSlot.id);
       if (c) { s.ball.x = c.x - s.ad * 0.5; s.ball.y = c.y; s.ball.placed = false; }
     } else if (s.stage === 'RUCK') {

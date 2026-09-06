@@ -19,7 +19,8 @@
  */
 import { ThreeCanvas } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
-import { chaseCam } from '../render/retro';
+import { newRig, rigFollow, snapRig } from './camera';
+import type { RigState } from './camera';
 import type { View } from '../render/retro';
 import type { RugbySim } from './engine';
 import type { Player } from './types';
@@ -37,6 +38,8 @@ export class RugbyView3D {
   failed = false;
 
   private view: View = { w: 1, h: 1 };
+  private rig: RigState = newRig();
+  private lastBall = { x: 0, y: 0 };
   private actors: FeedActor[] = [];
 
   constructor(container: HTMLElement) {
@@ -80,13 +83,16 @@ export class RugbyView3D {
     if (w !== this.view.w || h !== this.view.h) this.resize();
     const view = this.view;
 
-    // The broadcast camera trails the attack, following the ball.
-    const cam = chaseCam(view, {
-      tx: sim.ball.y,
-      tz: sim.ball.x,
-      dir: sim.attackDir(sim.possession ?? 'A'),
-      zoom: 0.35,
-    });
+    // The broadcast rig trails the side in possession, always framing the
+    // ball with a lead — the fix for the camera that wandered off.
+    const b = sim.ball;
+    // A phase cut can teleport the ball (try → conversion mark, dead ball →
+    // 22 dropout); snap the rig's anchor so it never chases across the pitch.
+    if (Math.hypot(b.x - this.lastBall.x, b.y - this.lastBall.y) > 12) snapRig(this.rig, b.x, b.y);
+    this.lastBall = { x: b.x, y: b.y };
+    const cam = rigFollow(this.rig, {
+      x: b.x, y: b.y, z: b.z, flight: b.flight, vx: b.vx, vy: b.vy,
+    }, sim.attackDir(sim.possession ?? 'A'), Math.min(dt, 0.05));
     three.syncCamera(cam, view);
 
     if (this.ready) {
@@ -181,6 +187,14 @@ function clipFor(sim: RugbySim, p: Player): string {
   if (bd) {
     const slot = bd.slots.find((s) => s.id === p.id);
     if (!slot) return 'ready';
+    // THE GRAPPLE — during the contact beat the tackler wrestles for the ball
+    // and the carrier shields it (the magnetic-hands strip contest).
+    if (bd.stage === 'IMPACT' && bd.strip.attempt) {
+      if (slot.role === 'CARRIER') return 'protect';
+      if (slot.role === 'TACKLER') return 'strip';
+    }
+    // A ripped ball: the tackler ends up over it, not the jackal.
+    if (bd.strip.win && slot.role === 'TACKLER' && bd.stage !== 'IMPACT') return 'jackal';
     switch (slot.role) {
       case 'CARRIER': return 'grounded';
       case 'TACKLER': return 'tackle';

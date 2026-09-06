@@ -800,6 +800,11 @@ export class ThreePlayerManager {
        * the drag would be invisible. */
       case 'latchCarry': return 'latchCarry';
       case 'latchHang': return 'latchHang';
+      /* MAGNETIC HANDS — the ball-strip grapple. The tackler rips at the ball
+       * in the contact, the carrier shields it. Both drive the ball-magnet
+       * arm pass (arms reach for the ball itself, not a body). */
+      case 'strip': return 'strip';
+      case 'protect': return 'protect';
       case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
       case 'kick': return 'kick';
       case 'tackle': return 'tackle';
@@ -903,6 +908,12 @@ export class ThreePlayerManager {
        *               that is needed to read as a man being towed. */
       case 'latchCarry': return { name: 'Run', loop: true };
       case 'latchHang': return { name: 'Tackle', loop: false };
+      /* MAGNETIC HANDS — the strip grapple. The tackler holds the drive/wrap
+       * pose and his hands are aimed at the ball by the ball-magnet pass; the
+       * carrier churns upright (Run at churn rate) while his arms close over
+       * the ball to shield it. */
+      case 'strip': return { name: 'Tackle', loop: false };
+      case 'protect': return { name: 'Run', loop: true };
       /* ASSET NOTE — these tackle states are driven by STAND-IN clips
        * (Tackle, SlideStart, DiveRoll, Death — see the cases above) with the
        * procedural layer compensating for what they lack. The real fix
@@ -1295,7 +1306,17 @@ export class ThreePlayerManager {
      *
      * The weight RAMPS with distance rather than snapping to 1 — a man still a
      * couple of metions out is beginning to reach, not already wrapped. */
-    if (latching && partner) {
+    if (state === 'strip' || state === 'protect') {
+      /* MAGNETIC HANDS — the ball-strip grapple. Both men's arms are aimed at
+       * the BALL itself, not at each other: the tackler's hands close on it to
+       * rip it free, the carrier's wrap over it to shield it. The same reach
+       * pass as the latch, retargeted at the ball, with a deeper torso dip on
+       * the ripper so he gets his chest over the contest. */
+      this.ball.getWorldPosition(_target);
+      const w = state === 'strip' ? 0.95 : 0.75;
+      this.applyArmReach(inst, _target, w, step);
+      this.applyTorsoDip(inst, state === 'strip' ? 0.85 : 0.6, step);
+    } else if (latching && partner) {
       const prig = this.resolveRig(partner);
       const anchor = prig.pelvis ?? prig.spine[0];
       if (anchor) {
@@ -1418,9 +1439,33 @@ export class ThreePlayerManager {
         pending.push(inst);
         continue;
       }
-      if (st.oneShot === 'latchCarry' || st.oneShot === 'latchHang') {
-        /* the latch broke or the takedown fired — release the hold so the
-         * branches below own the body again. */
+      /* MAGNETIC HANDS — the ball-strip grapple, held like the latch. */
+      if (desired === 'strip' || desired === 'protect') {
+        if (st.oneShot !== desired) {
+          if (desired === 'protect') {
+            const a = this.play(inst, 'protect', 0.25, LATCH_CHURN_RATE);
+            a?.setLoop(THREE.LoopRepeat, Infinity);
+          } else {
+            this.play(inst, 'strip', 0.12, 1.25);
+          }
+          st.oneShot = desired;
+          st.lock = 0;
+        }
+        st.lie = false;
+        st.passLatched = false;
+        st.tackleRole = null; st.tackleT = -1;
+        inst.proc.state = desired;
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+        inst.root.rotation.y = Math.PI - st.face;
+        inst.mixer.update(step);
+        if (inst.active) st.tackleClipT = inst.active.action.time;
+        pending.push(inst);
+        continue;
+      }
+      if (st.oneShot === 'latchCarry' || st.oneShot === 'latchHang'
+        || st.oneShot === 'strip' || st.oneShot === 'protect') {
+        /* the latch/grapple broke or the takedown fired — release the hold so
+         * the branches below own the body again. */
         st.oneShot = null; st.lock = 0;
       }
 
