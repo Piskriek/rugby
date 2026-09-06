@@ -39,8 +39,16 @@ import { Camera, View, RENDER_SCALE } from './retro';
 import { ThreeEnvironment } from './ThreeEnvironment';
 import { ThreeMatchDay } from './ThreeMatchDay';
 import { ThreeParticles } from './ThreeParticles';
+import type { RigidBody } from '@dimforge/rapier3d-compat';
+import type { RapierWorld } from '../core/physics/RapierWorld';
+import type { RapierDebugRenderer } from './RapierDebugRenderer';
 import type { Conditions } from './conditions';
 import { conditionsFor, qualityFor } from './conditions';
+
+/** The tiny slice of a TABS player the debug playground needs. */
+interface DebugRagdoll {
+  bodies: RigidBody[];
+}
 
 /** Feature flag: 3D dual-plane pitch, fog and uprights. */
 export const ENV_3D: boolean = true;
@@ -235,8 +243,23 @@ export class ThreeCanvas {
   environment: ThreeEnvironment | null = null;
   matchDay: ThreeMatchDay | null = null;
   particles: ThreeParticles | null = null;
+  /** Live wireframe overlay for the in-browser Rapier debug playground. */
+  rapierDebug: RapierDebugRenderer | null = null;
   /** True between contextlost and contextrestored; drawing is a no-op then. */
   contextLost = false;
+
+  /* The dev-only physics playground that drives `rapierDebug`. It is separate
+   * from the match engine (which is not yet Rapier-backed): a couple of TABS
+   * ragdolls collide head-on in the same coordinate space so the wireframes
+   * can be eyeballed against the pitch, GLB bodies and ball. */
+  private rapierWorld: RapierWorld | null = null;
+  private rapierDebugPlayers: DebugRagdoll[] = [];
+  private rapierDebugInitial: { x: number; y: number; z: number }[][] = [];
+  private rapierDebugVelocities: { x: number; z: number }[] = [];
+  private rapierDebugBall: RigidBody | null = null;
+  private rapierDebugAccumulator = 0;
+  private rapierDebugDeadline = 0;
+  private rapierDebugCancelled = false;
 
   private view: View = { w: 1, h: 1 };
   private composer: EffectComposer | null = null;
@@ -376,6 +399,10 @@ export class ThreeCanvas {
       renderHealth.pipeline = 'direct';
     }
     renderHealth.world = this.environment ? 'live' : 'dead';
+
+    /* Rapier debug playground — dev builds only. It loads Rapier's WASM as a
+     * side effect, so it stays out of the production bundle path. */
+    if (import.meta.env.DEV) this.bootstrapRapierDebug();
   }
 
   /**
@@ -446,6 +473,94 @@ export class ThreeCanvas {
     if (g) g.uAspect.value = v.w / Math.max(1, v.h);
   }
 
+
+  /* ----------------------- Rapier debug playground ----------------------- */
+
+  /**
+   * Boot the dev-only Rapier world that the wireframe renderer reads. This is
+   * deliberately NOT the match engine's simulation — live gameplay is still
+   * driven by `Director`. It exists purely so a developer can run `npm run dev`
+   * and watch real TABS ragdoll colliders move in the same Three space as the
+   * pitch, GLB players and ball.
+   */
+  private async bootstrapRapierDebug(): Promise<void> {
+    try {
+      /* Dynamic import keeps the ~rapier3d-compat WASM bundle out of the main
+       * app chunk: production never calls this, and dev pops it in behind a
+       * microtask after the WebGL scene is already up. */
+      const [{ RapierWorld }, { RapierDebugRenderer }] = await Promise.all([
+        import('../core/physics/RapierWorld'),
+        import('./RapierDebugRenderer'),
+      ]);
+      const world = await RapierWorld.create();
+      if (this.rapierDebugCancelled) {
+        world.dispose();
+        return;
+      }
+      world.addPitch({ hx: 50, hy: 0.5, hz: 30, x: 0, y: -0.5, z: 0 });
+
+      const players = [
+        world.addTabsPlayer({ x: 0, y: 0, z: -4, vx: 0, vz: 6 }),
+        world.addTabsPlayer({ x: 0, y: 0, z: 4, vx: 0, vz: -6 }),
+      ];
+      const ball = world.addBall({ radius: 0.15, x: 0, y: 0.7, z: -2 });
+      ball.setLinvel({ x: 0, y: 0.8, z: 0 }, true);
+
+      this.rapierWorld = world;
+      this.rapierDebugPlayers = players;
+      this.rapierDebugInitial = players.map((p) =>
+        p.bodies.map((body) => {
+          const t = body.translation();
+          return { x: t.x, y: t.y, z: t.z };
+        }));
+      this.rapierDebugVelocities = [{ x: 0, z: 6 }, { x: 0, z: -6 }];
+      this.rapierDebugBall = ball;
+      this.rapierDebug = new RapierDebugRenderer(this.scene, world.world, {
+        scale: RENDER_SCALE,
+      });
+      this.resetRapierDebugDemo();
+    } catch (e) {
+      /* A missing WASM/browser WebAssembly build must not take the match view
+       * down; the debug overlay is optional and the 2D/3D game still runs. */
+      if (!this.rapierDebugCancelled) noteRenderFault('Rapier debug playground', e);
+      this.rapierDebug = null;
+      this.rapierWorld = null;
+    }
+  }
+
+  /** Reset the playground ragdolls and ball to their opening tackle pose. */
+  private resetRapierDebugDemo(): void {
+    this.rapierDebugDeadline = 5;
+    for (let pi = 0; pi < this.rapierDebugPlayers.length; pi++) {
+      const player = this.rapierDebugPlayers[pi];
+      const initial = this.rapierDebugInitial[pi];
+      const velocity = this.rapierDebugVelocities[pi];
+      for (let bi = 0; bi < player.bodies.length; bi++) {
+        const body = player.bodies[bi];
+        const pos = initial[bi];
+        body.setTranslation({ x: pos.x, y: pos.y, z: pos.z }, true);
+        body.setLinvel({ x: velocity.x, y: 0, z: velocity.z }, true);
+        body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      }
+    }
+    this.rapierDebugBall?.setTranslation({ x: 0, y: 0.7, z: -2 }, true);
+    this.rapierDebugBall?.setLinvel({ x: 0, y: 0.8, z: 0 }, true);
+    this.rapierDebugBall?.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  }
+
+  /** Step the debug world at fixed 60 Hz and refresh the wireframe buffers. */
+  private updateRapierDebug(dt: number): void {
+    if (!this.rapierWorld || !this.rapierDebug) return;
+    const FIXED_DT = 1 / 60;
+    this.rapierDebugAccumulator = Math.min(0.25, this.rapierDebugAccumulator + dt);
+    this.rapierDebugDeadline -= dt;
+    if (this.rapierDebugDeadline <= 0) this.resetRapierDebugDemo();
+    while (this.rapierDebugAccumulator >= FIXED_DT) {
+      this.rapierWorld.step(FIXED_DT);
+      this.rapierDebugAccumulator -= FIXED_DT;
+    }
+    this.rapierDebug.sync();
+  }
 
   /**
    * Match the 2D pinhole rig. Mirrors `project()` in retro.ts:
@@ -525,11 +640,14 @@ export class ThreeCanvas {
     return { w, h };
   }
 
-  render() {
+  render(dt = 1 / 60) {
     /* A lost context (driver reset, GPU OOM, a laptop changing graphics card)
      * otherwise leaves a permanently black canvas with no clue why. */
     if (this.contextLost) return;
     this.frame++;
+    /* The Rapier wireframes must reflect the physics world after the latest
+     * step, so the debug world advances before the scene is drawn. */
+    this.updateRapierDebug(dt);
     /* The shadow map is the single most expensive thing in this scene — 31
      * skinned meshes drawn again from the key's point of view. Half rate is
      * invisible: a sprinter advances 0.16 m per frame, and the shadow box is
@@ -575,6 +693,11 @@ export class ThreeCanvas {
   }
 
   dispose() {
+    this.rapierDebugCancelled = true;
+    this.rapierDebug?.dispose();
+    this.rapierDebug = null;
+    this.rapierWorld?.dispose();
+    this.rapierWorld = null;
     this.environment?.dispose();
     this.environment = null;
     this.matchDay?.dispose();

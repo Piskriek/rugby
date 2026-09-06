@@ -633,7 +633,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           }
           /* The weather itself: precipitation, wet ground, mist, lamp haze. */
           three.updateMatchDay(d.cam, view, dt);
-          three.render();
+          three.render(dt);
         }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
