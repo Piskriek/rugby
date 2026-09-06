@@ -28,6 +28,7 @@ import {
 import {
   anticipates, passIntersection, runOnVelocity, RUN_ON_SPEED_FRACTION,
 } from '../behaviour/backline-echelon';
+import { tabsTakeover, tickTabsTakeover } from './tackle-ai';
 import {
   forwardAttackPassDispatchFailures, forwardAttackPlayerWriteFailures,
   forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
@@ -38,6 +39,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   if (!d.op) { d.startOpen(d.possession, 0, -10); return; }
   const s = d.op;
   s.t += dt;
+  tickTabsTakeover(dt);
   const car = d.L(s.attacking, s.carrierNum);
   const human = d.isHuman(s.attacking);
 
@@ -513,7 +515,14 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   const reachRadius = t1 && (t1.diveT ?? 0) > 0 ? 1.1 * DIVE_REACH_BONUS : 1.1;
   if (tackler1 && tackler1.d < reachRadius && s.protect <= 0
     && (d.L(dTeam, tackler1.num).recoverT ?? 0) <= 0
-    && (car.recoverT ?? 0) <= 0) {
+    && (car.recoverT ?? 0) <= 0
+    /* CRITICAL FIX 2 — the TABS flailing dive (engine/tackle-ai.ts) owns the
+     * tackle at the physics layer: it triggers at 1.5 m Hips-to-Hips, and
+     * this dive-reach grab reaches 1.1 m × DIVE_REACH_BONUS = 1.65 m, so the
+     * law would intercept the physics dive before it happens. While the
+     * ball is live and the dive has taken over this carrier, the law stands
+     * down and the Rapier contact resolves the impact. */
+    && !tabsTakeover(s.ball, { team: s.attacking, num: car.num })) {
     const carrierP = car;
     const tackler = d.L(dTeam, tackler1.num);
     const grip = tackler.attrs.PWR;
