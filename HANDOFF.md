@@ -2314,6 +2314,20 @@ turnover, on top of the jackal numbers law and the hold time. Hands pressure ent
 difficulty 0/3/6 · `ragdollcheck`, `renderverify`, `turfverify`, `glslcheck`
 (10 shaders, 0 failing), `spec07-contracts`, `matchdayheadless` all green.
 
+**One disclosed regression, and it is a queue item.** Merging the pushed session
+history in (`68de62b`, whose open-play calibration this tree keeps) moves
+`audit-cli 120 3 1` from FAIL 2 to **FAIL 5**, all of it `LAW-66` — a 7 m hole in
+the defensive line where the pre-merge tree measured 5.9 m. Both parents read FAIL 2
+separately, so it is an interaction, not either side's bug. Bisected by measurement,
+not by opinion: the handling-error rate is innocent (5 either way), and the
+first-receiver turning gate costs two of the three (reverting it reads FAIL 3 with
+the same 7.2 m worst hole). The honest cause is that a defence folding back out of a
+ruck is scored against the open-play spacing rule while its men are still in
+clearout lanes, which the new choreography makes both more frequent and wider. The
+fix owed is a fold-back budget after a ruck — a rule in the defensive AI, not a
+slower attack, and certainly not a weakened LAW-66. It is written down at the call
+site in `engine/open.ts` as well as here.
+
 **Still owed to a human eye:** the picture itself. This session had no browser, so
 "the game looks right" is unbilled work — framing is 19 px at 640×360 (1.6× camera
 gain, `sceneaudit`-guarded) and needs someone to say whether the grapple reads at
