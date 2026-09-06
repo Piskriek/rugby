@@ -150,11 +150,85 @@ export interface TabsPlayer {
   bodies: RAPIER.RigidBody[];
   /** Every collider of the ragdoll. */
   colliders: RAPIER.Collider[];
+  /** This player's membership bit (see `allocPlayerBit`). Needed to cull the
+   *  carried ball against this ragdoll and to tell friend from foe when a
+   *  tackle should rip the ball free. */
+  bit: number;
 }
 
 function massToDensity(mass: number, hx: number, hy: number, hz: number): number {
   const volume = 8 * hx * hy * hz;
   return volume > 1e-9 ? mass / volume : 1;
+}
+
+/* ---- TARCS ball-carrier constraint ------------------------------------ */
+/* A carried ball is not a loose ball. While a carrier holds it (the engine
+ * controller's BALL_SECURED — see src/game/engine/ballcraft.ts), the physical
+ * ball is welded to the carrier's Chest with a FixedImpulseJoint so it rides
+ * the trunk instead of being knocked out of his hands by his own sprint. It
+ * stays welded until an OPPONENT tackle lands a blow big enough that the
+ * contact impulse (force * dt) clears the carrier's `breakImpulse`; then the
+ * joint breaks and the ball is spilled — the physics twin of dropping it
+ * (DROP_BALL in ballcraft). The two state names below are shared verbatim with
+ * ballcraft's CraftState so a caller driving both sides of the sim has one
+ * vocabulary, without the headless physics core importing the engine. */
+
+/** Possession state of a physically welded ball. Mirrors ballcraft's CraftState
+ *  so the harness and the engine controller agree on what "held" means. */
+export type BallCarrierState = 'BALL_SECURED' | 'DROP_BALL';
+
+export interface AttachBallOptions {
+  /** Break the weld the first time an opponent contact delivers an impulse
+   *  `force * dt` at or above this many N·s. A rugby hit can shove ~600 N over
+   *  a ~1/60 s step (≈10 N·s); a gentle shove is an order of magnitude less. */
+  breakImpulse: number;
+  /** Decide whether a collider other than the carrier's own body is an
+   *  opponent tackle that may break the weld. Defaults to "any registered
+   *  player whose membership bit differs from the carrier's" — i.e. the pitch,
+   *  the carrier himself and (when provided by the caller) team-mates never
+   *  count, only opposing tacklers do. */
+  isOpponent?: (other: RAPIER.Collider, carrier: TabsPlayer) => boolean;
+  /** Local offset of the carried ball centre from the Chest centre, in chest
+   *  space. The default rides the ball at the chest centre, which is the frame
+   *  origin the catch hands the ball over at. */
+  carryOffset?: { x: number; y: number; z: number };
+  /** Fired once, the frame the weld breaks. `state` is always 'DROP_BALL'. */
+  onBreak?: (info: { state: 'DROP_BALL'; impulse: number; by: RAPIER.Collider | null }) => void;
+}
+
+/** The live handle to a welded ball. `state` is 'BALL_SECURED' while the joint
+ *  exists and 'DROP_BALL' once a tackle (or `release`) has broken it. */
+export interface BallCarrier {
+  readonly carrier: TabsPlayer;
+  readonly ball: RAPIER.RigidBody;
+  readonly breakImpulse: number;
+  readonly joint: RAPIER.ImpulseJoint | null;
+  readonly state: BallCarrierState;
+  /** true while the ball is still welded to the chest. */
+  readonly held: boolean;
+  /** Manually break the weld and spill the ball (also used by the physics
+   *  break path). Returns true if the ball was still held. */
+  release(reason?: string): boolean;
+}
+
+/** Default break impulse (N·s): a committed low tackle on a 32 kg chest at
+ *  6 m/s comfortably exceeds it; a push from a second later rarely does. */
+export const DEFAULT_BREAK_IMPULSE_Ns = 9;
+
+/** Internal per-carrier bookkeeping the break detector needs. */
+interface ActiveCarrier {
+  carrier: TabsPlayer;
+  carrierBit: number;
+  ball: RAPIER.RigidBody;
+  ballCollider: RAPIER.Collider;
+  ballHandle: number;
+  savedGroups: number;
+  breakImpulse: number;
+  isOpponent: (other: RAPIER.Collider, carrier: TabsPlayer) => boolean;
+  onBreak?: AttachBallOptions['onBreak'];
+  constraint: BallCarrier;
+  joint: RAPIER.ImpulseJoint;
+  broken: boolean;
 }
 
 /**
@@ -175,6 +249,13 @@ export class RapierWorld {
    *  include its bit, and vice-versa). */
   private readonly playerColliders: { collider: RAPIER.Collider; bit: number }[] = [];
   private nextPlayerBit = 0;
+
+  /** Active ball-carrier welds, keyed by the carried ball's collider handle.
+   *  A single Rapier `EventQueue` drains every contact-force event the welded
+   *  balls register, so the break detector runs once per step and not once per
+   *  carrier. */
+  private readonly carriers = new Map<number, ActiveCarrier>();
+  private forceEvents: RAPIER.EventQueue | null = null;
 
   private constructor(world: RAPIER.World) {
     this.world = world;
@@ -206,7 +287,187 @@ export class RapierWorld {
   /** Increment the simulation by one fixed step. */
   step(dt: number): void {
     this.world.timestep = dt;
-    this.world.step();
+    if (this.carriers.size > 0) {
+      /* At least one welded ball is listening for break contacts. Its force
+       * events only arrive through an EventQueue handed to step(), so route
+       * through the shared queue (autoDrain clears it at the top of each step)
+       * and run the break detector over what this step produced. */
+      const queue = this.forceEvents ?? (this.forceEvents = new RAPIER.EventQueue(true));
+      this.world.step(queue);
+      this.drainBreakEvents(dt);
+    } else {
+      this.world.step();
+    }
+  }
+
+  /**
+   * Weld a ball to a carrier's Chest and arm the tackle break-detector.
+   *
+   * This is the physical half of the engine's BALL_SECURED catch: a caller
+   * places its carrier in BALL_SECURED possession, then hands the ball to this
+   * method so the two stop being independent solvers. Three guarantees:
+   *
+   *  1. No snap. Before the joint exists the ball's linear AND angular velocity
+   *     are copied from the Chest, and the ball is re-seated at the chest centre
+   *     so a FixedImpulseJoint starts from an already-matching state.
+   *  2. No self-jostle. The carrier's membership bit is masked out of the
+   *     ball's filter for as long as it is welded, so the ball never collides
+   *     with its own carrier (the chest, the arms holding it, the lot) yet still
+   *     collides with every opponent and the pitch.
+   *  3. One break threshold. Rapier contact-force events on the ball report the
+   *     tackle's summed contact force; the first frame an opponent blow delivers
+   *     `force * dt >= breakImpulse` the weld breaks and the ball is spilled.
+   *
+   * @param carrier The ragdoll whose Chest owns the ball.
+   * @param ball    The physical ball to carry. Must have one collider.
+   * @param opts    breakImpulse (required), optional opponent filter, offset,
+   *                and onBreak callback.
+   * @returns A `BallCarrier` handle. It starts `BALL_SECURED` and flips to
+   *          `DROP_BALL` the instant the joint is released.
+   */
+  attachBallToCarrier(carrier: TabsPlayer, ball: RAPIER.RigidBody, opts: AttachBallOptions): BallCarrier {
+    const ballCollider = ball.collider(0);
+    if (!ballCollider) throw new Error('attachBallToCarrier: ball has no collider to listen on');
+    if (this.carriers.has(ballCollider.handle)) {
+      throw new Error('attachBallToCarrier: that ball is already welded to a carrier');
+    }
+
+    const chest = carrier.chest;
+    const chestPos = chest.translation();
+    const offset = opts.carryOffset ?? { x: 0, y: 0, z: 0 };
+    const target = { x: chestPos.x + offset.x, y: chestPos.y + offset.y, z: chestPos.z + offset.z };
+
+    /* 1. Match velocity AND angular velocity so the first solver pass does not
+     * see a ball trying to fly one way out of a chest going another. */
+    const lin = chest.linvel();
+    const ang = chest.angvel();
+    ball.setLinvel({ x: lin.x, y: lin.y, z: lin.z }, true);
+    ball.setAngvel({ x: ang.x, y: ang.y, z: ang.z }, true);
+    ball.setTranslation({ x: target.x, y: target.y, z: target.z }, true);
+
+    /* 2. Cull the ball against this ONE carrier for as long as it is welded.
+     * Keep membership; strip only the carrier's bit out of the filter. */
+    const saved = ballCollider.collisionGroups();
+    const membership = (saved >>> 16) & 0xffff;
+    const filter = saved & 0xffff;
+    ballCollider.setCollisionGroups(groups(membership, filter & ~carrier.bit));
+
+    /* 3. The weld itself: a FixedImpulseJoint kills every relative degree of
+     * freedom between the ball and the chest. The joint's first anchor is the
+     * carry offset in chest-local space, so a ball carried in front of the
+     * chest stays exactly there (offset (0,0,0) rides the chest centre). Both
+     * frames are identity — correct at weld time because the ball was just
+     * re-seated from the (un-rotated) spawn pose; the fixed joint then keeps
+     * the offset rigid in the chest's own frame for the life of the weld. */
+    const joint = this.world.createImpulseJoint(
+      RAPIER.JointData.fixed(
+        { x: offset.x, y: offset.y, z: offset.z }, RAPIER.RotationOps.identity(),
+        { x: 0, y: 0, z: 0 }, RAPIER.RotationOps.identity(),
+      ),
+      chest, ball, true,
+    );
+
+    /* Contact-force events are opt-in per collider; the ball's collider turns
+     * them on with a zero threshold so even the first touch reports. */
+    ballCollider.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS);
+    ballCollider.setContactForceEventThreshold(0);
+
+    const active: ActiveCarrier = {
+      carrier,
+      carrierBit: carrier.bit,
+      ball,
+      ballCollider,
+      ballHandle: ballCollider.handle,
+      savedGroups: saved,
+      breakImpulse: opts.breakImpulse,
+      isOpponent: opts.isOpponent ?? ((other: RAPIER.Collider) => this.defaultOpponent(other, carrier.bit)),
+      onBreak: opts.onBreak,
+      joint,
+      broken: false,
+      constraint: null as unknown as BallCarrier,
+    };
+    active.constraint = this.makeCarrierHandle(active);
+    this.carriers.set(ballCollider.handle, active);
+    return active.constraint;
+  }
+
+  /** Free the WASM memory backing this world. */
+  dispose(): void {
+    /* Release every live weld so the ball collider groups are restored before
+     * the WASM backing the world is freed. */
+    for (const active of [...this.carriers.values()]) this.releaseCarrier(active);
+    if (this.forceEvents) { this.forceEvents.free(); this.forceEvents = null; }
+    this.carriers.clear();
+    this.world.free();
+  }
+
+  /* ------------------ ball-carrier constraint internals ------------------ */
+
+  /** Build the public handle for a welded carrier. `state`/`held`/`joint` read
+   *  live off the backing record so a break is visible the same frame it
+   *  happens without the caller polling the world. */
+  private makeCarrierHandle(active: ActiveCarrier): BallCarrier {
+    const self = this;
+    const handle: BallCarrier = {
+      carrier: active.carrier,
+      ball: active.ball,
+      breakImpulse: active.breakImpulse,
+      get joint() { return active.broken ? null : active.joint; },
+      get state(): BallCarrierState { return active.broken ? 'DROP_BALL' : 'BALL_SECURED'; },
+      get held() { return !active.broken; },
+      release(reason) { return self.releaseCarrier(active, reason); },
+    };
+    return handle;
+  }
+
+  /** Default opponent test. A collider is an opponent tackle if it is a lone
+   *  player limb — single membership bit at or above the PLAYER base — that is
+   *  NOT one of this carrier's own limbs. The pitch (PITCH bit), another ball
+   *  (BALL bit) and the carrier himself never count, so only a real opposing
+   *  tackler can rip the ball free. */
+  private defaultOpponent(other: RAPIER.Collider, carrierBit: number): boolean {
+    const m = (other.collisionGroups() >>> 16) & 0xffff;
+    if (m === carrierBit) return false;              // the carrier's own body
+    if (m < BIT_PLAYER_BASE || m === BIT_BALL || m === BIT_PITCH) return false; // pitch / ball / inert
+    return (m & (m - 1)) === 0;                      // a lone, distinct player bit
+  }
+
+  /** Tear a weld down. Removes the joint, restores the ball's collision groups
+   *  so it is a free object again (the spill), flags the record broken and
+   *  unregisters it. Returns true if a live weld was released. */
+  private releaseCarrier(active: ActiveCarrier, by?: { impulse?: number; by?: RAPIER.Collider | null } | string): boolean {
+    if (active.broken) return false;
+    active.broken = true;
+    this.carriers.delete(active.ballHandle);
+    this.world.removeImpulseJoint(active.joint, true);
+    active.ballCollider.setCollisionGroups(active.savedGroups);
+    const impulse = typeof by === 'object' && by ? by.impulse : undefined;
+    const collider = typeof by === 'object' && by ? by.by ?? null : null;
+    active.onBreak?.({ state: 'DROP_BALL', impulse: impulse ?? 0, by: collider });
+    return true;
+  }
+
+  /** Read the step's contact-force events and break any weld an opponent's
+   *  tackle impulse `force * dt` has cleared. */
+  private drainBreakEvents(dt: number): void {
+    const queue = this.forceEvents;
+    if (!queue || this.carriers.size === 0) return;
+    queue.drainContactForceEvents((event) => {
+      if (this.carriers.size === 0) return;
+      const h1 = event.collider1();
+      const h2 = event.collider2();
+      const active = this.carriers.get(h1) ?? this.carriers.get(h2);
+      if (!active || active.broken) return;
+      const otherHandle = active.ballHandle === h1 ? h2 : h1;
+      const other = this.world.getCollider(otherHandle);
+      /* force * dt is the impulse this blow carried. Only an OPPONENT's contact
+       * may break the weld — a team-mate bumping the carrier, or the ball
+       * brushing the pitch, must not spill it. */
+      const impulse = event.totalForceMagnitude() * dt;
+      if (impulse < active.breakImpulse) return;
+      if (other && !active.isOpponent(other, active.carrier)) return;
+      this.releaseCarrier(active, { impulse, by: other });
+    });
   }
 
   /** Add the static flat pitch surface. */
@@ -310,6 +571,7 @@ export class RapierWorld {
       chest,
       bodies: [hips, chest, armL, armR, thighL, thighR, calfL, calfR],
       colliders: [...this.playerColliders.filter((p) => p.bit === bit).map((p) => p.collider)],
+      bit,
     };
   }
 
@@ -332,11 +594,6 @@ export class RapierWorld {
       body,
     );
     return body;
-  }
-
-  /** Free the WASM memory backing this world. */
-  dispose(): void {
-    this.world.free();
   }
 
   /* ------------------------ internals ------------------------ */

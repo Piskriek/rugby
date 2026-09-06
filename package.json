@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:env": "node tools/_verify_env.mjs",
-    "gym:tackle": "tsx harness/gym/tackle-gym.ts"
+    "gym:tackle": "tsx harness/gym/tackle-gym.ts",
+    "constraint:ball": "tsx harness/ball-carrier-constraint.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
