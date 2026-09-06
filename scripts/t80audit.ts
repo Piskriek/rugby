@@ -84,7 +84,7 @@ for (let m = 0; m < matches; m++) {
       else if (kind === 'TURNOVER') turnT += ep.dur;
       else if (kind === 'PENALTY') penT += ep.dur;
       else if (kind === 'STALL') stallT += ep.dur;
-      if (rows.length < 14 || kind === 'MISC') rows.push(`${kind.padEnd(10)} dt=${ep.dur.toFixed(2)} at=${ep.at.toFixed(1)} why=${(ep.why || '-').slice(0, 72)} feed=${(d.feed[0]?.text ?? '-').slice(0, 40)} trips=${d.watchdogTrips}`);
+      if (rows.length < 14 || kind === 'MISC' || kind === 'STALL') rows.push(`${kind.padEnd(10)} dt=${ep.dur.toFixed(2)} at=${ep.at.toFixed(1)} why=${(ep.why || '-').slice(0, 72)} feed=${(d.feed[0]?.text ?? '-').slice(0, 40)} trips=${d.watchdogTrips}`);
       prevRuck = ruck; prevTurn = turn; prevPen = pen;
       inBd = false;
     }
@@ -104,8 +104,16 @@ console.log(`durations p50=${q(0.5)}s p90=${q(0.9)}s p99=${q(0.99)}s max=${q(1)}
 console.log(`contact-frames/ep=${(tot.contact / N).toFixed(2)}`);
 console.log(`stages: ${[...stages.entries()].map(([k, n]) => `${k}=${n}`).join(' ')}`);
 console.log('reasons:');
-for (const [k, n] of [...reasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)) {
-  console.log(`  ${String(n).padStart(3)}  ${k}`);
+const kindTot = new Map<string, number>();
+for (const [k, n] of [...reasons.entries()].sort((a, b) => b[1] - a[1])) {
+  const kk = k.split('|')[0];
+  kindTot.set(kk, (kindTot.get(kk) ?? 0) + n);
+  if (/^(TURNOVER|PENALTY)/.test(k)) console.log(`  ${String(n).padStart(3)}  ${k}`);
 }
+/* The reason map is per-episode: this is the honest breakdown-only ledger
+ * (the outcome line above additionally attributes phase-adjacent stat
+ * deltas — spilled-pass turnovers and follow-on penalties — to the episode
+ * that closed in the same frame). */
+console.log(`kindTotals: ${[...kindTot.entries()].map(([k, n]) => `${k}=${n}`).join(' ')}`);
 console.log('\nrows:');
 for (const r of rows) console.log(' ', r);

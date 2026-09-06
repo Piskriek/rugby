@@ -327,6 +327,8 @@ export interface BreakdownState {
     hand?: number; strip?: number; mx?: number; mz?: number }[];
   /** T-80 — spring-bind fend-offs counted this breakdown. */
   latchedBreaks?: number;
+  /** T-80 — the jackal has used his one rip attempt (density-scaled). */
+  stealAttempted?: boolean;
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck
@@ -1983,7 +1985,6 @@ export class Director {
     this.formationCounts.recoveryEpisodes[team]++;
     this.formationRecoverySamples[team].push(seconds);
   }
-
 
   private samplePendingTargetSlots() {
     const pending = this.pendingTargetSlotSample;
