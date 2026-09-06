@@ -23,6 +23,45 @@
 > those same gates (6 and 262 respectively). Do not tune the maul feature to
 > chase those unrelated stochastic gate values.
 
+> **SPEC_24 MATCH DAY shipped — 2026-09-05.** The presentation half of §6 is
+> closed: `render/conditions.ts` resolves the four condition systems the engine has
+> always modelled (weather, pitch, wind, kick-off) into one look, and the renderer,
+> the sky, the lights, the precipitation, the FX and the audio bed all read that one
+> object. New: `render/ThreeMatchDay.ts` (sky dome, shadowed light rig, GPU rain,
+> wet/frost layer), `render/ThreeParticles.ts` (one 1 600-particle pool, eight
+> behaviours), `render/fxDirector.ts` (FX from OBSERVED director transitions — the
+> engine never calls it), `ui/broadcast.tsx` (score bug, try stripe, TMO card,
+> conditions strip, ratings, replay treatment), a `RENDER PIPELINE` option, and two new
+> harnesses (`scripts/glslcheck.ts`, `scripts/matchdayheadless.ts`).
+> The seeded audit is unchanged to the point: `audit-cli 90 3 1` gives PASS 5343 /
+> WARN 4 / FAIL 1 on this branch and on clean `main`. **Read SPEC_24_MATCHDAY.md
+> before adding a particle or touching the colour pipeline.**
+>
+> Two rules this pass established and the next engineer should keep: the engine
+> owns numbers, `conditions.ts` owns appearances; and FX are derived by diffing the
+> Director, never pushed from inside a phase handler — that is §3.1's
+> two-writers-one-frame bug wearing a particle count.
+>
+> **SPEC_24 MERGE — 2026-09-05, same day.** The AAA edition (`6993915`) landed on this
+> branch while the match-day pass was being written, and both had built a sky, a light
+> rig and a post chain from the same base commit. The merge is by ownership, not by
+> union: their `render/turf.ts` procedural albedo/roughness/normal and their PBR
+> `MeshStandardMaterial` squad won the surfaces, our `render/conditions.ts` +
+> `render/ThreeMatchDay.ts` won the sky, lights, fog, shadow tier and grade, and their
+> `ThreeSky.ts` + `ThreePost.ts` were deleted along with the duplicate `graphics` and
+> `timeOfDay` display switches (the engine's own KICK-OFF option is the time of day).
+> `ui/broadcast.tsx` is theirs with our `ConditionsStrip`/`FormStrip`/`TmoCard`/`CardCard`
+> /`ReplayFrame` appended; their `game/gamepad.ts`, `MatchIntro`, `PlayerSpotlight` and the
+> two `director.ts` score-integrity fixes are all live. One object in `src/render` may say
+> where the sun is. Reasoning per area: `AAA_EDITION.md`; what changed in the SPEC_24 design:
+> its addendum. Post-merge gates: `tsc` clean, `glslcheck` 10/0, `matchdayheadless` all green,
+> `spec07-contracts` ALL GREEN, `audit-cli 90 3 1` byte-identical to both parents (PASS 5343 /
+> WARN 4 / FAIL 1) and `turfverify` ALL PASS at 780 ms. The freeze fix that followed (`8fb84d3`:
+> `render/noise.ts`, 2048×1024 turf, staged `LoadingScreen`, `contextlost` handling) merged into the
+> same commit; our scars are authored in metres for exactly that reason, and the crowd idle
+> optimisation gained a settle pass so a cheer cannot leave six sevenths of the stadium frozen
+> mid-jump.
+
 **For the next engineer.** Read this before touching `director.ts`.
 
 ---
@@ -50,6 +89,19 @@ thesis is in code; the thesis itself is in `src/game/jlr.ts`.
 | `render/scene.ts` | ~450 | Scene composition, depth sort, in-world overlays | Safe to extend, do not restructure |
 | `render/minimap.ts` | ~180 | Transparent tactical radar | Safe to extend |
 | `game/director.ts` | **~2600** | The match engine | **This is the game** |
+
+| `render/conditions.ts` | ~370 | **The one resolver for weather × kick-off × pitch × wind** | Active — the renderer's source of truth |
+| `render/ThreeMatchDay.ts` | ~600 | Sky dome, light rig + shadow frustum, GPU precipitation, wet/frost layer | Active |
+| `render/ThreeParticles.ts` | ~345 | One pooled FX system, eight behaviours | Active |
+| `render/fxDirector.ts` | ~360 | Director → FX, by observed transitions only. Never writes to the engine | Active |
+| `ui/broadcast.tsx` | ~400 | The TV package: their score bug, matchday card, player spotlight, controller badge + our TMO, card, conditions, ratings, replay | Active |
+| `render/turf.ts` | ~325 | Procedural turf: albedo (stripes + every marking baked), half-res roughness and normal, off one lattice. `TURF_SIZE` is the resolution contract | Active |
+| `render/noise.ts` | ~88 | Precomputed 256×256 value-noise lattice. Exists because the `Math.sin` hash cost 12 s of main thread per pitch | Active |
+| `game/gamepad.ts` | ~160 | Two-stick pad, merged into the same verb stream the keyboard writes | Active |
+| `ui/LoadingScreen.tsx` | ~79 | Covers the staged world build so the tab never looks frozen | Active |
+| `scripts/turfverify.ts` | ~83 | NaN / stripe / normal / build-time gates on the generated turf | Test harness |
+| `scripts/glslcheck.ts` | ~160 | Parses every shader + enforces the smoothstep-domain rule | Test harness |
+| `scripts/matchdayheadless.ts` | ~270 | Drives the render layers over a live match, headless | Test harness |
 | `game/intelligence.ts` | ~400 | Off-ball brain: movement, shapes, pass solver, crews | Active |
 | `game/shapes.ts` | ~500 | Shape/defence/playbook/camera-plan data | Active |
 | `game/data.ts` | ~750 | Teams, squads, kits, options, laws, commentary | Active |
@@ -2127,4 +2179,10 @@ The following specification documents have been drafted for the upcoming work qu
 - [SPEC_08_T65_STALL_PRESENTATION.md](./SPEC_08_T65_STALL_PRESENTATION.md)
 - [SPEC_09_RESTART_RITUAL.md](./SPEC_09_RESTART_RITUAL.md)
 - [SPEC_10_AUDIT_FAMILIES.md](./SPEC_10_AUDIT_FAMILIES.md)
+
+**Shipped, needs a human eye on the picture:**
+
+- [SPEC_24_MATCHDAY.md](./SPEC_24_MATCHDAY.md) — the AAA presentation pass. Every
+  number in it is measured; none of it is judged. The first review is a person
+  watching a rainy Tuesday at 3 p.m. and deciding whether the grade is right.
 

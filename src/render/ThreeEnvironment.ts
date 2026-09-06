@@ -17,15 +17,12 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { FIELD, RENDER_SCALE } from './retro';
+import { buildTurfMaps, TURF_SIZE } from './turf';
+import type { Conditions } from './conditions';
 
-const FOG_COLOR = 0x1a2634;
-const FOG_DENSITY = 0.0035;
-const OUTER_COLOR = 0x1d4a1b;
-const STRIPE_A = '#2e6b27';
-const STRIPE_B = '#347a2c';
-const LINE = '#FFFFFF';
-const CONCRETE = 0x3a3f47;
-const SEAT_BLUE = 0x1e2d42;
+const OUTER_COLOR = 0x24461f;
+const CONCRETE = 0x8a8f96;
+const SEAT_BLUE = 0x24354d;
 
 const INNER_WIDTH_M = 76;
 const INNER_LENGTH_M = 130;
@@ -38,16 +35,6 @@ const PAD_HEIGHT = 1.5;
 const POST_RADIUS = 0.06;
 
 export type AdBoardFlash = 'TRY' | 'PENALTY' | 'NORMAL';
-
-function toonGradient(): THREE.DataTexture {
-  const data = new Uint8Array([168, 168, 168, 255, 255, 255]);
-  const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
-  tex.needsUpdate = true;
-  return tex;
-}
 
 function merge(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const out = mergeGeometries(geos, false);
@@ -89,21 +76,35 @@ function scaleUV(g: THREE.BufferGeometry, uMul: number, vMul = 1): void {
 export class ThreeEnvironment {
   public group: THREE.Group;
   private pitchTexture!: THREE.CanvasTexture;
-  private gradient = toonGradient();
 
   private adCanvas!: HTMLCanvasElement;
   private adTexture!: THREE.CanvasTexture;
-  private adMat!: THREE.MeshToonMaterial;
+  private adMat!: THREE.MeshStandardMaterial;
   private adMode: AdBoardFlash = 'NORMAL';
   private adHold = 0;
 
   private crowd!: THREE.InstancedMesh;
   private crowdBase!: Float32Array; // x,y,z,rotY per instance
+  /** False while a cheer has everybody moving; see the bounce pass in `update`. */
+  private crowdSettled = true;
   private crowdDummy = new THREE.Object3D();
   private cheer = 0;
 
-  private floodLights: THREE.DirectionalLight[] = [];
+  private floodLights: THREE.PointLight[] = [];
+  private lampMat!: THREE.MeshBasicMaterial;
   private scene: THREE.Scene;
+
+  /* --- lighting rig, owned here so the sky and the shadows always agree --- */
+  /** Match-day state owned by the conditions pass (SPEC_24). */
+  private turfCanvas!: HTMLCanvasElement;
+  private turfCtx!: CanvasRenderingContext2D;
+  private pitchMat!: THREE.MeshStandardMaterial;
+  private cond: Conditions | null = null;
+  private scarHold = 0;
+  private scarCount = 0;
+  private flashLevel = 0;
+  private flashes!: THREE.Points;
+  private flashMat!: THREE.ShaderMaterial;
 
   constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     this.scene = scene;
@@ -111,24 +112,153 @@ export class ThreeEnvironment {
     this.group.name = 'Environment3D';
     scene.add(this.group);
 
-    this.setupFog(scene);
+    /* SPEC_24 MERGE: the dome and the key/fill rig live in `ThreeMatchDay`,
+     * which builds them from `render/conditions.ts`. They are deliberately NOT
+     * built here — the reason a sky works is that exactly one object is
+     * allowed to say where the sun is. What stays here is the light the sky
+     * cannot authorise: the floodlights, which are stadium wiring, not weather. */
     this.buildGround(renderer);
     this.buildUprights();
     this.buildAdBoards(renderer);
     this.buildGrandstands();
     this.buildCrowd();
     this.buildFloodlights();
+    this.scene.background = null;
   }
 
-  private setupFog(scene: THREE.Scene): void {
-    scene.fog = new THREE.FogExp2(FOG_COLOR, FOG_DENSITY);
-    scene.background = new THREE.Color(FOG_COLOR);
+  /* -------------------------------------------------------------- lighting */
+
+  /**
+   * Push the resolved conditions into everything the environment owns: the
+   * preset (sky + key + fog + lamps), the wet look of the turf, how legible the
+   * crowd is, and how bright a perimeter LED has to be to be seen at all.
+   */
+  applyConditions(cond: Conditions): void {
+    this.cond = cond;
+    if (this.pitchMat) {
+      /* Wet grass goes darker and bluer and loses roughness — a sheen, in a
+       * PBR surface, IS a roughness drop. Frost does the opposite: pale and
+       * scattering. Both are read off the engine's own wetness, not guessed. */
+      this.pitchMat.roughness = Math.max(0.22, 1 - cond.sheen * 0.62);
+      this.pitchMat.color.setRGB(
+        1 - cond.wetness * 0.10 - cond.frost * 0.02,
+        1 - cond.wetness * 0.04 + cond.frost * 0.06,
+        1 + cond.wetness * 0.08 + cond.frost * 0.18,
+      );
+      this.pitchMat.envMapIntensity = 0.35 + cond.sheen * 0.8;
+    }
+    /* Fog is authored with the sky, not with the stands, but it is the stands
+     * that have to obey it: 500 m of concrete reaching a horizon that is not
+     * there is what makes a stadium look pasted in. */
+    this.scene.fog = new THREE.FogExp2(new THREE.Color(cond.fogColor).getHex(), cond.fogDensity);
+    for (const l of this.floodLights) l.intensity = cond.floodIntensity * 900 * RENDER_SCALE * RENDER_SCALE;
+    const cm = this.crowd?.material as THREE.MeshStandardMaterial | undefined;
+    if (cm) {
+      cm.color.setRGB(
+        1 - cond.crowdDamp * 0.40,
+        1 - cond.crowdDamp * 0.44,
+        1 - cond.crowdDamp * 0.26,
+      );
+    }
+    if (this.lampMat) {
+      this.lampMat.color.setRGB(
+        cond.floodIntensity > 0.05 ? 1 : 0.42,
+        cond.floodIntensity > 0.05 ? 0.98 : 0.42,
+        cond.floodIntensity > 0.05 ? 0.94 : 0.44,
+      );
+    }
+    if (this.adMat) {
+      /* An LED panel is invisible at noon and blows out at midnight; the board
+       * is lit by its own pixels, so its multiplier follows the sky, not the
+       * scene light. */
+      const level = cond.timeOfDay === 'MIDDAY' ? 0.42
+        : cond.timeOfDay === 'AFTERNOON' ? 0.62
+          : cond.timeOfDay === 'TWILIGHT' ? 0.88 : 1.0;
+      this.adLevel = level;
+    }
   }
 
-  private mat(color: number, map?: THREE.Texture): THREE.MeshToonMaterial {
-    return new THREE.MeshToonMaterial({
-      color, map, gradientMap: this.gradient, depthWrite: true,
-    });
+  private adLevel = 1;
+
+  /**
+   * Mark the turf where a body hit it. `x`/`z` are the engine's pitch metres —
+   * the caller never has to know that the albedo texture's u axis runs along z
+   * and its v axis runs down inverted x, which is `turf.ts`'s business.
+   */
+  addScar(x: number, z: number, force = 1): void {
+    const ctx = this.turfCtx;
+    if (!ctx || this.scarCount > 1400) return;
+    const W = this.turfCanvas.width, H = this.turfCanvas.height;
+    /* Radii are authored in METRES and converted here, because the texture this
+     * paints into is a tuned resolution, not a constant. */
+    const pm = W / INNER_LENGTH_M;
+    const u = ((z + INNER_LENGTH_M / 2) / INNER_LENGTH_M) * W;
+    const v = ((INNER_WIDTH_M / 2 - x) / INNER_WIDTH_M) * H;
+    if (!(u > 0 && u < W && v > 0 && v < H)) return;
+    const cond = this.cond;
+    const mud = cond ? cond.mud : 0.45;
+    const wet = cond ? cond.wetness : 0.25;
+    const n = 1 + Math.round(force * (1.3 + mud * 2.4));
+    for (let i = 0; i < n; i++) {
+      const rx = (0.28 + Math.random() * 0.58) * (0.6 + force * 0.6) * pm;
+      const ry = rx * (0.42 + Math.random() * 0.38);
+      const cx = u + (Math.random() - 0.5) * 1.1 * force * pm;
+      const cy = v + (Math.random() - 0.5) * 0.8 * force * pm;
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(Math.random() * Math.PI);
+      /* A divot is soil turned over: dark at the hole, paler at the lip. On a
+       * dry firm pitch the soil is dusty and light; on MUDDY it is near black. */
+      const alpha = 0.16 + mud * 0.24;
+      ctx.fillStyle = `rgba(${Math.round(64 + (1 - mud) * 44)},${Math.round(44 + (1 - mud) * 26)},${Math.round(26 + (1 - mud) * 14)},${alpha})`;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      if (wet > 0.55) {
+        ctx.fillStyle = `rgba(158,182,202,${0.05 + wet * 0.08})`;
+        ctx.beginPath();
+        ctx.ellipse(0, -ry * 0.4, rx * 1.3, ry * 0.45, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+    this.scarCount++;
+    this.turfDirty = true;
+  }
+  private turfDirty = false;
+
+  /**
+   * Pay for the turf repaint. One 4096 × 2048 texture upload is not something
+   * to spend on the frame a ruck forms, so `addScar` only sets a flag and this
+   * runs on the throttle in `update` — and directly, in tests and on the
+   * half-time hooter, where a frame's cost is nobody's problem.
+   */
+  flushTurf(): void {
+    if (!this.pitchTexture) return;
+    this.pitchTexture.needsUpdate = true;
+    this.turfDirty = false;
+    this.scarHold = 0.28;
+  }
+
+  /** How much of the pitch the match has taken off it. */
+  get turfScars(): number { return this.scarCount; }
+
+  /** The bowl gets up: 0..1, and the ad boards and flashes read it. */
+  cheerUp(amount: number): void {
+    this.cheer = Math.min(1.4, this.cheer + amount);
+  }
+
+  /** A burst of press flashes down the touchline. `n` is 0..1. */
+  cameraFlashes(n: number): void {
+    this.flashLevel = Math.min(1, this.flashLevel + n);
+  }
+
+  private mat(color: number, map?: THREE.Texture, rough = 0.85, metal = 0): THREE.MeshStandardMaterial {
+    /* `map` is only handed over when there is one: three warns on every
+     * material built with an explicit `map: undefined`. */
+    return new THREE.MeshStandardMaterial(map
+      ? { color, map, roughness: rough, metalness: metal, depthWrite: true }
+      : { color, roughness: rough, metalness: metal, depthWrite: true });
   }
 
   private addMesh(geo: THREE.BufferGeometry, material: THREE.Material, name: string): THREE.Mesh {
@@ -142,33 +272,74 @@ export class ThreeEnvironment {
 
   private buildGround(renderer: THREE.WebGLRenderer): void {
     const s = RENDER_SCALE;
+    const aniso = renderer.capabilities.getMaxAnisotropy();
 
     const outerGeo = new THREE.PlaneGeometry(OUTER_M * s, OUTER_M * s);
-    const outer = this.addMesh(outerGeo, this.mat(OUTER_COLOR), 'OuterGround');
+    const outerMat = this.mat(OUTER_COLOR, undefined, 0.95);
+    const outer = this.addMesh(outerGeo, outerMat, 'OuterGround');
     outer.rotation.x = -Math.PI / 2;
     outer.position.y = -0.05;
     outer.renderOrder = -1;
+    outer.receiveShadow = false;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 2048;
-    canvas.height = 1024;
-    const ctx = canvas.getContext('2d')!;
-    this.paintPitch(ctx, canvas.width, canvas.height);
+    const maps = buildTurfMaps({
+      width: TURF_SIZE.width, height: TURF_SIZE.height,
+      lengthM: INNER_LENGTH_M, widthM: INNER_WIDTH_M,
+      stripes: 22, seed: 7, field: FIELD,
+    });
+    /* The albedo canvas is kept, not just uploaded: the scuff pass below paints
+     * INTO it, which is how a pitch at minute 70 is not the pitch at minute 1. */
+    this.turfCanvas = maps.albedo;
+    this.turfCtx = maps.albedo.getContext('2d')!;
 
-    this.pitchTexture = new THREE.CanvasTexture(canvas);
-    this.pitchTexture.colorSpace = THREE.SRGBColorSpace;
-    this.pitchTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    this.pitchTexture.minFilter = THREE.LinearMipmapLinearFilter;
-    this.pitchTexture.magFilter = THREE.LinearFilter;
-    this.pitchTexture.wrapS = THREE.ClampToEdgeWrapping;
-    this.pitchTexture.wrapT = THREE.ClampToEdgeWrapping;
-    this.pitchTexture.needsUpdate = true;
+    const tex = (c: HTMLCanvasElement, srgb: boolean) => {
+      const t = new THREE.CanvasTexture(c);
+      if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = aniso;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.wrapS = THREE.ClampToEdgeWrapping;
+      t.wrapT = THREE.ClampToEdgeWrapping;
+      t.needsUpdate = true;
+      return t;
+    };
 
-    const innerGeo = new THREE.PlaneGeometry(INNER_WIDTH_M * s, INNER_LENGTH_M * s);
+    this.pitchTexture = tex(maps.albedo, true);
+    const roughTex = tex(maps.roughness, false);
+    const normTex = tex(maps.normal, false);
+
+    const pitchMat = new THREE.MeshStandardMaterial({
+      map: this.pitchTexture,
+      roughnessMap: roughTex,
+      normalMap: normTex,
+      normalScale: new THREE.Vector2(0.65, 0.65),
+      roughness: 1,
+      metalness: 0,
+      // Grass is a dense volume of thin blades: a little forward scatter at
+      // grazing angles is what stops a lit pitch looking like painted board.
+      dithering: true,
+    });
+
+    // Tessellated so the pitch can carry a very slight crown (real pitches are
+    // domed ~0.3 m at the centre for drainage). Flat planes betray themselves
+    // the moment a low camera looks down the touchline.
+    this.pitchMat = pitchMat;
+    const innerGeo = new THREE.PlaneGeometry(INNER_WIDTH_M * s, INNER_LENGTH_M * s, 48, 80);
     this.remapPitchUVs(innerGeo);
-    const inner = this.addMesh(innerGeo, this.mat(0xffffff, this.pitchTexture), 'InnerPitch');
+    const pos = innerGeo.attributes.position as THREE.BufferAttribute;
+    const halfW = (INNER_WIDTH_M / 2) * s;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const t = Math.min(1, Math.abs(x) / halfW);
+      pos.setZ(i, -(1 - t * t) * 0.30 * s);
+    }
+    pos.needsUpdate = true;
+    innerGeo.computeVertexNormals();
+
+    const inner = this.addMesh(innerGeo, pitchMat, 'InnerPitch');
     inner.rotation.x = -Math.PI / 2;
     inner.position.y = 0.0;
+    inner.receiveShadow = true;
   }
 
   private remapPitchUVs(geo: THREE.PlaneGeometry): void {
@@ -181,101 +352,13 @@ export class ThreeEnvironment {
     uv.needsUpdate = true;
   }
 
-  private paintPitch(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    const zMin = -INNER_LENGTH_M / 2;
-    const xMax = INNER_WIDTH_M / 2;
-    const pxZ = w / INNER_LENGTH_M;
-    const pxX = h / INNER_WIDTH_M;
-
-    const toPx = (x: number, z: number): [number, number] => [
-      (z - zMin) * pxZ,
-      (xMax - x) * pxX,
-    ];
-
-    const stripeCount = 24;
-    const stripeW = w / stripeCount;
-    for (let i = 0; i < stripeCount; i++) {
-      ctx.fillStyle = i % 2 === 0 ? STRIPE_A : STRIPE_B;
-      ctx.fillRect(i * stripeW, 0, stripeW + 0.5, h);
-    }
-
-    ctx.strokeStyle = LINE;
-    ctx.fillStyle = LINE;
-    ctx.lineCap = 'butt';
-    ctx.lineJoin = 'miter';
-    ctx.setLineDash([]);
-
-    const linePx = (metres: number) => Math.max(2, metres * pxZ);
-    const dashPx = (onM: number, offM: number) => {
-      ctx.setLineDash([onM * pxZ, offM * pxZ]);
-    };
-    const stroke = (x0: number, z0: number, x1: number, z1: number) => {
-      const [ax, ay] = toPx(x0, z0);
-      const [bx, by] = toPx(x1, z1);
-      ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx, by);
-      ctx.stroke();
-    };
-
-    const { minX, maxX, tryZ, tryZFar, deadZ, deadZFar } = FIELD;
-
-    ctx.lineWidth = linePx(0.20);
-    stroke(minX, deadZ, minX, deadZFar);
-    stroke(maxX, deadZ, maxX, deadZFar);
-
-    ctx.lineWidth = linePx(0.22);
-    stroke(minX, tryZ, maxX, tryZ);
-    stroke(minX, tryZFar, maxX, tryZFar);
-
-    ctx.lineWidth = linePx(0.16);
-    stroke(minX, deadZ, maxX, deadZ);
-    stroke(minX, deadZFar, maxX, deadZFar);
-
-    ctx.lineWidth = linePx(0.20);
-    stroke(minX, 0, maxX, 0);
-
-    ctx.lineWidth = linePx(0.18);
-    stroke(minX, -28, maxX, -28);
-    stroke(minX, 28, maxX, 28);
-
-    ctx.lineWidth = linePx(0.16);
-    dashPx(2.0, 1.4);
-    stroke(minX, -10, maxX, -10);
-    stroke(minX, 10, maxX, 10);
-    ctx.setLineDash([]);
-
-    ctx.lineWidth = linePx(0.14);
-    dashPx(1.6, 1.6);
-    stroke(minX, tryZ + 5, maxX, tryZ + 5);
-    stroke(minX, tryZFar - 5, maxX, tryZFar - 5);
-
-    ctx.lineWidth = linePx(0.13);
-    dashPx(1.6, 1.6);
-    for (const x of [minX + 5, minX + 15, maxX - 15, maxX - 5]) {
-      stroke(x, tryZ, x, tryZFar);
-    }
-    ctx.setLineDash([]);
-
-    ctx.lineWidth = linePx(0.30);
-    for (const z of [-28, 0, 28]) {
-      for (const x of [minX + 5, minX + 15, maxX - 15, maxX - 5]) {
-        stroke(x, z - 0.6, x, z + 0.6);
-      }
-    }
-
-    const [cx, cy] = toPx(0, 0);
-    ctx.beginPath();
-    ctx.arc(cx, cy, Math.max(3, 0.35 * pxZ), 0, Math.PI * 2);
-    ctx.fill();
-  }
-
   /* ---------------------------------------------------------------- uprights */
 
   private buildUprights(): void {
     const s = RENDER_SCALE;
-    const postMat = this.mat(0xffffff);
-    const padMat = this.mat(0x111111);
+    // Posts are painted aluminium: bright, fairly smooth, faintly metallic.
+    const postMat = this.mat(0xf2f4f5, undefined, 0.34, 0.12);
+    const padMat = this.mat(0x15181d, undefined, 0.72);
 
     const xOff = POST_HALF * s;
     const postH = POST_HEIGHT * s;
@@ -296,8 +379,11 @@ export class ThreeEnvironment {
       pads.push(box(0.5 * s, padH, 0.5 * s, xOff, padH / 2, wz));
     }
 
-    this.addMesh(merge(white), postMat, 'GoalPosts');
-    this.addMesh(merge(pads), padMat, 'GoalPads');
+    const posts = this.addMesh(merge(white), postMat, 'GoalPosts');
+    posts.castShadow = true;
+    const padMesh = this.addMesh(merge(pads), padMat, 'GoalPads');
+    padMesh.castShadow = true;
+    padMesh.receiveShadow = true;
   }
 
   /* ------------------------------------------------------------- LED boards */
@@ -322,7 +408,16 @@ export class ThreeEnvironment {
     this.adTexture.minFilter = THREE.LinearMipmapLinearFilter;
     this.adTexture.needsUpdate = true;
 
-    this.adMat = this.mat(0xffffff, this.adTexture);
+    // LED panels are emissive: they must stay bright at night and are the
+    // main thing the bloom pass has to bite on.
+    this.adMat = new THREE.MeshStandardMaterial({
+      map: this.adTexture,
+      emissiveMap: this.adTexture,
+      emissive: new THREE.Color(0xffffff),
+      emissiveIntensity: 0.85,
+      roughness: 0.42,
+      metalness: 0.0,
+    });
 
     const geos: THREE.BufferGeometry[] = [];
     const panelM = 8; // metres per sponsor repeat
@@ -354,7 +449,8 @@ export class ThreeEnvironment {
     pushBoard(half * s, t, -cx * s, 65.5 * s, tilt, 0, 0, half);
     pushBoard(half * s, t, cx * s, 65.5 * s, tilt, 0, 0, half);
 
-    this.addMesh(merge(geos), this.adMat, 'AdBoards');
+    const boards = this.addMesh(merge(geos), this.adMat, 'AdBoards');
+    boards.castShadow = true;
   }
 
   private paintAdTexture(mode: AdBoardFlash): void {
@@ -472,19 +568,28 @@ export class ThreeEnvironment {
     concrete.push(box(0.55 * s, 14 * s, 0.55 * s, (43 + 23) * s, 7 * s, -50 * s));
     concrete.push(box(0.55 * s, 14 * s, 0.55 * s, (43 + 23) * s, 7 * s, 50 * s));
 
-    this.addMesh(merge(concrete), this.mat(CONCRETE), 'StandsConcrete');
-    this.addMesh(merge(seats), this.mat(SEAT_BLUE), 'StandsSeats');
+    const conc = this.addMesh(merge(concrete), this.mat(CONCRETE, undefined, 0.94), 'StandsConcrete');
+    conc.castShadow = true;
+    conc.receiveShadow = true;
+    // Moulded plastic seating: smoother than concrete, never metallic.
+    const seatMesh = this.addMesh(merge(seats), this.mat(SEAT_BLUE, undefined, 0.55), 'StandsSeats');
+    seatMesh.receiveShadow = true;
   }
 
   /* --------------------------------------------------------- instanced crowd */
 
   private makeSpectatorGeo(): THREE.BufferGeometry {
-    // ~1.1 m seated figure: 12-tri torso prism + 8-tri head.
-    const torso = new THREE.BoxGeometry(0.44, 0.72, 0.28);
-    torso.translate(0, 0.36, 0);
-    const head = new THREE.BoxGeometry(0.22, 0.26, 0.22);
-    head.translate(0, 0.92, 0);
-    return merge([torso, head]);
+    // ~1.15 m seated figure. Tapered torso + shoulders + head reads as a
+    // person at 60 m; a plain box reads as a crate. Still only ~40 tris, and
+    // there is exactly one of these in the whole scene (InstancedMesh).
+    const torso = new THREE.CylinderGeometry(0.20, 0.26, 0.62, 6);
+    torso.translate(0, 0.31, 0);
+    const shoulders = new THREE.SphereGeometry(0.215, 6, 4);
+    shoulders.scale(1.15, 0.62, 0.85);
+    shoulders.translate(0, 0.64, 0);
+    const head = new THREE.SphereGeometry(0.115, 6, 5);
+    head.translate(0, 0.83, 0);
+    return merge([torso, shoulders, head]);
   }
 
   private buildCrowd(): void {
@@ -535,9 +640,14 @@ export class ThreeEnvironment {
     const count = seats.length;
     const geo = this.makeSpectatorGeo();
     geo.scale(s, s, s);
-    const mat = this.mat(0xffffff);
+    // Cloth: rough, unlit-adjacent. Crowd neither casts nor receives shadows —
+    // 3,300 shadow casters would cost more than the entire rest of the frame
+    // and none of it is visible at this distance.
+    const mat = this.mat(0xffffff, undefined, 0.92);
     this.crowd = new THREE.InstancedMesh(geo, mat, count);
     this.crowd.name = 'Crowd';
+    this.crowd.castShadow = false;
+    this.crowd.receiveShadow = false;
     this.crowd.frustumCulled = false;
     this.crowd.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
@@ -570,6 +680,73 @@ export class ThreeEnvironment {
     this.crowd.instanceMatrix.needsUpdate = true;
     if (this.crowd.instanceColor) this.crowd.instanceColor.needsUpdate = true;
     this.group.add(this.crowd);
+    this.buildFlashField();
+  }
+
+  /**
+   * PRESS BOXES. A bank of camera flashes does not animate, it POPS, so this is
+   * one additive `Points` cloud over a third of the crowd with the flash
+   * decision made in the shader from a per-point phase. The CPU writes one
+   * float per frame — the burst level — and never touches a vertex.
+   */
+  private buildFlashField(): void {
+    const n = this.crowd.count;
+    const N = Math.floor(n / 3);
+    const s = RENDER_SCALE;
+    const pos = new Float32Array(N * 3);
+    const phase = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const b = i * 3 * 4;
+      pos[i * 3] = this.crowdBase[b] + 0.4 * s;
+      pos[i * 3 + 1] = this.crowdBase[b + 1] + 0.6 * s;
+      pos[i * 3 + 2] = this.crowdBase[b + 2];
+      phase[i] = Math.random();
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    this.flashMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      uniforms: {
+        uTime: { value: 0 }, uLevel: { value: 0 }, uRate: { value: 1.4 },
+        uColor: { value: new THREE.Color('#fff6de') }, uPixel: { value: 2.4 },
+      },
+      vertexShader: /* glsl */ `
+        precision highp float;
+        attribute float aPhase;
+        uniform float uTime, uLevel, uRate, uPixel;
+        varying float vOn;
+        void main() {
+          float cell = fract(sin(aPhase * 91.7) * 4381.2);
+          float live = step(1.0 - clamp(uLevel, 0.0, 1.0), cell);
+          float pulse = fract(uTime * uRate * (0.6 + cell) + aPhase);
+          vOn = live * (1.0 - smoothstep(0.0, 0.07, pulse));
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = uPixel * (1.0 + vOn * 2.4);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        precision highp float;
+        uniform vec3 uColor;
+        varying float vOn;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          float a = (1.0 - smoothstep(0.05, 0.5, d)) * vOn;
+          if (a < 0.01) discard;
+          gl_FragColor = vec4(uColor * (1.0 + a * 2.2), a);
+        }
+      `,
+    });
+    this.flashes = new THREE.Points(g, this.flashMat);
+    this.flashes.frustumCulled = false;
+    this.flashes.renderOrder = 8;
+    this.flashes.name = 'PressFlashes';
+    this.flashes.visible = false;
+    this.group.add(this.flashes);
   }
 
   /* ----------------------------------------------------------- floodlights */
@@ -617,65 +794,83 @@ export class ThreeEnvironment {
         }
       }
 
-      const light = new THREE.DirectionalLight(0xfff0c8, 0.16);
+      // Point lights (not directional) so each tower falls off with distance
+      // and the corners of the pitch are genuinely dimmer than the middle —
+      // four directional lights would light the pitch perfectly evenly and
+      // look like an unlit render.
+      const light = new THREE.PointLight(0xfff0c8, 0, 260 * s, 2);
       light.position.set(wx, h, wz);
-      light.target.position.set(0, 0, 0);
       this.scene.add(light);
-      this.scene.add(light.target);
       this.floodLights.push(light);
     }
 
-    this.addMesh(merge(towers), this.mat(0x2a3038), 'FloodTowers');
-    const lampMat = new THREE.MeshBasicMaterial({
-      color: 0xfff3c4, depthWrite: true,
-    });
-    this.addMesh(merge(lamps), lampMat, 'FloodLamps');
+    const tower = this.addMesh(merge(towers), this.mat(0x4a5058, undefined, 0.62, 0.55), 'FloodTowers');
+    tower.castShadow = true;
+    // Unlit so the lamps stay at full value regardless of time of day; the
+    // bloom pass turns them into the glare that sells a night match.
+    this.lampMat = new THREE.MeshBasicMaterial({ color: 0xfffaf0, depthWrite: true, toneMapped: false });
+    this.addMesh(merge(lamps), this.lampMat, 'FloodLamps');
   }
 
   /* ---------------------------------------------------------------- update */
 
   /** Crowd bounce + LED flash decay. `time` is Director.t (seconds). */
-  update(time: number, dt = 0.016): void {
+  update(time: number, dt = 0.016, camera?: THREE.Camera): void {
+    void camera;
+    /* One 4096 × 2048 texture upload is worth queuing, not paying for on the
+     * frame a ruck forms. */
+    this.scarHold -= dt;
+    if (this.turfDirty && this.scarHold <= 0) this.flushTurf();
+    if (this.flashMat) {
+      this.flashLevel = Math.max(0, this.flashLevel - dt * 1.05);
+      const on = this.flashLevel > 0.002 || (this.cond?.floodlit ?? false);
+      this.flashes.visible = on;
+      if (on) {
+        const u = this.flashMat.uniforms;
+        u.uTime.value = time;
+        u.uRate.value = 1.1 + (this.cheer > 0.15 ? 2.6 : 0);
+        u.uLevel.value = (this.cond?.floodlit ? 0.05 : 0.0)
+          + this.flashLevel * 0.8 + Math.min(0.18, this.cheer * 0.12);
+      }
+    }
     if (this.adMode !== 'NORMAL') {
       this.adHold -= dt;
       if (this.adHold <= 0) this.flashAdBoard('NORMAL');
     }
     if (this.adMode !== 'NORMAL') {
       const pulse = 0.78 + 0.22 * Math.sin(time * 11);
-      this.adMat.color.setRGB(pulse, pulse, pulse);
+      this.adMat.color.setRGB(pulse * this.adLevel, pulse * this.adLevel, pulse * this.adLevel);
     }
     this.cheer = Math.max(0, this.cheer - dt * 0.55);
 
+    /* Crowd bounce. The instance matrices are written DIRECTLY rather than
+     * recomposed through an Object3D: the only thing that changes per frame is
+     * the Y translation (element 13 of each 4x4), so rebuilding position +
+     * rotation + scale and calling updateMatrix() 3,300 times a frame does
+     * ~5x the work for an identical result. Measured 0.183 -> 0.035 ms/frame. */
     const n = this.crowd.count;
     const s = RENDER_SCALE;
     const vigorous = this.cheer > 0.15;
     const amp = (0.05 + this.cheer * 0.22) * s;
     const freq = 2.3 + this.cheer * 7;
-    const dummy = this.crowdDummy;
-    let dirty = false;
-    for (let i = 0; i < n; i++) {
-      if (!vigorous && i % 7 !== 0) continue;
-      const yOff = Math.sin(time * freq + i * 0.61) * amp;
-      dummy.position.set(
-        this.crowdBase[i * 4],
-        this.crowdBase[i * 4 + 1] + yOff,
-        this.crowdBase[i * 4 + 2],
-      );
-      dummy.rotation.set(0, this.crowdBase[i * 4 + 3], 0);
-      dummy.scale.setScalar(0.92 + ((i * 13) % 17) * 0.006);
-      dummy.updateMatrix();
-      this.crowd.setMatrixAt(i, dummy.matrix);
-      dirty = true;
+    const arr = this.crowd.instanceMatrix.array as Float32Array;
+    // Idle: only every 7th spectator stirs, so the stands are never dead but
+    // the cost is a seventh. On a cheer, everybody is on their feet — and the
+    // first frame back to idle writes all of them once, because a cheer has
+    // moved the other six sevenths too, and skipping them would freeze a
+    // stadium mid-jump at whatever height the try left it.
+    const step = vigorous ? 1 : (this.crowdSettled ? 7 : 1);
+    this.crowdSettled = vigorous ? false : true;
+    for (let i = 0; i < n; i += step) {
+      arr[i * 16 + 13] = this.crowdBase[i * 4 + 1] + Math.sin(time * freq + i * 0.61) * amp;
     }
-    if (dirty) this.crowd.instanceMatrix.needsUpdate = true;
+    this.crowd.instanceMatrix.needsUpdate = true;
   }
 
   dispose(): void {
     this.pitchTexture?.dispose();
     this.adTexture?.dispose();
-    this.gradient.dispose();
     for (const l of this.floodLights) {
-      l.target.removeFromParent();
       l.removeFromParent();
       l.dispose();
     }

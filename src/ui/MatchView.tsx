@@ -6,12 +6,22 @@ import { drawMinimap } from '../render/minimap';
 import { drawCRT, project } from '../render/retro';
 import { ENV_3D, ThreeCanvas } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
+import { conditionsFor, qualityFor, type Conditions } from '../render/conditions';
+import { FxDirector } from '../render/fxDirector';
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
 import { SpaceRemap } from './SpaceRemap';
 import { TutorialOverlay, CameraPanel } from './TutorialOverlay';
 import { stepAt } from '../game/tutorial';
+import { pollGamepad, emptyPrev, PrevGp } from '../game/gamepad';
+import { ScoreBug, MatchIntro, PlayerSpotlight, GamepadBadge, ConditionsStrip, FormStrip, TmoCard, CardCard, ReplayFrame } from './broadcast';
+import { LoadingScreen } from './LoadingScreen';
+
+/** Hand control back to the browser so it can paint and answer input. */
+const yieldToBrowser = () => new Promise<void>((r) => {
+  requestAnimationFrame(() => setTimeout(r, 0));
+});
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -53,6 +63,32 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [slow, setSlow] = useState(1);
   /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
   const [showAnimDebug, setShowAnimDebug] = useState(false);
+  /* AAA broadcast — match-day intro card and gamepad connection badge. */
+  const [intro, setIntro] = useState(true);
+  /* null once the world is built; drives the loading overlay until then. */
+  const [load, setLoad] = useState<{ stage: string; progress: number } | null>(
+    { stage: 'Preparing the ground', progress: 0 });
+  /* Mirror of `load` for the rAF loop, which closes over stale state. */
+  const loadingRef = useRef(true);
+  const introRef = useRef(true);
+  const gpPrev = useRef<PrevGp>(emptyPrev());
+  const [gp, setGp] = useState<{ connected: boolean; name: string }>({ connected: false, name: '' });
+  /* AAA — spoken commentary reads only new feed lines, never repeats them. */
+  const spokenRef = useRef('');
+  /* SPEC_24 — the last conditions object handed to the renderer. `conditionsFor`
+   * caches, so identity is the change test: comparing the object is free and
+   * cannot drift out of step with a hand-written key. */
+  const condRef = useRef<Conditions | null>(null);
+  const fxRef = useRef<FxDirector | null>(null);
+  /* SPEC_24 — hit-stop, in seconds of real time still to be slowed down. */
+  const hitStopRef = useRef(0);
+  /* Camera shake contributed by the FX director, decayed here in real time. */
+  const fxShakeRef = useRef(0);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => { setIntro(false); introRef.current = false; }, 7500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   if (!dirRef.current) {
     dirRef.current = new Director(cfg);
@@ -86,16 +122,80 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
    * Under ENV_3D this is the world (pitch, fog, uprights, actors); the 2D
    * canvas is a transparent HUD overlay stacked above it. */
+  /* ---------------------------------------------------------------- boot --
+   * Building the world is expensive: procedural turf maps, the stadium mesh
+   * set, the post-processing targets and a 6.3 MB rigged GLB. Doing all of it
+   * in one synchronous block starves the event loop for seconds — the browser
+   * cannot paint or answer input, and the tab looks frozen.
+   *
+   * So each stage awaits `yieldToBrowser()` before the next. The total work is
+   * unchanged, but it is now split across frames, so the loading screen
+   * animates and the window stays responsive throughout. */
   useEffect(() => {
     const host = threeDivRef.current;
     if (!host) return;
-    const three = new ThreeCanvas(host);
-    const players = new ThreePlayerManager(three);
-    threeRef.current = three;
-    playersRef.current = players;
-    players.load().catch((e) => console.error('player GLB load failed', e));
+    let cancelled = false;
+    let three: ThreeCanvas | null = null;
+
+    (async () => {
+      loadingRef.current = true; setLoad({ stage: 'Preparing the ground', progress: 0.04 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      // Stadium + procedural turf (~0.6 s).
+      three = new ThreeCanvas(host);
+      threeRef.current = three;
+      if (cancelled) return;
+
+      loadingRef.current = true; setLoad({ stage: 'Raising the stands', progress: 0.34 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      /* The look goes on before the squads are named, so the first frame anyone
+       * sees is already the match's own weather. Read from the director rather
+       * than props because the options screen writes straight onto the live
+       * match config. */
+      const d0 = dirRef.current;
+      if (d0) {
+        const cond0 = three.syncConditions(d0.options);
+        condRef.current = cond0;
+        three.particles?.setFog(cond0.fogColor, cond0.fogDensity * 14);
+        d0.audio.setWeather(cond0.precip === 'RAIN' ? cond0.precipDensity : 0, cond0.windSpeed);
+        d0.audio.setSurface(d0.pitch.firm);
+      }
+      /* The FX director is the only presentation object in this tree allowed to
+       * hold both the particle pool and the stadium: it reads the simulation and
+       * writes light and matter into the frame, never back into the engine. */
+      fxRef.current = new FxDirector(three.particles, three.environment);
+
+      loadingRef.current = true; setLoad({ stage: 'Naming the squads', progress: 0.56 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      const players = new ThreePlayerManager(three);
+      playersRef.current = players;
+
+      loadingRef.current = true; setLoad({ stage: 'Bringing out the teams', progress: 0.66 });
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      try {
+        await players.load();
+      } catch (e) {
+        console.error('player GLB load failed', e);
+      }
+      if (cancelled) return;
+
+      setLoad({ stage: 'Kick-off', progress: 1 });
+      await yieldToBrowser();
+      if (cancelled) return;
+      loadingRef.current = false; setLoad(null);
+    })();
+
     return () => {
-      three.dispose();
+      cancelled = true;
+      fxRef.current = null;
+      three?.dispose();
       threeRef.current = null;
       playersRef.current = null;
     };
@@ -142,8 +242,34 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
-      inp.run = inp.sprint;
-      prev.current = new Set(keys.current);
+
+      /* AAA — the gamepad merges into the same verb stream as the keyboard:
+       * held input first, then the rising/falling edges for the kick-meter,
+       * waggles, pause and stats. */
+      const gf = pollGamepad(gpPrev.current);
+      gpPrev.current = gf;
+      /* The matchday card consumes the input that dismisses it: if the player
+       * skips with the pad's START that press must not also pause the match. */
+      const gpSkip = gf.connected && gf.pressed.length > 0;
+      const skip = introRef.current && (pressed.size > 0 || gpSkip);
+      if (skip) {
+        introRef.current = false; setIntro(false);
+        pressed.clear(); released.clear();
+        for (const k of Object.keys(NO_INPUT) as (keyof Input)[]) inp[k] = false;
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      } else {
+        if (gf.connected) {
+          Object.assign(inp, gf.input);
+          for (const k of gf.pressed) pressed.add(k);
+          for (const k of gf.released) released.add(k);
+          setGp((cur) => (cur.connected && cur.name === gf.name ? cur : { connected: true, name: gf.name }));
+        } else {
+          setGp((cur) => (cur.connected ? { connected: false, name: '' } : cur));
+        }
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      }
 
       // The tutorial card resumes on the keys it lists, and only those.
       if (d.tut.active && d.tut.showing) {
@@ -159,8 +285,23 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* SPEC_06 — B toggles the facing/strafe debug overlay. */
       if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
 
-      d.gameSpeed = slow;
-      d.update(dt, inp, pressed, released);
+      /* Big hits squeeze three frames out of the second. `slow` is the player's
+       * own game-speed setting, so the dip multiplies it rather than fighting
+       * it, and it is driven by REAL time: slowing the simulation and then
+       * letting the slowdown feed itself is how a hit-stop becomes a flatline. */
+      const hitStop = hitStopRef.current > 0 ? 0.16 : 1;
+      hitStopRef.current = Math.max(0, hitStopRef.current - dt);
+      d.gameSpeed = slow * hitStop;
+      /* AAA — the world stays in the kickoff frame until the matchday card is
+       * dismissed; the presentation is a curtain, not a running clock behind
+       * the text. */
+      if (!introRef.current && !loadingRef.current) d.update(dt, inp, pressed, released);
+
+      /* While the loading screen is up the world is still being assembled, so
+       * there is nothing worth drawing and the boot stages need the main
+       * thread more than the renderer does. Skipping the draw here is what
+       * keeps the progress bar smooth instead of stuttering. */
+      if (loadingRef.current) { raf = requestAnimationFrame(loop); return; }
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -187,16 +328,44 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         const three = threeRef.current;
         if (three) {
           three.resize();
-          three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
+          /* One camera offset for the whole frame: the 2D pitch and the 3D squad
+           * are shaken by the same numbers, which is the only reason they do not
+           * slide apart when a ruck collapses. */
+          const shake = (d.cam.shake || 0) + fxShakeRef.current;
+          fxShakeRef.current = Math.max(0, fxShakeRef.current - dt * 2.4);
+          three.syncCamera({ ...d.cam, shake }, view, jx, jy);
           playersRef.current?.update(d, view, d.cam, dt);
+          /* ONE conditions object per frame, resolved from the options the engine
+           * already owns, pushed into the sky, the turf, the crowd and the kit.
+           * `syncConditions` is what makes the option screen live mid-match;
+           * the identity test makes polling it free. */
+          const cond = three.syncConditions(d.options);
+          if (cond !== condRef.current) {
+            condRef.current = cond;
+            three.particles?.setFog(cond.fogColor, cond.fogDensity * 14);
+            d.audio.setWeather(cond.precip === 'RAIN' ? cond.precipDensity : 0, cond.windSpeed);
+            d.audio.setSurface(d.pitch.firm);
+          }
+          playersRef.current?.setSoiling(cond.mud, cond.wetness);
+          playersRef.current?.setShadowStrength(cond.shadowStrength * (cond.shadows ? 0.55 : 1));
           const env = three.environment;
           if (env) {
             const recent = d.t - d.bannerAt < 2.2;
             const b = (d.banner || '').toUpperCase();
             if (recent && b.includes('TRY')) env.flashAdBoard('TRY');
             else if (recent && /(PENALTY|YELLOW|CARD|NO GOOD)/.test(b)) env.flashAdBoard('PENALTY');
-            env.update(d.t, dt);
+            env.update(d.t, dt, three.camera);
           }
+          /* IMPACT FX: turf, mud, dust, breath, blood, confetti, pitch scars,
+           * crowd, press flashes — and the two numbers that come back out. */
+          const fxPulse = fxRef.current?.update(d, cond, dt) ?? { impact: 0, shake: 0 };
+          if (fxPulse.impact > 0) {
+            hitStopRef.current = Math.max(hitStopRef.current, 0.05 + fxPulse.impact * 0.07);
+            fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.impact * 9);
+          }
+          if (fxPulse.shake > 0) fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.shake);
+          /* The weather itself: precipitation, wet ground, mist, lamp haze. */
+          three.updateMatchDay(d.cam, view, dt);
           three.render();
         }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
@@ -225,10 +394,30 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     raf = requestAnimationFrame(loop);
     const ui = setInterval(() => setTick((t) => t + 1), 110);
     return () => { cancelAnimationFrame(raf); clearInterval(ui); };
-  }, [slow, showAnimDebug]);
+  }, [slow, showAnimDebug, intro]);
 
   const d = dirRef.current!;
   const A = d.A, B = d.B;
+  /* AAA — spoken commentary overlays the feed every live tick when enabled.
+   * Uses the browser speech engine, so no audio assets are required. */
+  useEffect(() => {
+    if ((d.options.spokenCommentary ?? 0) < 1) return;
+    const line = d.feed[0]?.text ?? '';
+    if (!line || line === spokenRef.current) return;
+    spokenRef.current = line;
+    try {
+      if (!('speechSynthesis' in window)) return;
+      const u = new SpeechSynthesisUtterance(line.replace(/\s+/g, ' '));
+      u.rate = 1.02;
+      u.pitch = 0.82;
+      u.volume = 0.6;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch {
+      /* a browser without voices just stays silent */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick]);
   const density = ['MINIMAL', 'STANDARD', 'FULL', 'TELEMETRY'][d.options.hud ?? 1];
   const ctrl = d.ctrlPlayer;
   const contract = ctrl ? contractFor(ctrl.num) : null;
@@ -301,50 +490,54 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         </div>
       )}
 
-      {/* SCORE BAR */}
-      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
-        <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
-          <div className="flex items-center gap-3">
-            <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
-            <span className="text-[11px] text-[#6f7f96]">v</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
-            <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
-            <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+      {/* SCORE BAR — AAA broadcast bug by default, heritage 1991 from OPTIONS */}
+      {(d.options.broadcast ?? 1) >= 1 ? (
+        <ScoreBug d={d} objective={objective} density={density} />
+      ) : (
+        <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+          <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
+            <div className="flex items-center gap-3">
+              <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
+              <span className="text-[11px] text-[#6f7f96]">v</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
+              <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
+              <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+            </div>
+            {objective && (
+              <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
+                {objective.name} — TARGET {objective.target}
+              </div>
+            )}
+            {(d.live.some((p) => p.sinbin > 0)) && (
+              <div className="mt-0.5 flex gap-2">
+                {(['A', 'B'] as const).map((t) => {
+                  const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
+                  if (!binned.length) return null;
+                  return (
+                    <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
+                      <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
+                      {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {density !== 'MINIMAL' && (
+              <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
+                <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
+                  {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
+                </span>
+                <span>·</span><span>{d.phase.replace('_', ' ')}</span>
+                {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
+                {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
+              </div>
+            )}
           </div>
-          {objective && (
-            <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
-              {objective.name} — TARGET {objective.target}
-            </div>
-          )}
-          {(d.live.some((p) => p.sinbin > 0)) && (
-            <div className="mt-0.5 flex gap-2">
-              {(['A', 'B'] as const).map((t) => {
-                const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
-                if (!binned.length) return null;
-                return (
-                  <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
-                    <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
-                    {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
-                  </span>
-                );
-              })}
-            </div>
-          )}
-          {density !== 'MINIMAL' && (
-            <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
-              <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
-                {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
-              </span>
-              <span>·</span><span>{d.phase.replace('_', ' ')}</span>
-              {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
-              {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
       {/* CONTROLLED PLAYER NAMEPLATE — four channels so you always know who you are */}
       {ctrl && (
@@ -502,6 +695,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
+        <div className="mt-0.5 text-[#5f6f86]">GAMEPAD: STICK MOVE · <Kbd>A</Kbd> ACTION · <Kbd>X</Kbd>/<Kbd>Y</Kbd> PASS · <Kbd>B</Kbd> TACKLE · <Kbd>RB</Kbd> KICK</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
       </div>
@@ -525,6 +719,36 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             <div className="mt-2 flex justify-end"><Btn small onClick={() => setShowStats(false)}>CLOSE</Btn></div>
           </Panel>
         </div>
+      )}
+
+      {/* AAA BROADCAST — matchday intro, player spotlight, controller badge */}
+      {(d.options.broadcast ?? 1) >= 1 && <PlayerSpotlight d={d} />}
+      <GamepadBadge connected={gp.connected} name={gp.name} />
+
+      {/* SPEC_24 — the conditions the simulation is actually playing in, the
+        * season form behind the fixture, and the two moments a broadcast never
+        * shows in a sprite game: the TMO card and the sending-off. */}
+      {(d.options.broadcast ?? 1) >= 1 && (
+        <div className="pointer-events-none absolute left-1/2 top-[58px] -translate-x-1/2">
+          <ConditionsStrip d={d}
+            cond={condRef.current ?? conditionsFor(d.options, qualityFor(d.options))} />
+        </div>
+      )}
+      {(d.options.broadcast ?? 1) >= 1 && <FormStrip d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <TmoCard d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <CardCard d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <ReplayFrame d={d} />}
+      {!load && intro && (d.options.broadcast ?? 1) >= 1 && <MatchIntro d={d} />}
+
+      {/* LOADING — covers the world build so the tab never appears frozen. */}
+      {load && (
+        <LoadingScreen
+          stage={load.stage}
+          progress={load.progress}
+          homeName={A?.nation?.name}
+          awayName={B?.nation?.name}
+          venue={d.options.timeofday === 3 ? 'UNDER LIGHTS' : undefined}
+        />
       )}
 
       {/* PAUSE / HALF TIME / FULL TIME */}

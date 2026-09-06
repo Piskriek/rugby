@@ -60,34 +60,6 @@ const TEMPLATE_SLOT_MAT: Record<Slot, string> = {
   skin: 'TPL_skin', boots: 'TPL_boots', hair: 'MI_Hair_1', eyes: 'MI_Eyes',
 };
 
-/** Region of a body vertex from its dominant skinning bone + rest height. */
-function boneRegion(boneName: string, restY: number): Slot {
-  // foot + toe ("ball_*") bones: boot over the foot, sock cuff at the ankle.
-  if (/^(foot_|ball_[lr]|toe)/.test(boneName) || /^ball_leaf/.test(boneName)) {
-    return restY < 0.20 ? 'boots' : 'socks';
-  }
-  // calf: sock up to the knee; calf bone origin sits at ~0.54 (knee).
-  if (/^calf_/.test(boneName)) return restY < 0.55 ? 'socks' : 'skin';
-  if (/^thigh_/.test(boneName)) return restY > 0.70 ? 'shorts' : 'skin';
-  if (/^(root|pelvis|spine|neck)/.test(boneName)) return 'jersey';
-  if (/^(Head|index_|middle_|ring_|pinky_|thumb_)/.test(boneName)) return 'skin';
-  if (/^(clavicle|upperarm|lowerarm|hand_)/.test(boneName)) {
-    return /^clavicle_/.test(boneName) ? 'jersey' : 'skin';
-  }
-  return 'jersey';
-}
-
-/* ------------------------------------------------------------- lighting -- */
-function makeToonGradient(): THREE.DataTexture {
-  // Two hard bands: flat cel look matching the 2D pitch's flat fills.
-  const data = new Uint8Array([148, 148, 148, 255, 255, 255]);
-  const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
-  tex.generateMipmaps = false;
-  tex.needsUpdate = true;
-  return tex;
-}
 
 
 /* ================== PROCEDURAL "FAKE RAGDOLL" LAYER ==================
@@ -224,6 +196,15 @@ interface PlayerInstance {
   handBone?: THREE.Bone | null;
   /** contact shadow, kept flat on the turf while the body tilts (procedural) */
   shadow?: THREE.Mesh;
+  /** Per-instance kit materials, so the shirt can be dirtied. The template's
+   *  materials are shared; these are the clones made in `spawn`. */
+  kitMats: Partial<Record<Slot, THREE.MeshStandardMaterial>>;
+  /** Unsoiled kit colour and roughness — the base every soiling pass reads. */
+  kitBase: Partial<Record<Slot, { color: THREE.Color; rough: number }>>;
+  /** 0..1 accumulated ground staining. It never washes off: nothing does. */
+  soil: number;
+  /** The soil value the kit materials were last painted at. */
+  soilShown: number;
   /** lazily-resolved procedural bone set — see resolveRig() */
   rig?: ProceduralRig;
   /** smoothed procedural state, so nothing pops between frames */
@@ -320,33 +301,56 @@ function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
   return out;
 }
 
+/** Region of a body vertex from its dominant skinning bone + rest height. */
+function boneRegion(boneName: string, restY: number): Slot {
+  // foot + toe ("ball_*") bones: boot over the foot, sock cuff at the ankle.
+  if (/^(foot_|ball_[lr]|toe)/.test(boneName) || /^ball_leaf/.test(boneName)) {
+    return restY < 0.20 ? 'boots' : 'socks';
+  }
+  // calf: sock up to the knee; calf bone origin sits at ~0.54 (knee).
+  if (/^calf_/.test(boneName)) return restY < 0.55 ? 'socks' : 'skin';
+  if (/^thigh_/.test(boneName)) return restY > 0.70 ? 'shorts' : 'skin';
+  if (/^(root|pelvis|spine|neck)/.test(boneName)) return 'jersey';
+  if (/^(Head|index_|middle_|ring_|pinky_|thumb_)/.test(boneName)) return 'skin';
+  if (/^(clavicle|upperarm|lowerarm|hand_)/.test(boneName)) {
+    return /^clavicle_/.test(boneName) ? 'jersey' : 'skin';
+  }
+  return 'jersey';
+}
+
 export class ThreePlayerManager {
   ready = false;
   private template: THREE.Group | null = null;
   private templateClips: THREE.AnimationClip[] = [];
-  private gradient = makeToonGradient();
   private pool = new Map<string, PlayerInstance>();
   private readonly scene: THREE.Scene;
   private ball: THREE.Group;
   private shadowGeo: THREE.CircleGeometry;
   private shadowMat: THREE.MeshBasicMaterial;
+  /* --- match day (SPEC_24): soiling and wetness, driven from conditions --- */
+  private soilRate = 0;
+  private wetLevel = 0;
+  private ballMat: THREE.MeshStandardMaterial | null = null;
+  private static readonly MUD = new THREE.Color('#5a4227');
+  private static readonly SOAK = new THREE.Color('#0e1620');
   private badgeTextures = new Map<string, THREE.Texture>();
 
   constructor(three: import('./ThreeCanvas').ThreeCanvas) {
     this.scene = three.scene;
 
-    const key = new THREE.DirectionalLight(0xfff4df, 2.2);
-    key.position.set(-30, 60, 24);
-    this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0x9db8ec, 0.5);
-    fill.position.set(40, 22, -30);
-    this.scene.add(fill);
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.9));
-    this.scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x3a5a36, 0.45));
+    /* Lighting is owned entirely by ThreeEnvironment (sun + hemi + ambient +
+     * bounce + floodlights), so that the key direction, the visible sun in the
+     * sky dome and the cast shadows can never disagree. Adding a second key
+     * here — as this class used to — flattened every player against a pitch
+     * lit from somewhere else. */
 
-    this.shadowGeo = new THREE.CircleGeometry(0.52, 20);
+    /* The blob shadow survives as a CONTACT shadow only: a small, tight, dark
+     * ellipse right under the boots. Real cast shadows (from the sun) handle
+     * the long throw; this just glues the feet to the turf, which shadow maps
+     * at this range are too coarse to do on their own. */
+    this.shadowGeo = new THREE.CircleGeometry(0.34, 20);
     this.shadowMat = new THREE.MeshBasicMaterial({
-      color: 0x0c0d10, transparent: true, opacity: 0.26, depthWrite: false,
+      color: 0x0a0c10, transparent: true, opacity: 0.34, depthWrite: false,
     });
 
     this.ball = this.buildBall();
@@ -416,13 +420,13 @@ export class ThreePlayerManager {
       }
     });
 
-    const bodyMats: Record<Slot, THREE.MeshToonMaterial> = {} as Record<Slot, THREE.MeshToonMaterial>;
+    const bodyMats: Record<Slot, THREE.MeshStandardMaterial> = {} as Record<Slot, THREE.MeshStandardMaterial>;
     for (const slot of SLOTS) {
       // Bug-fix #1: fully opaque, front-face only, depth writes ON. Transparent
       // body materials made the renderer disable depth writes and sort limbs
       // inside-out (the "see-through / inverted depth" look).
-      const m = new THREE.MeshToonMaterial({
-        color: 0xffffff, gradientMap: this.gradient,
+      const m = new THREE.MeshStandardMaterial({
+        color: 0xffffff, roughness: 0.78, metalness: 0.0,
         transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
       });
       m.name = TEMPLATE_SLOT_MAT[slot];
@@ -520,7 +524,8 @@ export class ThreePlayerManager {
         m.bindMode = bindMode;
         m.bind(skel, bindMatrix);
         m.frustumCulled = false;
-        m.castShadow = false;
+        m.castShadow = true;
+        m.receiveShadow = true;
         m.name = `body_${slot}`;
         parent.add(m);
       }
@@ -532,8 +537,8 @@ export class ThreePlayerManager {
     for (const f of faces) {
       const matName = (f.material as THREE.Material)?.name ?? '';
       if (matName === 'MI_Hair_1') {
-        f.material = new THREE.MeshToonMaterial({
-          color: 0x2a1c14, gradientMap: this.gradient,
+        f.material = new THREE.MeshStandardMaterial({
+          color: 0x2a1c14, roughness: 0.62, metalness: 0.0,
           transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
         });
       } else if (matName === 'MI_Eyes') {
@@ -628,16 +633,64 @@ export class ThreePlayerManager {
     wAttr.needsUpdate = true;
   }
 
+  /* ------------------------------------------------------------ match day --
+   * Soiling and wetness, driven from `render/conditions.ts` by the view. Two
+   * numbers in, one visual out: a shirt that has been on the ground on a MUDDY
+   * pitch in the rain is not the shirt that started the half, and anyone who has
+   * watched a white kit at Twickenham in January knows which one wins.
+   *
+   * It accumulates and NEVER recovers, because that is what mud does. */
+  /** `rate` 0..1 from `conditions.mud`, `wet` 0..1 from `conditions.wetness`. */
+  setSoiling(rate: number, wet: number) {
+    this.soilRate = rate;
+    this.wetLevel = wet;
+  }
+
+  /** Scale the fake contact shadows by the key light's own hard/soft state. */
+  setShadowStrength(v: number) {
+    const k = Math.max(0, Math.min(1, v));
+    this.shadowMat.opacity = 0.05 + k * 0.3;
+  }
+
+  private applySoil(inst: PlayerInstance) {
+    const soil = Math.min(1, inst.soil);
+    if (Math.abs(soil - inst.soilShown) < 0.012 && inst.soilShown >= 0) return;
+    inst.soilShown = soil;
+    for (const slot of ['jersey', 'shorts', 'socks'] as Slot[]) {
+      const mat = inst.kitMats[slot];
+      const base = inst.kitBase[slot];
+      if (!mat || !base) continue;
+      /* Skin and boots are not dirtied: a muddy face is a different feature.
+       * Mud also ROUGHS the cloth — a soaked jersey stops reflecting the
+       * floodlights, which is the part a colour tint alone misses. */
+      mat.color.copy(base.color).lerp(ThreePlayerManager.MUD, soil * 0.62)
+        .multiplyScalar(1 - this.wetLevel * 0.20);
+      mat.roughness = Math.min(1, base.rough + soil * 0.22 - this.wetLevel * 0.06);
+      mat.emissive.copy(ThreePlayerManager.SOAK).multiplyScalar(0.03 + this.wetLevel * 0.09);
+    }
+  }
+
+  /** Clear the accumulated state between matches (the pool survives a restart). */
+  resetSoiling() {
+    for (const inst of this.pool.values()) { inst.soil = 0; inst.soilShown = -1; }
+  }
+
   /* ----------------------------------------------------------- ball ----- */
   private buildBall(): THREE.Group {
     const g = new THREE.Group();
     g.name = 'Ball3D';
     const geo = new THREE.SphereGeometry(0.16, 18, 12);
     geo.scale(1.0, 0.78, 1.65);
-    g.add(new THREE.Mesh(geo, new THREE.MeshToonMaterial({
-      color: 0xb8562f, gradientMap: this.gradient,
+    const ballSkin = new THREE.MeshStandardMaterial({
+      // Waxed leather: tight specular, no metal.
+      color: 0xb8562f, roughness: 0.45, metalness: 0.0,
       transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
-    })));
+    });
+    this.ballMat = ballSkin;
+    const ballMesh = new THREE.Mesh(geo, ballSkin);
+    ballMesh.castShadow = true;
+    ballMesh.receiveShadow = true;
+    g.add(ballMesh);
     const seam = new THREE.Mesh(
       new THREE.TorusGeometry(0.13, 0.007, 6, 20),
       new THREE.MeshBasicMaterial({
@@ -683,9 +736,16 @@ export class ThreePlayerManager {
     };
 
     let badgeMat: THREE.MeshBasicMaterial = null as unknown as THREE.MeshBasicMaterial;
+    const kitMats: Partial<Record<Slot, THREE.MeshStandardMaterial>> = {};
+    const kitBase: Partial<Record<Slot, { color: THREE.Color; rough: number }>> = {};
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
+      /* SPEC_24 — the squad has to be IN the light, not merely lit: skinned
+       * meshes cast through the key light's shadow map, so a shadow follows a
+       * dive. The contact blob stays for the far end of the lens, where a
+       * 2048 map over 42 m cannot resolve a boot. */
+      if (o.name !== 'ContactShadow') { mesh.castShadow = true; mesh.receiveShadow = true; }
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material as THREE.Material];
       const replaced: THREE.Material[] = [];
       for (const mat of mats) {
@@ -694,12 +754,23 @@ export class ThreePlayerManager {
         const slot = (Object.keys(TEMPLATE_SLOT_MAT) as Slot[]).find((s) => TEMPLATE_SLOT_MAT[s] === name);
         if (slot && slot !== 'hair' && slot !== 'eyes') {
           // Bug-fix #1: opaque kit materials, front faces only, depth writes on.
-          out = new THREE.MeshToonMaterial({
+          /* Per-slot surface response. Jersey and shorts are matte technical
+           * cloth; socks a touch rougher; skin has a low broad sheen; boots are
+           * the only genuinely glossy thing on a player. Giving every slot the
+           * same roughness is the single clearest "this is a game model" tell. */
+          const ROUGH: Record<string, number> = {
+            jersey: 0.74, shorts: 0.70, socks: 0.86, skin: 0.55, boots: 0.28,
+          };
+          const km = new THREE.MeshStandardMaterial({
             color: new THREE.Color(slotColour[slot]),
-            gradientMap: this.gradient,
+            roughness: ROUGH[slot] ?? 0.75,
+            metalness: 0.0,
             transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
           });
-          out.name = `M_${slot}`;
+          km.name = `M_${slot}`;
+          kitMats[slot] = km;
+          kitBase[slot] = { color: km.color.clone(), rough: km.roughness };
+          out = km;
         } else if (name === 'TPL_NumberBadge') {
           if (team === 'REF') {
             mesh.visible = false;
@@ -724,13 +795,14 @@ export class ThreePlayerManager {
     const shadow = new THREE.Mesh(this.shadowGeo, this.shadowMat);
     shadow.rotation.x = -Math.PI / 2;
     shadow.position.y = 0.02;
-    shadow.scale.set(0.95, 0.42, 1);
+    shadow.scale.set(0.95, 0.50, 1);
     shadow.renderOrder = -1;
     root.add(shadow);
     // kept so the procedural body tilt can counter-rotate it flat (below)
     const shadowRef = shadow;
 
     const inst: PlayerInstance = {
+      kitMats, kitBase, soil: 0, soilShown: -1,
       actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
       proc: {
@@ -1369,6 +1441,19 @@ export class ThreePlayerManager {
       const desired = this.mapState(a.renderClip, st.spd);
       const locomoting = ['idle', 'walk', 'run', 'sprint'].includes(desired);
 
+      /* SOILING. A man on the ground, in a ruck, or bound into a maul puts the
+       * pitch onto his shirt. `grounded` stains fastest, because that is the
+       * state where a shirt lies flat on real grass for a whole second. */
+      if (this.soilRate > 0.02) {
+        const dirty = desired === 'grounded' || desired === 'dive' || desired === 'ruck'
+          || desired === 'bind' || desired === 'tackle' || desired === 'getup';
+        if (dirty && inst.soil < 1) {
+          inst.soil = Math.min(1, inst.soil
+            + this.soilRate * step * (desired === 'grounded' ? 0.42 : 0.17));
+          this.applySoil(inst);
+        }
+      }
+
       /* PART 1 — release the pass latch the moment the engine leaves the
        * pass state, so the NEXT pass gets a fresh single shot. */
       if (desired !== 'pass') st.passLatched = false;
@@ -1640,6 +1725,16 @@ export class ThreePlayerManager {
       } else if (cr) {
         free.x = cr.x + 0.28; free.y = cr.down ? 0.3 : 1.05; free.z = cr.z; free.visible = true;
       }
+    }
+
+    /* A wet ball is a darker ball, and it is the one piece of kit that is
+     * genuinely soaked through all match. The engine already widened handling
+     * error by `wetnessOf()`; this is that number, seen. */
+    if (this.ballMat) {
+      const w = this.wetLevel;
+      this.ballMat.color.setHex(0xb8562f).multiplyScalar(1 - w * 0.26);
+      this.ballMat.roughness = 0.45 - w * 0.12;
+      this.ballMat.emissive.copy(ThreePlayerManager.SOAK).multiplyScalar(0.03 + w * 0.12);
     }
 
     this.ball.visible = free.visible || !!carrier;

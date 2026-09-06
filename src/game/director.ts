@@ -4503,6 +4503,16 @@ export class Director {
     if (s.type === 'GOAL') this.conversionPending = false;
     const pts = s.type === 'GOAL' ? (isConv ? POINTS.CONVERSION : POINTS.PENALTY) : POINTS.DROP_GOAL;
     this.teams[s.kicker].score += pts;
+    /* AAA broadcast: a kick score must also be a spotlight. This also fixes
+     * the lingering T-13 lastScorer hang — a penalty after a converted try no
+     * longer attributes the +3 to the earlier try scorer. */
+    this.lastScorer = {
+      num: s.kickerNum,
+      name: s.kickerName,
+      team: s.kicker,
+      min: this.minute,
+      kind: isConv ? 'CONVERSION' : s.type === 'GOAL' ? 'PENALTY' : 'DROP',
+    };
     this.events.push({ min: this.minute, team: s.kicker, kind: s.type, text: `${this.teams[s.kicker].nation.short} +${pts} — ${s.kickerName}` });
     this.commentate('KICK');
     this.banner_(`${this.teams[s.kicker].nation.short} +${pts} — ${s.kickerName}`);
@@ -4512,6 +4522,10 @@ export class Director {
 
   kickMissed( /* T-03: engine-internal */s: KickState, why: string) {
     s.stage = 'RESULT'; s.result = 'MISSED';
+    /* SPEC_07 — a missed conversion ends the try's set-piece window, exactly
+     * as a made one does. Without this a subsequent penalty goal inherited
+     * the pending conversion flag and was credited (and spotlighted) as +2. */
+    if (s.type === 'GOAL') this.conversionPending = false;
     this.commentate('KICK', `— ${why}`);
     this.banner_('NO GOOD');
     this.kk = undefined;

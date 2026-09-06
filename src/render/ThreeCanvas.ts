@@ -1,5 +1,5 @@
 /**
- * ThreeCanvas — the WebGL viewport.
+ * ThreeCanvas — the WebGL viewport, the colour pipeline and the match-day rig.
  *
  * A single Three.js renderer/camera rig. The camera is NOT a free 3D camera:
  * every frame it is rebuilt to match the 2D pinhole rig in `render/retro.ts`
@@ -12,18 +12,172 @@
  * is a transparent HUD overlay on top. When unset, this canvas stays
  * transparent and only paints 3D actors over the 2D pitch.
  *
+ * ## The colour pipeline (AAA pass)
+ *
+ * The scene renders into a half-float target and leaves through one custom
+ * grade pass. Deliberately, `renderer.toneMapping` is `NoToneMapping`: inside
+ * an EffectComposer the renderer skips tone mapping anyway (it is applied only
+ * when drawing to the canvas), and leaving it to `OutputPass` would apply it
+ * AFTER bloom had already clipped. Owning the curve in one shader means the
+ * exposure, the filmic shoulder, the sRGB encode, the vignette, the grain, the
+ * chroma split and the rain on the lens are one decision, in one order, and
+ * the bloom threshold can be authored in true HDR against it.
+ *
+ * It is also the reason `LEGACY` quality still goes through the composer: one
+ * pipeline, switched off by parameters, rather than two pipelines that drift.
+ *
  * World convention: everything 3D is rendered in the game's *scaled* render
  * space (logical metres * RENDER_SCALE):
  *   world = (x · RENDER_SCALE, y · RENDER_SCALE, −z · RENDER_SCALE)
  */
 import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { Camera, View, RENDER_SCALE } from './retro';
 import { ThreeEnvironment } from './ThreeEnvironment';
+import { ThreeMatchDay } from './ThreeMatchDay';
+import { ThreeParticles } from './ThreeParticles';
+import type { Conditions } from './conditions';
+import { conditionsFor, qualityFor } from './conditions';
 
 /** Feature flag: 3D dual-plane pitch, fog and uprights. */
 export const ENV_3D: boolean = true;
 
 const FOG_COLOR = 0x1a2634;
+
+/* ------------------------------------------------------------- grade pass --- */
+const GradeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uExposure: { value: 1.0 },
+    uVignette: { value: 0.35 },
+    uGrain: { value: 0.03 },
+    uChroma: { value: 0.0015 },
+    uTime: { value: 0 },
+    uLift: { value: new THREE.Vector3(0.006, 0.004, 0.012) },
+    uGain: { value: new THREE.Vector3(1.02, 1.0, 1.0) },
+    uSat: { value: 1.06 },
+    uLensWet: { value: 0 },
+    uDropletSeed: { value: 0 },
+    uAspect: { value: 1.6 },
+    uShoulder: { value: 1.0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    precision highp float;
+    uniform sampler2D tDiffuse;
+    uniform float uExposure, uVignette, uGrain, uChroma, uTime, uSat;
+    uniform float uLensWet, uDropletSeed, uAspect, uShoulder;
+    uniform vec3 uLift, uGain;
+    varying vec2 vUv;
+
+    float hash21(vec2 p) {
+      p = fract(p * vec2(123.34, 456.21));
+      p += dot(p, p + 45.32);
+      return fract(p.x * p.y);
+    }
+
+    /* Extended Reinhard with a shoulder at L=4. Chosen over a Hable-style
+     * curve because its behaviour is legible: it is the identity below ~0.3,
+     * it maps 2.0 to a white kit rather than a clipping sheet, and it never
+     * goes negative — which matters because the target is half-float and a
+     * curve with an unclipped denominator turns a specular pin-point into NaN.
+     * uShoulder mixes back toward the plain curve for LEGACY, where the
+     * brief is "same picture as the 2D canvas", not "same picture after film". */
+    vec3 filmic(vec3 x) {
+      x = max(x * uExposure, vec3(0.0));
+      const float L = 4.0;
+      vec3 c = (x * (1.0 + x / (L * L))) / (1.0 + x);
+      float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      /* Mild S-curve so the grade does not read as a wash. */
+      vec3 s = c * (1.02 + 0.06 * c);
+      c = mix(max(vec3(0.0), x), s, clamp(uShoulder, 0.0, 1.0));
+      return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 1.03)) * (1.0 + luma * 0.0);
+    }
+
+    vec3 toSRGB(vec3 c) {
+      c = clamp(c, 0.0, 1.0);
+      return mix(c * 12.92, pow(c, vec3(1.0 / 2.4)) * 1.055 - 0.055,
+                 step(vec3(0.0031308), c));
+    }
+
+    /* A raindrop on the lens: a cell of the frame that samples a compressed,
+     * inverted patch of the image, with a bright rim. Cheaper and far more
+     * convincing than a screen-space refraction pass. */
+    vec2 droplets(vec2 uv, float t, float strength) {
+      float grid = 26.0;
+      vec2 g = uv * vec2(grid * uAspect, grid);
+      vec2 cell = floor(g);
+      vec2 f = fract(g) - 0.5;
+      float h = hash21(cell + vec2(t * 0.0, floor(t * 0.6)));
+      float on = step(1.0 - strength * 0.30, h);
+      /* Drops slide down the glass when there are enough of them. */
+      float slide = strength > 0.55 ? fract(t * 0.22 + h) * 0.35 : 0.0;
+      f.y -= slide;
+      float r = length(f);
+      float drop = on * (1.0 - smoothstep(0.12, 0.36, r));
+      float lens = -drop * 0.16;
+      vec2 off = normalize(f + vec2(1e-4)) * lens;
+      float rim = on * smoothstep(0.30, 0.36, r) * (1.0 - smoothstep(0.36, 0.42, r));
+      return vec2(off.x * 0.006, off.y * 0.006) + vec2(0.0, rim * 0.0);
+    }
+
+    void main() {
+      vec2 uv = vUv;
+      float wet = uLensWet;
+      vec2 disp = vec2(0.0);
+      if (wet > 0.001) disp = droplets(uv, uTime + uDropletSeed, wet);
+
+      /* Chromatic split grows toward the frame edge, as it does in a real
+       * broadcast lens at 400 mm. */
+      vec2 c = uv - 0.5;
+      float r2 = dot(c, c);
+      float ca = uChroma * (0.35 + r2 * 2.6);
+      vec2 baseUv = uv + disp;
+      float blur = wet * 0.0035 * smoothstep(0.02, 0.35, r2);
+
+      vec3 col;
+      col.r = texture2D(tDiffuse, baseUv + c * ca + vec2(blur)).r;
+      col.g = texture2D(tDiffuse, baseUv - vec2(blur * 0.4)).g;
+      col.b = texture2D(tDiffuse, baseUv - c * ca - vec2(blur)).b;
+
+      /* Water left on the glass smears a little highlight. */
+      col += wet * 0.05 * smoothstep(0.55, 1.0, 1.0 - abs(c.y) * 1.6);
+
+      col *= uGain;
+      col = filmic(max(col, vec3(0.0)));
+      col += uLift * (1.0 - smoothstep(0.0, 0.55, max(col.r, max(col.g, col.b))));
+
+      float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = mix(vec3(luma), col, uSat);
+
+      /* Vignette: an oval, so it does not crush the corners of a 16:9 frame
+       * into a porthole. */
+      float vig = 1.0 - uVignette * smoothstep(0.22, 0.78, r2 * 1.35 + pow(abs(c.x) * 0.55, 2.4));
+      col *= vig;
+
+      col = toSRGB(col);
+
+      /* Grain in display space, luminance-weighted: shadows and midtones get
+       * the noise, highlights stay clean, which is what film grain actually
+       * looks like on a fast stock. */
+      float g = hash21(gl_FragCoord.xy + vec2(uTime * 37.13, uTime * 19.7));
+      float w = 1.0 - smoothstep(0.25, 0.95, luma);
+      col += (g - 0.5) * uGrain * (0.35 + w);
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+};
+
 
 export class ThreeCanvas {
   readonly renderer: THREE.WebGLRenderer;
@@ -31,13 +185,33 @@ export class ThreeCanvas {
   readonly scene: THREE.Scene;
   readonly dom: HTMLCanvasElement;
   environment: ThreeEnvironment | null = null;
+  matchDay: ThreeMatchDay | null = null;
+  particles: ThreeParticles | null = null;
+  /** True between contextlost and contextrestored; drawing is a no-op then. */
+  contextLost = false;
 
   private view: View = { w: 1, h: 1 };
+  private composer: EffectComposer | null = null;
+  private bloom: UnrealBloomPass | null = null;
+  private grade: ShaderPass | null = null;
+  private frame = 0;
+  private cond: Conditions | null = null;
+  /** Set when the shadow map last updated; shadows run at half rate. */
+  private shadowEvery = 2;
 
   constructor(container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
-    this.renderer.setClearColor(ENV_3D ? FOG_COLOR : 0x000000, ENV_3D ? 1 : 0);
-    this.renderer.shadowMap.enabled = false;
+    this.renderer = new THREE.WebGLRenderer({
+      alpha: !ENV_3D, antialias: true, premultipliedAlpha: false,
+      powerPreference: 'high-performance',
+    });
+    this.renderer.setClearColor(FOG_COLOR, ENV_3D ? 1 : 0);
+    /* Shadows are enabled here and turned on per-tier by `applyConditions`;
+     * `autoUpdate` is off so the rig can pay for them every other frame. */
+    this.renderer.shadowMap.enabled = ENV_3D;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.toneMapping = THREE.NoToneMapping;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const el = this.renderer.domElement;
     el.style.position = 'absolute';
@@ -50,6 +224,20 @@ export class ThreeCanvas {
     container.appendChild(el);
     this.dom = el;
 
+    /* A lost context (driver reset, GPU OOM, laptop switching graphics)
+     * otherwise leaves a permanently black canvas with no clue why.
+     * Preventing the default event lets the browser hand the context back,
+     * and Three re-uploads its resources automatically on restore. */
+    el.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.contextLost = true;
+      console.warn('[render] WebGL context lost — pausing draw until restore');
+    });
+    el.addEventListener('webglcontextrestored', () => {
+      this.contextLost = false;
+      console.warn('[render] WebGL context restored');
+    });
+
     this.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 400);
     this.camera.frustumCulled = true;
     this.scene = new THREE.Scene();
@@ -59,10 +247,84 @@ export class ThreeCanvas {
 
   /** Build the 3D environment (pitch, fog, uprights) when the flag is on. */
   init() {
-    if (ENV_3D) {
-      this.environment = new ThreeEnvironment(this.scene, this.renderer);
-    }
+    if (!ENV_3D) return;
+    this.environment = new ThreeEnvironment(this.scene, this.renderer);
+    this.matchDay = new ThreeMatchDay(this.scene);
+    this.particles = new ThreeParticles(this.scene);
+
+    const w = Math.max(2, this.dom.clientWidth || 2);
+    const h = Math.max(2, this.dom.clientHeight || 2);
+    const rt = new THREE.WebGLRenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      samples: 4,
+      colorSpace: THREE.LinearSRGBColorSpace,
+    });
+    this.composer = new EffectComposer(this.renderer, rt);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.3, 0.6, 0.8);
+    this.composer.addPass(this.bloom);
+    this.grade = new ShaderPass(GradeShader);
+    this.grade.renderToScreen = true;
+    this.composer.addPass(this.grade);
   }
+
+  /**
+   * Push one conditions object into every consumer of the look. Called when the
+   * resolved conditions change, not every frame — the tone curve and the shadow
+   * tier are renderer state and touching them per frame costs a shader recompile
+   * for the bloom pass.
+   */
+  applyConditions(cond: Conditions) {
+    this.cond = cond;
+    this.renderer.toneMapping = THREE.NoToneMapping;
+    this.renderer.shadowMap.enabled = ENV_3D && cond.shadows;
+    this.shadowEvery = cond.quality === 'FULL' ? 2 : 1;
+    if (this.matchDay) {
+      this.matchDay.applyQuality(cond);
+      if (this.bloom) {
+        /* LEGACY is the flat frame on purpose: no halo, no bleed, no light
+         * spilling off the LED boards. The pass still runs (one pipeline, not
+         * two) but with its contribution switched to zero. */
+        this.bloom.strength = cond.quality === 'LEGACY' ? 0 : cond.bloomStrength;
+        this.bloom.threshold = cond.bloomThreshold;
+        this.bloom.radius = cond.bloomRadius;
+      }
+    }
+    const g = this.grade?.uniforms as Record<string, { value: any }> | undefined;
+    if (g) {
+      g.uExposure.value = cond.exposure;
+      g.uVignette.value = cond.vignette;
+      g.uGrain.value = cond.grain;
+      g.uChroma.value = cond.chroma;
+      g.uLensWet.value = cond.precip === 'RAIN' ? cond.lensWet : 0;
+      g.uSat.value = cond.weather === 'OVERCAST' || cond.weather === 'FOG' ? 0.9 : 1.08;
+      g.uShoulder.value = cond.quality === 'LEGACY' ? 0.35 : 1.0;
+      g.uLift.value.set(cond.gradeLift[0], cond.gradeLift[1], cond.gradeLift[2]);
+      g.uGain.value.set(cond.gradeGain[0], cond.gradeGain[1], cond.gradeGain[2]);
+    }
+    this.environment?.applyConditions(cond);
+  }
+
+  /**
+   * Per-frame match-day update: sky, lights, weather, and the FX pool.
+   * Kept on the canvas rather than in the view so the shadow frustum, the
+   * bloom and the camera are re-derived in one place, in the order that matters.
+   */
+  updateMatchDay(cam: Camera, v: View, dt: number) {
+    if (!this.matchDay || !this.cond) return;
+    const cond = this.cond;
+    this.matchDay.update(cam, v, cond, dt);
+    /* The lens that matters is the 2D pinhole's own vertical FOV in radians —
+     * `this.camera.fov` is a stale 35 DEGREES, because syncCamera overwrites
+     * the projection matrix from the retro rig. Feeding the wrong one here is
+     * how a clod becomes a boulder at TACTICAL zoom. */
+    this.particles?.setPixelScale(v.h, cam.fov);
+    this.particles?.setFog(cond.fogColor, cond.fogDensity * 14);
+    const g = this.grade?.uniforms as Record<string, { value: any }> | undefined;
+    if (g) g.uTime.value += dt;
+    if (g) g.uAspect.value = v.w / Math.max(1, v.h);
+  }
+
 
   /**
    * Match the 2D pinhole rig. Mirrors `project()` in retro.ts:
@@ -124,19 +386,58 @@ export class ThreeCanvas {
   resize() {
     const w = this.dom.clientWidth || this.view.w;
     const h = this.dom.clientHeight || this.view.h;
-    const pr = Math.min(2, window.devicePixelRatio || 1);
+    /* 1.75 rather than 2: the WebGL cost (and every post-processing target)
+     * scales with the square of this number, and the difference between 1.75x
+     * and 2x is invisible at normal viewing distance while costing ~30% more
+     * fill. The 2D HUD canvas is separate and still runs at full DPR. */
+    const pr = Math.min(1.75, window.devicePixelRatio || 1);
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
+    if (this.composer) {
+      this.composer.setPixelRatio(pr);
+      this.composer.setSize(w, h);
+      /* UnrealBloomPass carries its own resolution vector; if it is not told,
+       * the blur is computed for the old frame size and the halo stops
+       * matching the lamps it came from. */
+      this.bloom?.setSize(w * pr, h * pr);
+    }
     return { w, h };
   }
 
   render() {
-    this.renderer.render(this.scene, this.camera);
+    /* A lost context (driver reset, GPU OOM, a laptop changing graphics card)
+     * otherwise leaves a permanently black canvas with no clue why. */
+    if (this.contextLost) return;
+    this.frame++;
+    /* The shadow map is the single most expensive thing in this scene — 31
+     * skinned meshes drawn again from the key's point of view. Half rate is
+     * invisible: a sprinter advances 0.16 m per frame, and the shadow box is
+     * 42 m wide, so the error is well under a texel. */
+    if (this.renderer.shadowMap.enabled) {
+      this.renderer.shadowMap.needsUpdate = this.frame % this.shadowEvery === 0;
+    }
+    if (this.composer && ENV_3D) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
+  }
+
+  /** Resolve the option bag into conditions and apply them if they changed. */
+  syncConditions(options: Record<string, number>) {
+    const c = conditionsFor(options, qualityFor(options));
+    if (c !== this.cond) this.applyConditions(c);
+    return c;
   }
 
   dispose() {
     this.environment?.dispose();
     this.environment = null;
+    this.matchDay?.dispose();
+    this.matchDay = null;
+    this.particles?.dispose();
+    this.particles = null;
+    this.bloom?.dispose();
+    this.grade?.dispose();
+    this.composer?.dispose();
+    this.composer = null;
     this.renderer.dispose();
     this.dom.remove();
   }
