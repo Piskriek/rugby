@@ -858,7 +858,11 @@ export class Director {
   }
 
   L(team: 'A' | 'B', num: number): Live { /* T-03: engine-internal */
-    return this.live.find((p) => p.team === team && p.num === num) ?? this.live[0];
+    for (let i = 0; i < this.live.length; i++) {
+      const p = this.live[i];
+      if (p.team === team && p.num === num) return p;
+    }
+    return this.live[0];
   }
   run( /* T-03: engine-internal */team: 'A' | 'B', num: number): PlayerRun {
     return this.teams[team].players[num - 1];

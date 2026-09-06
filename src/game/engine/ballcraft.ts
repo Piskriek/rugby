@@ -174,9 +174,13 @@ export function solveTwoBone(
  *  `project()` builds its view from `yaw`, so this is the same forward the pixel
  *  the player is aiming at is derived from — one source of truth, no second
  *  camera maths that can drift out of agreement with the renderer. */
+const _look = { x: 0, y: 0, z: 0 };
 export function lookVector(d: Director): { x: number; y: number; z: number } {
   const ct = Math.cos(d.cam.tilt), st = Math.sin(d.cam.tilt);
-  return { x: Math.sin(d.cam.yaw) * ct, y: -st, z: Math.cos(d.cam.yaw) * ct };
+  _look.x = Math.sin(d.cam.yaw) * ct;
+  _look.y = -st;
+  _look.z = Math.cos(d.cam.yaw) * ct;
+  return _look;
 }
 
 function go(bc: BallCraft, d: Director, state: CraftState, why: string) {
@@ -204,6 +208,8 @@ function go(bc: BallCraft, d: Director, state: CraftState, why: string) {
 const _pt = { x: 0, y: 0, z: 0, loose: false };
 const _pole = { x: 0, y: 0, z: 0 };
 const _aim = { x: 0, y: 0, z: 0 };
+const _secBall = { x: 0, y: 0, z: 0 };
+const _free = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, bounces: 0 };
 export function ballPoint(d: Director, bc: BallCraft, p: Live) {
   const s = d.op!;
   const pt = _pt;
@@ -221,6 +227,21 @@ export function ballPoint(d: Director, bc: BallCraft, p: Live) {
   pt.x = p.x + 0.12 * p.size * side; pt.y = 1.05 * p.size;
   pt.z = p.z + 0.16 * p.size * side; pt.loose = false;
   return pt;
+}
+
+function solveArm(
+  slot: ArmPose,
+  p: Live,
+  root: { x: number; y: number; z: number },
+  target: { x: number; y: number; z: number },
+  poleDown: number,
+  l1: number,
+  l2: number,
+): ArmPose {
+  _pole.x = root.x - p.x; _pole.y = -0.55 * poleDown; _pole.z = root.z - p.z;
+  slot.shoulder = root;
+  solveTwoBone(root, target, l1, l2, _pole, slot);
+  return slot;
 }
 
 
@@ -288,19 +309,6 @@ export function stepCraft(
   bc.shoulderR.x = p.x - lat; bc.shoulderR.y = chestY + 0.06; bc.shoulderR.z = p.z - latZ;
   const shoulderL = bc.shoulderL, shoulderR = bc.shoulderR;
 
-  /* One holder per arm, reused: the pose the rig reads is the SAME object every frame,
-   * so a frame of catching makes nothing and the renderer can hold a reference to it
-   * without copying. `shoulder` is the anchor object itself, which is also reused. */
-  const solveArm = (slot: ArmPose, root: { x: number; y: number; z: number },
-    target: { x: number; y: number; z: number }, poleDown: number): ArmPose => {
-    _pole.x = root.x - p.x; _pole.y = -0.55 * poleDown; _pole.z = root.z - p.z;
-    slot.shoulder = root;
-    solveTwoBone(root, target, l1, l2, _pole, slot);
-    return slot;
-  };
-
-  const ball = () => ballPoint(d, bc, p);
-
   switch (bc.state) {
     /* ------------------------------------------------------------------ IDLE */
     case 'IDLE': {
@@ -312,24 +320,24 @@ export function stepCraft(
       _aim.x = p.x + (bc.ownsBall ? 0 : 0.1 * size);
       _aim.y = chestY - 0.12;
       _aim.z = p.z + 0.16 * size * side;
-      solveArm(bc.l, shoulderL, _aim, 0.4);
+      solveArm(bc.l, p, shoulderL, _aim, 0.4, l1, l2);
       _aim.x -= 0.2 * size * (lat !== 0 ? Math.sign(lat) : 1);
-      solveArm(bc.r, shoulderR, _aim, 0.4);
+      solveArm(bc.r, p, shoulderR, _aim, 0.4, l1, l2);
       if (handsUp) go(bc, d, 'HANDS_READY', 'RMB down');
       break;
     }
 
     /* ----------------------------------------------------------- HANDS_READY */
     case 'HANDS_READY': {
-      const b = ball();
+      const b = ballPoint(d, bc, p);
       /* Both hands go to the SAME target, converged by 9 cm each: that is a catch
        * shape. Two hands on one ball, palms to it, elbows out — and if the ball is
        * out of reach they both strain toward it by exactly as far as the arm allows,
        * because the solver clamps the distance and reports the shortfall as `reach`. */
       _aim.x = b.x - 0.09; _aim.y = b.y; _aim.z = b.z;
-      solveArm(bc.l, shoulderL, _aim, 1);
+      solveArm(bc.l, p, shoulderL, _aim, 1, l1, l2);
       _aim.x = b.x + 0.09;
-      solveArm(bc.r, shoulderR, _aim, 1);
+      solveArm(bc.r, p, shoulderR, _aim, 1, l1, l2);
       const gap = Math.hypot(bc.l.hand.x - b.x, bc.l.hand.y - b.y, bc.l.hand.z - b.z)
         + Math.hypot(bc.r.hand.x - b.x, bc.r.hand.y - b.y, bc.r.hand.z - b.z);
       /* The distance that matters for the lock is chest/hand to ball, and the spec
@@ -358,16 +366,16 @@ export function stepCraft(
           if (d.t - bc.lastRefusal > 0.5) {
             bc.lastRefusal = d.t;
             const why = `refused — ball ${handGap.toFixed(2)} m from the hands, need ${SECURE_M}`;
-          /* The ledger is unconditional and deduplicated by content: a refused grab is
-           * an engine fact, and the last of them is what a probe or a bug report needs.
-           * The HUD hint keeps its 0.25 s gate, because that slot is shared with the
-           * rest of the commentary and a man mashing LMB should not mute the match. */
+            /* The ledger is unconditional and deduplicated by content: a refused grab is
+             * an engine fact, and the last of them is what a probe or a bug report needs.
+             * The HUD hint keeps its 0.25 s gate, because that slot is shared with the
+             * rest of the commentary and a man mashing LMB should not mute the match. */
             if (bc.log[bc.log.length - 1]?.why !== why) {
               bc.log.push({ state: bc.state, t: d.t, why });
               if (bc.log.length > 40) bc.log.shift();
             }
+            if (bc.t > 0.25) d.showHint(`NO BALL IN REACH — ${handGap.toFixed(1)} m AWAY (NEED ${SECURE_M})`, 1.1);
           }
-          if (bc.t > 0.25) d.showHint(`NO BALL IN REACH — ${handGap.toFixed(1)} m AWAY (NEED ${SECURE_M})`, 1.1);
         }
       }
       if (!handsUp) { go(bc, d, 'IDLE', 'RMB released'); break; }
@@ -381,11 +389,14 @@ export function stepCraft(
        * what "secured" means physically, and it is why `ownsBall` gates the ball
        * write in `upOpen` rather than this module reaching into the phase. */
       bc.ownsBall = true;
-      const b = { x: p.x + 0.10 * size * side, y: chestY - 0.16, z: p.z + 0.14 * size * side };
+      _secBall.x = p.x + 0.10 * size * side;
+      _secBall.y = chestY - 0.16;
+      _secBall.z = p.z + 0.14 * size * side;
+      const b = _secBall;
       _aim.x = b.x - 0.1; _aim.y = b.y + 0.06; _aim.z = b.z;
-      solveArm(bc.l, shoulderL, _aim, 0.5);
+      solveArm(bc.l, p, shoulderL, _aim, 0.5, l1, l2);
       _aim.x = b.x + 0.1; _aim.y = b.y - 0.04;
-      solveArm(bc.r, shoulderR, _aim, 0.5);
+      solveArm(bc.r, p, shoulderR, _aim, 0.5, l1, l2);
       bc.l.reach = 1; bc.r.reach = 1;
       if (s) { s.ball.x = b.x; s.ball.y = b.y; s.ball.z = b.z; s.ball.live = false; }
       /* BALL SECURITY. A defender who gets a hand in while the catcher is still
@@ -398,7 +409,7 @@ export function stepCraft(
          * is off the outside world while you do: a strip attempt against a secured grip
          * is an order of magnitude less likely. Release it and the risk is back, which
          * is why the drop is a decision and not a free action. */
-        const grip = ballGrip(d) ? 0.12 : 1;
+        const grip = (secure || ballGrip(d)) ? 0.12 : 1;
         const pStrip = (0.16 + (near.attrs.AGG - p.attrs.SKL) * 0.004) * grip;
         if (R() < pStrip) {
           knockOn(d, bc, p, 'stripped by ' + shortName(near));
@@ -421,9 +432,9 @@ export function stepCraft(
        * the arms do not go back to the ribs inside 300 ms. */
       const b = bc.free!;
       _aim.x = b.x - 0.12; _aim.y = b.y + 0.18; _aim.z = b.z;
-      solveArm(bc.l, shoulderL, _aim, 0.8);
+      solveArm(bc.l, p, shoulderL, _aim, 0.8, l1, l2);
       _aim.x = b.x + 0.12;
-      solveArm(bc.r, shoulderR, _aim, 0.8);
+      solveArm(bc.r, p, shoulderR, _aim, 0.8, l1, l2);
       if (bc.l.reach > 0.4 || bc.r.reach > 0.4) { bc.l.reach = 1; bc.r.reach = 1; }
       if (pressed.has('punt') || punt) { go(bc, d, 'PUNT_KICK', 'Space inside the window'); bc.t = 0; break; }
       if (bc.t >= PUNT_WINDOW_S) {
@@ -535,9 +546,9 @@ export function stepCraft(
   if (bc.state === 'IDLE' && bc.free) {
     const b = bc.free;
     _aim.x = b.x - 0.1; _aim.y = b.y; _aim.z = b.z;
-    solveArm(bc.l, shoulderL, _aim, 1);
+    solveArm(bc.l, p, shoulderL, _aim, 1, l1, l2);
     _aim.x = b.x + 0.1;
-    solveArm(bc.r, shoulderR, _aim, 1);
+    solveArm(bc.r, p, shoulderR, _aim, 1, l1, l2);
   }
 }
 
@@ -571,10 +582,14 @@ function takeBall(d: Director, bc: BallCraft, p: Live, b: { x: number; y: number
  *  the whole of the distance comes from the boot. */
 function dropBall(bc: BallCraft, p: Live, side: number, size: number) {
   bc.ownsBall = false;
-  bc.free = {
-    x: p.x + 0.1 * size * side, y: 1.02 * size, z: p.z + 0.18 * size * side,
-    vx: p.vx * 0.35, vy: 0.55, vz: p.vz * 0.35, bounces: 0,
-  };
+  _free.x = p.x + 0.1 * size * side;
+  _free.y = 1.02 * size;
+  _free.z = p.z + 0.18 * size * side;
+  _free.vx = p.vx * 0.35;
+  _free.vy = 0.55;
+  _free.vz = p.vz * 0.35;
+  _free.bounces = 0;
+  bc.free = _free;
   bc.window = PUNT_WINDOW_S;
   bc.t = 0;
 }
@@ -591,7 +606,14 @@ function ballGrip(d: Director): boolean {
 function knockOn(d: Director, bc: BallCraft, p: Live, why: string) {
   const s = d.op!;
   bc.ownsBall = false;
-  bc.free = { x: s.ball.x, y: s.ball.y, z: s.ball.z, vx: p.vx * 0.2, vy: 0.2, vz: p.vz * 0.2, bounces: 0 };
+  _free.x = s.ball.x;
+  _free.y = s.ball.y;
+  _free.z = s.ball.z;
+  _free.vx = p.vx * 0.2;
+  _free.vy = 0.2;
+  _free.vz = p.vz * 0.2;
+  _free.bounces = 0;
+  bc.free = _free;
   d.say('DROPPED IT');
   go(bc, d, 'LOOSE', why);
 }
@@ -625,13 +647,14 @@ function integrate(bc: BallCraft, dt: number) {
 function resolveLoose(d: Director, bc: BallCraft, who: Live | null, why: string, team?: 'A' | 'B') {
   const b = bc.free;
   const t = team ?? who?.team ?? bc.team;
-  const at = b ? { x: b.x, z: b.z } : { x: d.op?.carrierX ?? 0, z: d.op?.carrierZ ?? 0 };
+  const atX = b ? b.x : (d.op?.carrierX ?? 0);
+  const atZ = b ? b.z : (d.op?.carrierZ ?? 0);
   bc.free = null;
   bc.ownsBall = false;
   bc.foot = null;
   bc.window = 0;
   if (who) d.setCtrl(t, who.num);
-  d.startOpen(t, clamp(at.x, -33, 33), clamp(at.z, -58, 58));
+  d.startOpen(t, clamp(atX, -33, 33), clamp(atZ, -58, 58));
   if (t !== bc.team) d.say('TURNOVER — KICK CHASE WON');
   go(bc, d, 'IDLE', why);
 }
