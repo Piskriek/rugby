@@ -3,7 +3,12 @@ import { Director, Input, NO_INPUT, MatchConfig } from '../game/director';
 import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
-import { drawCRT, project } from '../render/retro';
+import {
+  DEFAULT_TUNING, createRigState, toggleViewMode, updateRig,
+  type RigInput,
+} from '../render/camera';
+import { PointerLock } from '../render/pointerLock';
+import { drawCRT, project, type Camera } from '../render/retro';
 import { ENV_3D, ThreeCanvas, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { conditionsFor, qualityFor, type Conditions } from '../render/conditions';
@@ -60,6 +65,8 @@ export const KEYMAP: Record<string, string> = {
   r: 'replay', tab: 'stats', escape: 'pause',
   /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
   b: 'animDebug',
+  /* V toggles the player-driven first/third person rig (src/render/camera.ts). */
+  v: 'viewMode',
 };
 
 export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }: {
@@ -79,6 +86,19 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const prev = useRef<Set<string>>(new Set());
   const [, force] = useState(0);
   const [showStats, setShowStats] = useState(false);
+
+  /* ---- player-driven first/third person rig (V) --------------------------
+   * Off by default: the broadcast director owns the camera unless the player
+   * explicitly takes it. `rigRef` holds the pure state from render/camera.ts;
+   * `plockRef` owns the browser pointer lock. */
+  const rigRef = useRef(createRigState('THIRD'));
+  const plockRef = useRef<PointerLock | null>(null);
+  const [rigOn, setRigOn] = useState(false);
+  const [rigLocked, setRigLocked] = useState(false);
+  const rigOnRef = useRef(false);
+  const rigCamRef = useRef<Camera>({
+    x: 0, z: 0, h: 1.68, yaw: 0, tilt: 0, fov: 1.2, shake: 0, horizon: 0.5, roll: 0,
+  });
   const [tick, setTick] = useState(0);
   const [slow, setSlow] = useState(1);
   /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
@@ -130,9 +150,21 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       dirRef.current?.audio.userGesture();
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
+    /* Pointer lock lives on the HUD canvas: it is the topmost full-bleed
+     * element, so it receives the click wherever the player aims. */
+    if (canvasRef.current && !plockRef.current) {
+      plockRef.current = new PointerLock(canvasRef.current, {
+        onChange: (locked) => setRigLocked(locked),
+      });
+    }
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      plockRef.current?.dispose();
+      plockRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -388,6 +420,27 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       /* SPEC_06 — B toggles the facing/strafe debug overlay. */
       if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
 
+      /* ---- V: take or hand back the camera ------------------------------
+       * First V arms the rig and requests pointer lock. Subsequent presses
+       * flip first <-> third. ESC (browser-owned) drops the lock but leaves
+       * the rig armed, so the player keeps their view mode. */
+      if (pressed.has('viewMode')) {
+        if (!rigOnRef.current) {
+          rigOnRef.current = true;
+          setRigOn(true);
+          /* Seed from the director's current shot so taking control does not
+           * cut: the rig starts exactly where the broadcast camera was. */
+          const st = rigRef.current;
+          st.yaw = st.smoothYaw = d.cam.yaw;
+          st.pitch = st.smoothPitch = -d.cam.tilt;
+          st.posX = d.cam.x; st.posZ = d.cam.z; st.posH = d.cam.h;
+          plockRef.current?.request();
+        } else {
+          toggleViewMode(rigRef.current);
+          force((n) => n + 1);
+        }
+      }
+
       /* Big hits squeeze three frames out of the second. `slow` is the player's
        * own game-speed setting, so the dip multiplies it rather than fighting
        * it, and it is driven by REAL time: slowing the simulation and then
@@ -405,6 +458,39 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
        * thread more than the renderer does. Skipping the draw here is what
        * keeps the progress bar smooth instead of stuttering. */
       if (loadingRef.current) { raf = requestAnimationFrame(loop); return; }
+
+      /* ---- player-driven camera rig ---------------------------------------
+       * Runs AFTER the sim so it reads this frame's ball, and BEFORE the draw
+       * so both the 2D and 3D layers consume the same Camera. Overwriting
+       * d.cam (rather than threading a second camera through the renderers)
+       * is what guarantees the two layers stay pixel-aligned — they already
+       * agree to within 2 px, and that property is worth preserving. */
+      if (rigOnRef.current) {
+        const st = rigRef.current;
+        const md = plockRef.current?.consume() ?? { dx: 0, dy: 0 };
+        const bp = d.ballPoint();
+        const rigInput: RigInput = {
+          fwd: inp.up, back: inp.down, left: inp.left, right: inp.right,
+          sprint: inp.sprint,
+          mouseDX: md.dx, mouseDY: md.dy,
+        };
+        const carrier = d.live.find((q) => d.op && q.team === d.op.attacking
+          && q.num === d.op.carrierNum);
+        const res = updateRig(
+          st,
+          {
+            self: carrier
+              ? { x: carrier.x, z: carrier.z, face: carrier.face ?? 0 }
+              : { x: bp.x, z: bp.z, face: 0 },
+            ball: bp,
+            ballLanding: d.landingPrediction(),
+          },
+          rigInput, dt, DEFAULT_TUNING, rigCamRef.current,
+        );
+        /* Keep the director's own shake so impacts still register. */
+        res.camera.shake = d.cam.shake;
+        Object.assign(d.cam, res.camera);
+      }
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -614,6 +700,20 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
        * the 2D canvas paints the pitch and WebGL is a transparent actor layer. */}
       <canvas ref={canvasRef} className={`absolute inset-0 h-full w-full ${ENV_3D ? 'z-[2]' : 'z-0'}`} />
       <div ref={threeDivRef} className={`pointer-events-none absolute inset-0 ${ENV_3D ? 'z-0' : 'z-[1]'}`} />
+      {/* Player-camera status. Tells you which rig owns the view and, when the
+        * pointer is not locked, how to get it back — a pointer-locked mode
+        * with no visible way to re-enter it after ESC is a trap. */}
+      {rigOn && (
+        <div className="pointer-events-none absolute left-1/2 top-3 z-[40] -translate-x-1/2
+                        rounded border border-emerald-400/60 bg-slate-950/85 px-3 py-1.5
+                        font-mono text-[11px] font-bold tracking-wide text-emerald-300">
+          {rigRef.current.mode === 'FIRST' ? 'FIRST PERSON' : 'THIRD PERSON'}
+          <span className="ml-2 font-normal text-slate-400">V to switch</span>
+          {!rigLocked && (
+            <span className="ml-2 font-normal text-amber-300">· click to look</span>
+          )}
+        </div>
+      )}
       {/* Layer 2 — every HUD panel lives inside this wrapper so the 3D players
        * can never cover the score bar, commentary, or phase readouts. */}
       <div className="pointer-events-none absolute inset-0 z-10">
