@@ -66,7 +66,7 @@ let initPromise: Promise<void> | null = null;
 /** Await the one-time Rapier init. Safe to call from several runners. */
 export function initRapier(): Promise<void> {
   if (!initPromise) initPromise = RAPIER.init();
-  return initPromise;
+  return initPromise!;
 }
 
 export interface PitchSpec {

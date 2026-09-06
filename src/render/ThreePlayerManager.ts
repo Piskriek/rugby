@@ -1845,7 +1845,7 @@ export class ThreePlayerManager {
       foreArms: BONE_NAMES.foreArms.map(find),
     };
     inst.rig = rig;
-    if (import.meta.env.DEV && !rig.pelvis && !rig.spine.some(Boolean)) {
+    if (import.meta.env?.DEV && !rig.pelvis && !rig.spine.some(Boolean)) {
       console.warn('[procedural] no spine/pelvis bones matched — the fake-ragdoll '
         + 'layer is inert. Check the rig naming convention against BONE_NAMES.');
     }

@@ -16,6 +16,8 @@ import {
   planArrivalForce, planDefenceForce, planBallOut, planSlotOf, ruckPresence,
 } from './breakdownPlan';
 import { stepHands, publishHands, windowSlow, defHold, stripTimeFor } from './hands';
+import { throughGate } from './latch';
+import type { LatchVec } from './latch';
 
 /* PART 2 — MULTI-STAGE TACKLE PHYSICS.
  *
@@ -49,12 +51,6 @@ export function inKineticImpact(s: BreakdownState): boolean {
     : false;
 }
 
-/**
- * Slide the carrier and the tackler forward together through the kinetic
- * impact window, decaying the shared velocity to zero by its end, and carry
- * the contact point (and therefore the ruck) along with them. Called once per
- * frame from upBreakdown, before any stage logic reads contactX/Z.
- */
 /**
  * Advance the choreography one frame: every man's lane is sampled, every clearout
  * that has reached its strike point lands on the man it was aimed at, and the
@@ -157,6 +153,286 @@ function kineticImpact(d: Director, s: BreakdownState, dt: number) {
   }
 }
 
+/* ============================ T-80 SPRING LATCHES ============================
+ *
+ * The breakdown is no longer a static slot tableau driven by the axis model
+ * alone. Every participant gets a rigid body (topped with a capsule radius)
+ * and the set is solved each frame as a 6DOF compliant constraint lattice:
+ *
+ *   TACKLE  — tackler's shoulder/arm collider ↔ carrier's torso (spawned as
+ *             soon as valid binding conditions are met: within 1.2 m; the
+ *             gate rule applies to ruck entries, not to the tackle itself).
+ *   RUCK    — each arriving entrant's shoulder ↔ the ball body, spawned the
+ *             moment the man is inside 1.2 m AND has come through the gate
+ *             (behind the hindmost foot, inside the ruck's width).
+ *
+ * Bodies seek their slot marks, bind, and then push. The shove is the same
+ * PWR×quality sum the axis model used — but it is now applied THROUGH the
+ * bind lattice, and the net horizontal force moves the ball body, so the
+ * contest visibly shifts as it is won. Joints release on breaking strength
+ * (a powerful fend rips the tackle bind apart), on tackle completion, or on
+ * the whistle — never by teleporting the participants back to slots.
+ *
+ * The presentation (placeBound easing live actors onto bd.players slots)
+ * is untouched: the slots ARE the latch positions, so the actors follow the
+ * physics one ease behind. No rigid separation runs inside the pod (bound
+ * players are skipped by separate()), so nothing is ever projected.
+ * --------------------------------------------------------------------------- */
+
+const LATCH_AXIS_K = 34;      // N per axis-force unit (axis forces are PWR units ~100s)
+const LATCH_BALL_R = 0.22;
+/* The ball body is the CONTEST's aggregate mass, not a 0.4 kg rugby ball:
+ * it is what the pile's binds and drives push against (a real ruck is the
+ * ball plus the men over it). 7 kg made every bind impulse launch it. */
+const LATCH_BALL_M = 32;
+const TACKLE_AXES = {
+  tx: { k: 4300, c: 640, rest: 0, max: 7000 },
+  ty: { k: 2600, c: 430, rest: 0, max: 4800 },
+  tz: { k: 5600, c: 740, rest: 0, max: 8000 },
+  rx: { k: 1500, c: 250, rest: 0, max: 620 },
+  ry: { k: 1200, c: 220, rest: 0, max: 560 },
+  rz: { k: 1700, c: 280, rest: 0, max: 620 },
+};
+const RUCK_AXES = {
+  tx: { k: 3400, c: 520, rest: 0, max: 5600 },
+  ty: { k: 2200, c: 380, rest: 0, max: 4200 },
+  tz: { k: 4400, c: 640, rest: 0, max: 6600 },
+  rx: { k: 1200, c: 220, rest: 0, max: 520 },
+  ry: { k: 1000, c: 200, rest: 0, max: 470 },
+  rz: { k: 1400, c: 250, rest: 0, max: 520 },
+};
+/* The break limits are the SAFETY ceiling, not the tuning line: the spring
+ * lattice caps every axis individually (7-8 kN) so the vector sum of a
+ * normal tackle/ruck sits around 8-12 kN, and the split-impulse contact
+ * keeps the bind at its rest envelope. A fend is a driven release from
+ * open.ts (latch.fend), which sends a strain spike of its own — bindings
+ * do not wear out from an ordinary shove. */
+const TACKLE_BREAK_N = 15000, TACKLE_BREAK_NM = 1500;
+const RUCK_BREAK_N = 13000, RUCK_BREAK_NM = 1300;
+
+function bodyMass(p: { attrs: { PWR: number } }): number {
+  return 88 + p.attrs.PWR * 0.22;   // 88-115 kg, heavier props push heavier
+}
+
+function yawToward(x: number, z: number, tx: number, tz: number): number {
+  return Math.atan2(x - tx, z - tz);
+}
+
+/**
+ * Build the pile. Every slot becomes a body spawned at its LIVE position
+ * (nothing teleports in), seeking its slot mark. The ball body is the
+ * contested object the binds transmit through.
+ */
+function latchMount(d: Director, s: BreakdownState, dir: number): void {
+  const sys = d.latches;
+  sys.reset();
+  const fwd = s.attacking === 'A' ? 1 : -1;
+  /* The ball body — the contest's aggregate mass. It sits half a stride in
+   * front of the contact point, at the carrier's feet, where a ruck actually
+   * forms — never underneath the carrier's torso capsule (deep initial
+   * overlap made the contact spring eject it through the pile). */
+  const ballZ = s.contactZ + fwd * 0.6;
+  const ball = sys.spawn({
+    kind: 'BALL', team: s.attacking, num: 0,
+    x: s.contactX, z: ballZ, y: 0.3, yaw: 0, vx: 0, vy: 0, vz: 0, yawVel: 0,
+    mass: LATCH_BALL_M, radius: LATCH_BALL_R, down: true, drive: 0, driveDir: fwd,
+  });
+  sys.anchorBody(ball.id, s.contactX, ballZ, 16000, 2600);
+  for (const slot of s.players) {
+    const p = d.L(slot.team, slot.num);
+    /* ARRIVAL SPEED CAP. The open-play converger is sprinting at up to
+     * 10 m/s when the whistle falls; a body that keeps that into the bind
+     * arrives as a 12 m/s projectile (the jarring fault — the pile's worst
+     * pairs were all v≈10/3.4). A real clearout brakes as he closes: the
+     * hit is carried, not the full sprint. 5.5 m/s is still a hard arrival;
+     * the seek braking below finishes the settle. */
+    const sv = Math.hypot(p.vx, p.vz);
+    const vCap = sv > 5.5 ? 5.5 / sv : 1;
+    const body = sys.spawn({
+      kind: slot.role === 'CARRIER' ? 'CARRIER'
+        : slot.role === 'TACKLER' ? 'TACKLER'
+          : slot.role === 'JACKAL' ? 'JACKAL'
+            : slot.role === 'COUNTER' ? 'COUNTER' : 'CLEARER',
+      team: slot.team, num: slot.num,
+      x: p.x, z: p.z, y: 0, yaw: slot.role === 'TACKLER'
+        ? yawToward(p.x, p.z, s.contactX, s.contactZ)
+        : (slot.team === s.attacking ? (dir > 0 ? 0 : Math.PI) : (dir > 0 ? Math.PI : 0)),
+      vx: p.vx * vCap, vy: 0, vz: p.vz * vCap, yawVel: 0,
+      mass: bodyMass(p), radius: 0.55, down: slot.down, drive: 0,
+      /* The shove is along each side's own attacking axis: the carrier side
+       * drives +fwd, the defending side drives −fwd. `latticeNet` reads the
+       * same sign to split attack/defence. */
+      driveDir: slot.team === s.attacking ? fwd : -fwd,
+    });
+    /* The body spawns with the live actor's velocity, so the carrier keeps
+     * the momentum of the carry into the bind: a powerful runner lands hard
+     * and strains the tackle joint before the bind settles him. */
+    slot.mx = slot.x; slot.mz = slot.z;
+    sys.seek(body.id, slot.x, slot.z);
+  }
+
+  /* PILE SEATING. Open play ends with the tackler ON the carrier (the gate
+   * hunt found pairs 0.1 m apart, v=0.0/3.4 — the hit arrived inside the
+   * man). A pile bound together must START at its contact envelope: spread
+   * every pair that is inside (rA+rB) by a small, deterministic kick along
+   * the pair normal, at mount only, in a few bounded passes. The ball body
+   * is anchored, so the men give way around it. Bodies keep their velocities
+   * (the hit is a hit), and the seat becomes the seek mark, so nothing walks
+   * back into its neighbour. This is the "minimum separation margin" fix:
+   * the joints then compress from a legal gap instead of merging at zero. */
+  const BALL_K = 0;   // the ball body does not move — it is anchored
+  for (let pass = 0; pass < 4; pass++) {
+    let moved = false;
+    for (let i = 0; i < sys.bodies.length; i++) {
+      for (let k = i + 1; k < sys.bodies.length; k++) {
+        const a = sys.bodies[i], b = sys.bodies[k];
+        const dx = b.x - a.x, dz = b.z - a.z;
+        const d = Math.hypot(dx, dz);
+        const need = (a.radius + b.radius) * 0.92 + 0.07;
+        if (d >= need) continue;
+        const nx = d > 1e-4 ? dx / d : 1;
+        const nz = d > 1e-4 ? dz / d : 0;
+        const gap = need - d;
+        const wA = a.kind === 'BALL' ? BALL_K : b.kind === 'BALL' ? 1 : 0.5;
+        const wB = 1 - wA;
+        a.x -= nx * gap * wA; a.z -= nz * gap * wA;
+        b.x += nx * gap * wB; b.z += nz * gap * wB;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  /* the seats ARE the marks now — re-aim every seek at the seated spot. */
+  for (const b of sys.bodies) {
+    if (b.kind === 'BALL') continue;
+    sys.seek(b.id, b.x, b.z);
+  }
+}
+
+/** Drive one committed body through its bind (N). Returns true when the body
+ *  is actually in the lattice — an unbound entrant pushes nothing. */
+function driveBody(d: Director, team: 'A' | 'B', num: number, units: number): boolean {
+  const b = d.latches.byTeamNum(team, num);
+  if (!b || !b.bound || b.kind === 'BALL') return false;
+  b.drive = clamp(units * LATCH_AXIS_K, 0, 5200);
+  return true;
+}
+
+
+
+/** One bind attempt pair (shoulder ↔ torso). */
+function tryTackleBind(d: Director, s: BreakdownState): void {
+  const sys = d.latches;
+  const carrier = sys.byKind('CARRIER');
+  const tackler = sys.byKind('TACKLER');
+  if (!carrier || !tackler) return;
+  if (sys.joints.some((j) => j.kind === 'TACKLE')) return;
+  /* A bind torn by breaking strength IS the fend: the hit is broken, the
+   * pair repopulates from the sides — never an instant re-bind. */
+  if ((sys.metrics.releases['BREAK_STRENGTH'] ?? 0) > 0) return;
+  const dx = tackler.x - carrier.x, dz = tackler.z - carrier.z;
+  const dOrig = Math.hypot(dx, dz);
+  if (dOrig >= 1.2) return;
+  /* The tackler's shoulder sits on the side the defender came from. The
+   * anchors are at the CAPSULE SURFACES (the two radii), so the joint rests
+   * exactly at the contact envelope: a bind that is never stretched to its
+   * break point by its own rest pose. Bodies still compress INTO the bind
+   * when the pile drives them, which is the compliant shove the law wants. */
+  const lat = clamp(dx * 0.14, -0.14, 0.14);
+  const shoulder: LatchVec = { x: lat, y: 1.34, z: 0.55 };
+  const torso: LatchVec = { x: 0, y: 0.95, z: 0.55 };
+  const j = sys.bind({
+    kind: 'TACKLE', a: tackler.id, b: carrier.id,
+    anchorA: shoulder, anchorB: torso,
+    axes: TACKLE_AXES, breakN: TACKLE_BREAK_N, breakNm: TACKLE_BREAK_NM,
+  });
+  if (j) {
+    tackler.vx = (dx / dOrig) * 3.4;
+    tackler.vz = (dz / dOrig) * 3.4;
+    d.shake(0.06 + 0.08 * clamp(s.power.A / 900, 0, 1));
+  }
+}
+
+/** Ruck entry: bind the first shoulder to the ball through the gate. */
+function tryRuckBinds(d: Director, s: BreakdownState, fwd: number): void {
+  const sys = d.latches;
+  const ball = sys.byKind('BALL');
+  if (!ball) return;
+  for (const b of sys.bodies) {
+    if (b.kind === 'BALL' || b.kind === 'CARRIER' || b.kind === 'TACKLER' || b.bound) continue;
+    if (b.down) continue;
+    if (Math.hypot(b.x - ball.x, b.z - ball.z) >= 1.2) continue;
+    const defence = b.team !== s.attacking;
+    if (!throughGate(b.x, b.z, ball.x, ball.z, fwd, defence)) continue;
+    /* shoulder at the entrant's capsule surface; the ball anchor stays at
+     * its centre (entrants bind from both sides, so the 0.22 m rest strain
+     * is the shoulder pressed into the ball — soft, never breaking). */
+    const shoulder: LatchVec = { x: b.team === s.attacking ? -0.12 : 0.12, y: 1.22, z: 0.55 };
+    sys.bind({
+      kind: 'RUCK', a: b.id, b: ball.id,
+      anchorA: shoulder, anchorB: { x: 0, y: 0.14, z: 0 },
+      axes: RUCK_AXES, breakN: RUCK_BREAK_N, breakNm: RUCK_BREAK_NM,
+    });
+  }
+}
+
+/** Per-frame latch pass: seek, bind, drive, solve, write back. */
+function latchTick(d: Director, s: BreakdownState, dt: number): void {
+  const sys = d.latches;
+  const fwd = s.attacking === 'A' ? 1 : -1;
+  /* A drive is owned for one frame: the RUCK block below rewrites the legal
+   * men's drives (they are applied on this frame's step once assigned before
+   * it), and anyone not rewritten — illegal now, bound now, or the contest
+   * over — stops pushing. */
+  for (const b of sys.bodies) b.drive = 0;
+  // arrivals: seek the slot mark; once close, hold position and wait for the bind
+  for (const b of sys.bodies) {
+    if (b.kind === 'BALL') continue;
+    const slot = s.players.find((q) => q.team === b.team && q.num === b.num);
+    if (!slot) continue;
+    const dd = Math.hypot(b.x - slot.mx!, b.z - slot.mz!);
+    if (sys.bindCounts().joints === 0 && dd < 0.25) sys.settle(b.id);
+    else if (!b.bound && dd < 0.22) sys.settle(b.id);
+    else if (!b.bound) {
+      sys.seek(b.id, slot.mx!, slot.mz!);
+      /* BIND-ZONE BRAKE. The arrival sheds speed over the last metre and a
+       * half — a man braces into the bind instead of hitting it at sprint
+       * (the jarring fault pairs were all v≈10 into a standing pile). The
+       * seek still pulls him in, the brake only removes the projectile
+       * component; the bind then takes over at ~1 m/s. */
+      if (dd < 1.5) {
+        const k = Math.exp(-(1.9 + (1.5 - dd) * 2.6) * dt);
+        b.vx *= k; b.vz *= k;
+      }
+    }
+  }
+  if (s.stage === 'CONTACT' || s.stage === 'PLACE' || s.stage === 'RUCK') tryTackleBind(d, s);
+  if (s.stage === 'RUCK' && s.ruckFormed) tryRuckBinds(d, s, fwd);
+
+  // drives are assigned by the axis model before this step (sideForce writes
+  // them through `driveBody`), so the shove reaches the contest THROUGH the
+  // bind lattice and the ball body — and the ruck — physically moves.
+  sys.step(dt);
+  const net = sys.latticeNet(fwd);
+  /* The meter is the honest physical read: the net force actually applied
+   * through the binds right now (+1 attack shove, −1 defence hold). */
+  s.contestMeter = clamp(0.5 + net.net * 0.5, 0, 1);
+
+  // write-back: the slots ARE the bodies; ball follows the contested body.
+  for (const b of sys.bodies) {
+    const slot = s.players.find((q) => q.team === b.team && q.num === b.num);
+    if (slot) { slot.x = b.x; slot.z = b.z; slot.down = b.down; }
+    if (b.kind === 'BALL') { s.ball.x = b.x; s.ball.z = b.z; }
+  }
+}
+
+function latchBreakDelta(d: Director, s: BreakdownState): number {
+  const total = d.latches.metrics.releases['BREAK_STRENGTH'] ?? 0;
+  const prev = s.latchedBreaks ?? 0;
+  s.latchedBreaks = total;
+  return total - prev;
+}
+
 export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set<string>) {
 
   const s = d.bd!;
@@ -164,6 +440,18 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
   kineticImpact(d, s, dt);
   stepPlan(d, s, dt);
   const atk = s.attacking, dTeam = d.defending();
+
+  /* T-80 — the lattice pass. Bodies seek their marks, bind when valid, and
+   * the solver moves the contest; the stage logic below reads/writes the
+   * same slot state, and the write-back keeps them in lock-step. */
+  if (d.latches.bodies.length) {
+    latchTick(d, s, dt);
+    const broke = latchBreakDelta(d, s);
+    if (broke > 0) {
+      d.teams[atk].stats.tacklesBroke += broke;
+      d.commentate('BIG_HIT', `— ${broke > 1 ? 'THE BINDS RIPPED APART' : 'A POWERFUL FEND RIPS THE BIND'}`);
+    }
+  }
 
   /* Playtest 2: "I press the pass button and it doesn't pass." A pass
    * pressed during the fight is the nine's call: it plays the moment the
@@ -231,7 +519,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * other phase. This baseline roll lives at the PLACE→RUCK transition
        * (the tackle, not the contest); the contest adds its own hazard
        * below when the defence is actually on top. */
-      if (R() < 0.036 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.015 + (d.slider(atk, 'aggression') / 100) * 0.03) {
         s.resultWhy = 'NOT RELEASING AT THE TACKLE';
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
@@ -281,6 +569,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
 
     const sideForce = (nums: number[], team: 'A' | 'B') => {
       let f = 0;
+      const push: { num: number; c: number }[] = [];
       for (const n of nums) {
         const p = d.L(team, n);
         if (p.sinbin > 0) continue;
@@ -301,9 +590,11 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
          * is what buys the shove back. CPU-vs-CPU numbers are untouched. */
         const quality = p.down ? 0.85
           : clamp((team === s.attacking ? (d.isHuman(atk) ? 1.08 : 1.32) : 1.0) - dist / 6, 0.2, 1);
-        f += p.attrs.PWR * quality;
+        const c = p.attrs.PWR * quality;
+        f += c;
+        push.push({ num: n, c });
       }
-      return f;
+      return { f, push };
     };
 
     /* attack: committed men × commit factor. The base is the clearout
@@ -321,30 +612,10 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * ramp was 0.4 s; the clearout is pre-running off the carrier's hip,
      * and the bdanat probe showed the RUCK stage eating 1.22 s of a 1.7 s
      * breakdown with the ramp as a fixed floor on every one. */
-    /* T-40. The ramp used to be a stopwatch — `contestT / 0.3` — which meant the
-     * attack's shove reached full strength a third of a second after the ruck
-     * formed no matter whether three men were still running in or none were. It is
-     * now the mean of where those men ACTUALLY are, off the same curves that move
-     * them, so the clearout's arrival is the contest's force and the jackal's
-     * window is the time it genuinely takes to get there.
-     *
-     * The 0.45 floor is measured, not decorative: a man 6 m out is already a body
-     * the defence must clear before it can camp on the ball, and pricing arrival at
-     * zero turned late support into a guaranteed turnover. See the probe: steal rate
-     * per ruck is what decides whether this floor is too generous. */
     const arrival = s.plan ? planArrivalForce(s.plan) : Math.min(1, s.contestT / 0.3);
     const atkRamp = Math.max(Math.min(1, s.contestT / 0.3) * 0.4, 0.55 + 0.45 * arrival);
-    /* HANDS ARE A FORCE ON THE BALL, not a modifier on the axis. That distinction is
-     * the whole finding of wiring this up: the defence's `sideForce` is ZERO in a
-     * large share of rucks (nobody in the crew passes the gate test that frame), and
-     * anything multiplied by zero is still zero — the first version of this line was a
-     * `(1 + grip)` factor and it changed nothing at all, which the probe caught as a
-     * steal rate of exactly zero across 42 rucks. An ADDITIVE term is the honest
-     * shape: a grip is worth a man, so it joins the sum as a man does.
-     *
-     * Priced at about a third of a back-rower's shove for the attack's guards, who
-     * are also being counted in `sideForce` for the body they put over the ball. */
-    const atkF = sideForce(s.crew, atk) * commitF * atkRamp + h.atkPressure * 1.7;
+    const atkS = sideForce(s.crew, atk);
+    const atkF = atkS.f * commitF * atkRamp + h.atkPressure * 1.7;
 
     if (humanAtk && pressed.has('action')) {
       s.commitA = clamp(s.commitA + 1, 1, 3);
@@ -361,64 +632,25 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * carrier — no hip rider within three metres — loses that race; a
      * supported one never sees it. This is where breakdown turnovers are
      * earned, not rolled. */
-    /* T-40 — the window is HIS, not the ruck's. Keying the rush to `contestT`
-     * gave a jackal who had not even reached the ball his full strength from the
-     * frame the ruck formed, and took it away a second later whether or not
-     * anybody had come for him. It now counts from the frame he arrived on his mark
-     * (which is when his hands can actually be on the ball) and closes the moment a
-     * clearout drives him off it. A support side that is 2 m away gives him a
-     * second and a half; a packed one gives him nothing. That is the whole
-     * breakdown contest, stated as one number. */
     const jackalT = s.plan ? Math.max(0, s.t - (s.plan.jackalAt ?? s.groundAt)) : s.contestT;
     const clearedHold = s.jackalClearedAt !== undefined
       ? Math.max(0, 1 - (s.t - s.jackalClearedAt) / 0.5) : 1;
-    /* Priced, not free: at a full +1.0 for a second this became a 21% steal rate
-     * against the 5-15% a real side loses, because a jackal is ALWAYS the first
-     * defender there and the clearout is usually the second body in. 0.8 over
-     * 0.85 s is the difference between punishing a support that abandoned the
-     * carrier and punishing a ruck that is merely two men instead of three. */
     const jackalRush = 1 + 0.8 * Math.max(0, 1 - jackalT / 0.85) * (s.jackalActive ? clearedHold : 0);
-    /* The defence gets the same question asked of it: a counter-rucker still 12 m
-     * away is not a counter-rucker, and a jackal who has been driven 1.4 m off the
-     * ball is not holding it. `planDefenceForce` reads both off the lanes. */
     const defArrive = s.plan ? planDefenceForce(s.plan) : 1;
-    /* A GRIP IS WORTH A THIRD OF A BACK ROW. The defence's force above is built from
-     * men and arrival, exactly like the attack's, and that is the right base — but it
-     * has no term for the one thing that actually wins a ball: hands on it. Without
-     * one, a defender who holds the ball for a full second changes nothing about the
-     * axis, so the axis never gets to the number the turnover is read from, and the
-     * contest could only be won by a shove. Measured on 42 rucks: 1038 frames of a
-     * real grip, three frames where it coincided with a red axis, zero turnovers.
-     *
-     * The multiplier is bounded and it decays with the grip, so it cannot be farmed:
-     * lose contact for a frame and the count restarts from zero, which is what a
-     * clearout through the Jackal's hands does to him. */
-    /* A GRIP ON THE BALL IS WORTH A MAN. `PRESSURE_PER_HAND` is scaled so one
-     * settled defender with both hands on it for a second contributes about what a
-     * third-row forward arriving at full shove does, and no more: hands win a ball
-     * that has been cleared of bodies, they do not out-push a clearout. The decay is
-     * the point — the count restarts the frame a clearout breaks contact, which is
-     * what a clearout is for. */
-    const defF = sideForce(s.defCrew, dTeam) * (0.78 + diff.reaction * 0.22) * (0.55 + 0.45 * defArrive)
+    const defFactor = (0.78 + diff.reaction * 0.22) * (0.55 + 0.45 * defArrive)
       * (1 + (jackal ? jackal.attrs.AWA : 40) / 350)
-      * (s.commitA <= 1 ? 1.22 : 1)    // a one-man ruck is a stealable ruck
-      * jackalRush + h.defPressure * 1.2;   // swept 1.2 → 3.0 on two seeds: this is the
-      /* largest value that keeps every breakdown gate green. 1.8 still passes but
-       * starts paying out more steals than a stranded ruck has bodies for; 2.4 and
-       * above break the arrival and window gates outright. */
+      * (s.commitA <= 1 ? 1.22 : 1)
+      * jackalRush;
+    const defS = sideForce(s.defCrew, dTeam);
+    const defF = defS.f * defFactor + h.defPressure * 1.2;
     s.contestT += dt;
 
-    /* published onto the ruck's own player list for the rig — see hands.ts */
+    /* T-80 — the shove goes THROUGH the bind lattice. Each legal entrant
+     * drives his share of the side's force down his bind into the ball body */
+    for (const m of atkS.push) driveBody(d, atk, m.num, m.c * commitF * atkRamp);
+    for (const m of defS.push) driveBody(d, dTeam, m.num, m.c * defFactor);
+
     publishHands(s, h);
-    /* Asymmetric on purpose, and the asymmetry is the finding, not the style. The
-     * attack's side of this contest is already in the forces above — a guard's body
-     * over the ball is a committed man, and `sideForce` counts him at his PWR and
-     * his arrival. What was NOT in them is a defender's hands, because a jackal is
-     * worth his PWR only when the plan says he has arrived, and the plan does not
-     * know he has the ball in his grip. So defence hands are added and attack hands
-     * are discounted: charging both sides for the same pile made every ruck resolve
-     * to the attack, because the man standing nearest the ball is on the attack's
-     * team. Measured, not believed: 0 steals in 45 rucks, worst axis −0.57. */
     s.power.A = atkF; s.power.B = defF;
     const net = clamp((atkF - defF) / Math.max(1, atkF + defF), -1, 1);
     /* Driving a man backwards off the ball is easier work than prying it
@@ -454,13 +686,27 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
     s.axisVel += net * recover * dt;
     s.axisVel *= Math.exp(-0.8 * dt);
     s.axis = clamp(s.axis + s.axisVel * dt, -1, 1);
-    s.contestMeter = (s.axis + 1) / 2;
+    /* `contestMeter` is written by the latch pass (the physical net force);
+     * the axis above is the resolution model the thresholds read. */
     /* SUSTAINED HANDS — the second steal path. A defence that holds the ball
-     * on its side of the axis for a full second is winning it in fact, rush
-     * or no rush; the law gives it to the jackal who had both hands on it
-     * and his weight past the ball. An instant dip to −0.75 is a rip; this
-     * is a grind-out, and both are steals. */
-    if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
+     * on its side of the axis for a real beat is winning it in fact, rush or
+     * no rush; the law gives it to the jackal who had both hands on it and
+     * his weight past the ball. An instant dip to −0.75 is a rip (the
+     * numbers path below); this is a grind-out, and both are steals.
+     * The numbers call stays law-true: with equal or more men over the ball
+     * a set jackal may take it; a man alone in there only slows it. */
+      if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
+    if (s.axis <= -0.6 && s.redT >= 0.6 && s.jackalActive
+      && s.defCrew.length >= s.crew.length && s.stage === 'RUCK') {
+      d.teams[dTeam].stats.turnovers++;
+      if (jackal) { d.run(dTeam, jackal.num).jackals++; d.teams[dTeam].stats.jackals++; }
+      d.emitEv({ t: d.t, type: 'TURNOVER', x: s.contactX, z: s.contactZ });
+      d.commentate('TURNOVER');
+      s.resultWhy = `JACKAL WON — SUSTAINED HANDS ACROSS THE BALL, AXIS ${s.axis.toFixed(2)}`;
+      d.clearRuck();
+      d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
+      return;
+    }
 
     /* defence on top → the not-releasing hazard rises with their dominance
      * (the attack is the side holding the man off the ball). The old roll
@@ -501,7 +747,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * in the 22), not a raffle on every ruck. */
       if (s.jackalActive && jackal) {
         const redZone = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 22;
-        if (R() < (redZone ? 0.15 : 0.03)) {
+        if (R() < (redZone ? 0.08 : 0.02)) {
           s.resultWhy = 'NOT ROLLING AWAY — THE JACKAL HELD ON TOO LONG';
           d.beginPenalty(atk, REFEREE_CALLS.HANDS_IN, jackal.num);
           return;
@@ -617,10 +863,10 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       }
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
-       * other phase. A body on the ball with no hands in it is the version of
-       * this offence that used to be free. */
+       * other phase. */
       const noHands = h.bestDefOnBall < 0.12 ? 0.03 : 0;
       if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06 + noHands) {
+        s.resultWhy = `NOT RELEASING — THE JACKAL HELD UNDER THE SHOVE (AXIS ${s.axis.toFixed(2)})`;
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
       }
@@ -932,6 +1178,9 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   }
   d.phase = 'BREAKDOWN';
   d.op = undefined;
+  /* T-80 — the pile is built at the LIVE positions (no teleport), each body
+   * seeking its slot mark. The ball body is the contested mass. */
+  latchMount(d, d.bd!, dir);
   if (d.isHuman(atk)) d.showHint('A/D POUND TO CLEAR OUT — OR WAIT FOR THE NINE', 2.6);
   d.setCtrl(atk, 9);
 }

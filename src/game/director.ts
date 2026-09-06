@@ -76,6 +76,7 @@ import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/la
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
+import { LatchSystem } from './engine/latch';
 
 /* ============================ INPUT ============================ */
 
@@ -323,7 +324,9 @@ export interface BreakdownState {
     /** HANDS — 0..1 how committed his hands are to the ball this frame, and how
      *  far the strip has got. Written by stepHands, read by the rig to decide
      *  whether his arms should be reaching for the ball or holding a man. */
-    hand?: number; strip?: number }[];
+    hand?: number; strip?: number; mx?: number; mz?: number }[];
+  /** T-80 — spring-bind fend-offs counted this breakdown. */
+  latchedBreaks?: number;
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck
@@ -623,6 +626,9 @@ export class Director {
   op?: OpenPlayState;
   ml?: MaulState;
   bd?: BreakdownState;
+  /** T-80 — multi-body compliant spring binds for the tackle/ruck contest.
+   *  Reset on every breakdown start, released on whistle/phase teardown. */
+  latches = new LatchSystem();
   pitch: PitchConditions;
   zoom = 0.34;
   camMode: CamMode = 'CABLE';
@@ -1890,7 +1896,7 @@ export class Director {
              * tautology — an AI that needed suppressing is the defect. */
             this.offsideLedger.markWhistled(this, line, team);
             this.formationCounts.offsideSuppressed[team]++;
-            if (import.meta.env.DEV) {
+            if (import.meta.env?.DEV) {
               console.warn(`[SPEC_12] ${team}${breach.player.num} needed Force-AI-Clean suppression — `
                 + `${breach.penetration.toFixed(1)} m offside at the ${line.kind} line`);
             }
@@ -2038,14 +2044,14 @@ export class Director {
    * so a headless harness reports the precise writer instead of tuning past it.
    */
   private readonly reportForwardAttackGate: ForwardAttackGateReporter = (failure: ForwardAttackGateFailure): void => {
-    if (!import.meta.env.DEV) return;
+    if (!import.meta.env?.DEV) return;
     const message = `[SPEC_02 gate] ${failure.label} :: ${failure.reason} :: ${JSON.stringify(failure.values)}`;
     console.error(message);
     throw new Error(message);
   };
 
   private forwardAttackGates(): ForwardAttackGateReporter | undefined {
-    return import.meta.env.DEV ? this.reportForwardAttackGate : undefined;
+    return import.meta.env?.DEV ? this.reportForwardAttackGate : undefined;
   }
 
   /** Engine modules use this to route their pure SPEC_02 gate results here. */
@@ -2926,7 +2932,7 @@ export class Director {
    */
   place(p: Live, x: number, z: number, who: string) {
     const ddx = x - p.x, ddz = z - p.z;
-    if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
+    if (import.meta.env?.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
     }
     p.movedBy = who;
@@ -3008,7 +3014,7 @@ export class Director {
      * he does not get to shout about it eight times a match. Every other
      * behind-the-ball mark still warns, because every other one IS a bug. */
     const authoredLastMan = p.num === 15 && source === 'goal-line-def';
-    if (!authoredLastMan && import.meta.env.DEV) {
+    if (!authoredLastMan && import.meta.env?.DEV) {
       console.warn(`[SPEC_11] shirt ${p.num} (${p.team}) defensive mark from ${source} is `
         + `${(-penetration).toFixed(1)} m behind the ball — clamped to the line`);
     }
@@ -4201,6 +4207,8 @@ export class Director {
       p.down = false; p.bound = false;
     }
     this.bd = undefined;
+    /* T-80 — tackle completed: every bind releases (RECYCLE reason). */
+    this.latches.clear('RECYCLE');
   }
 
   /**
@@ -4336,6 +4344,8 @@ export class Director {
     this.ml = undefined;
     this.scrim = undefined;
     this.lo = undefined;
+    /* T-80 — the whistle / phase teardown releases every bind. */
+    this.latches.clear('WHISTLE');
   }
 
   /* ============================ MAUL ============================ */
@@ -4551,6 +4561,8 @@ export class Director {
     this.penaltyTouchKick = false;
     this.phase = 'KICK';
     this.op = undefined; this.bd = undefined;
+    /* T-80 — a whistle/restart never leaves a frame of bind behind. */
+    this.latches.clear('WHISTLE');
     this.teams[team].stats.kicks++;
     this.run(team, num).kicks++;
     if (type === 'RESTART' || type === 'DROP_OUT') this.kickoffFormation(team, z);

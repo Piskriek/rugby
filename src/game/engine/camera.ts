@@ -385,13 +385,22 @@ export function cableRig(
    * faults). The lead scales with the subject's own velocity. */
   const spd = k ? Math.hypot(k.vx, k.vz) : (d.op ? Math.hypot(d.op.vx, d.op.vz) : 0);
   const leadK = clamp(0.35 + spd / 9, 0.35, 1);
-  /* THE LEAD IS IN METRES AND THE FRAME IS IN PIXELS. A 9 m lead is a fifth of
+  /* The LEAD follows the PLAY, never the rig's side. With the end-on side
+   * locked (cableSwapOnTurnover off) an attack running INTO the lens needs
+   * its lead reversed — the old rigDir lead pointed the lens PAST an
+   * oncoming carry, and a long straight run spent six seconds with the ball
+   * riding the bottom edge of the frame (the 400-frame d0 off-target burst
+   * in the fault hunt). A run away from the lens leads as before; a run at
+   * the lens rides a touch short so the ball sits above the line.
+   *
+   * THE LEAD IS IN METRES AND THE FRAME IS IN PIXELS. A 9 m lead is a fifth of
    * a wide shot and three quarters of a tight one: left alone, the framing gain
    * pushes the ball out of the bottom of the frame and UX-23 ("the ball is
    * inside the frame") fails for the sake of legibility, which is the opposite
    * of what the gain is for. So the lead is divided by the same number that
    * multiplies the lens — the rig keeps leading by the same FRACTION of shot. */
-  const aimZ = anchorZ + rigDir * (spec.lead / cGain) * (1 + wide * 0.6) * dropK * leadK;
+  const leadDir = rigDir === dir ? dir : dir * 0.45;
+  const aimZ = anchorZ + leadDir * (spec.lead / cGain) * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
   const pxC = spec.pxPerMetre * z.pxMul * cGain * (1 - wide * 0.28 * rollK);
