@@ -23,6 +23,112 @@
 > those same gates (6 and 262 respectively). Do not tune the maul feature to
 > chase those unrelated stochastic gate values.
 
+> **SPEC_24 MATCH DAY shipped — 2026-09-05.** The presentation half of §6 is
+> closed: `render/conditions.ts` resolves the four condition systems the engine has
+> always modelled (weather, pitch, wind, kick-off) into one look, and the renderer,
+> the sky, the lights, the precipitation, the FX and the audio bed all read that one
+> object. New: `render/ThreeMatchDay.ts` (sky dome, shadowed light rig, GPU rain,
+> wet/frost layer), `render/ThreeParticles.ts` (one 1 600-particle pool, eight
+> behaviours), `render/fxDirector.ts` (FX from OBSERVED director transitions — the
+> engine never calls it), `ui/broadcast.tsx` (score bug, try stripe, TMO card,
+> conditions strip, ratings, replay treatment), a `RENDER PIPELINE` option, and two new
+> harnesses (`scripts/glslcheck.ts`, `scripts/matchdayheadless.ts`).
+> The seeded audit is unchanged to the point: `audit-cli 90 3 1` gives PASS 5343 /
+> WARN 4 / FAIL 1 on this branch and on clean `main`. **Read SPEC_24_MATCHDAY.md
+> before adding a particle or touching the colour pipeline.**
+>
+> Two rules this pass established and the next engineer should keep: the engine
+> owns numbers, `conditions.ts` owns appearances; and FX are derived by diffing the
+> Director, never pushed from inside a phase handler — that is §3.1's
+> two-writers-one-frame bug wearing a particle count.
+>
+> **SPEC_24 MERGE — 2026-09-05, same day.** The AAA edition (`6993915`) landed on this
+> branch while the match-day pass was being written, and both had built a sky, a light
+> rig and a post chain from the same base commit. The merge is by ownership, not by
+> union: their `render/turf.ts` procedural albedo/roughness/normal and their PBR
+> `MeshStandardMaterial` squad won the surfaces, our `render/conditions.ts` +
+> `render/ThreeMatchDay.ts` won the sky, lights, fog, shadow tier and grade, and their
+> `ThreeSky.ts` + `ThreePost.ts` were deleted along with the duplicate `graphics` and
+> `timeOfDay` display switches (the engine's own KICK-OFF option is the time of day).
+> `ui/broadcast.tsx` is theirs with our `ConditionsStrip`/`FormStrip`/`TmoCard`/`CardCard`
+> /`ReplayFrame` appended; their `game/gamepad.ts`, `MatchIntro`, `PlayerSpotlight` and the
+> two `director.ts` score-integrity fixes are all live. One object in `src/render` may say
+> where the sun is. Reasoning per area: `AAA_EDITION.md`; what changed in the SPEC_24 design:
+> its addendum. Post-merge gates: `tsc` clean, `glslcheck` 10/0, `matchdayheadless` all green,
+> `spec07-contracts` ALL GREEN, `audit-cli 90 3 1` byte-identical to both parents (PASS 5343 /
+> WARN 4 / FAIL 1) and `turfverify` ALL PASS at 780 ms. `6bcbd54` (the NO TELEPORTS engine fix) then
+> merged on top; the seeded audit is now byte-identical to that tip at PASS 5407 / WARN 2 / FAIL 2,
+> 0 teleports, and the trade is recorded in `AAA_EDITION.md`. The freeze fix that followed (`8fb84d3`:
+> `render/noise.ts`, 2048×1024 turf, staged `LoadingScreen`, `contextlost` handling) merged into the
+> same commit; our scars are authored in metres for exactly that reason, and the crowd idle
+> optimisation gained a settle pass so a cheer cannot leave six sevenths of the stadium frozen
+> mid-jump.
+>
+> **THE BREAKDOWN, PRE-SIMULATED — 2026-09-06.** The user's verdict on the shipped tackle
+> was "better but not good", with a specific list: how players behave at the tackle, how
+> they clean out, how the ball comes out, all of it *presimulated so it is optimised*, plus
+> "the blood puddles are hilarious btw". What landed is `game/engine/breakdownPlan.ts`: a
+> ruck is now CHOREOGRAPHED, not steered. One build per tackle (0.10 ms measured) turns the
+> real distances into per-man lanes sampled from `game/data/ruckTimings.json` — 252 curves
+> baked offline by `scripts/breakdownbake.ts` from the same 120 Hz body the ragdoll solves,
+> so the times, the strike, the ground a man gives and the settle are physics the game
+> already believes, not authored numbers. The frame's cost is one table read per man
+> (1.8 µs for five lanes — stumble, peel and both presence counts included, gated at 50 µs).
+> The whole-frame comparison against the planless fallback is printed and NOT asserted: a
+> planned episode frame (445 µs) and a planless one (323 µs) are not the same frames, since a
+> ruck where men arrive and get hit is a busier frame and leads to a different match.
+> No RNG in the plan: it is keyed on shirt number and contact point, which is why the same seed
+> rehearses the same rucks and `scripts/breakdownprobe.ts` can hold it to ten measurements.
+> Three things it fixed that were visible in one sentence of complaint: support arrived all
+> at once (now arrival ORDER, 0.85 s mean spread, zero lockstep frames), nobody was HIT (the
+> first clearer takes the nearest defender, the strike lands at 70% of the lane so it is a
+> collision and not an arrival, and above 2.4 m/s the man he came for is on his back for the
+> get-up lock — a cleanout that removes a body, which is why the ball is then easy), and the
+> ball was teleported to the nine (it is heel'd along a sampled arc that ENDS on the exact
+> mark RECYCLE restarts from, because aiming at the man instead of the mark left the ball
+> 0.8 m short of itself).
+> Presentation answered it in kind, and only in presentation: a shove the engine applied gets
+> a counter-lean measured as the gap between raw and smoothed velocity (`applyBalance`), the
+> hard ones get a real fall seeded from the hit's own impulse instead of a re-estimate, the
+> live solver is capped at six bodies per frame with the seventh and eighth replaying baked
+> takes, a man running in now RUNS instead of arriving already bound, and the men on the
+> winning side peel off the ruck as the ball leaves it. The "blood" was MUD clods: 34 of
+> them per fall, brown, `bounce 0.22`, alive for 1.25 s, plus an `addScar` stamp per landing
+> that multiplied to near-black at one point on the grass. Clods are now half as many,
+> smaller, thrown upward and gone in half a second with no bounce at all; `addScar` refuses
+> a mark within 0.85 m of a recent one, so a ruck is one churned patch; and a ruck now
+> *churns* — two or three flecks every tenth of a second, which is what makes a pile look
+> contested rather than posed.
+>
+> Gates: `tsc` clean, `vite build` 2,032.97 kB / 627.47 kB gzip (+46 kB is the table,
+> inlined by the single-file build), `breakdownprobe` 10/10, `ragdollcheck` 12/12,
+> `ragdollverify` ALL PASS, `renderverify`/`turfverify`/`glslcheck`/`spec07-contracts`/
+> `matchdayheadless` green, `teleprobe` 0 teleports. **The single 90 s seeded sample is no
+> longer a usable bar** — six seeds at 180 s, identical rule sets, this branch against
+> `0c9e80d`: FAIL 22 against 34, with UX-23 18→9, LOG-51 5→1, LAW-17/41/57 6→3, LOG-19 18→10,
+> and two families up: LAW-66 4→9 (holes in the line where a cleanout has just taken a man
+> out of it — the consequence the feature exists to produce) and LOG-20 10→15 (a ruck is
+> dense by construction; widening it was measured and costs the contest its timing, so the
+> trade is recorded in `breakdownPlan.ts` rather than tuned away). `audit-cli 90 3 1` on this
+> branch is PASS 5373/WARN 4/FAIL 1 on seed 1, and PASS 5220/WARN 24/FAIL 18 on seed 4 — that
+> spread is one kick restart moving in or out of the window, not fourteen faults appearing.
+> Use `scripts/auditcompare.sh <dir> 180 "1 2 3 4 5 6"`, which is why it exists. `audit-cli 90
+> 3 4` looks worse (FAIL 12 against 1) and is the same artifact: nine of those are UX-58 on one
+> kick return that is inside this window and outside the baseline's, and the whole kick-restart
+> family (UX-23, LAW-17/57, LOG-51/52/56, UX-58) counts 11 here against 19 on `0c9e80d` over
+> the six seeds — thinner returns and a loose line at a kick taken while the pitch is still
+> arranged around a breakdown, which is a `kick.ts`/shape job and not a ruck job. One idea in
+> this pass was measured inert and deleted rather than kept: re-tasking the men still running
+> into an already-won ruck as the nine's support fired in 0 of 14 rucks, because the committed
+> crew always arrives before the ball comes out. Reasoning in `SPEC_24_MATCHDAY.md`. One audit
+> rule was wrong and is fixed here: LAW-78 asserted 3-3-2 scrum rows as if it were Law 19
+> while `engine/setpieces.ts` has authored 3-4-1 since T-11 and says the old shape "is not a
+> scrum"; the check now tests what the Law requires (a front row of three, the other five
+> bound behind it, at least one at the base) so a future pack shape cannot be a failure by
+> definition. Known, pre-existing, untouched here: at a long restart kick the camera plan
+> lets the focus leave the frame for a few frames (UX-23) and the kicking side's ten are
+> caught ahead of the ball (LAW-17/LAW-57). Both are present on `0c9e80d` at 180 s.
+
 **For the next engineer.** Read this before touching `director.ts`.
 
 ---
@@ -50,6 +156,32 @@ thesis is in code; the thesis itself is in `src/game/jlr.ts`.
 | `render/scene.ts` | ~450 | Scene composition, depth sort, in-world overlays | Safe to extend, do not restructure |
 | `render/minimap.ts` | ~180 | Transparent tactical radar | Safe to extend |
 | `game/director.ts` | **~2600** | The match engine | **This is the game** |
+
+| `render/conditions.ts` | ~370 | **The one resolver for weather × kick-off × pitch × wind** | Active — the renderer's source of truth |
+| `render/ThreeMatchDay.ts` | ~600 | Sky dome, light rig + shadow frustum, GPU precipitation, wet/frost layer | Active |
+| `render/ThreeParticles.ts` | ~345 | One pooled FX system, eight behaviours | Active |
+| `render/fxDirector.ts` | ~360 | Director → FX, by observed transitions only. Never writes to the engine | Active |
+| `ui/broadcast.tsx` | ~400 | The TV package: their score bug, matchday card, player spotlight, controller badge + our TMO, card, conditions, ratings, replay | Active |
+| `render/ragdollKernel.ts` | ~370 | The 11-node flat-array body the baked falls were simulated with. No view in it, which is why it bakes and why it is testable at 10k falls/s | Active |
+| `render/ragdollRig.ts` | ~240 | Bone bridge for the baked tier: resolve, seed from the live pose, drive the rig as a delta from a captured origin | Active |
+| `render/ragdollClips.ts` | ~150 | Playback of the 36 baked takes: pick the cell, rotate to the heading, scale to the pace | Active |
+| `game/engine/breakdownPlan.ts` | ~570 | The ruck, choreographed in advance: one build per tackle turns distances into baked lanes and the frame only samples them. Owns positions and force, never a law | Active |
+| `game/data/ruckTimings.json` | 35.8 kB | 252 baked curves — role × 12 distance buckets × 3 support tiers — carrying time, strike point, transferred Δv, ground given and settle. Generated, do not hand-edit | Generated |
+| `render/ragdoll.ts` | ~470 | Position-based fall solver. 20 particles that ARE bones, one-sided joint limits, Coulomb ground, soft pins for the wrap. Owns posture only — the engine keeps translation | Active |
+| `render/turf.ts` | ~325 | Procedural turf: albedo (stripes + every marking baked), half-res roughness and normal, off one lattice. `TURF_SIZE` is the resolution contract | Active |
+| `render/noise.ts` | ~88 | Precomputed 256×256 value-noise lattice. Exists because the `Math.sin` hash cost 12 s of main thread per pitch | Active |
+| `game/gamepad.ts` | ~160 | Two-stick pad, merged into the same verb stream the keyboard writes | Active |
+| `ui/LoadingScreen.tsx` | ~79 | Covers the staged world build so the tab never looks frozen | Active |
+| `scripts/turfverify.ts` | ~83 | NaN / stripe / normal / build-time gates on the generated turf | Test harness |
+| `scripts/glslcheck.ts` | ~160 | Parses every shader + enforces the smoothstep-domain rule | Test harness |
+| `scripts/matchdayheadless.ts` | ~270 | Drives the render layers over a live match, headless | Test harness |
+| `scripts/ragdollbake.ts` | ~185 | Offline simulation of the fall library. Rejects any take that fails to settle, ends upright or slides | Build tool |
+| `scripts/ragdollverify.ts` | ~285 | Kernel + library: yaw invariance, determinism, budget, decode, settle, playback cost | Test harness |
+| `scripts/renderverify.ts` | ~48 | Asserts the pitch crown's sign and that the renderer leaves tone mapping to the grade pass | Test harness |
+| `scripts/breakdownbake.ts` | ~340 | The offline bake for the table above: integrates a real 120 Hz bang-bang body per role/distance/tier, derives strike/impulse/retreat from that body, validates monotone + bounded + step-cap and REFUSES to write a bad table | Tool — run with `--write` |
+| `scripts/breakdownprobe.ts` | ~330 | Ten behavioural measurements on live CPU-vs-CPU runs in three variants (planned, planless, support stranded): no teleports, arrival order, clearout displacement, ball-out path, the numbers rule, cost, determinism | Test harness |
+| `scripts/ragdollcheck.ts` | ~330 | Twelve measurements on the fall solver with a synthetic rig: stretch, limits, sinking, mud-vs-firm, pair contact, wrap pins, energy, determinism, cost | Test harness |
+| `scripts/lookprobe.ts` | ~200 | Rebuilds albedo × rig × tone curve per condition set and flags clipped or black surfaces. Exists because no harness here can look at the picture | Test harness |
 | `game/intelligence.ts` | ~400 | Off-ball brain: movement, shapes, pass solver, crews | Active |
 | `game/shapes.ts` | ~500 | Shape/defence/playbook/camera-plan data | Active |
 | `game/data.ts` | ~750 | Teams, squads, kits, options, laws, commentary | Active |
@@ -2128,3 +2260,84 @@ The following specification documents have been drafted for the upcoming work qu
 - [SPEC_09_RESTART_RITUAL.md](./SPEC_09_RESTART_RITUAL.md)
 - [SPEC_10_AUDIT_FAMILIES.md](./SPEC_10_AUDIT_FAMILIES.md)
 
+**Shipped, needs a human eye on the picture:**
+
+- [SPEC_24_MATCHDAY.md](./SPEC_24_MATCHDAY.md) — the AAA presentation pass. Every
+  number in it is measured; none of it is judged. The first review is a person
+  watching a rainy Tuesday at 3 p.m. and deciding whether the grade is right.
+
+
+## 11. THE CONTEST AND THE BOOT — 2026-09-06 (this Arena session, `arena/01a072cf-rugby`)
+
+Two things were wrong when this session started: the field went silent at 66%, and
+the breakdown was still arithmetic wearing a costume. Both are fixed, both are
+measured, and the fixes are load-bearing on each other — a stall you cannot see is
+indistinguishable from a stall you chose to tolerate.
+
+**The boot rule, restated so it does not regress:** a staged boot stage may not have
+an unsettled path. `ThreePlayerManager.load()` is `async` end to end
+(`parseAsync`, `Promise.all` over rig + tackle-pair bytes with the optional half
+`.catch(() => null)`), a module-level `cached(url)` memoises only the **bytes**, and
+`MatchView` races every stage against `RIG_BUDGET_MS = 6000` /
+`BOOT_BUDGET_MS = 15000`, naming the stage that timed out in a dismissible banner.
+`scripts/bootcheck.ts` (7 checks) drives that ladder with a deliberately hanging
+asset. Do not "widen the timeout" to make a symptom go away, and do not cache the
+*prepared* scene — `prepareTemplate` mutates its template.
+
+**The contest:** `engine/hands.ts` (new) owns the ball, `latch.ts` owns the man.
+Reach is a posture-keyed field sampled from the plan's own slot state; a grip needs
+`gap < GRIP_M[posture]` and `reach > 0.22`; the strip meter is the only route to a
+turnover, on top of the jackal numbers law and the hold time. Hands pressure enters
+`defF`/`atkF` **additively** (×1.2 — see `AAA_EDITION.md` for the sweep) because
+`sideForce` is zero in many rucks and a multiplier on zero is invisible.
+
+**Traps this session paid for, in one place:**
+- A `new Promise` whose executor awaits an `async` callback can never reject. That is
+  the whole 66% bug class.
+- Any multiplicative hands term on a side-force that is often zero is dead code that
+  looks tuned.
+- A gate comparing `stats.jackals` to a crew-list count measures `assignCrew`, not the
+  law. Both probes had to switch to the engine's own `ruckPresence(plan, atk, hands)`
+  read on the state *before* the deciding frame — the win writes `resultWhy` and then
+  destroys the state in the same call, so read the snapshot you kept.
+- `bestDefOnBall` is seconds and `defHold` returns it; `strip` is a 0..1 meter. Two
+  clocks, and confusing them makes a units bug that reads like a balance bug.
+- Never assert a rate the engine's own law controls without first measuring the
+  distribution: the remembered "0.143 steals/ruck" baseline does not exist in this
+  build, and `redT >= 1.0 s` was unreachable for the same reason.
+- `sceneaudit`'s `tallest px` must be read after letting `updateCamera` settle
+  (~45 × ) or it measures an easing lens, not the framing.
+
+**Green as shipped:** `tsc --noEmit` clean · `vite build` clean (dist/index.html
+2,051.31 kB, gzip 633.76 kB) · `sceneaudit` 19/19 with `tallest 19 px` at 640×360 ·
+`breakdownprobe` all green · `handsprobe` ALL PASS · `teleprobe` 0 teleports across
+difficulty 0/3/6 · `ragdollcheck`, `renderverify`, `turfverify`, `glslcheck`
+(10 shaders, 0 failing), `spec07-contracts`, `matchdayheadless` all green.
+
+**One disclosed regression, and it is a queue item.** Merging the pushed session
+history in (`68de62b`, whose open-play calibration this tree keeps) moves
+`audit-cli 120 3 1` from FAIL 2 to **FAIL 5**, all of it `LAW-66` — a 7 m hole in
+the defensive line where the pre-merge tree measured 5.9 m. Both parents read FAIL 2
+separately, so it is an interaction, not either side's bug. Bisected by measurement,
+not by opinion: the handling-error rate is innocent (5 either way), and the
+first-receiver turning gate costs two of the three (reverting it reads FAIL 3 with
+the same 7.2 m worst hole). The honest cause is that a defence folding back out of a
+ruck is scored against the open-play spacing rule while its men are still in
+clearout lanes, which the new choreography makes both more frequent and wider. The
+fix owed is a fold-back budget after a ruck — a rule in the defensive AI, not a
+slower attack, and certainly not a weakened LAW-66. It is written down at the call
+site in `engine/open.ts` as well as here.
+
+**Still owed to a human eye:** the picture itself. This session had no browser, so
+"the game looks right" is unbilled work — framing is 19 px at 640×360 (1.6× camera
+gain, `sceneaudit`-guarded) and needs someone to say whether the grapple reads at
+that size or whether the rig needs the ball-side hand drawn bigger.
+
+**Read `SENIOR_PLAYBOOK.md` before you open a file, and finish with
+`npx vite-node scripts/gatecheck.ts` before you ask anyone to review.** That is the
+whole contract: §1–3 are the rules and the traps, §6 is three scoped briefs with their
+acceptance tests, §7 is how to review a sibling branch that solved the same prompt by
+forking the engine. The gate runs seventeen harnesses plus `tsc` and the production
+build in about two minutes, refuses a merge on any red line, and ratchets the audit's
+FAIL/WARN counts against `scripts/gate-baseline.json` so a session cannot quietly
+purchase green with a weakened check.

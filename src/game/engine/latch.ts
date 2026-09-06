@@ -37,7 +37,6 @@
 
 import type { Live } from '../intelligence';
 import type { OpenPlayState } from '../director';
-import { R } from './rng';
 
 /* ============================ IDENTITY ============================ */
 
@@ -62,8 +61,8 @@ export function playerId(p: { team: 'A' | 'B' | 'REF'; num: number }): PlayerId 
  * because anything lighter reads as a man who has simply slowed down rather
  * than a man being held.
  */
-export const LATCH_SPEED_MULT = 0.42;
-export const LATCH_ACCEL_MULT = 0.35;
+export const LATCH_SPEED_MULT = 0.28;
+export const LATCH_ACCEL_MULT = 0.30;
 
 /**
  * THE GRIP TIGHTENS. A constant drag multiplier gives the carrier a terminal
@@ -78,14 +77,8 @@ export const LATCH_ACCEL_MULT = 0.35;
  * trigger is reachable, and the drag distance falls to the metre or two a
  * real carry makes through contact. The timer is left as the ceiling it was
  * always meant to be, not the way every tackle ends.
- *
- * AUDIT retune: 0.28 / 0.42 s read as a man instantly glued and dumped — the
- * carrier dropped below dead-momentum almost before the strip window opened,
- * so every latch ended at the first trigger and the tackle had no middle.
- * 0.42 / 0.55 s keeps a 7 m/s carrier alive for the whole wrestle, so the
- * grapple, the strip beat and the drive-through all exist on screen.
  */
-export const LATCH_GRIP_SECONDS = 0.55;
+export const LATCH_GRIP_SECONDS = 0.42;
 
 /** The live drag multiplier for a held carrier, given seconds since contact. */
 export function dragMultiplier(latchT: number): number {
@@ -94,13 +87,13 @@ export function dragMultiplier(latchT: number): number {
 }
 
 /** The longest a latch can survive before the takedown is forced, seconds. */
-export const LATCH_MAX_DRAG = 0.75;
+export const LATCH_MAX_DRAG = 0.6;
 
 /**
  * Dead momentum. Below this the carrier is no longer going anywhere and the
  * drag has done its job — he goes over. Metres per second.
  */
-export const LATCH_DEAD_MOMENTUM = 1.4;
+export const LATCH_DEAD_MOMENTUM = 1.5;
 
 /**
  * A latch needs a moment to exist before the momentum test can end it, or a
@@ -113,47 +106,18 @@ export const LATCH_MIN_DRAG = 0.12;
 export const LATCH_TRAIL_METRES = 0.5;
 
 /**
- * The fastest the hanging defender may close onto the carrier's hip, metres
- * per second. The old write moved him the WHOLE remaining gap on the first
- * latch frame (measured 1.73 m — a teleport). A live latch lasts at most
- * LATCH_MAX_DRAG (0.6 s) and the carrier is under the 28% drag, so ~5 m/s
- * closes a genuine gap while keeping every frame under the provenance line.
- */
-export const LATCH_SNAP_SPEED = 5.0;
-
-/* ---------- THE STRIP (hands win the ball in the drag) ---------- */
-
-/** Seconds into the drag before a strip can be attempted. Before this the
- *  defender is still just getting hands on — he cannot rip what he has not
- *  grabbed. */
-export const STRIP_START = 0.14;
-/** Seconds after which the drag timer/shove takes over. The wrestle window is
- *  (STRIP_START, STRIP_END). */
-export const STRIP_END = 0.70;
-/** The chance multiplier on a dominant wrestle, plus the base that means even
- *  a fair fight has a beat where the ball can come loose. */
-export const STRIP_BASE = 0.14;
-
-/**
- * The strip attempt, derived from the wrestle, NOT a coin flip:
+ * THE CLOSE. A latch begins at the contact radius, but a defender who dived
+ * for it committed from up to `LATCH_DIVE_REACH` (2.4 m) away — and the snap
+ * below puts him on the carrier's hip. Writing that in one frame moved him
+ * up to 1.73 m in 16 ms (measured), which is twice a sprint and exactly the
+ * "impossible instantaneous movement" the NO-TELEPORTS gate exists to catch.
  *
- *   grip  = the tackler's hands — power plus awareness (the eye that sees
- *           where the ball is), over the pure speed;
- *   resist = the carrier's hold — his power and his ball skill;
- *   edge  = grip − resist in points, so a big mismatch wins and a fair fight
- *           stays a genuine contest.
- *
- * Even a fair fight has a ~5% beat (that is what makes a strip a live risk
- * the crowd notices); a clearly dominant jackal peaks around 25%, a carrier
- * with poor ball security pushes it past that. The window is narrow so it
- * reads as one moment in the tackle, not a lottery on every carry.
+ * So the gap is CLOSED rather than jumped: the offset between where he
+ * actually is and where the hip is decays to zero over this many seconds.
+ * That is also what really happens — he is in the air, reaching, and arrives
+ * a moment later. Short enough to still read as one continuous grab.
  */
-export function stripChance(tackler: Live, carrier: Live): number {
-  const grip = tackler.attrs.PWR + tackler.attrs.AWA * 0.6;
-  const resist = carrier.attrs.PWR * 0.8 + carrier.attrs.SKL * 0.8;
-  const edge = grip - resist;
-  return Math.max(0.02, Math.min(0.30, STRIP_BASE + edge / 160));
-}
+export const LATCH_CLOSE_SECONDS = 0.14;
 
 /**
  * The reach of the committed dive. Outside the contact radius but inside
@@ -189,10 +153,13 @@ export interface LatchState {
   dragged: number;
   /** true when the defender left his feet to make it (Part 3 polish) */
   dived: boolean;
-  /** the strip attempt fires ONCE per latch, in the second half of the drag.
-   *  A tackle is not a coin flip on the contact frame; it is a wrestle that
-   *  has a moment where the hands can win the ball. */
-  stripTried: boolean;
+  /**
+   * Offset from the hip to where the tackler actually was when the hands went
+   * on, metres. Decays to zero over LATCH_CLOSE_SECONDS so he converges onto
+   * the carrier instead of teleporting onto him. See LATCH_CLOSE_SECONDS.
+   */
+  closeX: number;
+  closeZ: number;
 }
 
 /* ====================== PRESENTATION CLIP NAMES ====================== */
@@ -219,6 +186,9 @@ export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived
   carrier.latchedBy = playerId(tackler);
   carrier.latchDrag = LATCH_SPEED_MULT;
   tackler.latchingOnto = playerId(carrier);
+  /* Where the hip is right now, and therefore how far he still has to travel.
+   * Held as an offset and decayed, so the very first tick does not jump him. */
+  const a0 = latchAnchor(carrier);
   const latch: LatchState = {
     carrierNum: carrier.num,
     tacklerNum: tackler.num,
@@ -227,7 +197,8 @@ export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived
     t: 0,
     dragged: 0,
     dived,
-    stripTried: false,
+    closeX: tackler.x - a0.x,
+    closeZ: tackler.z - a0.z,
   };
   s.latch = latch;
   /* He is not tackled yet — he is being held. The clips say exactly that, and
@@ -284,7 +255,7 @@ export function latchAnchor(carrier: Live): { x: number; z: number; vx: number; 
 }
 
 /** Why a latch ended — for the takedown call and the commentary line. */
-export type LatchEnd = 'DEAD_MOMENTUM' | 'DRAG_TIMER' | 'STRIP' | 'LOST';
+export type LatchEnd = 'DEAD_MOMENTUM' | 'DRAG_TIMER' | 'LOST';
 
 export interface LatchTick {
   /** null while the drag continues */
@@ -315,23 +286,19 @@ export function tickLatch(
     return { end: 'LOST', dragged: latch.dragged };
   }
 
-  /* THE SNAP — BOUNDED. The defender has no independent position while he is
-   * holding on: his coordinates ARE the carrier's, offset to the hip. The
-   * whole illusion is two men moving as one unit, and it costs nothing but a
-   * write that `think()` has been told to stay out of. The write used to be
-   * absolute, so the FIRST latch frame closed the entire remaining gap to the
-   * hip in one frame (measured 1.73 m — a teleport). Close the gap at a
-   * capped closure speed instead; the hip drifts under the drag, and 5 m/s
-   * keeps the defender reading as hung on while never moving him >0.1 m a
-   * frame. */
+  /* THE SNAP. The defender has no independent position while he is holding
+   * on: his coordinates ARE the carrier's, offset to the hip. This is the
+   * whole illusion — two men moving as one unit — and it costs nothing but a
+   * write that `think()` has been told to stay out of. */
   const before = { x: tackler.x, z: tackler.z };
   const anchor = latchAnchor(carrier);
-  const gap = Math.hypot(anchor.x - tackler.x, anchor.z - tackler.z);
-  const step = Math.min(gap, LATCH_SNAP_SPEED * dt);
-  if (gap > 1e-6) {
-    tackler.x += ((anchor.x - tackler.x) / gap) * step;
-    tackler.z += ((anchor.z - tackler.z) / gap) * step;
-  }
+  /* The residual gap from the moment of contact, easing out. `k` is 1 on the
+   * contact frame and 0 once LATCH_CLOSE_SECONDS has elapsed, after which he
+   * is welded to the hip exactly as before. */
+  const k = latch.t < LATCH_CLOSE_SECONDS ? 1 - latch.t / LATCH_CLOSE_SECONDS : 0;
+  const ease = k * k;          // quadratic: quick at first, gentle on arrival
+  tackler.x = anchor.x + latch.closeX * ease;
+  tackler.z = anchor.z + latch.closeZ * ease;
   tackler.vx = anchor.vx;
   tackler.vz = anchor.vz;
   tackler.movedBy = 'latch';
@@ -350,22 +317,6 @@ export function tickLatch(
    * halfway through the drag. */
   if (carrier.clip !== CLIP_LATCH_CARRY) { carrier.clip = CLIP_LATCH_CARRY; carrier.clipT = 0; }
   if (tackler.clip !== CLIP_LATCH_HANG) { tackler.clip = CLIP_LATCH_HANG; tackler.clipT = 0; }
-
-  /* THE STRIP ATTEMPT — once, in the second half of the drag. This is the
-   * beat where the hands can actually win the ball: the defender has set his
-   * grip, the carrier is tiring under it, and the pair are about to hit the
-   * timer. It does not roll based on nothing; it is the wrestle above.
-   *
-   * WINNING THE BALL. The tackler keeps the carrier's drag and the two are
-   * unlinked; the carrier is down (he just lost the ball in the tackle) and
-   * the strip happens here, in the drag, so the pair do not teleport into the
-   * ruck to receive it. */
-  if (!latch.stripTried && latch.t >= STRIP_START && latch.t <= STRIP_END) {
-    latch.stripTried = true;
-    if (R() < stripChance(tackler, carrier)) {
-      return { end: 'STRIP', dragged: latch.dragged };
-    }
-  }
 
   /* THE TRIGGERS. Momentum first — a carrier stopped dead goes over
    * immediately, which is what a dominant hit looks like — then the timer,

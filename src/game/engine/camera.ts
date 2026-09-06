@@ -39,6 +39,22 @@ export function updateCamera(d: Director, dt: number) {
     && d.camMode !== 'CABLE';
   const spec = camModeSpec(kicking ? 'SHOULDER' : d.camMode);
 
+  /* One number, applied where the mode is resolved rather than where it is
+   * drawn, so the retro projector and the WebGL camera cannot drift apart: both
+   * read the same `d.cam` that comes out of here. See Director.camScale.
+   *
+   * It is NOT applied flat. Measured over six 90-second seeds, a blanket 2.2x
+   * bought 2x the size of every man and cost the framing rules: UX-23 (the
+   * contest must stay in shot) went 8 → 14 failures and UX-24 lit up 28 times,
+   * because a tight lens in open play crops the very things those rules check —
+   * the defensive line, the support runners, the receiver of a kick. A broadcast
+   * operator does not do that either: they are wide while the ball travels and
+   * tight when the ball is stuck. So the gain rides the same instinct the
+   * dynamic zoom already uses, and the framing rules and the legibility win can
+   * both be true. */
+  const gain = 1 + (Math.max(0.6, Math.min(4, d.camScale || 1)) - 1) * contestK(d);
+  const dolly = 1 / Math.sqrt(gain);
+
   const z = resolveZoom(d.camZoom, d.dynamicIntensity, {
     phase: d.phase,
     pressure: d.op?.pressure ?? 0,
@@ -69,8 +85,8 @@ export function updateCamera(d: Director, dt: number) {
   }
 
   const view: View = { w: 960, h: 540 };
-  let height = spec.height * z.heightMul;
-  let px = spec.pxPerMetre * z.pxMul;
+  let height = spec.height * z.heightMul * dolly;
+  let px = spec.pxPerMetre * z.pxMul * gain;
   if (d.breakawayT > 0) height *= 1 + Math.min(0.14, d.breakawayT * 0.06);
   if (d.impactT > 0 && spec.id !== 'CABLE') px *= 1 + Math.min(0.12, d.impactT * 0.14);
   let target: Camera;
@@ -82,13 +98,13 @@ export function updateCamera(d: Director, dt: number) {
      * Built by hand rather than through behindPostsCam so the shoulder view can
      * sit right on the kicker instead of on the goal line. */
     const isPosts = !kicking && d.camMode === 'POSTS';
-    const back = spec.standback * z.standbackMul;
+    const back = spec.standback * z.standbackMul * dolly;
     const rigX = isPosts ? tx * 0.25 : tx - (tx - (d.kk?.landX ?? tx)) * 0.08;
     const rigZ = isPosts
       ? (dir > 0 ? FIELD.tryZ - 10 : FIELD.tryZFar + 10)
       : tz - dir * back;
     const aimX = kicking ? (d.kk?.landX ?? tx) : tx;
-    const aimZ = kicking ? (d.kk?.landZ ?? tz) : tz + dir * 14;
+    const aimZ = kicking ? (d.kk?.landZ ?? tz) : tz + dir * (14 / gain);
     const dx = aimX - rigX;
     const dz = aimZ - rigZ;
     /* D-1 — height-scaled follow floor, see minFollowGround. */
@@ -113,11 +129,13 @@ export function updateCamera(d: Director, dt: number) {
      * direction that no longer pointed at anything. The further it panned the
      * worse it got. Everything is now solved from one rig position.
      */
-    const standback = spec.standback * z.standbackMul;
-    const subjectZ = tz + spec.lead * dir;
+    const standback = spec.standback * z.standbackMul * dolly;
+    const subjectZ = tz + (spec.lead / gain) * dir;
 
     // Longitudinal tracking with a dead zone, so the rig does not jitter.
-    const dead = Math.max(0.4, spec.deadZone * (1.4 - z.track));
+    /* The dead zone is a distance, and the frame it is measured against has got
+     * smaller: 2 m of slop is nothing wide and half a shot tight. */
+    const dead = Math.max(0.4, spec.deadZone * (1.4 - z.track) / gain);
     if (Math.abs(subjectZ - d.rigZ) > dead) {
       d.rigZ += (subjectZ - d.rigZ) * clamp(Math.abs(subjectZ - d.rigZ) / 8, 0.2, 1);
     }
@@ -167,17 +185,16 @@ export function updateCamera(d: Director, dt: number) {
    * ball-on-screen gate flaked on one match in six. Rate 3 only inside
    * six metres (broadcast drift), rate 8 beyond it: the rig keeps up with
    * anything a rugby player can do. */
-  const far = dist > 6;
+  const frameK = 1 + (Math.max(0.6, Math.min(4, d.camScale || 1)) - 1) * contestK(d);
+  /* "Far" is a fraction of a frame, not six metres: at a long lens six metres is
+   * most of the shot, so the transit rate has to start earlier and run harder in
+   * proportion to how tight the picture is. The per-frame distance cap is left
+   * alone — that one is a gantry's mechanics, not a lens. */
+  const far = dist > 6 / frameK;
   /* Cap the per-frame travel at 5.5 m: the cut is fast but the rig is still
    * a rig — it never moves more than a real gantry could survive. */
-  const kPos = Math.min(1 - Math.exp(-dt * (far ? 8 : 3.0)), dist > 0.01 ? 5.5 / dist : 1);
-  /* A kick in flight climbs 6-10 m in under a second; the tilt and lens have
-   * to track that ascent or the ball rides out the top of frame while the
-   * rig is still pointing at the launch spot. Rate 2.2 (the near-band ease)
-   * is too slow for that. Use a dedicated fast zoom/tilt rate on a high
-   * kick. */
-  const kZoomRate = d.kk?.stage === 'FLIGHT' && (d.kk?.by ?? 0) > 0.6 ? 10 : (far ? 7 : 2.2);
-  const kZoom = 1 - Math.exp(-dt * kZoomRate);
+  const kPos = Math.min(1 - Math.exp(-dt * (far ? 8 : 3.0) * frameK), dist > 0.01 ? 5.5 / dist : 1);
+  const kZoom = 1 - Math.exp(-dt * (far ? 7 : 2.2));
   const kYaw = 1 - Math.exp(-dt * 3.0);
   d.cam.x += (target.x - d.cam.x) * kPos;
   d.cam.z += (target.z - d.cam.z) * kPos;
@@ -230,6 +247,49 @@ export function updateCamera(d: Director, dt: number) {
  * snap to the ball; it is dragged toward a point behind the ball and swings
  * in behind.
  */
+/**
+ * How much of the framing gain this moment earns, 0 = keep the wide lens.
+ *
+ * A contest is a thing that happens in four metres of grass: a ruck, a maul, a
+ * set piece, a kicker standing over a still ball. Nothing else in the game is
+ * that compact, and the rules that police the picture know it.
+ */
+export function contestK(d: Director): number {
+  /* A CONTEST IS A STUCK BALL, NOT A PHASE NAME. The single most common way to
+   * break the framing rules with a tight lens is also the most exciting thing
+   * that happens in a match: the ball leaves a breakdown at pace while the phase
+   * tag still says BREAKDOWN, and a half-frame lens follows nothing. So the gain
+   * rides the ball's own speed — come in as it is caught, go back out as it is
+   * carried. Measured: without this the tighter frame cost 5 UX-23 failures
+   * ("the ball is inside the frame"), which is precisely the thing the player
+   * was complaining about. */
+  const ballSpd = d.op ? Math.hypot(d.op.vx ?? 0, d.op.vz ?? 0) : 0;
+  const release = Math.max(0.28, Math.min(1, 1.25 - ballSpd / 7));
+  const p = d.phase;
+  if (p === 'BREAKDOWN' || p === 'MAUL' || p === 'SCRUM' || p === 'LINEOUT') return release;
+  if (d.kk) {
+    /* Aim and power are still, and the ball is the subject: come in. Flight is
+     * the widest shot in the game and must stay that way, and a grounded ball
+     * after the bounce is a contest again. The ceremony — FANFARE, WALKUP — is
+     * neither: it is the team coming out, and measuring said a tight lens there
+     * only buys UX-23 failures (9 frames with the ball out of shot became 15 at
+     * 2.2x), so the gain is simply not spent on it. */
+    if (d.kk.stage === 'AIM' || d.kk.stage === 'METER' || d.kk.stage === 'SETUP') return 1;
+    if (d.kk.stage === 'FLIGHT') return d.kk.bounces > 0 ? 0.7 : 0;
+    if (d.kk.stage === 'FANFARE' || d.kk.stage === 'WALKUP') return 0;
+    return 0.5;
+  }
+  if (d.holdP) return 1;                       // a try, a card: the moment is the subject
+  if (d.impactT > 0) return 0.8 * release;     // the tackle just happened, the ground fight follows
+  if (p === 'OPEN_PLAY') {
+    /* A goal-line stand is a confined contest with an open-play phase tag; a
+     * 40-metre counter-attack is neither, and needs the classic field. */
+    const toLine = d.op?.toLine ?? 50;
+    return Math.min(1, 0.18 + Math.max(0, 1 - toLine / 26) * 0.7 + (d.op?.pressure ?? 0) * 0.18);
+  }
+  return 0.35;
+}
+
 export function cableRig(
   d: Director,
   view: View, spec: CamModeSpec, z: { pxMul: number; heightMul: number; standbackMul: number; track: number },
@@ -238,16 +298,13 @@ export function cableRig(
   const k = d.kk;
   const inFlight = k?.stage === 'FLIGHT';
   const aiming = k?.stage === 'AIM' || k?.stage === 'METER';
-  const high = inFlight && !!k && k.by > 0.6;
 
   // Lock the end-on side unless the player asked it to swap on turnover.
   const rigDir = d.cableSwapOnTurnover ? dir : 1;
 
   /* On a kick the rig backs off and climbs so the flight and the chase are
-   * both in frame. `cableEase` ramps that in and out rather than snapping.
-   * Only an actually-high flight needs the wide aerial framing; a low grubber
-   * is a running chase and must close onto the contest. */
-  const wantKickWide = high || aiming ? 1 : 0;
+   * both in frame. `cableEase` ramps that in and out rather than snapping. */
+  const wantKickWide = inFlight || aiming ? 1 : 0;
   d.cableEase += (wantKickWide - d.cableEase) * (1 - Math.exp(-dt * 1.8));
   const wide = d.cableEase;
 
@@ -258,16 +315,16 @@ export function cableRig(
    * ball trickled away at shin height — riding the bottom edge of the
    * frame for seconds at a time. After the first bounce the wide EXTRAS
    * (trail, height, the lens widening) release by rollK and the rig closes
-   * onto the contest for the ball. The hang is untouched: bounces == 0.
-   *
-   * FRAMING AUDIT: a grubber/roll reaches y≈0.2 and never "bounces", so the
-   * old `bounces > 0` test kept the wide rig up until the flight stage ended
-   * — a grounded ball rode the bottom edge for the whole chase. A ball is
-   * only airborne enough to need the wide lens while it is actually high;
-   * anything at ankle height is grounded regardless of the bounce counter. */
-  const rollK = k && inFlight && !high ? 0.35 : 1;
-  const trail = spec.standback * z.standbackMul * (1 + wide * 0.85 * rollK);
-  const height = spec.height * z.heightMul * (1 + wide * 0.7 * rollK);
+   * onto the contest for the ball. The hang is untouched: bounces == 0. */
+  const rollK = k && inFlight && k.bounces > 0 ? 0.35 : 1;
+  /* The cable rig is the shipped default view, so the framing gain has to be
+   * paid here as well as in the mode branches — and paid the same way, by
+   * dollying the rig in as the lens tightens. `cableH` is then floored below,
+   * which keeps the rig above the terraces no matter how tight the gain. */
+  const cGain = 1 + (Math.max(0.6, Math.min(4, d.camScale || 1)) - 1) * contestK(d);
+  const cDolly = 1 / Math.sqrt(cGain);
+  const trail = spec.standback * z.standbackMul * cDolly * (1 + wide * 0.85 * rollK);
+  const height = spec.height * z.heightMul * cDolly * (1 + wide * 0.7 * rollK);
 
   /* While the ball is in the air, sit between the ball and where it will land
    * so both are framed. Otherwise anchor on the ball itself.
@@ -278,7 +335,7 @@ export function cableRig(
    * the yaw several degrees in one frame. The anchor is now eased like every
    * other axis, so the rig glides to the new subject instead of whipping. */
   let anchorX = tx, anchorZ = tz;
-  if (high) {
+  if (inFlight) {
     const lp = d.landingPrediction();
     if (lp) { anchorX = (tx + lp.x) / 2; anchorZ = (tz + lp.z) / 2; }
   }
@@ -320,12 +377,7 @@ export function cableRig(
    * collapses onto the landing point. Height-scaled, so the frame leads
    * again the moment the next kick goes up. */
   const aimX = anchorX;
-  /* As the ball comes down the lead must collapse onto it, all the way to
-   * zero: a grounded roll is not a target to be led — leading a 0.2 m ball by
-   * six metres put it back on the bottom edge of frame (measured remaining
-   * BALL-ON-SCREEN faults). Once it has bounced and rolls at shin height the
-   * lens rides the ball itself. */
-  const dropK = (inFlight && k) ? clamp((k.by - 0.5) / 8, 0, 1) : 1;
+  const dropK = k && inFlight ? clamp(k.by / 9, 0.3, 1) : 1;
   /* THE LEAD IS EARNED BY SPEED. The aim leads the subject so a running
    * attack reads into space — but a STOPPED or crawling ball needs no lead,
    * and holding one put every grounded ruck-ball at the bottom edge of the
@@ -333,23 +385,22 @@ export function cableRig(
    * faults). The lead scales with the subject's own velocity. */
   const spd = k ? Math.hypot(k.vx, k.vz) : (d.op ? Math.hypot(d.op.vx, d.op.vz) : 0);
   const leadK = clamp(0.35 + spd / 9, 0.35, 1);
-  const aimZ = anchorZ + rigDir * spec.lead * (1 + wide * 0.6) * dropK * leadK;
+  /* THE LEAD IS IN METRES AND THE FRAME IS IN PIXELS. A 9 m lead is a fifth of
+   * a wide shot and three quarters of a tight one: left alone, the framing gain
+   * pushes the ball out of the bottom of the frame and UX-23 ("the ball is
+   * inside the frame") fails for the sake of legibility, which is the opposite
+   * of what the gain is for. So the lead is divided by the same number that
+   * multiplies the lens — the rig keeps leading by the same FRACTION of shot. */
+  const aimZ = anchorZ + rigDir * (spec.lead / cGain) * (1 + wide * 0.6) * dropK * leadK;
   const dx = aimX - d.cableX;
   const dz = aimZ - d.cableZ;
-  const pxC = spec.pxPerMetre * z.pxMul * (1 - wide * 0.62 * rollK);
+  const pxC = spec.pxPerMetre * z.pxMul * cGain * (1 - wide * 0.28 * rollK);
   const ground = Math.max(4, Math.hypot(dx, dz));
 
   // Tilt down onto the play. Extra downward angle when wide, so a kick reads
   // as an aerial view of the whole contest.
-  // T-KICK-FRAMING: while the ball is in FLIGHT aim at the BALL's own height,
-  // not the turf behind it. A drop-out from the dead-ball zone peaks ~9-12 m
-  // up; a rig tilting at ground level 30 m away points underneath it and the
-  // ball rides out the top of frame (measured off-target frames on PUNT/FLIGHT
-  // with sy<0). Clamp the aim height so a ball briefly above the lens still
-  // keeps the pitch, not the sky, in shot.
-  const aimH = (inFlight && k) ? clamp(k.by, 0.4, 12) : 1.2;
-  const tilt = Math.atan2(d.cableH - aimH, ground) * (1 + wide * 0.10);
-  const slant = Math.hypot(ground, d.cableH - aimH);
+  const tilt = Math.atan2(d.cableH - 1.2, ground) * (1 + wide * 0.10);
+  const slant = Math.hypot(ground, d.cableH - 1.2);
   const focal = Math.max(1, pxC * slant);
 
   return {

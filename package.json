@@ -20,11 +20,16 @@
     "three": "^0.185.1"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.8",
+    "@shaderfrog/glsl-parser": "^7.0.1",
+    "@sparticuz/chromium": "^149.0.0",
     "@tailwindcss/vite": "4.1.17",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "playwright": "^1.63.0",
+    "puppeteer-core": "^25.10.0",
     "tailwindcss": "4.1.17",
     "tsx": "^4.23.13",
     "typescript": "5.9.3",

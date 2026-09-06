@@ -106,6 +106,19 @@ export function CameraPanel({ d, force }: { d: Director; force: (f: (n: number) 
           </Btn>
         ))}
       </div>
+      {/* THE FRAMING GAIN. How big a person is on screen. The 1991 numbers were
+      * right for a 14-pixel sprite and wrong for a skinned human, so this is
+      * exposed rather than hidden: someone who wants the whole backline in the
+      * frame can have it, and they are not being told they are wrong. */}
+      <div className="mt-1 flex items-center gap-1">
+        <span className="text-[8px] font-black tracking-widest text-[#7f8ea6]">SCALE</span>
+        {[1, 1.6, 2.2, 3].map((z) => (
+          <Btn key={z} small active={Math.abs(d.camScale - z) < 0.01}
+            onClick={() => { d.camScale = z; force((n) => n + 1); }}>
+            {z === 1 ? '1991' : `${z.toFixed(1)}x`}
+          </Btn>
+        ))}
+      </div>
       {d.camZoom === 'DYNAMIC' && (
         <div className="mt-1">
           <div className="flex justify-between text-[9px] text-[#7f8ea6]">

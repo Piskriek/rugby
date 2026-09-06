@@ -67,3 +67,119 @@ Two small engine corrections surfaced while wiring the presentation:
 - `npm run build` — clean (single-file bundle ~1.75 MB)
 - `npx vite-node scripts/spec07-contracts.ts` — **SPEC_07 contracts: ALL GREEN**
 - `npx vite-node scripts/chain.ts 3` — engine regression run unaffected
+
+## Reconciliation with SPEC_24 (the match-day pass)
+
+This file and `SPEC_24_MATCHDAY.md` were written in two sittings against the same
+base commit, and both reached for the sky. Merging them was not additive: two sky
+domes, two light rigs and two post chains in one scene do not blend, they argue.
+The rule applied was **one owner per area**, chosen on the merits of each:
+
+| Area | Owner | Why |
+|---|---|---|
+| Turf surface | **this edition** — `render/turf.ts` | Procedural albedo + roughness + normal with the markings baked in, mown stripes and pre-existing wear. It beats a painted canvas outright, and the wear it bakes is the same wear SPEC_24 wanted to add live. |
+| Player surfaces | **this edition** — per-slot `MeshStandardMaterial` | Jersey, shorts, socks, skin and boots get different roughness. SPEC_24's soiling pass was rewritten onto that model: mud now raises roughness as well as darkening, which the toon materials could not express. |
+| Stadium lighting rig | **SPEC_24** — `render/ThreeMatchDay.ts` | One `SkyPreset`-shaped object resolved per frame in `render/conditions.ts` from the seven weathers × five pitch states × four kick-off times the engine already simulates, driving sky, key, fog, shadow tier and flood level together. A four-preset table that ignores the weather would have made the simulation's own KICK-OFF slider decorative again. |
+| Post chain | **SPEC_24** — bloom + filmic grade + vignette + grain + chromatic aberration + lens droplets | Conditions-driven, and it owns tone mapping because `EffectComposer` bypasses the renderer's. Their `ThreePost.ts` (bloom/FXAA/SSAO by a `graphics` slider) is deleted. |
+| HUD | **both**, split by function | Their `ScoreBug`, `PlayerSpotlight`, `MatchIntro`, `GamepadBadge`; SPEC_24's `ConditionsStrip`, `FormStrip`, `TmoCard`, `CardCard`, `ReplayFrame`. No duplicate lower-thirds: their bug owns score/clock/possession, my strip owns the ground and the air, and neither draws the other's data. |
+| Input | **this edition** — `game/gamepad.ts` | Two sticks folded into the same verb stream the keyboard writes. Untouched by SPEC_24. |
+| Score integrity | **this edition** — `game/director.ts` | Two fixes so the numbers on screen cannot disagree with the ledger. Presentation never writes engine state, so these are the only engine edits in either pass. |
+
+Two display options died in the merge, both because they duplicated something the
+simulation already owned: `graphics` (PERFORMANCE/BALANCED/ULTRA → the existing
+`render` pipeline switch) and `timeOfDay` (four authored skies → the engine's own
+`timeofday` KICK-OFF setting, which `conditions.ts` now reads). Anyone wanting a
+second lighting switch should first explain what the match's own kick-off time is for.
+
+A third merge followed the same rule, this one of two solvers that had been written
+into the same file name on purpose. `render/ragdoll.ts` (mine) solves a fall live on
+STANDARD and FULL; the pass that baked 36 falls and plays them back as a yaw-rotated
+table lookup now lives in `render/ragdollKernel.ts` + `ragdollClips.ts` and is what
+LEGACY gets, with `ragdollEnabled` choosing between them so no body is ever written
+by both in one frame. Nothing was thrown away in that merge and the reason is in the
+table above: the bake is strictly cheaper and strictly less responsive, and the two
+claims are not in competition — the tier that cannot afford to solve a body should
+not be the tier that gets the worst physics. Verification of the merged pair is in
+`SPEC_24_MATCHDAY.md`'s second addendum, including the two harnesses that keep the
+bake honest (yaw invariance to 0.45 mm, bit-exact determinism).
+
+Verification after the merge (and after `6bcbd54`, the NO TELEPORTS engine fix, merged
+on top of it): `tsc --noEmit` clean, `scripts/glslcheck.ts` 10 shaders / 0 failing,
+`scripts/matchdayheadless.ts` all green, `scripts/spec07-contracts.ts` ALL GREEN,
+`scripts/teleprobe.ts` 0 teleports across difficulty 0/3/6, and
+`scripts/audit-cli.ts 90 3 1` byte-identical to the tip of the other pass —
+PASS 5407, WARN 2, FAIL 2, 0 teleports, 0 watchdog trips. That is the honest trade
+the teleport fix makes against the earlier baseline (PASS 5343, WARN 4, FAIL 1, 5
+teleports): three teleports and two `LOG-20` bunching warnings are gone, and
+`LAW-66` picks up one more defensive-line hole, because a defender placed by a ruck
+now keeps that placement for a frame instead of being yanked back to his support
+mark by `think()`. It is a simulation decision, not a presentation one — nothing in
+either pass writes engine state from the render layer. The one thing neither pass can
+verify is the picture; that still needs a human eye on `npm run dev`.
+
+**Second addendum (playtest), both sides of "it looks bad in game".** The tackle
+now has a real floor: `render/ragdoll.ts`, a 20-particle position-based solver in
+which the particles *are* the rig's bones, handed the body from the grounding
+stage of a tackle and nothing else — the drive and the wrap stay authored, the
+engine keeps translation, and the tackler's hands are pinned to the carrier's
+waist inside the solver so the wrap survives the fall. 0.083 ms per frame for
+eight of them at once, and `scripts/ragdollcheck.ts` proves the twelve things a
+ragdoll fails at, headless. The grey was measured rather than guessed: the
+hierarchy of fills was feeding the rig more irradiance than the key, there was no
+`scene.environment` for a PBR material to reflect, `#FFFFFF` kit albedo clipped
+through the tone curve, and the concrete concourse out-shone the pitch. Sky
+PMREM'd into an environment map, per-weather `iblMul`, kit albedo scaled to
+fabric, `CONCRETE` darkened, and a rule that a floodlight is not the sun behind a
+cloud. Written up with numbers in `SPEC_24_MATCHDAY.md`'s addendum; the art
+contract in `render/retro.ts`, `coronal.ts` and `rig.ts` was not touched, and no
+engine file was.
+
+
+---
+
+## The grapple: hands, not arithmetic
+
+The breakdown used to be a coin flip with a timer on it. `breakdown.ts` weighed two
+side-forces, and whoever won the axis kept the ball; a "jackal steal" was one
+`Math.random()` comparison away from a defender standing near a ruck. This edition
+replaces that with a mechanism the rig can also see: `engine/hands.ts` samples a
+reach **field** around the ball and lets a hand that is in it long enough and with
+enough leverage become a grip, and a grip that pays its meter takes the ball.
+
+The division of labour is the part to keep: **hands own the ball, `latch.ts` owns the
+man.** A grapple is not a second latch and never pulls a body off his feet — the
+clearout's impulse already does that, and two systems shoving the same pelvis is a
+jitter nobody can tune.
+
+- **Posture prices the reach.** A man on his mark standing over the ball has
+  `REACH_M` 1.35 m and a grip radius of 1.05 m; one lying on the deck reaches
+  0.55 m and grips at 0.80; a runner still on his lane is `ARRIVING` and effectively
+  has no hands there at all. One radius for all three is physically wrong and was
+  the first version's mistake.
+- **Presimulated, still.** Nothing here integrates a body. Per man per frame: one
+  `hypot`, one exponential approach on reach, one clamp. `handsprobe` measures
+  **2.07 µs for a 12-man ruck with 0 B/frame of heap**, against 367.8 µs for the
+  ruck's own frame — the contest is 0.6% of the cost of the thing it is contesting.
+- **Forces enter additively.** `defF = sideForce(defCrew) · … + h.defPressure * 1.2`.
+  The multiplier version of that term is dead code in disguise: `sideForce` is zero
+  for a large share of rucks, so anything multiplied by it vanishes. The constant was
+  swept 1.2 → 3.0 on two seeds; 1.8 still cleared every gate and started paying out
+  more steals than a stranded ruck has bodies for, and 2.4 and above broke the arrival
+  and window gates outright.
+- **The ball has to be *won*, twice.** A defence win needs more bodies at the ball
+  than the attack has (the user's jackal law, unchanged), needs the best defender's
+  hands on it for `stripTimeFor(presence.atk)` seconds, and needs his strip meter to
+  reach 1. Contact alone makes a defence heavy, not possessive — a man lying on the
+  ball not playing it is a penalty, not a turnover.
+- **The heel pays for the contest.** `windowSlow(h)` adds up to 0.30 s of ball-out
+  delay, defender-only, so a jackal who is on the ball but cannot finish the job
+  still costs the attack time. That is the "slow the ball" half of the law.
+
+Measured with `scripts/handsprobe.ts` (12 checks, ALL PASS on 3 seeds × 90 s):
+37 rucks, open-play steal rate **0.054 per ruck**, and with the attacking guards
+placed 12 m behind the ball the same mechanism turns it over in **23.1%** of rucks —
+the grip is a price, not a wall. It put hands on the ball in 8 of 9 contestable
+jackal lanes; the ninth was stopped 3.7 m short, which is a cleanout doing its job.
+`scripts/breakdownprobe.ts` stays 10/10 green alongside it: worst per-frame step
+0.207 m against a 0.25 m teleport gate, arrival spread 0.85 s, plan build
+0.128 ms per tackle.

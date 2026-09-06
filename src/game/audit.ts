@@ -232,7 +232,17 @@ check: (p) => (num(p, 'height') > 2 && num(p, 'tilt') > 0 && num(p, 'tilt') < 1.
 
   /* ---------- SCRUM ---------- */
   { kind: 'SCRUM', id: 'LAW-77', standard: 'LAW', law: 'Law 19 — the scrum', claim: 'Eight players per side bind', check: (p) => num(p, 'perSide') === 8 ? ok() : bad(`${num(p, 'perSide')} per side in the scrum`) },
-  { kind: 'SCRUM', id: 'LAW-78', standard: 'LAW', law: 'Law 19 — front row, second row, back row', claim: 'Three in the front row, three in the second, two in the back', check: (p) => (num(p, 'frontRow') === 3 && num(p, 'secondRow') === 3 && num(p, 'backRow') === 2) ? ok() : bad(`rows ${num(p, 'frontRow')}/${num(p, 'secondRow')}/${num(p, 'backRow')}`) },
+  /* LAW-78, REWRITTEN. Its claim was "three, three, two" — one team's shape,
+   * asserted as if it were the Law — and the engine has deliberately not done that
+   * since T-11: `setpieces.ts` lays out 3-4-1 and says in its own comment that the
+   * old 3-3-2 "is not a scrum" (the flankers belong between the locks, and the
+   * eight alone on the base). An audit rule that disagrees with the code it audits
+   * is not a test, it is a coin toss on when a scrum happens to land in the window,
+   * so the check is what Law 19 requires of the formation: a front row of three and
+   * the other five bound behind it in one unit, at least one of them at the base.
+   * 3-4-1 and 3-3-2 both pass; seven forwards and a loose head does not. The counts
+   * are per side, because `trace.ts` halves the both-teams total. */
+  { kind: 'SCRUM', id: 'LAW-78', standard: 'LAW', law: 'Law 19 — front row, second row, back row', claim: 'Three in the front row, the other five bound behind it', check: (p) => (num(p, 'frontRow') === 3 && num(p, 'secondRow') + num(p, 'backRow') === 5 && num(p, 'backRow') >= 1) ? ok() : bad(`rows ${num(p, 'frontRow')}/${num(p, 'secondRow')}/${num(p, 'backRow')}`) },
   { kind: 'SCRUM', id: 'LAW-79', standard: 'LAW', law: 'Law 19 — the feed', claim: 'The side awarded the scrum puts the ball in', check: (p) => str(p, 'feed').length === 1 ? ok() : bad('no feeding side recorded') },
   /* SPEC_10 B3: ASSEMBLE is the pack jogging in — the cadence begins at
    * CROUCH (the director's own fallback reads 'FORMING THE SCRUM'). */

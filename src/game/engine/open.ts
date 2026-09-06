@@ -411,27 +411,13 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       if (tick.end) {
         const tacklerNum = lt.num;
         clearLatch(s, lc, lt);
-        if (tick.end === 'STRIP') {
-          /* THE STRIP. The tackler has ripped the ball in the wrestle. This is
-           * a real rugby turnover in the tackle: the defence takes the ball
-           * from the carrier and plays on from the contact without a ruck
-           * being formed to hand it to them. The carrier stays exactly where
-           * he is (he has just lost it in contact) and the tackler becomes
-           * the new carrier of the SAME team that won it back. */
-          const stripTeam = lt.team as 'A' | 'B';
-          d.teams[stripTeam].stats.tackles++;
-          d.teams[stripTeam].stats.turnovers++;
-          d.teams[stripTeam].stats.strips++;
-          d.run(stripTeam, lt.num).tackles++;
-          d.run(stripTeam, lt.num).turnovers++;
-          d.run(stripTeam, lt.num).jackals++;
-          d.run(stripTeam, lt.num).strips++;
-          d.say('STRIPPED IN THE TACKLE!');
-          d.commentate('BIG_HIT', '— AND HE RIPS THE BALL!');
-          d.emitEv({ t: d.t, type: 'TURNOVER', x: lc.x, z: lc.z });
-          d.startOpen(stripTeam, lc.x, lc.z, lt.num, s.phase + 1, 0, 0.75);
-          return;
-        }
+        /* THE STRIP IN THE WRESTLE IS NOT HERE ANY MORE. An earlier pass ended the
+         * latch with a `STRIP` verdict and handed the defence the ball at the point of
+         * contact, straight from the tackler's arms. It is gone deliberately: the
+         * grapple is `engine/hands.ts` now, where a theft is priced by bodies at the
+         * ball, by posture, and by seconds of clean contact, and a second unpriced
+         * route to a turnover in open play would make all of that decoration. A man
+         * ripped off his feet still goes to the breakdown like everyone else. */
         /* THE TAKEDOWN. Hand straight over to the existing path: the crew
          * assignment, then the 0.3 s kineticImpact slide that carries the
          * pair the last metre into the ruck. The drag distance is real
@@ -1008,14 +994,18 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
      * pressure or in a rush — so the "run, then pass" turn was killing the
      * move at its first receiver and the match produced ~1-pass chains.
      * The turning gate now belongs to CARRY plays only; a called backline
-     * move keeps the ball in hand and gives it again. */
+     * move keeps the ball in hand and gives it again.
+     *
+     * MEASURED COST, DISCLOSED: this gate plus the grapple's clearout lanes moves
+     * `LAW-66` from 2 to 5 failures on `audit-cli 120 3 1` (a 7 m hole instead of
+     * 5.9 m), because a defence whose line is folding back from a ruck is measured
+     * against the open-play spacing rule while its men are still in their lanes.
+     * Reverting the gate buys back two of the three (FAIL 3, same 7.2 m worst hole);
+     * the handling-error rate was measured as innocent (5 either way). The rule that
+     * closes this properly is a fold-back budget after a ruck, not a slower attack,
+     * and it is owed a session of its own. */
     if (intent === 'PASS' && s.heldT < 0.35 && s.pressure < 0.5
       && d.op?.carrierNum !== 9 && !passingPlay) intent = 'CARRY';
-    /* T-13. THE FINISHER KEEPS THE BALL. A carrier through the line used
-     * to pass 0.15-0.5 s into the break — the cadence beat the moment and
-     * the SUPPORT man took the tackle: 81 breaks, none scored. While the
-     * road ahead is open he backs himself; when the cover arrives the
-     * support game resumes. */
     if (s.lineBreak && intent === 'PASS') {
       const defsNow = d.live.filter((q) => q.team !== s.attacking);
       const roadOpen = !defsNow.some((q) => (q.z - car.z) * s.dir > -0.5

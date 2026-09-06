@@ -16,6 +16,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Director, TeamRun } from '../game/director';
 import { KITS, DIFFICULTY_TABLE, OPTION_ITEMS } from '../game/data';
+import type { Conditions } from '../render/conditions';
+
+const fmt = (n: number, d = 0) => n.toFixed(d);
 
 const WEATHER_NAMES = ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'];
 const LAW = (d: Director, id: string) => (d.options[id] ?? 0);
@@ -248,3 +251,151 @@ export function GamepadBadge({ connected, name }: { connected: boolean; name: st
 }
 
 export const broadcastOptionLabel = () => OPTION_ITEMS.find((o) => o.id === 'broadcast')?.label ?? 'BROADCAST';
+
+/* ============================================================================
+ * SPEC_24 — the match-day panels. The bug, the spotlight and the intro above
+ * are the broadcast's voice; these are its EVIDENCE: what the kick-off time is
+ * doing to the ground, what the TMO is actually checking, and the three men the
+ * ratings board already knows about. They are here rather than in MatchView for
+ * the same reason the bug is: a graphic belongs to the package, not to the
+ * component that happens to draw the canvas.
+ * ========================================================================== */
+
+export function TmoCard({ d }: { d: Director }) {
+  if (!d.tmo) return null;
+  const t = Math.min(1, d.tmo.t / 6);
+  return (
+    <div className="absolute left-1/2 top-[15%] w-[286px] -translate-x-1/2">
+      <div className="overflow-hidden rounded-[3px] border-2 border-[#e8cf46]/70 bg-[#080c14]/95">
+        <div className="flex items-center justify-between bg-[#e8cf46] px-2 py-[3px]">
+          <span className="text-[10px] font-black tracking-[0.24em] text-[#0b0f17]">TMO REVIEW</span>
+          <span className="text-[9px] font-black tabular-nums text-[#0b0f17]">LIVE</span>
+        </div>
+        <div className="px-3 py-2">
+          <div className="text-[12px] font-black leading-tight text-[#f4efe2]">
+            CHECKING {d.tmo.short.toUpperCase()} GROUNDING
+          </div>
+          <div className="mt-[2px] text-[8px] tracking-[0.16em] text-[#8fa0b8]">
+            CAMERA: {d.tmo.angle > 0.9 ? 'BEHIND THE POST' : d.tmo.angle < 0.2 ? 'TACTICAL HIGH' : 'SIDE ON'}
+          </div>
+          <div className="mt-2 h-[4px] w-full overflow-hidden rounded-full bg-[#1b2436]">
+            <div className="h-full bg-[#e8cf46] transition-[width] duration-200" style={{ width: `${t * 100}%` }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function CardCard({ d }: { d: Director }) {
+  const b = (d.banner || '').toUpperCase();
+  if (!(b.includes('YELLOW') || b.includes('RED CARD'))) return null;
+  const since = d.t - (d.bannerAt ?? 0);
+  if (since > 5) return null;
+  const red = b.includes('RED');
+  return (
+    <div className="absolute left-1/2 top-[34%] flex -translate-x-1/2 items-center gap-3"
+      style={{ opacity: Math.min(1, (5 - since) / 0.6) }}>
+      <div className="h-[54px] w-[38px] rotate-[-8deg] rounded-[3px] shadow-[0_12px_28px_-8px_rgba(0,0,0,0.9)]"
+        style={{ background: red ? '#c0392b' : '#e8cf46' }} />
+      <div>
+        <div className="text-[15px] font-black leading-none text-[#f4efe2]">
+          {red ? 'RED CARD' : 'YELLOW CARD'}
+        </div>
+        <div className="mt-[3px] text-[9px] font-bold tracking-[0.16em] text-[#a9b6c8]">
+          {red ? 'FOURTEEN MEN FOR THE REST OF THE MATCH' : 'TEN MINUTES IN THE BIN'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- conditions ---- */
+export function ConditionsStrip({ d, cond }: { d: Director; cond: Conditions }) {
+  const wet = Math.round(cond.wetness * 100);
+  const wind = ['CALM', 'LIGHT', 'BREEZY', 'STRONG', 'GUSTING'][d.options.wind ?? 1] ?? 'LIGHT';
+  return (
+    <div className="select-none">
+      <div className="flex items-center gap-3 rounded-[3px] border border-[#2c3a52]/90 bg-[#080c14]/92 px-2.5 py-1.5 backdrop-blur-[2px]">
+        <Field label="VENUE" value={d.A.nation.venue.toUpperCase()} />
+        <Divider />
+        <Field label="WEATHER" value={cond.weather} />
+        <Divider />
+        <Field label="PITCH" value={cond.pitchKind} />
+        <Divider />
+        <Field label="WIND" value={wind} />
+        <Divider />
+        <Field label="KICK-OFF" value={cond.timeOfDay} />
+        <Divider />
+        <div className="flex items-center gap-1.5">
+          <span className="text-[7px] font-bold tracking-[0.18em] text-[#5f6f86]">GROUND</span>
+          <span className="relative block h-[6px] w-[46px] overflow-hidden rounded-full bg-[#1b2436]">
+            <span className="absolute inset-y-0 left-0 rounded-full"
+              style={{ width: `${Math.round(cond.wetness * 100)}%`, background: 'linear-gradient(90deg,#4a7d3c,#7fa3e6)' }} />
+          </span>
+          <span className="text-[8px] font-black tabular-nums text-[#a9b6c8]">{wet}%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="leading-none">
+      <div className="text-[7px] font-bold tracking-[0.18em] text-[#5f6f86]">{label}</div>
+      <div className="mt-[2px] text-[10px] font-black tracking-[0.06em] text-[#f4efe2]">{value}</div>
+    </div>
+  );
+}
+const Divider = () => <span className="h-[18px] w-px bg-[#2c3a52]" />;
+
+/* ------------------------------------------------------------ the replay ------ */
+export function ReplayFrame({ d }: { d: Director }) {
+  if (!d.phase.includes('REPLAY')) return null;
+  return (
+    <>
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-[6%] bg-black" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[6%] bg-black" />
+      <div className="pointer-events-none absolute left-1/2 top-[9%] flex -translate-x-1/2 items-center gap-2 rounded-[2px] bg-[#080c14]/90 px-2 py-[3px]">
+        <span className="h-[7px] w-[7px] animate-pulse rounded-full bg-[#e2664f]" />
+        <span className="text-[9px] font-black tracking-[0.26em] text-[#f4efe2]">REPLAY</span>
+        <span className="text-[9px] font-bold tabular-nums text-[#8fa0b8]">
+          {d.replayTimer ? d.replayTimer.toFixed(1) : '0.0'}s
+        </span>
+      </div>
+    </>
+  );
+}
+
+/* ------------------------------------------------------------ form of game ---- */
+/**
+ * The three highest-rated men on the pitch. `PlayerRun.rating` is produced by
+ * the same accumulator the post-match box score prints, so a viewer watching a
+ * 9 across the water cannot be told he is on for an 8.
+ */
+export function FormStrip({ d }: { d: Director }) {
+  const all = [...d.A.players.map((p) => ({ p, team: 'A' as const })), ...d.B.players.map((p) => ({ p, team: 'B' as const }))]
+    .filter((x) => x.p.on)
+    .sort((a, b) => b.p.rating - a.p.rating)
+    .slice(0, 3);
+  if (!all.length) return null;
+  return (
+    <div className="pointer-events-none absolute bottom-[92px] left-3 select-none">
+      <div className="rounded-[3px] border border-[#2c3a52]/90 bg-[#080c14]/92 px-2 py-1.5">
+        <div className="mb-1 flex items-center justify-between gap-3 text-[7px] font-bold tracking-[0.2em] text-[#5f6f86]">
+          <span>FORM OF THE GAME</span>
+          <span className="text-[#3d4b66]">LIVE RATINGS</span>
+        </div>
+        {all.map(({ p, team }) => (
+          <div key={`${team}-${p.num}`} className="flex items-baseline gap-2 leading-tight">
+            <span className="w-[10px] text-[8px] font-black tabular-nums text-[#7f8ea6]">{p.num}</span>
+            <span className="w-[86px] truncate text-[9px] font-bold text-[#dfe6f0]">{p.name}</span>
+            <span className="w-[26px] text-right text-[9px] font-black tabular-nums text-[#e8cf46]">{fmt(p.rating, 1)}</span>
+            <span className="h-[8px] w-[2px]" style={{ background: team === 'A' ? '#e2664f' : '#7fa3e6' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
