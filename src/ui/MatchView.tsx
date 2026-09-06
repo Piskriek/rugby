@@ -33,6 +33,12 @@ const yieldToBrowser = () => new Promise<void>((r) => {
  * seconds apart, so that the usual slow case (a 6.3 MB GLB over a proxy) gives up on
  * the rig first and gets a real kick-off with plain men, and the watchdog only fires
  * if something earlier has gone wrong as well.
+ *
+ * What the 6 s is measured against, so nobody tunes it blind: `curl` through the dev
+ * server serves the whole 6.3 MB rig in 11 ms warm, and 15.9 s once — while the
+ * server was mid-restart, which is a broken pipeline, not a slow asset. The number
+ * that matters is the browser's own fetch of it across the preview proxy, and that is
+ * why `index.html` preloads the GLB at document time instead of waiting for the mount.
  */
 const RIG_BUDGET_MS = 6000;
 const BOOT_BUDGET_MS = 15000;
