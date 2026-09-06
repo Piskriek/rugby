@@ -105,3 +105,20 @@ mark by `think()`. It is a simulation decision, not a presentation one — nothi
 either pass writes engine state from the render layer. The one thing neither pass can
 verify is the picture; that still needs a human eye on `npm run dev`.
 
+**Second addendum (playtest), both sides of "it looks bad in game".** The tackle
+now has a real floor: `render/ragdoll.ts`, a 20-particle position-based solver in
+which the particles *are* the rig's bones, handed the body from the grounding
+stage of a tackle and nothing else — the drive and the wrap stay authored, the
+engine keeps translation, and the tackler's hands are pinned to the carrier's
+waist inside the solver so the wrap survives the fall. 0.083 ms per frame for
+eight of them at once, and `scripts/ragdollcheck.ts` proves the twelve things a
+ragdoll fails at, headless. The grey was measured rather than guessed: the
+hierarchy of fills was feeding the rig more irradiance than the key, there was no
+`scene.environment` for a PBR material to reflect, `#FFFFFF` kit albedo clipped
+through the tone curve, and the concrete concourse out-shone the pitch. Sky
+PMREM'd into an environment map, per-weather `iblMul`, kit albedo scaled to
+fabric, `CONCRETE` darkened, and a rule that a floodlight is not the sun behind a
+cloud. Written up with numbers in `SPEC_24_MATCHDAY.md`'s addendum; the art
+contract in `render/retro.ts`, `coronal.ts` and `rig.ts` was not touched, and no
+engine file was.
+

@@ -254,3 +254,133 @@ consequences for the design in this document, both now handled in
 size (a pixel-authored scar doubles in real size when the texture halves), and the
 crowd's every-seventh idle bounce writes all rows once when a cheer decays.
 
+---
+
+## Addendum — the fall, and why the picture was grey
+
+Both of these came out of playing the thing. One read as "the tackle is fake", the
+other as "everything is grey shit", and they turned out to be the same problem
+worn two different ways: the scene had no ambient light source that a physical
+material could reflect, and a man who was hit had no floor to fall onto.
+
+### The fall: physics owns the ground, the clip owns everything else
+
+An authored tackle was always going to lose at the moment of impact — 30 pre-baked
+poses cannot know where the man being hit happened to be. So `render/ragdoll.ts`
+is a 20-particle position-based solver (Verlet, four Gauss–Seidel iterations,
+fixed 1/120 substeps, five per frame maximum) and it is given exactly one job.
+
+| Stage | Who owns the body | Why |
+| --- | --- | --- |
+| IMPACT (0–0.15 s) | the drive/wrap clips | a solver has no memory of intention; the wrap reads better authored |
+| GROUNDING (0.15–0.40 s) | **the solver** | this is where a canned clip is found out |
+| roll-away / get-up | the clips, faded against a settled solver | a physics-driven get-up looks like a drowning |
+
+Four decisions carry the "realistic, at a low cost" brief:
+
+- **The particles *are* the bones.** `spine_02` is not a joint with a bone
+  attached to it; it is a point mass, and the solver's output is a set of
+  *directions*. The animated clip keeps the twist of every limb and the solver
+  replaces only where each bone points, so no skinning is rewritten and no
+  second skeleton exists.
+- **Translation stays with the engine.** `setAnchor(rx, -rz)` is called per frame
+  and the solver is dragged by the delta, with the pelvis's excess drift eased
+  back over the last 0.45 m of a 1.6 m allowance. A solver that disagrees with
+  the simulation about where a man is has to lose, because the ruck, the offside
+  line and the referee all read the simulation.
+- **A hit is a torque, not an impulse.** Height-scaled initial velocity: a shoulder
+  strike to the chest topples, a chop to the knees drops him. Seeded as a `prev`
+  offset rather than a force, so stability costs nothing.
+- **Only falling men simulate.** Two at a time, typically, for ~1 s. Measured
+  cost: **0.083 ms/frame for eight simultaneous solved falls**, in the same loop
+  that already walks the poses, with zero per-frame allocations.
+
+Then there is the part an impact needs that a ragdoll does not give you for free:
+the man who made the tackle must still be *holding* the man he hit. That is a soft
+pin — the tackler's two hands pulled toward the carrier's waist inside the solver,
+slack with distance, so a man thrown clear lets go by himself. An animation
+layered over the physics to fake the grab is how a cheap ragdoll advertises
+itself: the collision is solved and then undone, in the same half second.
+
+`scripts/ragdollcheck.ts` runs twelve checks, headless, on a synthetic skeleton
+with the shipped rig's names and conventions: settle inside 1.6 s, drawn bone
+error under 3 %, no hyperextension past the joint limit, nothing more than 1 cm
+through the turf, mud carrying a man a shorter distance than firm grass with the
+same hit, two fallers who cannot pass through each other, the pinned wrap holding
+tighter than a free arm, energy only leaving the system, no NaN and a
+force-settle under a 44 m/s hit, byte-exact determinism, contacts drained once for
+the wear pass, and a dragged anchor that changes where he is but not how he fell.
+
+Four bugs it found, all of them the kind that ship because they look like "the
+physics is a bit wobbly":
+
+1. **A bounce that accelerated into the floor.** `prev.y = p.y + vy * -restitution`
+   with `vy` already negative reflects the velocity the wrong way, so every
+   contact drove the body harder down, and nothing ever calmed. The solve took
+   2.4 s (its hard ceiling) instead of 1.0 s.
+2. **A joint limit that was also a strut.** One-sided `max` links carried the
+   seeded span as a `rest` target too, so below the ceiling they fought the
+   structural link across it — and the elbow landed straighter than anatomy
+   allows, precisely at the moment a hand presses on the deck. Joint limits now
+   re-solve *after* the ground pass, projected in the floor.
+3. **Friction as per-substep damping.** Scaling tangential velocity by a factor
+   every substep stops a body in two frames on any setting above sticky, which is
+   how mud and firm grass end up identical. Real friction is a fixed loss per
+   unit time — `mu * g * h²` in displacement units — mass-independent, and now
+   the difference between the two grounds is a distance you can see.
+4. **Reading the pose back through `bone.matrixWorld`.** The usual way to blend a
+   world-space aim into a bone, and a feedback loop: the rotation written last
+   frame is the reference for the one written this frame. With the particles
+   frozen at rest (0.05 m/s) the drawn head still whipped at 29 m/s. The solver
+   now reads only the *parent's* frame and composes on top of whatever the mixer
+   wrote this frame, so the limb keeps its twist and there is nothing to
+   oscillate about.
+
+### The grey: it was the fills, and the missing mirror
+
+The probe (`scripts/lookprobe.ts`) rebuilds the rig — albedo, both lights, IBL,
+exposure, extended-Reinhard, saturation, vignette — and prints what each surface
+reaches on screen. Its first run said the whole story: `AFTERNOON` fed the rig
+0.97 from the key against roughly 1.7 from hemisphere-plus-ambient, so the frame
+was *authored* flat; a white kit clipped to exactly 1.000 and lost its chroma in
+the curve; black boots were black in the albedo sense (0.009) with nothing to
+reflect, because `scene.environment` was null and a PBR material with no env map
+has no ambient specular at all.
+
+Four fixes, in order of how much they mattered:
+
+- **An environment map, from the sky we already draw.** `refreshEnvironment()`
+  PMREMs a proxy mesh that shares the dome's shader — the dome itself is never
+  re-parented, because moving it out of the scene would blank the sky — into a
+  render target that becomes `scene.environment`, refreshed only when conditions
+  change and disposed on teardown. Dark kit and boots now have something to
+  reflect; `LEGACY` gets `null` and keeps its flat look on purpose.
+- **Ratio, not level.** The keys came up (MIDDAY 4.15, `AFTERNOON` 3.85,
+  `TWILIGHT` 2.30, `FLOODLIT` 3.55) and the fills came *down* (ambient 0.10–0.14),
+  with a per-weather `iblMul` so overcast and fog — which really are giant soft
+  boxes — draw their irradiance from the environment instead of from the ambient
+  light. MIDDAY's white kit now lands at 0.958 instead of clipping, with the
+  pitch at 0.409 and skin at 0.675 underneath it.
+- **Fabric reflects less than plastic.** Kit albedo is multiplied by 0.78–0.82
+  before lighting, because `#FFFFFF` is a *paint* swatch, not a shirt: unlit
+  cotton is nearer 0.78, and that headroom is what lets the tone curve keep the
+  folds and the mud in the shirt instead of printing a white card.
+- **The stands are not the brightest thing on screen.** `CONCRETE` came down from
+  `0x8a8f96` to `0x4b5158` (0.369 on screen against grass at 0.409). A grey
+  stadium that out-shines the pitch is what "it looks like grey shit" was,
+  literally: the eye adapts to the largest area it can find.
+
+One condition-only rule is worth keeping an eye on: `keyMul` used to be applied to
+floodlight as if the lamps were the sun behind a cloud. Rain halves a solar key
+and costs a 400-lux array about a fifth of its own, so under `FLOODLIT` the
+weather's attenuation is now taken at 42 % strength and the pitch lifts from 0.215
+to 0.284. A wet night under the lights should not read as an unlit field.
+
+Verification for this pass: `tsc --noEmit` clean, `ragdollcheck` 12 green,
+`glslcheck` 10/0, `matchdayheadless` all green, `turfverify` ALL PASS,
+`spec07-contracts` ALL GREEN, `teleprobe` 0 teleports, `build` 1,846.89 kB
+(531 kB gzip, +12 kB for the solver), and `audit-cli.ts 90 3 1` still byte-identical
+to the tree it was merged from — PASS 5407, WARN 2, FAIL 2, 0 teleports, 0 watchdog
+trips. No engine file was touched: the ragdoll writes bones, never positions in
+`live`. What still needs a human eye is the one thing no harness here can do:
+whether a fall now *looks* right.

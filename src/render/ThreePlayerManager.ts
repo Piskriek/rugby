@@ -26,6 +26,7 @@ import type { Director, Actor } from '../game/director';
 import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
+import { Ragdoll } from './ragdoll';
 
 const MODEL_URL = 'assets/models/rugby_player.glb';
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
@@ -62,13 +63,12 @@ const TEMPLATE_SLOT_MAT: Record<Slot, string> = {
 
 
 
-/* ================== PROCEDURAL "FAKE RAGDOLL" LAYER ==================
+/* ============ PROCEDURAL POSTURE LAYER (and where it hands over) ============
  *
  * Canned clips cannot know how far apart two men are, how fast they are
  * travelling or which way they are twisting, so a latch built purely out of
- * them reads as a hug between two statues. Rather than a physics engine (a
- * true ragdoll would fight the AnimationMixer and wreck the skinning), the
- * chaos is written ON TOP of the sampled pose, every frame, in three layers:
+ * them reads as a hug between two statues. The chaos is written ON TOP of the
+ * sampled pose, every frame, in three layers:
  *
  *   1  BODY TILT    the whole mesh pitches forward into the carrier, so the
  *                   tackler is flying horizontally rather than standing up
@@ -76,6 +76,21 @@ const TEMPLATE_SLOT_MAT: Record<Slot, string> = {
  *                   in world space, so his hands track the man he is holding
  *   3  SPINE THRASH a velocity-scaled sine injected into the carrier's spine
  *                   and neck, so he fights and lurches under the weight
+ *
+ * WHAT THIS LAYER NO LONGER OWNS: the ground. A pose pitched 78 degrees forward
+ * is a man who is falling, not a man who HAS fallen, and no amount of sine on
+ * the spine convinces anyone he hit the deck. From the GROUNDING stage of a
+ * tackle the whole body is handed to `render/ragdoll.ts` — a small
+ * position-based solver whose particles are this skeleton's bones, so it
+ * overrides where each bone POINTS and leaves the clip its twist. Two rules
+ * make the two systems coexist, and both are load-bearing:
+ *
+ *   - the solver writes bone quaternions AFTER `applyProcedural`, never before
+ *     (a blend whose input is its own last output is a feedback loop, and the
+ *     head can be measured whipping at 29 m/s with the physics asleep);
+ *   - `applyProcedural` stands aside once `proc.ragW` passes 0.30, keeping only
+ *     the arm reach, because tilt/dip/thrash aimed at the same bones the solver
+ *     is solving is an argument the pose loses by whichever ran last.
  *
  * ORDER IS EVERYTHING. `mixer.update()` OVERWRITES every bone it animates,
  * and this rig's clips animate the whole spine and both arms (65 tracks,
@@ -207,6 +222,8 @@ interface PlayerInstance {
   soilShown: number;
   /** lazily-resolved procedural bone set — see resolveRig() */
   rig?: ProceduralRig;
+  /** the solved fall, or null while the clip owns this man (render/ragdoll.ts) */
+  rag?: Ragdoll | null;
   /** smoothed procedural state, so nothing pops between frames */
   proc: {
     /** current forward pitch of the whole body, radians */
@@ -219,6 +236,8 @@ interface PlayerInstance {
     dip: number;
     /** free-running phase for the wobble, so two men never wobble in sync */
     phase: number;
+    /** 0..1 how much of this man's pose the fall solver owns */
+    ragW: number;
     /** the FSM state resolved this frame, for the post-mixer pass */
     state: string;
   };
@@ -243,6 +262,8 @@ interface PlayerInstance {
     tackleRole: 'TACKLER' | 'CARRIER' | null;
     /** true when the engine classed this collision as a standing takedown */
     standingHit: boolean;
+    /** streamed velocity in pitch metres/second, the fall's initial conditions */
+    svx: number; svz: number;
     /** playhead of the tackle clip, carried across stage boundaries so a
      *  single authentic clip runs on instead of restarting each stage. */
     tackleClipT: number;
@@ -640,11 +661,26 @@ export class ThreePlayerManager {
    * watched a white kit at Twickenham in January knows which one wins.
    *
    * It accumulates and NEVER recovers, because that is what mud does. */
-  /** `rate` 0..1 from `conditions.mud`, `wet` 0..1 from `conditions.wetness`. */
+  /**
+   * `rate` 0..1 from `conditions.mud`, `wet` 0..1 from `conditions.wetness`.
+   *
+   * This also sets how the TURF answers a body, because it is the same two
+   * numbers: a MUDDY pitch is soft and grippy (a man stops in one engagement and
+   * stays down), a firm one is springy and slippery (he skips, rolls, and takes a
+   * second line of turf with him). Authoring a second ground table somewhere else
+   * would be the same mistake as a sky that disagrees with the pitch.
+   */
   setSoiling(rate: number, wet: number) {
     this.soilRate = rate;
     this.wetLevel = wet;
+    this.grip = Math.max(0.34, Math.min(0.86, 0.50 + rate * 0.34 - wet * 0.16));
+    this.bounce = Math.max(0.03, 0.21 * (1 - wet * 0.62) - rate * 0.07);
   }
+
+  private grip = 0.55;
+  private bounce = 0.15;
+  /** Turf hits reported by the falls, in pitch metres, drained by the view. */
+  private groundHits: { x: number; z: number; force: number }[] = [];
 
   /** Scale the fake contact shadows by the key light's own hard/soft state. */
   setShadowStrength(v: number) {
@@ -673,6 +709,81 @@ export class ThreePlayerManager {
   /** Clear the accumulated state between matches (the pool survives a restart). */
   resetSoiling() {
     for (const inst of this.pool.values()) { inst.soil = 0; inst.soilShown = -1; }
+  }
+
+  /** Hand the solved falls over to the frame's wear pass, once per frame. */
+  drainGroundHits(): { x: number; z: number; force: number }[] {
+    if (!this.groundHits.length) return this.groundHits;
+    const out = this.groundHits.slice();
+    this.groundHits.length = 0;
+    return out;
+  }
+
+  /** FLAT 16-BIT has no physics, no shadows and no weather. Nothing to clear
+   *  for the other tiers: a fall settles or is force-settled inside 2.4 s. */
+  clearFalls() {
+    for (const inst of this.pool.values()) {
+      inst.rag?.dispose();
+      inst.rag = null;
+      inst.proc.ragW = 0;
+    }
+  }
+
+  /**
+   * Start a fall. Called on the frame the takedown reaches its GROUNDING stage,
+   * not on impact: the drive and the wrap are better authored than solved, and
+   * by this frame the arms are already around the man being brought down, so the
+   * solver inherits a pose that makes sense instead of an exploded one.
+   */
+  private startFall(inst: PlayerInstance, partner: PlayerInstance | null) {
+    if (inst.rag || !inst.root) return;
+    /* The pair's mean drift is the ENGINE's business (`breakdown.ts` slides both
+     * men through the impact window), so it is subtracted out here: the fall owns
+     * the difference between the two, which is the violent part. */
+    const px = partner ? (inst.st.svx + partner.st.svx) * 0.5 : inst.st.svx;
+    const pz = partner ? (inst.st.svz + partner.st.svz) * 0.5 : inst.st.svz;
+    /* Clamped, because a ruck can drop a man forty metres downfield in one frame
+     * and the velocity estimator has no way to tell that from a tackle. A fall
+     * seeded with a teleport's speed is a body thrown into the third row. */
+    const cap = 6.5;
+    const cl = (v: number) => Math.max(-cap, Math.min(cap, v));
+    const rx = cl(inst.st.svx - px), rz = cl(inst.st.svz - pz);
+    /* A side-on hit has a cross-component, and that is exactly the spin that
+     * makes two men roll instead of topple in parallel. */
+    let spin = 0;
+    if (partner) {
+      const dx = partner.root.position.x - inst.root.position.x;
+      const dz = partner.root.position.z - inst.root.position.z;
+      const d = Math.hypot(dx, dz) || 1;
+      spin = ((rx * dz - rz * dx) / d) * 0.34;
+    }
+    /* A diving tackler is airborne already; a standing takedown is not, and
+     * seeding a drop he does not have is how a ragdoll starts underwater. */
+    const dive = inst.st.tackleRole === 'TACKLER' && !inst.st.standingHit;
+    const airborne = dive ? Math.min(0.34, 0.10 + Math.hypot(rx, rz) * 0.035) : 0;
+    const gain = inst.st.standingHit ? 0.42 : 0.72;
+    try {
+      inst.rag = new Ragdoll(inst.root, {
+        vx: rx * gain, vz: rz * gain, vy: -(dive ? 1.1 : 0.35),
+        spin, airborne,
+      }, { friction: this.grip, restitution: this.bounce, y: 0 });
+    } catch {
+      inst.rag = null;   // a rig we cannot read is not worth a broken frame
+    }
+  }
+
+  /** The other half of this man's collision, if he is still falling with him. */
+  private fallPartner(inst: PlayerInstance, pool: PlayerInstance[]): PlayerInstance | null {
+    if (!inst.st.tackleRole) return null;
+    const want = inst.st.tackleRole === 'TACKLER' ? 'CARRIER' : 'TACKLER';
+    let best: PlayerInstance | null = null;
+    let bestD = Infinity;
+    for (const other of pool) {
+      if (other === inst || other.st.tackleRole !== want || other.team === inst.team) continue;
+      const d = inst.root.position.distanceToSquared(other.root.position);
+      if (d < bestD) { bestD = d; best = other; }
+    }
+    return bestD > 9 * 9 ? null : best;
   }
 
   /* ----------------------------------------------------------- ball ----- */
@@ -761,8 +872,16 @@ export class ThreePlayerManager {
           const ROUGH: Record<string, number> = {
             jersey: 0.74, shorts: 0.70, socks: 0.86, skin: 0.55, boots: 0.28,
           };
+          /* Fabric albedo. A white cotton-poly jersey is a very good reflector
+           * and a very bad mirror: measured sports kit sits around 0.72–0.80
+           * diffuse, never 1.0. Handing the material a literal 1.0 means the
+           * sun clips the shirt to a flat white silhouette with no fold, no
+           * terminator and no man inside it — which is half of what "the
+           * players look grey" turns out to be. Skin and boots keep their own
+           * response: boots are meant to clip. */
+          const FABRIC = slot === 'jersey' ? 0.78 : slot === 'shorts' ? 0.80 : 0.82;
           const km = new THREE.MeshStandardMaterial({
-            color: new THREE.Color(slotColour[slot]),
+            color: new THREE.Color(slotColour[slot]).multiplyScalar(FABRIC),
             roughness: ROUGH[slot] ?? 0.75,
             metalness: 0.0,
             transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
@@ -806,7 +925,7 @@ export class ThreePlayerManager {
       actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
       proc: {
-        tilt: 0, reach: 0, thrash: 0, dip: 0,
+        tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -815,6 +934,7 @@ export class ThreePlayerManager {
         face: actor.rf > 0 ? 0 : Math.PI,
         passLatched: false,
         tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
+        svx: 0, svz: 0,
       },
     };
     return inst;
@@ -1329,6 +1449,15 @@ export class ThreePlayerManager {
   private applyProcedural(
     inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
   ) {
+    /* A SOLVED fall owns this man's whole body: the root tilt, the torso dip and
+     * the thrash would all fight it for the same bones, and the argument is lost
+     * by whichever runs last. The arm reach still runs below, at reduced weight,
+     * because a tackler whose arms let go mid-fall has forgotten the tackle. */
+    if (inst.proc.ragW > 0.30) {
+      this.applyArmReach(inst, null, 0, step);
+      this.applyTorsoDip(inst, 0, step);
+      return;
+    }
     const latching = state === 'latchHang';
     const latched = state === 'latchCarry';
     const grounding = state === 'tackleGround' || state === 'rollAway'
@@ -1406,6 +1535,12 @@ export class ThreePlayerManager {
       const vz = (a.rz - st.lz) / Math.max(step, 1e-4);
       st.lx = a.rx; st.lz = a.rz;
       st.spd = Math.hypot(vx, vz);
+      /* Smoothed, because this feeds the initial conditions of a physics solve
+       * and a single noisy frame from a snapped position would fire a man into
+       * the third row. The engine's own `live` velocities are not on the
+       * presentation contract that `Actor` offers, so they are recovered here. */
+      st.svx += (vx - st.svx) * Math.min(1, step * 14);
+      st.svz += (vz - st.svz) * Math.min(1, step * 14);
 
       // heading: a moving man walks where he is going (smoothed); a slow man
       // holds his last facing.
@@ -1525,6 +1660,13 @@ export class ThreePlayerManager {
       } else if (!tackleSide && st.tackleRole) {
         st.tackleRole = null; st.tackleT = -1;
       }
+      /* A man getting to his feet hands his body back to the animator; the
+       * weight below fades it out rather than snapping the pose. */
+      if (st.tackleRole === null && desired !== 'grounded' && desired !== 'getup'
+        && (locomoting || desired === 'ruck' || desired === 'bind')) {
+        inst.rag?.dispose();
+        inst.rag = null;
+      }
 
       if (st.tackleRole) {
         const prev = st.tackleT;
@@ -1574,6 +1716,14 @@ export class ThreePlayerManager {
           st.lock = 0;
         }
         st.lie = true;
+        /* THE FALL. Physics takes over the moment the drive ends and the ground
+         * begins — see render/ragdoll.ts for why the drive stays authored. */
+        if (wantStage >= 1) this.startFall(inst, this.fallPartner(inst, pending));
+        /* The roll-away is authored, so the fall is CALLED rather than taken: a
+         * solved body that is still stepping when the get-up clip starts pulls at
+         * it. `settled` freezes the pose and the weight below fades it out, so the
+         * hands back happens on a calm body instead of a mid-air one. */
+        else if (inst.rag) inst.rag.settled = wantStage === 2 || inst.rag.settled;
         inst.proc.state = wantStage === 0
           ? (st.tackleRole === 'CARRIER' ? 'hitReact' : 'tackleDrive')
           : wantStage === 1
@@ -1683,6 +1833,81 @@ export class ThreePlayerManager {
     for (const inst of pending) {
       const partner = this.latchPartner(inst, pending);
       this.applyProcedural(inst, inst.proc.state, partner, step);
+    }
+    /* THE FALLS. They run in their own loop, after every animated pose exists
+     * and after `applyProcedural` has stood aside: two falling men push on each
+     * other, and a body has to be resisted by where the other one got to THIS
+     * frame, or the pair sink through one another on the deck. Two passes for
+     * the same reason — every solve first, then every pose. */
+    for (const inst of pending) {
+      const rag = inst.rag;
+      if (!rag) {
+        if (inst.proc.ragW > 0.001) inst.proc.ragW *= Math.exp(-step * 7);
+        continue;
+      }
+      /* In, fast; out, slower. A man does not stop falling the frame the sim
+       * decides he has finished, and the get-up clip has to meet a body that is
+       * still mostly where it fell, not one that snapped upright. */
+      const want = rag.settled ? 0 : 1;
+      inst.proc.ragW += (want - inst.proc.ragW) * (1 - Math.exp(-(want ? 13 : 6) * step));
+      rag.weight = inst.proc.ragW;
+      /* Where the engine moved him since the last frame: the solver is dragged
+       * along instead of being left behind, and it is the DELTA it applies, not a
+       * teleport, so a break-off mid-fall cannot rip the legs out. */
+      rag.setAnchor(inst.actor.rx, -inst.actor.rz);
+      /* THE WRAP SURVIVES THE FALL. The tackler's hands are pinned to the
+       * carrier's waist while both men are still going down — in the solver's own
+       * language rather than as an animation layered over it: the pin is a soft
+       * pull, so a man thrown clear lets go by himself as the distance grows.
+       * Set before the step, because a pin that arrives after the solve is a pin
+       * that does nothing for one frame. */
+      const mate = this.fallPartner(inst, pending);
+      rag.clearPins();
+      if (mate && inst.st.tackleRole === 'TACKLER' && rag.weight > 0.25) {
+        const waist = this.resolveRig(mate).pelvis ?? this.resolveRig(mate).spine[0];
+        if (waist) {
+          waist.updateWorldMatrix(true, false);
+          const sc = mate.root.getWorldScale(_v2);
+          const inv = sc.x > 1e-6 ? 1 / sc.x : 1;
+          _target.setFromMatrixPosition(waist.matrixWorld).multiplyScalar(inv);
+          const k = 0.055 * rag.weight;
+          rag.pin('hand_l', _target.x, _target.y, _target.z, k);
+          rag.pin('hand_r', _target.x, _target.y, _target.z, k);
+        }
+      }
+      rag.step(step);
+      for (const hit of rag.takeContacts()) {
+        /* Sim metres -> pitch metres. The model's z runs opposite the engine's
+         * down-field axis, and that sign is the only translation here. */
+        this.groundHits.push({ x: hit.x, z: -hit.z, force: hit.force });
+      }
+    }
+    for (const inst of pending) {
+      const rag = inst.rag;
+      if (!rag) continue;
+      const mate = this.fallPartner(inst, pending);
+      if (mate?.rag) Ragdoll.contact(rag, mate.rag, this.bounce);
+      rag.apply();
+      /* The engine owns where he IS; the fall owns how much of him is on the
+       * grass, and how far he slid from where he was hit. Both are clamped: a
+       * solver that disagrees with the simulation about a man's position is a
+       * solver that has to lose, because the ruck, the offside line and the
+       * referee all read the simulation. */
+      const w = rag.weight;
+      const drop = Math.max(-0.95, Math.min(0, rag.dropY)) * w * RENDER_SCALE;
+      const dr = rag.drift;
+      const lim = 0.5;
+      inst.root.position.set(
+        inst.actor.rx * RENDER_SCALE + Math.max(-lim, Math.min(lim, dr.x)) * w * RENDER_SCALE,
+        drop,
+        -inst.actor.rz * RENDER_SCALE + Math.max(-lim, Math.min(lim, dr.z)) * w * RENDER_SCALE,
+      );
+      if (inst.shadow) {
+        /* A body on the deck covers more turf and sits closer to it. */
+        inst.shadow.scale.set(0.95 + w * 0.5, 0.50 + w * 0.34, 1);
+        inst.shadow.position.y = 0.02 * (1 - 0.55 * w);
+      }
+      if (rag.settled && inst.proc.ragW < 0.02) { rag.dispose(); inst.rag = null; }
     }
 
     for (const [k, inst] of this.pool) {

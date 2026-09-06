@@ -347,6 +347,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             d.audio.setSurface(d.pitch.firm);
           }
           playersRef.current?.setSoiling(cond.mud, cond.wetness);
+          /* FLAT 16-BIT is a frame without weather, shadows or physics; a solved
+           * fall would be the only moving thing in it that the sprite tier has
+           * no answer for, so the falls are handed back to the animator. */
+          if (cond.quality === 'LEGACY') playersRef.current?.clearFalls();
           playersRef.current?.setShadowStrength(cond.shadowStrength * (cond.shadows ? 0.55 : 1));
           const env = three.environment;
           if (env) {
@@ -364,6 +368,28 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.impact * 9);
           }
           if (fxPulse.shake > 0) fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.shake);
+          /* THE FLOOR. A solved body kicks up a second line of turf when it
+           * arrives a second time — a roll, a skip, a knee on the deck. The
+           * manager reports the contacts, this spends them, because the pitch
+           * and the weather belong to the renderer and the fall does not. */
+          const hits = playersRef.current?.drainGroundHits() ?? [];
+          /* The solver reports every joint that reached the deck; the frame does
+           * not need all of them. A knee and an elbow landing 0.1 s apart are one
+           * cloud of turf, not six, and the wear canvas is already running to a
+           * budget. Take the heaviest few. */
+          if (hits.length) {
+            hits.sort((a, b) => b.force - a.force);
+            let spent = 0;
+            for (const h of hits) {
+              if (h.force < 0.22 || spent >= 3) continue;
+              spent++;
+              three.environment?.addScar(h.x, h.z, 0.55 + h.force * 0.5);
+              three.particles?.emit(cond.mud > 0.5 ? 'MUD' : 'DUST', {
+                count: 3 + Math.round(h.force * 6), x: h.x * 1.65, y: 0.06, z: -h.z * 1.65,
+                speed: 0.9 + h.force, up: 0.5, scale: 0.8, opacity: 0.55,
+              });
+            }
+          }
           /* The weather itself: precipitation, wet ground, mist, lamp haze. */
           three.updateMatchDay(d.cam, view, dt);
           three.render();
