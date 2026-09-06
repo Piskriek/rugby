@@ -2332,3 +2332,12 @@ site in `engine/open.ts` as well as here.
 "the game looks right" is unbilled work — framing is 19 px at 640×360 (1.6× camera
 gain, `sceneaudit`-guarded) and needs someone to say whether the grapple reads at
 that size or whether the rig needs the ball-side hand drawn bigger.
+
+**Read `SENIOR_PLAYBOOK.md` before you open a file, and finish with
+`npx vite-node scripts/gatecheck.ts` before you ask anyone to review.** That is the
+whole contract: §1–3 are the rules and the traps, §6 is three scoped briefs with their
+acceptance tests, §7 is how to review a sibling branch that solved the same prompt by
+forking the engine. The gate runs seventeen harnesses plus `tsc` and the production
+build in about two minutes, refuses a merge on any red line, and ratchets the audit's
+FAIL/WARN counts against `scripts/gate-baseline.json` so a session cannot quietly
+purchase green with a weakened check.
