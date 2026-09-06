@@ -239,8 +239,11 @@ read:
 
 Everything else in this document — the gap table, the four rulings, the FX
 director, the composer order, the honest limitations — stands as written. The
-verification numbers in the table still hold: `audit-cli.ts 90 3 1` after the
-merge is byte-identical to before it, on either side.
+verification numbers in the table still hold in the sense that matters — no
+presentation change moved an engine number: `audit-cli.ts 90 3 1` after each merge
+was byte-identical to the tree being merged in. The audit's own totals did move
+once, and it was not our doing: `6bcbd54` fixed three teleports and bought one
+extra `LAW-66`, which is a simulation decision, argued in `AAA_EDITION.md`.
 
 The freeze fix that landed next (`8fb84d3`) is part of this picture, not a footnote
 to it: the turf this pass paints into is now 2048 × 1024 off a precomputed noise

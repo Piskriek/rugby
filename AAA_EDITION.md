@@ -91,10 +91,17 @@ simulation already owned: `graphics` (PERFORMANCE/BALANCED/ULTRA → the existin
 `timeofday` KICK-OFF setting, which `conditions.ts` now reads). Anyone wanting a
 second lighting switch should first explain what the match's own kick-off time is for.
 
-Verification after the merge: `tsc --noEmit` clean, `scripts/glslcheck.ts` 10
-shaders / 0 failing, `scripts/matchdayheadless.ts` all green, `scripts/spec07-contracts.ts`
-ALL GREEN, and `scripts/audit-cli.ts 90 3 1` byte-identical to the pre-merge runs of
-both sides — PASS 5343, WARN 4, FAIL 1, 5 teleports, 0 watchdog trips. The one
-thing neither pass can verify is the picture; that still needs a human eye on
-`npm run dev`.
+Verification after the merge (and after `6bcbd54`, the NO TELEPORTS engine fix, merged
+on top of it): `tsc --noEmit` clean, `scripts/glslcheck.ts` 10 shaders / 0 failing,
+`scripts/matchdayheadless.ts` all green, `scripts/spec07-contracts.ts` ALL GREEN,
+`scripts/teleprobe.ts` 0 teleports across difficulty 0/3/6, and
+`scripts/audit-cli.ts 90 3 1` byte-identical to the tip of the other pass —
+PASS 5407, WARN 2, FAIL 2, 0 teleports, 0 watchdog trips. That is the honest trade
+the teleport fix makes against the earlier baseline (PASS 5343, WARN 4, FAIL 1, 5
+teleports): three teleports and two `LOG-20` bunching warnings are gone, and
+`LAW-66` picks up one more defensive-line hole, because a defender placed by a ruck
+now keeps that placement for a frame instead of being yanked back to his support
+mark by `think()`. It is a simulation decision, not a presentation one — nothing in
+either pass writes engine state from the render layer. The one thing neither pass can
+verify is the picture; that still needs a human eye on `npm run dev`.
 

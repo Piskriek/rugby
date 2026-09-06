@@ -2481,7 +2481,13 @@ export class Director {
           steer(k, dt, false);
           clip(k, 'jog');
         } else {
-          this.place(k, s.bx, s.bz - s.dir * 1.1, 'kicker');
+          /* T-16/NO-TELEPORT. Rate-limited, NOT snapped. The walk-up branch
+           * above only owns the kicker during WALKUP; in FANFARE and AIM he
+           * arrives here from wherever the previous phase left him, and a hard
+           * place() moved him up to 10.02 m in a single frame (measured at
+           * t=43.7s, difficulty 3). settleToward caps the step at a walking
+           * 2.6 m/s, so he closes the last stride instead of jumping it. */
+          this.settleToward(k, s.bx, s.bz - s.dir * 1.1, dt, 'kicker');
           k.vx = 0; k.vz = 0; k.face = s.dir;
           clip(k, 'ready');
         }
@@ -2564,7 +2570,10 @@ export class Director {
           k.job = 'GET TO THE BALL';
           steer(k, dt, false);
         } else {
-          this.place(k, kx, kz, 'kicker');
+          /* Same contract as the goal-kick ritual above: the 0.5 m guard means
+           * this branch is a settle onto the mark, so it must be rate-limited
+           * rather than a snap. */
+          this.settleToward(k, kx, kz, dt, 'kicker');
           k.vx = 0; k.vz = 0; k.face = s.dir;
           clip(k, 'ready');
         }
@@ -3149,6 +3158,21 @@ export class Director {
        * the shape. Skipping him here stops think() from yanking him back to his
        * support mark — which is what made him teleport onto the ball. */
       if (this.op?.ball.live && p.team === this.op.attacking && p.num === this.op.pendingReceiver) continue;
+      /* PHASE HAND-OFF (T-02 ownership). On the single frame a breakdown or
+       * maul resolves, the set-piece code has already placed this man for the
+       * ruck and open play then inherits him in the SAME frame — so `steer()`
+       * would be the second writer, which is the double-move the contract
+       * forbids. Measured 4 times in 18,000 frames, always on the exact frame
+       * BREAKDOWN -> OPEN_PLAY.
+       *
+       * He simply keeps the placement he was given and picks up his steering
+       * next frame, 16 ms later, which is invisible. */
+      if (p.movedBy === 'bound') {
+        this.writeThinkPlayer(gate, `think:handoff:${p.team}${p.num}`, p, ['urgency'] as const, () => {
+          p.urgency = 0;
+        });
+        continue;
+      }
       /* LATCH-AND-DRAG (T-02 ownership). A defender hanging off a carrier is
        * owned by engine/latch.ts, which snaps his coordinates onto the
        * carrier's hip every frame. Steering him at a defensive mark at the

@@ -56,7 +56,9 @@
 > where the sun is. Reasoning per area: `AAA_EDITION.md`; what changed in the SPEC_24 design:
 > its addendum. Post-merge gates: `tsc` clean, `glslcheck` 10/0, `matchdayheadless` all green,
 > `spec07-contracts` ALL GREEN, `audit-cli 90 3 1` byte-identical to both parents (PASS 5343 /
-> WARN 4 / FAIL 1) and `turfverify` ALL PASS at 780 ms. The freeze fix that followed (`8fb84d3`:
+> WARN 4 / FAIL 1) and `turfverify` ALL PASS at 780 ms. `6bcbd54` (the NO TELEPORTS engine fix) then
+> merged on top; the seeded audit is now byte-identical to that tip at PASS 5407 / WARN 2 / FAIL 2,
+> 0 teleports, and the trade is recorded in `AAA_EDITION.md`. The freeze fix that followed (`8fb84d3`:
 > `render/noise.ts`, 2048×1024 turf, staged `LoadingScreen`, `contextlost` handling) merged into the
 > same commit; our scars are authored in metres for exactly that reason, and the crowd idle
 > optimisation gained a settle pass so a cheer cannot leave six sevenths of the stadium frozen
