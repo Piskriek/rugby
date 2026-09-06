@@ -51,7 +51,7 @@ for (let i = 0; i < seconds * 60; i++) {
     const was = prev.get(`${p.team}${p.num}`);
     if (!was) continue;
     const disp = Math.hypot(p.x - was.x, p.z - was.z);
-    const ctx = `t=${d.t.toFixed(3)} sh${p.num}(${p.team}) ${fmt(disp)}m phase ${phaseBefore}->${d.phase} bd-stage=${bdBefore?.stage ?? '-'} v=(${p.vx.toFixed(2)},${p.vz.toFixed(2)}) z:${was.z.toFixed(2)}->${p.z.toFixed(2)}`;
+    const ctx = `t=${d.t.toFixed(3)} sh${p.num}(${p.team}) ${fmt(disp)}m movedBy=${(p as any).movedBy ?? '?'} phase ${phaseBefore}->${d.phase} bd-stage=${bdBefore?.stage ?? '-'} v=(${p.vx.toFixed(2)},${p.vz.toFixed(2)}) z:${was.z.toFixed(2)}->${p.z.toFixed(2)}`;
     if (disp > maxDisp) { maxDisp = disp; maxInfo = ctx; }
     if (disp > HARD_FAIL) { hardFail++; if (hardFail <= 20) provenance.push(`HARD ${ctx}`); }
     else if (disp > TIGHTEN) { tighten++; if (tighten <= 20) provenance.push(`TIGHTEN ${ctx}`); }

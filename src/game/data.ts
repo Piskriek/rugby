@@ -396,10 +396,10 @@ export interface OptionItem { id: string; label: string; values: string[]; def: 
 export const OPTION_ITEMS: OptionItem[] = [
   { id: 'halfLength', label: 'HALF LENGTH', values: ['2 MIN', '5 MIN', '10 MIN', '20 MIN', '40 MIN'], def: 1, note: 'Clock compression keeps a 40-minute half inside a real session.', cat: 'MATCH' },
   { id: 'difficulty', label: 'SKILL LEVEL', values: ['0 ROOKIE', '1 CLUB', '2 DISTRICT', '3 COUNTY', '4 TRIALIST', '5 INTERNATIONAL', '6 LEGEND', '7 ELITE', '8 SUPREME', '9 MYTHIC'], def: 3, note: 'Ten rungs. 0-6 shipped in 1991; 7-9 are the Five Nations Edition ceiling.', cat: 'MATCH' },
-  { id: 'weather', label: 'WEATHER', values: ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'], def: 1, note: 'Wet ball widens handling error probability and shortens kick distances.', cat: 'CONDITIONS' },
+  { id: 'weather', label: 'WEATHER', values: ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'], def: 0, note: 'Wet ball widens handling error probability and shortens kick distances.', cat: 'CONDITIONS' },
   { id: 'pitch', label: 'PITCH', values: ['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'], def: 1, note: 'Footing alters acceleration, sidestep success and maul traction.', cat: 'CONDITIONS' },
   { id: 'wind', label: 'WIND', values: ['CALM', 'LIGHT', 'BREEZY', 'STRONG', 'GUSTING'], def: 1, note: 'Cross-wind pushes the ball off line on every kick and restart.', cat: 'CONDITIONS' },
-  { id: 'timeofday', label: 'KICK-OFF', values: ['MIDDAY', 'AFTERNOON', 'TWILIGHT', 'FLOODLIT'], def: 2, note: 'Changes crowd shading and the vignette weight.', cat: 'CONDITIONS' },
+  { id: 'timeofday', label: 'KICK-OFF', values: ['MIDDAY', 'AFTERNOON', 'TWILIGHT', 'FLOODLIT'], def: 1, note: 'Changes crowd shading and the vignette weight.', cat: 'CONDITIONS' },
   /* SPEC_12. The REFEREE slider is RETIRED. It promised to drive "penalty
    * frequency, card threshold and advantage length" and was read by nothing in
    * the engine — a control that advertised an effect it did not have. Vague
@@ -432,10 +432,14 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'showControls', label: 'CONTROLS PANEL', values: ['OFF', 'TOP LEFT', 'TOP LEFT + ALL'], def: 1, note: 'The live control list at the top left, with the most logical action highlighted.', cat: 'DISPLAY' },
   { id: 'radar', label: 'RADAR', values: ['OFF', 'ON'], def: 1, note: 'The transparent pitch map, top right.', cat: 'DISPLAY' },
   { id: 'autoReplay', label: 'AUTO REPLAY', values: ['OFF', 'SCORES', 'EVERYTHING'], def: 1, note: 'Five replay variants shipped with the original, varying in speed and dimension.', cat: 'DISPLAY' },
-  { id: 'crt', label: 'CRT FILTER', values: ['OFF', 'SUBTLE', 'FULL'], def: 1, note: 'Scanline and phosphor overlay.', cat: 'DISPLAY' },
+  { id: 'render', label: 'RENDER PIPELINE', values: ['FLAT 16-BIT', 'STANDARD', 'NEXT-GEN'], def: 2,
+    note: 'One switch for the whole 3D frame. NEXT-GEN: weather in the air, rain on the lens, 2048 shadow map, pitch wear, kit that dirties, filmic grade. STANDARD: the same, half-resolution shadows. FLAT 16-BIT: no precipitation, no shadows, no bloom — the original frame, kept because it is the design document\'s own picture.', cat: 'DISPLAY' },
+  { id: 'crt', label: 'CRT FILTER', values: ['OFF', 'SUBTLE', 'FULL'], def: 0, note: 'Scanline and phosphor overlay.', cat: 'DISPLAY' },
   { id: 'commentary', label: 'COMMENTARY', values: ['OFF', 'TICKER', 'FULL'], def: 2, note: 'Caption feed under the HUD.', cat: 'DISPLAY' },
   { id: 'crowd', label: 'CROWD NOISE', values: ['OFF', 'LOW', 'FULL'], def: 2, note: 'Mixed by travelling support ratio.', cat: 'DISPLAY' },
   { id: 'hud', label: 'HUD DENSITY', values: 'MINIMAL STANDARD FULL TELEMETRY'.split(' '), def: 1, note: 'From bare score to live expected-points readouts.', cat: 'DISPLAY' },
+  { id: 'broadcast', label: 'BROADCAST PACKAGE', values: ['HERITAGE 1991', 'AAA BROADCAST'], def: 1, note: 'AAA adds the matchday card, television score bug and player spotlight lower-thirds; HERITAGE keeps the original 16-bit HUD.', cat: 'DISPLAY' },
+  { id: 'spokenCommentary', label: 'SPOKEN COMMENTARY', values: ['OFF', 'ON'], def: 0, note: 'Reads the live commentary feed aloud with the browser speech engine. Designed to be layered over the crowd bed.', cat: 'DISPLAY' },
   { id: 'handicap', label: 'CPU HANDICAP', values: ['NONE', 'SLIGHT', 'PLAYER EDGE'], def: 1, note: 'Quiet stat nudge for whoever needs it.', cat: 'MATCH' },
   { id: 'extraTime', label: 'EXTRA TIME', values: ['OFF', 'ON', 'GOLDEN POINT'], def: 1, note: 'Only in knockout rugby.', cat: 'MATCH' },
 ];

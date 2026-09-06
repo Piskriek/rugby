@@ -3,8 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>World Class Rugby — 16-Bit Rugby Union (1991)</title>
-    <meta name="description" content="A polished clone of World Class Rugby (Audiogenic / Denton Designs, 1991): sixteen nations, six set-piece mini-games, ten skill levels, Five Nations and World Cup." />
+    <title>World Class Rugby — AAA Rugby Union</title>
+    <!-- The squad rig is 6.3 MB and the match tree only asks for it after React has
+         mounted, built the world and parsed the shader set — so on a throttled link the
+         boot bar sat at 66% while an idle network did nothing. Starting the fetch at
+         document time overlaps it with everything above; the loader's own request then
+         reuses the memory cache. A 404 here (a standalone dist/index.html with no
+         public/ next to it) costs nothing: the rig degrades to the procedural bodies,
+         which is the same ladder the boot budget already handles. -->
+    <link
+      rel="preload"
+      href="/assets/models/rugby_player.glb"
+      as="fetch"
+      crossorigin="anonymous"
+      fetchpriority="high"
+    />
+    <meta name="description" content="A modern broadcast presentation of World Class Rugby (Audiogenic / Denton Designs, 1991): sixteen nations, six set-piece mini-games, ten skill levels, Five Nations and World Cup, now with AAA matchday cards, television score bug, player spotlights and gamepad support." />
     <style>
       html, body, #root { height: 100%; margin: 0; background: #0a0e16; }
       body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
