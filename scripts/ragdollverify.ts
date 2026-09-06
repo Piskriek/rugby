@@ -6,7 +6,7 @@
  * being injected until it explodes. Each of those is checked numerically here
  * so none of them needs an eyeball to catch.
  */
-import { RagdollBody, RagdollPool, NODE, NODE_COUNT, STICK_COUNT, ITERATIONS, FIXED_STEP } from '../src/render/ragdoll';
+import { RagdollBody, RagdollPool, NODE, NODE_COUNT, STICK_COUNT, ITERATIONS, FIXED_STEP } from '../src/render/ragdollKernel';
 
 /** A plausible standing pose, world metres, facing +Z. */
 function standingSeed(x = 0, z = 0): Float32Array {

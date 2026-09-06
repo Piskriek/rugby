@@ -97,6 +97,10 @@ thesis is in code; the thesis itself is in `src/game/jlr.ts`.
 | `render/ThreeParticles.ts` | ~345 | One pooled FX system, eight behaviours | Active |
 | `render/fxDirector.ts` | ~360 | Director → FX, by observed transitions only. Never writes to the engine | Active |
 | `ui/broadcast.tsx` | ~400 | The TV package: their score bug, matchday card, player spotlight, controller badge + our TMO, card, conditions, ratings, replay | Active |
+| `render/ragdollKernel.ts` | ~370 | The 11-node flat-array body the baked falls were simulated with. No view in it, which is why it bakes and why it is testable at 10k falls/s | Active |
+| `render/ragdollRig.ts` | ~240 | Bone bridge for the baked tier: resolve, seed from the live pose, drive the rig as a delta from a captured origin | Active |
+| `render/ragdollClips.ts` | ~150 | Playback of the 36 baked takes: pick the cell, rotate to the heading, scale to the pace | Active |
+| `render/ragdoll.ts` | ~470 | Position-based fall solver. 20 particles that ARE bones, one-sided joint limits, Coulomb ground, soft pins for the wrap. Owns posture only — the engine keeps translation | Active |
 | `render/turf.ts` | ~325 | Procedural turf: albedo (stripes + every marking baked), half-res roughness and normal, off one lattice. `TURF_SIZE` is the resolution contract | Active |
 | `render/noise.ts` | ~88 | Precomputed 256×256 value-noise lattice. Exists because the `Math.sin` hash cost 12 s of main thread per pitch | Active |
 | `game/gamepad.ts` | ~160 | Two-stick pad, merged into the same verb stream the keyboard writes | Active |
@@ -104,6 +108,11 @@ thesis is in code; the thesis itself is in `src/game/jlr.ts`.
 | `scripts/turfverify.ts` | ~83 | NaN / stripe / normal / build-time gates on the generated turf | Test harness |
 | `scripts/glslcheck.ts` | ~160 | Parses every shader + enforces the smoothstep-domain rule | Test harness |
 | `scripts/matchdayheadless.ts` | ~270 | Drives the render layers over a live match, headless | Test harness |
+| `scripts/ragdollbake.ts` | ~185 | Offline simulation of the fall library. Rejects any take that fails to settle, ends upright or slides | Build tool |
+| `scripts/ragdollverify.ts` | ~285 | Kernel + library: yaw invariance, determinism, budget, decode, settle, playback cost | Test harness |
+| `scripts/renderverify.ts` | ~48 | Asserts the pitch crown's sign and that the renderer leaves tone mapping to the grade pass | Test harness |
+| `scripts/ragdollcheck.ts` | ~330 | Twelve measurements on the fall solver with a synthetic rig: stretch, limits, sinking, mud-vs-firm, pair contact, wrap pins, energy, determinism, cost | Test harness |
+| `scripts/lookprobe.ts` | ~200 | Rebuilds albedo × rig × tone curve per condition set and flags clipped or black surfaces. Exists because no harness here can look at the picture | Test harness |
 | `game/intelligence.ts` | ~400 | Off-ball brain: movement, shapes, pass solver, crews | Active |
 | `game/shapes.ts` | ~500 | Shape/defence/playbook/camera-plan data | Active |
 | `game/data.ts` | ~750 | Teams, squads, kits, options, laws, commentary | Active |

@@ -91,6 +91,18 @@ simulation already owned: `graphics` (PERFORMANCE/BALANCED/ULTRA → the existin
 `timeofday` KICK-OFF setting, which `conditions.ts` now reads). Anyone wanting a
 second lighting switch should first explain what the match's own kick-off time is for.
 
+A third merge followed the same rule, this one of two solvers that had been written
+into the same file name on purpose. `render/ragdoll.ts` (mine) solves a fall live on
+STANDARD and FULL; the pass that baked 36 falls and plays them back as a yaw-rotated
+table lookup now lives in `render/ragdollKernel.ts` + `ragdollClips.ts` and is what
+LEGACY gets, with `ragdollEnabled` choosing between them so no body is ever written
+by both in one frame. Nothing was thrown away in that merge and the reason is in the
+table above: the bake is strictly cheaper and strictly less responsive, and the two
+claims are not in competition — the tier that cannot afford to solve a body should
+not be the tier that gets the worst physics. Verification of the merged pair is in
+`SPEC_24_MATCHDAY.md`'s second addendum, including the two harnesses that keep the
+bake honest (yaw invariance to 0.45 mm, bit-exact determinism).
+
 Verification after the merge (and after `6bcbd54`, the NO TELEPORTS engine fix, merged
 on top of it): `tsc --noEmit` clean, `scripts/glslcheck.ts` 10 shaders / 0 failing,
 `scripts/matchdayheadless.ts` all green, `scripts/spec07-contracts.ts` ALL GREEN,
@@ -104,4 +116,21 @@ now keeps that placement for a frame instead of being yanked back to his support
 mark by `think()`. It is a simulation decision, not a presentation one — nothing in
 either pass writes engine state from the render layer. The one thing neither pass can
 verify is the picture; that still needs a human eye on `npm run dev`.
+
+**Second addendum (playtest), both sides of "it looks bad in game".** The tackle
+now has a real floor: `render/ragdoll.ts`, a 20-particle position-based solver in
+which the particles *are* the rig's bones, handed the body from the grounding
+stage of a tackle and nothing else — the drive and the wrap stay authored, the
+engine keeps translation, and the tackler's hands are pinned to the carrier's
+waist inside the solver so the wrap survives the fall. 0.083 ms per frame for
+eight of them at once, and `scripts/ragdollcheck.ts` proves the twelve things a
+ragdoll fails at, headless. The grey was measured rather than guessed: the
+hierarchy of fills was feeding the rig more irradiance than the key, there was no
+`scene.environment` for a PBR material to reflect, `#FFFFFF` kit albedo clipped
+through the tone curve, and the concrete concourse out-shone the pitch. Sky
+PMREM'd into an environment map, per-weather `iblMul`, kit albedo scaled to
+fabric, `CONCRETE` darkened, and a rule that a floodlight is not the sun behind a
+cloud. Written up with numbers in `SPEC_24_MATCHDAY.md`'s addendum; the art
+contract in `render/retro.ts`, `coronal.ts` and `rig.ts` was not touched, and no
+engine file was.
 

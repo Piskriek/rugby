@@ -21,7 +21,13 @@ import { buildTurfMaps, TURF_SIZE } from './turf';
 import type { Conditions } from './conditions';
 
 const OUTER_COLOR = 0x24461f;
-const CONCRETE = 0x8a8f96;
+/* Weathered structural concrete, NOT the primer grey a default material
+ * ships with. At 0x8a8f96 every terrace, wall and stair in the bowl sat at
+ * ~0.63 relative luminance under a noon key — brighter than the pitch — and
+ * the frame read as one flat grey plate behind the players. Concrete in a
+ * stadium is dark, dirty and low-contrast against grass; the terracing gets
+ * its shape from the shadow ramp, not from its albedo. */
+const CONCRETE = 0x4b5158;
 const SEAT_BLUE = 0x24354d;
 
 const INNER_WIDTH_M = 76;

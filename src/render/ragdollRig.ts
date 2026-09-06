@@ -21,7 +21,7 @@
  * a tackled player inverting completely is exactly the case that exposes it.
  */
 import * as THREE from 'three';
-import { NODE } from './ragdoll';
+import { NODE } from './ragdollKernel';
 
 /** The bones the ragdoll drives, in the naming conventions this rig may use. */
 const RAG_BONES = {

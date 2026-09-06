@@ -198,6 +198,12 @@ export class ThreeCanvas {
   private cond: Conditions | null = null;
   /** Set when the shadow map last updated; shadows run at half rate. */
   private shadowEvery = 2;
+  /**
+   * The environment map is rebuilt from the sky dome on the frame AFTER a
+   * conditions change, not during it: the dome's own colours are written by
+   * `update()`, and sampling it before that would filter last match's sky.
+   */
+  private envStale = true;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -276,6 +282,7 @@ export class ThreeCanvas {
    */
   applyConditions(cond: Conditions) {
     this.cond = cond;
+    this.envStale = true;
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.shadowMap.enabled = ENV_3D && cond.shadows;
     this.shadowEvery = cond.quality === 'FULL' ? 2 : 1;
@@ -314,6 +321,16 @@ export class ThreeCanvas {
     if (!this.matchDay || !this.cond) return;
     const cond = this.cond;
     this.matchDay.update(cam, v, cond, dt);
+    if (this.envStale) {
+      this.envStale = false;
+      const env = this.matchDay.refreshEnvironment(this.renderer, cond);
+      this.scene.environment = env;
+      /* One number drives the whole indirect term, and it is the number the
+       * flat fills used to fake: an overcast sky is a softbox, a clear noon is
+       * not, and a black jersey only reads as cloth if something is reflecting
+       * off it. */
+      this.scene.environmentIntensity = env ? cond.iblIntensity : 1;
+    }
     /* The lens that matters is the 2D pinhole's own vertical FOV in radians —
      * `this.camera.fov` is a stale 35 DEGREES, because syncCamera overwrites
      * the projection matrix from the retro rig. Feeding the wrong one here is

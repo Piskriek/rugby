@@ -57,6 +57,8 @@ export interface Conditions {
   floodlit: boolean; floodIntensity: number;
   /** Ambient bounce (sky + concrete) and the hemisphere pair. */
   ambientColor: string; ambientIntensity: number;
+  /** `scene.environmentIntensity` for the filtered sky dome. See TimeLook.ibl. */
+  iblIntensity: number;
   hemiSky: string; hemiGround: string; hemiIntensity: number;
   /** Fill from the far side of the bowl so backs never go pure black. */
   fillColor: string; fillIntensity: number;
@@ -126,6 +128,18 @@ interface TimeLook {
   zenith: string; mid: string; horizon: string; haze: string;
   key: string; keyI: number; el: number; az: number;
   amb: string; ambI: number; hs: string; hg: string; hI: number;
+  /**
+   * Sky irradiance supplied by the environment map rather than by a light.
+   * This is the number that decides whether a black jersey is a man or a
+   * silhouette: `MeshStandardMaterial` with no `scene.environment` has NO
+   * ambient specular at all, so dark kit cannot reflect the stadium and light
+   * kit can only be blown out. The dome is already in the scene, so the fix is
+   * to filter it into an IBL and let it do the work the two flat fills used to
+   * fake — which is also why `ambI` and `hI` below are now much smaller than
+   * they were: hemisphere and ambient lights carry the SAME energy as the sky,
+   * and paying for it twice is exactly the flat grey look this replaces.
+   */
+  ibl: number;
   fill: string; fillI: number; fog: string; fogD: number;
   exp: number; bloom: number; thresh: number; vig: number;
   stars: number; cloud: number; flood: number; crowdDamp: number;
@@ -135,34 +149,34 @@ interface TimeLook {
 const TIME_LOOK: Record<(typeof TIMES)[number], TimeLook> = {
   MIDDAY: {
     zenith: '#3f79c8', mid: '#7fa9dc', horizon: '#cfdcea', haze: '#9fb0bc',
-    key: '#fff4dc', keyI: 3.05, el: 0.92, az: 2.58,
-    amb: '#cfe0f2', ambI: 0.62, hs: '#bcd6f0', hg: '#3d5a34', hI: 0.85,
+    key: '#fff4dc', keyI: 4.15, el: 0.92, az: 2.58,
+    amb: '#cfe0f2', ambI: 0.14, hs: '#bcd6f0', hg: '#3d5a34', hI: 0.34, ibl: 0.72,
     fill: '#dfeaf5', fillI: 0.30, fog: '#b9c9d8', fogD: 0.0016,
-    exp: 1.0, bloom: 0.10, thresh: 0.94, vig: 0.22,
+    exp: 0.79, bloom: 0.10, thresh: 0.94, vig: 0.22,
     stars: 0, cloud: 0.30, flood: 0, crowdDamp: 0, shadow: 1.0,
   },
   AFTERNOON: {
     zenith: '#35639f', mid: '#7d94bd', horizon: '#d8b98c', haze: '#a58f74',
-    key: '#ffd9a1', keyI: 2.75, el: 0.40, az: 2.34,
-    amb: '#d8cbb8', ambI: 0.50, hs: '#a9c3e2', hg: '#42512f', hI: 0.80,
+    key: '#ffd9a1', keyI: 3.85, el: 0.40, az: 2.34,
+    amb: '#d8cbb8', ambI: 0.13, hs: '#a9c3e2', hg: '#42512f', hI: 0.32, ibl: 0.70,
     fill: '#e8c9a0', fillI: 0.34, fog: '#a89e9a', fogD: 0.0026,
-    exp: 1.02, bloom: 0.17, thresh: 0.88, vig: 0.30,
+    exp: 0.90, bloom: 0.17, thresh: 0.88, vig: 0.30,
     stars: 0, cloud: 0.42, flood: 0.05, crowdDamp: 0.05, shadow: 1.0,
   },
   TWILIGHT: {
     zenith: '#16224a', mid: '#3a4a76', horizon: '#c07a4e', haze: '#5d4a4a',
-    key: '#ffb377', keyI: 1.55, el: 0.09, az: 2.10,
-    amb: '#5f6f92', ambI: 0.50, hs: '#39496e', hg: '#1a2418', hI: 0.62,
+    key: '#ffb377', keyI: 2.30, el: 0.09, az: 2.10,
+    amb: '#5f6f92', ambI: 0.14, hs: '#39496e', hg: '#1a2418', hI: 0.30, ibl: 0.58,
     fill: '#7fa0d8', fillI: 0.40, fog: '#2d3a55', fogD: 0.0058,
-    exp: 1.10, bloom: 0.30, thresh: 0.74, vig: 0.40,
+    exp: 1.02, bloom: 0.30, thresh: 0.74, vig: 0.40,
     stars: 0.45, cloud: 0.5, flood: 0.75, crowdDamp: 0.25, shadow: 0.75,
   },
   FLOODLIT: {
     zenith: '#050810', mid: '#0c1426', horizon: '#1d2a3e', haze: '#233246',
-    key: '#eaf3ff', keyI: 2.35, el: 0.72, az: 0.62,
-    amb: '#3a4a66', ambI: 0.42, hs: '#25344e', hg: '#0d1610', hI: 0.55,
+    key: '#eaf3ff', keyI: 3.55, el: 0.72, az: 0.62,
+    amb: '#3a4a66', ambI: 0.10, hs: '#25344e', hg: '#0d1610', hI: 0.22, ibl: 0.50,
     fill: '#89b6ff', fillI: 0.52, fog: '#131d2e', fogD: 0.0062,
-    exp: 1.16, bloom: 0.46, thresh: 0.60, vig: 0.50,
+    exp: 1.06, bloom: 0.46, thresh: 0.60, vig: 0.50,
     stars: 0.9, cloud: 0.22, flood: 1.0, crowdDamp: 0.4, shadow: 0.9,
   },
 };
@@ -174,6 +188,8 @@ interface WeatherLook {
   bloomAdd: number; threshAdd: number; vigAdd: number; grain: number;
   chroma: number; sheen: number; puddle: number; steam: number;
   cloudMul: number; starsMul: number; crowdDamp: number;
+  /** Sky irradiance on the IBL axis: an overcast sky is one softbox. */
+  iblMul: number;
   precip: Precip; precipMul: number; wetMul: number;
   skyMul: number; horizonMul: number; shadowMul: number;
 }
@@ -184,6 +200,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     vigAdd: 0, grain: 0.026, chroma: 0.0011, sheen: 0.02, puddle: 0, steam: 0,
     cloudMul: 0.55, starsMul: 1, crowdDamp: 0, precip: 'NONE', precipMul: 0,
     wetMul: 1, skyMul: 1.06, horizonMul: 1, shadowMul: 1,
+    iblMul: 0.8,
   },
   OVERCAST: {
     keyMul: 0.38, ambMul: 1.55, fogAdd: 0.0012, expMul: 1.03, bloomAdd: -0.03,
@@ -191,6 +208,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.05, steam: 0.05, cloudMul: 1.9, starsMul: 0.1, crowdDamp: 0.1,
     precip: 'NONE', precipMul: 0, wetMul: 1.3, skyMul: 0.78, horizonMul: 0.9,
     shadowMul: 0.18,
+    iblMul: 1.85,
   },
   DRIZZLE: {
     keyMul: 0.5, ambMul: 1.3, fogAdd: 0.0035, expMul: 1.04, bloomAdd: 0.06,
@@ -198,6 +216,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.16, steam: 0.14, cloudMul: 2.2, starsMul: 0.04, crowdDamp: 0.2,
     precip: 'RAIN', precipMul: 0.55, wetMul: 1.35, skyMul: 0.62,
     horizonMul: 0.82, shadowMul: 0.3,
+    iblMul: 1.45,
   },
   RAIN: {
     keyMul: 0.42, ambMul: 1.42, fogAdd: 0.0072, expMul: 1.05, bloomAdd: 0.12,
@@ -205,6 +224,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.45, steam: 0.2, cloudMul: 2.6, starsMul: 0, crowdDamp: 0.34,
     precip: 'RAIN', precipMul: 1.0, wetMul: 1.5, skyMul: 0.5,
     horizonMul: 0.72, shadowMul: 0.22,
+    iblMul: 1.3,
   },
   FOG: {
     keyMul: 0.6, ambMul: 1.7, fogAdd: 0.0175, expMul: 1.12, bloomAdd: 0.30,
@@ -212,6 +232,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.1, steam: 0.55, cloudMul: 2.9, starsMul: 0, crowdDamp: 0.62,
     precip: 'NONE', precipMul: 0, wetMul: 1.45, skyMul: 0.68,
     horizonMul: 1.5, shadowMul: 0.1,
+    iblMul: 2.1,
   },
   'COLD SNAP': {
     keyMul: 0.72, ambMul: 1.35, fogAdd: 0.0058, expMul: 1.07, bloomAdd: 0.14,
@@ -219,6 +240,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.08, steam: 1.0, cloudMul: 1.7, starsMul: 0.5, crowdDamp: 0.3,
     precip: 'SNOW', precipMul: 0.8, wetMul: 0.8, skyMul: 0.72,
     horizonMul: 1.15, shadowMul: 0.5,
+    iblMul: 1.15,
   },
   GALE: {
     keyMul: 0.66, ambMul: 1.2, fogAdd: 0.0022, expMul: 1.0, bloomAdd: 0.05,
@@ -226,6 +248,7 @@ const WEATHER_LOOK: Record<string, WeatherLook> = {
     puddle: 0.2, steam: 0.3, cloudMul: 3.4, starsMul: 0.15, crowdDamp: 0.22,
     precip: 'RAIN', precipMul: 0.7, wetMul: 1.2, skyMul: 0.6,
     horizonMul: 0.9, shadowMul: 0.35,
+    iblMul: 1.25,
   },
 };
 
@@ -275,6 +298,14 @@ export function resolveConditions(
   const scarring = 0.35 + (1 - P.firm) * 1.15;
 
   const shadows = quality !== 'LEGACY' && T.shadow * W.shadowMul > 0.14;
+  /* A floodlight array is four hundred lux aimed at the pitch, not the sun
+   * behind a cloud. RAIN takes more than half of a solar key and about a fifth
+   * of a lit one; with a single multiplier for both, a wet Wednesday night under
+   * the lights renders as an unlit field, which is what "the pitch is black"
+   * actually is. Only the lamp-lit look gets the softer rule. */
+  const lamps = T.flood > 0.5;
+  const keyMul = lamps ? 1 - (1 - W.keyMul) * 0.42 : W.keyMul;
+  const ambMul = lamps ? 1 - (1 - W.ambMul) * 0.45 : W.ambMul;
 
   return {
     weather, timeOfDay, pitchKind,
@@ -288,12 +319,13 @@ export function resolveConditions(
     cloudSpeed: 1.4 + windSpeed * 0.9,
 
     keyColor: W.precip === 'SNOW' ? '#dbe7ff' : T.key,
-    keyIntensity: T.keyI * W.keyMul * (quality === 'LEGACY' ? 1.25 : 1),
+    keyIntensity: T.keyI * keyMul * (quality === 'LEGACY' ? 1.25 : 1),
     sunAz: T.az, sunEl: T.el,
     floodlit: T.flood > 0.5,
     floodIntensity: T.flood,
-    ambientColor: T.amb, ambientIntensity: T.ambI * W.ambMul,
-    hemiSky: T.hs, hemiGround: T.hg, hemiIntensity: T.hI * (1 + W.ambMul * 0.25),
+    ambientColor: T.amb, ambientIntensity: T.ambI * ambMul,
+    iblIntensity: clampN(T.ibl * W.iblMul * (lamps ? 1.25 : 1), 0, 1.75),
+    hemiSky: T.hs, hemiGround: T.hg, hemiIntensity: T.hI * (1 + ambMul * 0.25),
     fillColor: T.fill, fillIntensity: T.fillI,
     shadowStrength: clampN(T.shadow * W.shadowMul, 0, 1),
     shadows,

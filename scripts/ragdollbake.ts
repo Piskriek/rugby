@@ -34,7 +34,7 @@
  * is far below what is visible on a 1.8 m body.
  */
 import fs from 'node:fs';
-import { RagdollBody, NODE_COUNT, NODE } from '../src/render/ragdoll';
+import { RagdollBody, NODE_COUNT, NODE } from '../src/render/ragdollKernel';
 
 /* ------------------------------------------------------------ parameters --- */
 

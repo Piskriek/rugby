@@ -563,6 +563,50 @@ export class ThreeMatchDay {
    * Quality tier changed (or first frame): rebuild the shadow map size and
    * whether the key casts at all. `mapSize` changes need the old map disposed.
    */
+  /* -------------------------------------------------- image-based lighting */
+  private pmrem: THREE.PMREMGenerator | null = null;
+  private envScene: THREE.Scene | null = null;
+  private envRT: THREE.WebGLRenderTarget | null = null;
+
+  /**
+   * Filter THIS frame's sky dome into an environment map.
+   *
+   * A PBR material has two halves: a diffuse lobe and a specular lobe. Lights
+   * give it the diffuse and nothing else gives it the specular, so a scene of
+   * `MeshStandardMaterial`s with no `scene.environment` is a scene where a
+   * black jersey cannot reflect a stadium and a white jersey has nothing to do
+   * but clip — exactly the flat, primed, everything-is-grey look a hand-lit PBR
+   * rig falls into. The dome already holds the answer (it IS the sky, the
+   * floodlit haze and the sun), so rather than inventing a second set of fills
+   * the scene's own sky is run through three's prefiltered radiance generator.
+   *
+   * Once per CONDITIONS CHANGE, not per frame: `fromScene` costs a handful of
+   * milliseconds, and the sky only changes when the weather or the kick-off
+   * time moves on the options screen.
+   */
+  refreshEnvironment(renderer: THREE.WebGLRenderer, cond: Conditions): THREE.Texture | null {
+    /* FLAT 16-BIT is a deliberately unlit frame; an IBL would fight it. */
+    if (cond.quality === 'LEGACY') {
+      this.envRT?.dispose();
+      this.envRT = null;
+      return null;
+    }
+    if (!this.envScene) {
+      /* A second mesh over the SAME geometry and material: the real dome is
+       * never re-parented out of the live scene, and the two cannot disagree
+       * about what the sky looks like because they share their uniforms. */
+      const proxy = new THREE.Mesh(this.dome.geometry, this.skyMat);
+      proxy.frustumCulled = false;
+      this.envScene = new THREE.Scene();
+      this.envScene.add(proxy);
+    }
+    this.pmrem ??= new THREE.PMREMGenerator(renderer);
+    const rt = this.pmrem.fromScene(this.envScene, 0, 1, DOME_R * 4);
+    this.envRT?.dispose();
+    this.envRT = rt;
+    return rt.texture;
+  }
+
   applyQuality(cond: Conditions) {
     const size = cond.quality === 'FULL' ? 2048 : 1024;
     this.key.castShadow = cond.shadows;
@@ -576,6 +620,11 @@ export class ThreeMatchDay {
   }
 
   dispose() {
+    this.envRT?.dispose();
+    this.envRT = null;
+    this.envScene = null;
+    this.pmrem?.dispose();
+    this.pmrem = null;
     this.dome.geometry.dispose();
     this.skyMat.dispose();
     this.precip.geometry.dispose();
