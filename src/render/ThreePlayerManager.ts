@@ -2782,6 +2782,22 @@ export class ThreePlayerManager {
   }
 
   /** SPEC_06 facing/strafe overlay feed (view is now true 3D facing). */
+  /**
+   * Is this man currently driven by the ragdoll solver rather than a clip?
+   *
+   * TARCS calls this the ACTIVE/KINEMATIC split. Both the live solver (`rag`)
+   * and the baked-clip playback (`ragPlay`) count as active: in either case
+   * physics owns the transform and the animation state machine does not,
+   * which is the distinction the debug panel exists to show.
+   */
+  isRagdolled(team: string, num: number): boolean {
+    for (const inst of this.pool.values()) {
+      if (inst.team !== team || inst.num !== num) continue;
+      return !!(inst.rag || inst.ragPlay);
+    }
+    return false;
+  }
+
   debugEntries() {
     const out: { key: string; team: string; num: number; gait: string; spd: number; face: number }[] = [];
     for (const [key, inst] of this.pool) {
