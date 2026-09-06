@@ -94,6 +94,7 @@ export const NO_INPUT: Input = {
 
 export type Phase =
   | 'SCRUM' | 'LINEOUT' | 'KICK' | 'OPEN_PLAY' | 'MAUL' | 'BREAKDOWN'
+  | 'CHAOS_SCRIM'
   | 'REPLAY' | 'LINEOUT_REPLAY' | 'KICK_REPLAY' | 'MAUL_REPLAY' | 'BREAKDOWN_REPLAY';
 
 export interface Actor {
@@ -103,6 +104,8 @@ export interface Actor {
   ring: number;     // 0 none, 1 controlled, 2 pass target
   size: number;     // T-39 per-player build, 0.92 .. 1.12
   turnT: number;    // playtest 2: the turn beat, 0..1
+  /** CHAOS_SCRIM — presentation-only park flag for bodies outside the 14-body scrim. */
+  hidden?: boolean;
 }
 
 interface Pack { force: number; forceTransmitted: number; waggle: number; fitness: number }
@@ -310,6 +313,52 @@ export interface BreakdownState {
   hitKind: 'RUNNING' | 'STANDING';
   /** closing speed at the contact frame, m/s (diagnostics + renderer). */
   hitSpeed: number;
+}
+
+/**
+ * CHAOS SCRIMMAGE — a 14-body stress scrim for the TARCS physics pipeline.
+ *
+ * The mode deliberately sidesteps the full 30-man law engine and runs a
+ * small, dense 7v7: one human carrier with the ball welded to his hands
+ * (BALL SECURED), six friendly bodies fanned behind him, and seven opposing
+ * bodies permanently in "Flailing Dive" pursuit. It exists to put many
+ * bodies in motion with frequent contact so the ragdoll/latch layer, the
+ * separation resolver and the per-player steering budget are exercised
+ * together.
+ */
+export interface ChaosBody {
+  role: 'PLAYER' | 'ALLY' | 'RIVAL';
+  /** per-body phase for the flail/wobble sine */
+  phase: number;
+  /** seconds left of a committed RIVAL dive */
+  diveT: number;
+  /** cooldown before the next dive may start */
+  diveCd: number;
+  /** how much this body strays from its ideal line while flailing */
+  wobble: number;
+}
+
+export interface ChaosScrimState {
+  t: number;
+  /** the 14 participating Live bodies */
+  pool: Live[];
+  /** per-pool-index presentation/AI state (same order as `pool`) */
+  bodies: ChaosBody[];
+  player: Live;
+  allies: Live[];
+  rivals: Live[];
+  playerNum: number;
+  ballSecured: boolean;
+  ballState: 'SECURED';
+  spawnX: number;
+  spawnZ: number;
+  /** the one current ragdoll latch, if any */
+  latch: { rival: Live; player: Live; t: number } | null;
+  /** lightweight frames/second sample so the mode can be sanity-checked */
+  fps: { start: number; frames: number };
+  /** driven by the chaos updater, exposed for the HUD/minimap */
+  contacts: number;
+  dives: number;
 }
 
 /**
@@ -550,6 +599,28 @@ const PLAYER_SIZE: Record<number, number> = {
   9: 0.93, 10: 0.95, 11: 0.92, 12: 1.00, 13: 0.98, 14: 0.92, 15: 0.96,
 };
 
+/* ============================ CHAOS SCRIMMAGE ============================ */
+
+/** TARCS stress mode: the 14 bodies live in a tight, always-moving scrum. */
+const CHAOS_ALLY_COUNT = 6;
+/** The human carrier drives at about 60% of normal pace while ragdolled. */
+const CHAOS_LATCH_DRAG = 0.55;
+/** A rival commits to a Flailing Dive inside this range. */
+const CHAOS_DIVE_RANGE = 11;
+const CHAOS_DIVE_SECONDS = 0.62;
+/** Ragdoll latch is released if the pair is dragged apart past this. */
+const CHAOS_LATCH_BREAK = 2.3;
+
+/** A small closed set of fan offsets behind the carrier (A runs toward +z). */
+const CHAOS_ALLY_FAN = [
+  { x: -8.5, z: -9 },
+  { x: -4.2, z: -6.5 },
+  { x: 0.0, z: -7.5 },
+  { x: 4.2, z: -6.5 },
+  { x: 8.5, z: -9 },
+  { x: 0.5, z: -13 },
+];
+
 /* ============================ DIRECTOR ============================ */
 
 export class Director {
@@ -565,6 +636,8 @@ export class Director {
   op?: OpenPlayState;
   ml?: MaulState;
   bd?: BreakdownState;
+  /** CHAOS_SCRIM — the live stress-scrim state, undefined outside the mode. */
+  chaos?: ChaosScrimState;
   pitch: PitchConditions;
   zoom = 0.34;
   camMode: CamMode = 'CABLE';
@@ -808,6 +881,7 @@ export class Director {
    * this, the automated audit reads this, so the two can never disagree.
    */
   get prompt(): string {
+    if (this.chaos) return 'A/D/W/S CARRY · SPACE SPRINT · C RESTART CHAOS · BALL SECURED';
     if (this.hint) return this.hint;
     if (this.kk) {
       if (this.kk.stage === 'AIM') return `A / D AIM THE KICK · SPACE TO SET POWER — ${this.kk.profile.label}`;
@@ -957,6 +1031,7 @@ export class Director {
      * context actually has. Whatever the phase branches added, the verb the
      * engine will fire is always the honest primary: guarantee it is listed. */
     if (!out.some((a) => a.primary) && cv.key) out.push({ key: cv.key, label: cv.label, primary: true });
+    if (this.chaos) add('C', 'RESTART CHAOS SCRIMMAGE');
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }
@@ -968,6 +1043,16 @@ export class Director {
    * each, updated every frame.
    */
   get narrative(): { now: string; next: string; clock: number; danger: boolean } {
+    if (this.chaos) {
+      const c = this.chaos;
+      const latch = c.latch ? ` · ${c.latch.rival.num} IS ON YOU` : '';
+      return {
+        now: c.ballSecured ? 'BALL SECURED' : 'BALL SECURED',
+        next: `14 BODIES LIVE · ${c.allies.length} ALLIES FAN OUT · ${c.rivals.length} RIVALS DIVE${latch}`,
+        clock: 0,
+        danger: !!c.latch,
+      };
+    }
     if (this.kk) {
       const k = this.kk;
       if (k.stage === 'FANFARE') return { now: 'TRY! The crowd is on its feet', next: `${k.kickerName} will take the conversion`, clock: 0, danger: false };
@@ -1134,6 +1219,10 @@ export class Director {
   }
 
   ballPoint(): { x: number; y: number; z: number } {
+    if (this.chaos && this.chaos.ballSecured) {
+      const p = this.chaos.player;
+      return { x: p.x, y: 1.14, z: p.z };             // welded to the carrier
+    }
     if ((this.phase === 'SCRUM' || this.phase === 'REPLAY') && this.scrim && this.scrim.ball.state !== 'HELD') {
       return { x: this.scrumAnchor.x + this.scrim.ball.x, y: this.scrim.ball.y + 0.06, z: this.scrumAnchor.z + this.scrim.ball.z };
     }
@@ -1307,6 +1396,182 @@ export class Director {
 
   /* ============================ UPDATE ============================ */
 
+  /* ============================ CHAOS SIM ============================ */
+
+  /** Running FPS estimate for the stress mode (updated once a second). */
+  chaosFps = 0;
+
+  /**
+   * Advance the 14-body scrim.
+   *
+   * The loop is deliberately flat and allocation-free in the steady state:
+   * `pool` and `bodies` are built once by `startChaosScrimmage()` and every
+   * frame walks them by index. Contact uses the same `Live` latch fields the
+   * renderer's fake-ragdoll layer reads, so a single latch exercises the
+   * full TARCS ragdoll visual while the other 13 bodies keep colliding.
+   */
+  private updateChaos(dt: number, input: Input) {
+    const c = this.chaos;
+    if (!c) return;
+    c.t += dt;
+
+    for (const p of c.pool) {
+      p.controlled = false;
+      p.carrier = false;
+      p.passRank = 0;
+      p.movedBy = undefined;
+    }
+
+    const player = c.player;
+    const sprint = input.sprint;
+    player.controlled = true;
+    player.carrier = true;
+
+    /* HUMAN CARRIER — a plain input-carried free runner. The ball is welded
+     * to him; no pass or kick route can remove it in this mode. */
+    const ix = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    const iz = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+    const mag = Math.hypot(ix, iz);
+    if (mag > 0) {
+      player.tx = clamp(player.x + (ix / mag) * 4.2, -33, 33);
+      player.tz = clamp(player.z + (iz / mag) * 4.2, -58, 58);
+      player.urgency = sprint ? 1.2 : 1;
+      steer(player, dt, sprint);
+      if (Math.abs(player.vz) > 0.3) player.face = player.vz > 0 ? 1 : -1;
+    } else {
+      player.tx = player.x;
+      player.tz = player.z;
+      player.urgency = 0.5;
+      steer(player, dt, sprint);
+    }
+    player.clip = player.latchedBy ? 'latchCarry' : 'carry';
+    player.job = 'BALL SECURED — CARRY';
+
+    /* SIX FRIENDLY BODIES — fan out behind the carrier on a rotating pair of
+     * offsets, chasing the carrier's speed so the flank keeps a connected
+     * look (the shallow side gets a little help from separation). */
+    for (let i = 0; i < c.allies.length; i++) {
+      const p = c.allies[i];
+      const body = c.bodies[i + 1];
+      const o = CHAOS_ALLY_FAN[i % CHAOS_ALLY_FAN.length];
+      const drift = Math.sin(c.t * 2.1 + body.phase) * 0.7;
+      p.tx = clamp(player.x + o.x + drift, -33, 33);
+      p.tz = clamp(player.z + player.face * o.z, -58, 58);
+      p.urgency = 0.85;
+      p.job = 'FAN OUT BEHIND THE CARRIER';
+      steer(p, dt, false);
+      const sp = Math.hypot(p.vx, p.vz);
+      p.clip = sp > 5.5 ? 'sprint' : sp > 0.8 ? 'jog' : 'ready';
+    }
+
+    /* SEVEN RIVAL BODIES — permanent Flailing Dive pursuit. They weave with a
+     * per-body sine, commit a fixed-length dive when the player is in range,
+     * and latch onto the carrier on contact so the ragdoll layer gets real
+     * work. */
+    for (let i = 0; i < c.rivals.length; i++) {
+      const p = c.rivals[i];
+      const body = c.bodies[1 + CHAOS_ALLY_COUNT + i];
+      const dx = player.x - p.x;
+      const dz = player.z - p.z;
+      const dist = Math.hypot(dx, dz) || 1e-4;
+
+      let tx = player.x + player.vx * 0.16;
+      let tz = player.z + player.vz * 0.16;
+      if (dist > 1e-3) {
+        /* lateral flail around the direct pursuit line */
+        const sway = Math.sin(c.t * 6.3 + body.phase) * 1.7 * body.wobble;
+        tx += (-dz / dist) * sway;
+        tz += (dx / dist) * sway;
+      }
+      p.tx = clamp(tx, -33, 33);
+      p.tz = clamp(tz, -58, 58);
+      p.urgency = p.latchingOnto ? 0.8 : 1.15;
+      p.job = 'FLAILING DIVE — TARGET THE PLAYER';
+
+      if (body.diveT > 0) {
+        body.diveT -= dt;
+        p.tx = player.x;
+        p.tz = player.z;
+        p.urgency = 1.32;
+        steer(p, dt, true);
+        p.clip = 'dive';
+        p.clipT = Math.min(p.clipT, 0.49);
+        if (body.diveT <= 0) {
+          body.diveCd = 0.7 + R() * 1.4;
+          p.clip = 'jog';
+        }
+      } else {
+        body.diveCd -= dt;
+        steer(p, dt, true);
+        p.clip = Math.hypot(p.vx, p.vz) > 5.6 ? 'sprint' : 'jog';
+        if (body.diveCd <= 0 && dist < CHAOS_DIVE_RANGE) {
+          body.diveT = CHAOS_DIVE_SECONDS + R() * 0.22;
+          c.dives++;
+          p.clip = 'dive';
+          p.clipT = 0;
+        }
+      }
+
+      /* The latch owns the clip — once a rival is hanging onto the carrier we
+       * never let the dive cooldown or locomotion picker blank the ragdoll. */
+      if (p.latchingOnto) {
+        p.clip = 'latchHang';
+        p.clipT = 0;
+      }
+      if (Math.abs(p.vz) > 0.3) p.face = p.vz > 0 ? 1 : -1;
+    }
+
+    /* BODY SEPARATION — the same resolver the full match uses, but on the
+     * 14-body pool only, keeping the frame cost O(14^2/2) instead of O(30^2). */
+    separate(c.pool, dt);
+
+    /* RAGDOLL LATCH — one rival may lock onto the carrier at a time. This is
+     * what feeds the renderer's procedural fake-ragdoll layer (body tilt,
+     * arm reach, spine thrash) with a live, moving pair. */
+    if (c.latch) {
+      c.latch.t += dt;
+      const r = c.latch.rival;
+      const d = Math.hypot(r.x - player.x, r.z - player.z);
+      if (d > CHAOS_LATCH_BREAK || c.latch.t > 4.5) {
+        player.latchedBy = null;
+        player.latchDrag = undefined;
+        r.latchingOnto = null;
+        player.clip = 'carry';
+        r.clip = 'jog';
+        c.latch = null;
+      }
+    }
+
+    if (!c.latch) {
+      for (let i = 0; i < c.rivals.length; i++) {
+        const r = c.rivals[i];
+        if (c.bodies[1 + CHAOS_ALLY_COUNT + i].diveT <= 0) continue;
+        const d = Math.hypot(r.x - player.x, r.z - player.z);
+        if (d < 1.05) {
+          player.latchedBy = `${r.team}:${r.num}`;
+          r.latchingOnto = `${player.team}:${player.num}`;
+          player.latchDrag = CHAOS_LATCH_DRAG;
+          player.clip = 'latchCarry';
+          r.clip = 'latchHang';
+          r.clipT = 0;
+          c.latch = { rival: r, player, t: 0 };
+          c.contacts++;
+          break;
+        }
+      }
+    }
+
+    /* FPS sample — one allocation-free count per frame, reported once a second. */
+    c.fps.frames++;
+    const nowMs = performance.now();
+    const windowMs = nowMs - c.fps.start;
+    if (windowMs >= 1000) {
+      this.chaosFps = Math.round((c.fps.frames * 1000) / windowMs);
+      c.fps.start = nowMs;
+      c.fps.frames = 0;
+    }
+  }
+
   update(dtReal: number, input: Input, pressed: Set<string>, released = new Set<string>()) {
     /* Unattended hold timer (T-18): counts down even while paused, so a
      * CPU-v-CPU half time resumes on its own. */
@@ -1352,6 +1617,18 @@ export class Director {
     if (this.op) {
       const c = this.live.find((p) => p.team === this.op!.attacking && p.num === this.op!.carrierNum);
       if (c) c.carrier = true;
+    }
+
+    /* CHAOS_SCRIM owns the whole frame: no laws, no referee, no formation
+     * brain, no set-piece cabinet. It is a dedicated 14-body stress loop
+     * that ends by streaming the same actor contracts the match uses. */
+    if (this.chaos) {
+      this.updateChaos(dt, input);
+      this.frameEvents = this.eventBus.splice(0);
+      this.updateCamera(dt);
+      this.syncActors();
+      this.t += dt;
+      return;
     }
 
     this.refSignal = Math.max(0, this.refSignal - dt);
@@ -2713,7 +2990,7 @@ export class Director {
 
   private phaseName(): PhaseName {
     switch (this.phase) {
-      case 'OPEN_PLAY': case 'REPLAY': return 'OPEN_PLAY';
+      case 'CHAOS_SCRIM': case 'OPEN_PLAY': case 'REPLAY': return 'OPEN_PLAY';
       case 'BREAKDOWN': case 'BREAKDOWN_REPLAY': return 'RUCK';
       case 'MAUL': case 'MAUL_REPLAY': return 'MAUL';
       case 'SCRUM': return 'RUCK';
@@ -2732,11 +3009,13 @@ export class Director {
    * to leave a carrier-anchored frame. While the ball is live, the ball is the subject.
    */
   cameraFocus(): { x: number; z: number } {
+    if (this.chaos) return { x: this.chaos.player.x, z: this.chaos.player.z };
     if (this.op && this.op.ball.live) return { x: this.op.ball.x, z: this.op.ball.z };
     return this.focusPoint();
   }
 
   focusPoint(): { x: number; z: number } {
+    if (this.chaos) return { x: this.chaos.player.x, z: this.chaos.player.z };
     if (this.op) return { x: this.op.carrierX, z: this.op.carrierZ };
     if (this.bd) return { x: this.bd.contactX, z: this.bd.contactZ };
     if (this.ml) return { x: this.ml.x, z: this.ml.z };
@@ -3772,6 +4051,139 @@ export class Director {
 
   /* ============================ OPEN PLAY ============================ */
 
+  /* ============================ CHAOS SCRIMMAGE ============================ */
+
+  /**
+   * TARCS stress scrim: 14 active ragdolls (7v7).
+   *
+   * The human carrier is the camera target and the ball is welded to him
+   * (BALL SECURED). Six friendly bodies fan out behind him with simple
+   * flocking; the seven opposing bodies are immediately in "Flailing Dive"
+   * pursuit. Everything runs through the existing movement/ragdoll pipeline
+   * (steer + separate + latch) so the stress is on real engine code, not on
+   * a parallel toy loop.
+   */
+  startChaosScrimmage() {
+    const playerNum = 10;
+    const allyNums = [9, 11, 12, 13, 14, 15];
+    const rivalNums = [1, 2, 3, 4, 5, 6, 7];
+
+    const player = this.L('A', playerNum);
+    const allies = allyNums.map((n) => this.L('A', n));
+    const rivals = rivalNums.map((n) => this.L('B', n));
+    const pool = [player, ...allies, ...rivals];
+    const bodies: ChaosBody[] = pool.map((p, i) => ({
+      role: p === player ? 'PLAYER' : p.team === 'A' ? 'ALLY' : 'RIVAL',
+      phase: (i * 1.618 + 0.4) % (Math.PI * 2),
+      diveT: 0,
+      diveCd: i < 7 ? 0.1 + (i % 4) * 0.22 : 0,
+      wobble: 0.6 + ((i * 37) % 10) / 10,
+    }));
+
+    /* Park the full thirty cleanly so no stale latch / carry / down state
+     * leaks into the scrim. */
+    for (const p of this.live) {
+      p.controlled = false;
+      p.carrier = false;
+      p.passRank = 0;
+      p.bound = false;
+      p.down = false;
+      p.sinbin = 0;
+      p.beatenT = 0;
+      p.diveT = 0;
+      p.recoverT = 0;
+      p.recoverX = undefined;
+      p.recoverZ = undefined;
+      p.latchedBy = null;
+      p.latchingOnto = null;
+      p.latchDrag = undefined;
+      p.vx = 0;
+      p.vz = 0;
+      p.restT = 0;
+      p.clip = 'idle';
+      p.clipT = R() * 2;
+      p.jitter = R() * 1.7;
+      p.stamina = 100;
+      p.assignment = 'OPEN_PLAY';
+      p.job = '';
+      p.tx = p.x;
+      p.tz = p.z;
+      p.urgency = 0.5;
+      p.movedBy = undefined;
+    }
+
+    /* Spawn layout: carrier at the centre of his half, allies fanning behind,
+     * rivals starting in a loose flail line ahead of him. */
+    const sx = 0, sz = -20;
+    player.x = sx; player.z = sz; player.vx = 0; player.vz = 0;
+    player.face = 1; player.clip = 'carry'; player.clipT = 0;
+    player.carrier = true; player.controlled = true;
+    player.job = 'BALL SECURED — CARRY';
+    player.tx = sx; player.tz = sz + 3;
+    player.urgency = 1;
+
+    allies.forEach((p, i) => {
+      const o = CHAOS_ALLY_FAN[i % CHAOS_ALLY_FAN.length];
+      this.place(p, clamp(sx + o.x, -32, 32), clamp(sz + o.z, -56, 56), 'chaos');
+      p.face = 1; p.clip = 'ready'; p.clipT = R() * 2;
+      p.job = 'FAN OUT BEHIND THE CARRIER';
+      p.tx = p.x; p.tz = p.z;
+      p.urgency = 0.85;
+    });
+
+    rivals.forEach((p, i) => {
+      const ox = ((i % 7) - 3) * 4.2 + (((i * 13) % 5) - 2);
+      const oz = 4 + (i % 3) * 3;
+      this.place(p, clamp(sx + ox, -32, 32), clamp(sz + oz, -56, 56), 'chaos');
+      p.face = -1; p.clip = 'sprint'; p.clipT = R() * 2;
+      p.job = 'FLAILING DIVE — TARGET THE PLAYER';
+      p.tx = player.x; p.tz = player.z;
+      p.urgency = 1.1;
+    });
+
+    /* Disable any live phase objects and switch to the scrim phase. */
+    this.op = undefined; this.bd = undefined; this.ml = undefined;
+    this.kk = undefined; this.lo = undefined; this.scrim = undefined;
+    this.passOpts = [];
+    this.pendingPenalty = null;
+    this.advantage = 0;
+    this.refBubbles = [];
+    this.possession = 'A';
+    this.phase = 'CHAOS_SCRIM';
+    this.paused = false;
+    this.over = false;
+    this.replayOf = null;
+    if (this.tut.active) this.tut.active = false;
+    this.setCtrl('A', playerNum);
+
+    this.chaos = {
+      t: 0,
+      pool,
+      bodies,
+      player,
+      allies,
+      rivals,
+      playerNum,
+      ballSecured: true,
+      ballState: 'SECURED',
+      spawnX: sx,
+      spawnZ: sz,
+      latch: null,
+      fps: { start: performance.now(), frames: 0 },
+      contacts: 0,
+      dives: 0,
+    };
+
+    this.banner_('BALL SECURED — CHAOS SCRIMMAGE');
+    this.say('BALL SECURED — 14 BODIES, 7 RIVALS ARE COMING IN FLAILING DIVES');
+    this.showHint('C RESTARTS THE CHAOS SCRIMMAGE · W / S / A / D CARRY · SPACE SPRINT', 6);
+  }
+
+  /** Restart the same 14-body scrim, used by the C trigger. */
+  restartChaosScrimmage() {
+    this.startChaosScrimmage();
+  }
+
   startOpen(team: 'A' | 'B', x: number, z: number, num = 9, phase = 1, gained = 0, protect = 0) {
     this.possession = team;
     const dir = team === 'A' ? 1 : -1;
@@ -4683,6 +5095,7 @@ export class Director {
   /* ============================ SYNC TO ACTORS ============================ */
 
   private syncActors() {
+    const chaos = this.chaos;
     for (let i = 0; i < 30; i++) {
       const p = this.live[i];
       const a = this.actors[i];
@@ -4692,6 +5105,8 @@ export class Director {
       a.size = p.size;
       a.num = p.num; a.team = p.team;
       a.ring = p.controlled ? 1 : (this.passOpts.some((o) => o.player === p) ? 2 : 0);
+      /* CHAOS_SCRIM only streams the 14 participating bodies. */
+      a.hidden = !!chaos && chaos.pool.indexOf(p) < 0;
     }
     /* SPEC_15 — the referee is streamed like any other actor, from state that
      * engine/referee.ts integrated. `rf` is the ±1 the puppet pipeline reads
@@ -4703,6 +5118,7 @@ export class Director {
     ref.rf = Math.cos(r.face) >= 0 ? 1 : -1;
     ref.renderClip = r.clip;
     ref.clipT = 0;
+    ref.hidden = !!chaos;
   }
 
   /* ============================ SUBS & KITS ============================ */

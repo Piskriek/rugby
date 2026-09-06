@@ -71,6 +71,7 @@ export function drawMinimap(ctx: CanvasRenderingContext2D, d: Director, v: View)
   ctx.restore();
 
   for (const a of d.actors) {
+    if (a.hidden) continue;
     const px = mx(a.rz), py = my(a.rx);
     if (px < x - 4 || px > x + w + 4) continue;
     const isRef = a.team === 'REF';
@@ -141,6 +142,7 @@ function drawFrustum(
 }
 
 function ballPos(d: Director): { x: number; z: number } | null {
+  if (d.chaos && d.chaos.ballSecured) return { x: d.chaos.player.x, z: d.chaos.player.z };
   if (d.kk && (d.phase === 'KICK' || d.phase === 'KICK_REPLAY')) return { x: d.kk.bx, z: d.kk.bz };
   if (d.op && d.phase === 'OPEN_PLAY') {
     return d.op.ball.live ? { x: d.op.ball.x, z: d.op.ball.z } : { x: d.op.carrierX, z: d.op.carrierZ };

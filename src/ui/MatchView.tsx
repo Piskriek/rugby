@@ -138,12 +138,22 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       }
       // space is sprint while held and action on the edge
       const pressed = new Set<string>();
-      for (const raw of keys.current) if (!prev.current.has(raw)) pressed.add(KEYMAP[raw] ?? raw);
+      const rawPressed = new Set<string>();
+      for (const raw of keys.current) {
+        if (!prev.current.has(raw)) {
+          pressed.add(KEYMAP[raw] ?? raw);
+          rawPressed.add(raw);
+        }
+      }
       /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
       inp.run = inp.sprint;
       prev.current = new Set(keys.current);
+
+      /* CHAOS_SCRIM — C is the accessible stress-test trigger. It starts the
+       * 14-body scrim from anywhere and restarts it while it is already live. */
+      if (rawPressed.has('c')) d.startChaosScrimmage();
 
       // The tutorial card resumes on the keys it lists, and only those.
       if (d.tut.active && d.tut.showing) {
@@ -234,6 +244,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const contract = ctrl ? contractFor(ctrl.num) : null;
 
   const commandBar = () => {
+    if (d.chaos) return 'BALL SECURED · RUN · C RESTARTS THE 14-BODY CHAOS SCRIMMAGE';
     if (d.hint) return d.hint;
     if (d.phase === 'KICK' && d.kk) {
       return d.kk.stage === 'AIM'
@@ -429,6 +440,15 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>SPEED</span><span className="text-[#f4efe2]">{d.ml.speed.toFixed(2)} m/s</span></div>
           </Panel>
         )}
+        {d.phase === 'CHAOS_SCRIM' && d.chaos && (
+          <Panel title="CHAOS SCRIMMAGE">
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>BODIES</span><span className="text-[#f4efe2]">{d.chaos.pool.length} (7v7)</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>BALL</span><span className="text-[#6ee7a0]">{d.chaos.ballState}</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>CONTACTS</span><span className="text-[#f4efe2]">{d.chaos.contacts}</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>DIVES</span><span className="text-[#f4efe2]">{d.chaos.dives}</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>FPS</span><span className={d.chaosFps >= 60 ? 'text-[#6ee7a0]' : 'text-[#ffd76a]'}>{d.chaosFps || '—'}</span></div>
+          </Panel>
+        )}
         {d.phase === 'OPEN_PLAY' && d.op && density !== 'MINIMAL' && ctrlTeam(d) === d.op.attacking && (
           <Panel title="OPEN PLAY">
             <div className="h-2 w-full border border-[#3d4b66] bg-[#0a0e16]">
@@ -501,7 +521,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       </div>
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
-        <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · WHEEL ZOOM</div>
+        <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · <Kbd>C</Kbd> CHAOS SCRIM · WHEEL ZOOM</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
       </div>

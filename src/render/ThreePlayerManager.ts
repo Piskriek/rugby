@@ -1324,6 +1324,8 @@ export class ThreePlayerManager {
     const pending: PlayerInstance[] = [];
 
     for (const a of d.actors) {
+      /* CHAOS_SCRIM parks the 16 non-participating bodies. */
+      if (a.hidden) continue;
       const team: KitTeam = a.team === 'REF' ? 'REF' : a.team;
       const inst = this.getOrCreate(team, a.num, a);
       active.add(this.key(team, a.num));
@@ -1612,7 +1614,10 @@ export class ThreePlayerManager {
     const free = { x: 0, y: 0, z: 0, visible: false };
     let carrier: PlayerInstance | null = null;
 
-    if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
+    if (d.phase === 'CHAOS_SCRIM' && d.chaos && d.chaos.ballSecured) {
+      /* BALL SECURED — the ball is welded to the human carrier's hand socket. */
+      carrier = this.pool.get(this.key(d.chaos.player.team as KitTeam, d.chaos.player.num)) ?? null;
+    } else if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
       const sc = d.scrim!;
       if (sc && sc.ball.state !== 'HELD') {
         free.x = d.scrumAnchor.x + sc.ball.x; free.y = sc.ball.y + 0.06; free.z = d.scrumAnchor.z + sc.ball.z; free.visible = true;
