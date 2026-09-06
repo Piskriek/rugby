@@ -101,6 +101,17 @@ export interface RigTuning {
   ballBiasRange: number;
   /** Maximum yaw/tilt bias applied at point-blank range, radians. */
   ballBiasMax: number;
+  /** Ball-bias follower time constant, seconds. See the whiplash note in
+   *  `update()` step 8: the TABS ragdoll launches the ball at extreme
+   *  velocities, and a bias that copies the ball's direction frame-to-frame
+   *  turns every launch into a camera snap. The applied offset is damped
+   *  toward the raw bias with this constant instead. */
+  ballBiasTau: number;
+  /** Hard cap on how fast the applied ball bias may swing, rad/s. An
+   *  exponential follower still takes an unbounded first step after a large
+   *  target jump — and a ragdoll launch is exactly that — so this clamp is
+   *  the second half of the whiplash fix. */
+  ballBiasMaxTurnRate: number;
 
   /** Walk and sprint speeds, metres/second. */
   walkSpeed: number;
@@ -139,6 +150,14 @@ export const DEFAULT_TUNING: RigTuning = {
 
   ballBiasRange: 15,
   ballBiasMax: 0.30,
+  /* 0.12 s closes ~63% of the bias gap in 120 ms — fast enough to read as
+   * "looking toward the ball" while a 25 m/s launch drags the target, slow
+   * enough that the view arrives as a lerp instead of a snap. */
+  ballBiasTau: 0.12,
+  /* 2.5 rad/s ≈ 143°/s. A violent ball crossing the bias range therefore
+   * sweeps the view at a bounded, human rate rather than teleporting the
+   * aim across the sky in one frame. */
+  ballBiasMaxTurnRate: 2.5,
 
   walkSpeed: 4.6,
   sprintSpeed: 8.4,
@@ -170,6 +189,12 @@ export interface RigState {
   exhausted: boolean;
   /** 0 = fully THIRD, 1 = fully FIRST. Drives the seamless blend. */
   blend: number;
+  /** Applied ball bias as a smoothed OFFSET from the player's own look,
+   *  radians. Tracking state for the whiplash fix (see `update()` step 8):
+   *  it is an offset, never an absolute angle, so it fades with the player's
+   *  aim and can never integrate into the look accumulator. */
+  biasYawOff: number;
+  biasTiltOff: number;
 }
 
 /* -------------------------------------------------------------- utilities */
@@ -218,6 +243,7 @@ export function createRigState(mode: ViewMode = 'THIRD'): RigState {
     stamina: 1,
     exhausted: false,
     blend: mode === 'FIRST' ? 1 : 0,
+    biasYawOff: 0, biasTiltOff: 0,
   };
 }
 
@@ -270,6 +296,10 @@ export function applyMouseDelta(
  * Falloff is smoothstep on distance rather than linear: linear engages with a
  * visible kink the moment the ball crosses the range boundary, which reads as
  * the camera twitching.
+ *
+ * This is the RAW bias for the frame. `update()` step 8 does not apply it
+ * directly — it feeds it to the rate-limited follower (the whiplash fix),
+ * so callers that need the immediate, undamped value should use this.
  *
  * @returns additive { yaw, tilt } offsets in radians; zero when not engaged.
  */
@@ -589,14 +619,48 @@ export function updateRig(
   }
 
   /* 8. BALL BIAS, applied last so it is a true offset from the player's own
-   *    aim and can never accumulate into the look accumulator. */
+   *    aim and can never accumulate into the look accumulator.
+   *
+   *    THE WHIPLASH FIX (TABS regression). The bias is a FOLLOWER, not a
+   *    feed. The TABS ragdoll occasionally launches the ball at extreme
+   *    velocities, so inside the 15 m range the ball's direction can change
+   *    many tens of degrees between two frames. A bias that copies the ball
+   *    frame-to-frame snaps the rendered view with it — 40° in a single 16 ms
+   *    frame is the measured old behaviour, effectively infinite angular
+   *    velocity, and it reads as a violent swing rather than tracking. Two
+   *    terms make it smooth:
+   *
+   *      - the applied offset is exponentially damped toward the raw bias
+   *        with `ballBiasTau` (framerate-independent, like every other
+   *        smoother in this file), so the view lerps toward the ball;
+   *
+   *      - the per-frame change of that offset is additionally clamped to
+   *        `ballBiasMaxTurnRate * dt`, because an exponential follower still
+   *        takes an unbounded first step after a large target jump, and that
+   *        first step is exactly what a ragdoll launch produces.
+   *
+   *    The offset is also magnitude-clamped to `ballBiasMax`, so whatever the
+   *    ball does the view can never leave the player's own aim by more than
+   *    the designed partial blend. In steady state — a ball at rest in view —
+   *    the follower converges to exactly the offset the old code applied, so
+   *    tracking a calm ball is visually unchanged. */
   const bias = ballLookBias(st.posX, st.posZ, st.posH, world, t);
-  const yawOut = bias.weight > 0
-    ? st.smoothYaw + angleDelta(st.smoothYaw, bias.yaw) * bias.weight
-    : st.smoothYaw;
-  const pitchOut = bias.weight > 0
-    ? st.smoothPitch + (bias.tilt - st.smoothPitch) * bias.weight
-    : st.smoothPitch;
+  const wantYawOff = bias.weight > 0 ? angleDelta(st.smoothYaw, bias.yaw) * bias.weight : 0;
+  const wantTiltOff = bias.weight > 0 ? (bias.tilt - st.smoothPitch) * bias.weight : 0;
+  const kb = smoothFactor(dt, t.ballBiasTau);
+  const maxStep = t.ballBiasMaxTurnRate * dt;
+  let next = st.biasYawOff + (wantYawOff - st.biasYawOff) * kb;
+  st.biasYawOff = clamp(
+    clamp(next, st.biasYawOff - maxStep, st.biasYawOff + maxStep),
+    -t.ballBiasMax, t.ballBiasMax,
+  );
+  next = st.biasTiltOff + (wantTiltOff - st.biasTiltOff) * kb;
+  st.biasTiltOff = clamp(
+    clamp(next, st.biasTiltOff - maxStep, st.biasTiltOff + maxStep),
+    -t.ballBiasMax, t.ballBiasMax,
+  );
+  const yawOut = st.smoothYaw + st.biasYawOff;
+  const pitchOut = st.smoothPitch + st.biasTiltOff;
 
   /* 9. EMIT. `tilt` is positive-DOWN for project(); `pitch` is positive-up.
    *    This is the single sign flip promised in the header. */

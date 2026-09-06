@@ -41,6 +41,7 @@ import { ThreeMatchDay } from './ThreeMatchDay';
 import { ThreeParticles } from './ThreeParticles';
 import type { RigidBody } from '@dimforge/rapier3d-compat';
 import type { RapierWorld } from '../core/physics/RapierWorld';
+import { attachImpactAudio, type MatchAudio } from '../game/audio';
 import type { RapierDebugRenderer } from './RapierDebugRenderer';
 import type { Conditions } from './conditions';
 import { conditionsFor, qualityFor } from './conditions';
@@ -260,6 +261,11 @@ export class ThreeCanvas {
   private rapierDebugAccumulator = 0;
   private rapierDebugDeadline = 0;
   private rapierDebugCancelled = false;
+  /* TARCS — the audio engine the physics world reports its impacts to, and the
+   * live subscription. The audio may be attached before OR after the async
+   * Rapier bootstrap resolves, so both paths call `wireImpactAudio`. */
+  private impactAudio: MatchAudio | null = null;
+  private impactAudioDetach: (() => void) | null = null;
 
   private view: View = { w: 1, h: 1 };
   private composer: EffectComposer | null = null;
@@ -507,6 +513,7 @@ export class ThreeCanvas {
       ball.setLinvel({ x: 0, y: 0.8, z: 0 }, true);
 
       this.rapierWorld = world;
+      this.wireImpactAudio();
       this.rapierDebugPlayers = players;
       this.rapierDebugInitial = players.map((p) =>
         p.bodies.map((body) => {
@@ -692,8 +699,32 @@ export class ThreeCanvas {
     return c;
   }
 
+  /**
+   * TARCS — give the physics world an audio engine to shout at.
+   *
+   * Ordering is not the caller's problem: the Rapier world boots behind an
+   * async dynamic import, so this may land first (the subscription is deferred
+   * until the world exists) or last (it subscribes immediately). Passing null
+   * detaches.
+   */
+  attachMatchAudio(audio: MatchAudio | null): void {
+    if (this.impactAudio === audio) return;
+    this.impactAudioDetach?.();
+    this.impactAudioDetach = null;
+    this.impactAudio = audio;
+    this.wireImpactAudio();
+  }
+
+  private wireImpactAudio(): void {
+    if (this.impactAudioDetach || !this.rapierWorld || !this.impactAudio) return;
+    this.impactAudioDetach = attachImpactAudio(this.rapierWorld, this.impactAudio);
+  }
+
   dispose() {
     this.rapierDebugCancelled = true;
+    this.impactAudioDetach?.();
+    this.impactAudioDetach = null;
+    this.impactAudio = null;
     this.rapierDebug?.dispose();
     this.rapierDebug = null;
     this.rapierWorld?.dispose();

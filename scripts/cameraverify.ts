@@ -398,5 +398,62 @@ console.log('cameraverify — first/third person rig\n');
     `${(per * 1000).toFixed(2)} us/frame (budget 10 us)`);
 }
 
+/* ------------------------------------- 8. ball-tracking whiplash (TABS) */
+
+{
+  /* THE TABS REGRESSION. The ragdoll occasionally launches the ball at
+   * extreme velocities, so inside the 15 m bias range the ball's direction
+   * can change many tens of degrees between two frames. The applied bias
+   * must be a rate-limited follower:
+   *   (a) no single frame may swing the rendered yaw by more than the
+   *       tuned turn-rate cap — the old code took 40° in one frame;
+   *   (b) the offset can never leave the player's own aim by more than the
+   *       tuned maximum bias, no matter how violently the ball moves;
+   *   (c) and it must still ENGAGE — damping that kills the feature fixes
+   *       nothing. */
+  const st = createRigState('FIRST');
+  st.posX = 0; st.posZ = 0; st.posH = T.eyeHeight;
+  const cam = newCam();
+  const inp = noInput();
+  updateRig(st, world(), inp, 1 / 60, T, cam);
+  const before = cam.yaw;
+  updateRig(st, world({ ball: { x: 8, y: 1, z: 0 } }), inp, 1 / 60, T, cam);
+  const swing = Math.abs(angleDelta(before, cam.yaw));
+  const cap = T.ballBiasMaxTurnRate / 60;
+  check('a launched ball cannot snap the view',
+    swing <= cap + 1e-9, `single-frame swing ${(swing / DEG).toFixed(2)} deg (cap ${(cap / DEG).toFixed(2)} deg)`);
+
+  /* The same launch, sustained: the ball circles the player at ~25 m/s,
+   * its direction swinging 20° every frame for ten seconds. */
+  const st2 = createRigState('FIRST');
+  st2.posX = 0; st2.posZ = 0; st2.posH = T.eyeHeight;
+  const cam2 = newCam();
+  let maxOff = 0;
+  let maxFrame = 0;
+  let prev = cam2.yaw;
+  for (let i = 0; i < 600; i++) {
+    const a = i * 0.35;
+    updateRig(st2, world({ ball: { x: Math.sin(a) * 12, y: 2, z: Math.cos(a) * 12 } }), inp, 1 / 60, T, cam2);
+    maxOff = Math.max(maxOff, Math.abs(cam2.yaw));
+    maxFrame = Math.max(maxFrame, Math.abs(angleDelta(prev, cam2.yaw)));
+    prev = cam2.yaw;
+  }
+  check('sustained extreme ball motion stays rate-limited',
+    maxFrame <= cap + 1e-9, `worst single-frame swing ${(maxFrame / DEG).toFixed(2)} deg (cap ${(cap / DEG).toFixed(2)} deg)`);
+  check('the bias never leaves its envelope',
+    maxOff <= T.ballBiasMax + 1e-9, `max ${(maxOff / DEG).toFixed(1)} deg from the player's aim (cap ${(T.ballBiasMax / DEG).toFixed(1)} deg)`);
+
+  /* ...and the follower must still track: at a settled ball the bias
+   * converges to a clearly visible offset. */
+  const st3 = createRigState('FIRST');
+  st3.posX = 0; st3.posZ = 0; st3.posH = T.eyeHeight;
+  const cam3 = newCam();
+  for (let i = 0; i < 180; i++) {
+    updateRig(st3, world({ ball: { x: 6, y: 1, z: 6 } }), inp, 1 / 60, T, cam3);
+  }
+  check('the damped bias still engages at rest',
+    cam3.yaw > 0.2, `settled offset ${(cam3.yaw / DEG).toFixed(1)} deg toward the ball`);
+}
+
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');
 if (!ok) process.exit(1);

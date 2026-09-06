@@ -200,9 +200,15 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     }
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
+    /* Browser autoplay policy: the keydown above only covers players who reach
+     * the pitch via the keyboard. `armFirstGesture` catches every other route
+     * (touch, a click on the HUD, a pointer event from the menu) and removes
+     * itself once the context is actually running. */
+    dirRef.current?.audio.armFirstGesture(window);
     return () => {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
+      dirRef.current?.audio.disarmFirstGesture();
       plockRef.current?.dispose();
       plockRef.current = null;
     };
@@ -332,6 +338,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           noteRenderFault('weather on the 3D layer', e);
         }
       }
+      /* TARCS — hand the physics world the audio engine, so Rapier's own
+       * collision events drive the impact synthesiser directly. Safe before the
+       * Rapier bootstrap has resolved; ThreeCanvas defers the subscription. */
+      if (d0 && three) three.attachMatchAudio(d0.audio);
       /* The FX director is the only presentation object in this tree allowed to
        * hold both the particle pool and the stadium: it reads the simulation and
        * writes light and matter into the frame, never back into the engine. */

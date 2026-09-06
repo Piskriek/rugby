@@ -95,6 +95,22 @@ export interface BallCraft {
   log: { state: CraftState; t: number; why: string }[];
 }
 
+/**
+ * Detect when the engine's ball controller is holding a secured ball.
+ *
+ * This is the seam a physical carrier rides on: `BALL_SECURED` is the one state
+ * in which the engine claims possession (it writes the chest point and gravity
+ * does not exist for the ball), so it is exactly when a physical TARCS carrier
+ * (RapierWorld.attachBallToCarrier) should hold a weld — and the moment the
+ * controller leaves it (a strip -> DROP_BALL, a release, a tackle) the weld
+ * must be dropped. Exported as a predicate so a future physics integrator can
+ * ask the engine what it owns WITHOUT the engine importing physics (the
+ * headless core must stay Three/DOM/engine-free).
+ */
+export function isBallSecured(bc: BallCraft): boolean {
+  return bc.state === 'BALL_SECURED';
+}
+
 export function makeCraft(): BallCraft {
   const zero = (): ArmPose => ({
     shoulder: { x: 0, y: 0, z: 0 }, elbow: { x: 0, y: 0, z: 0 }, hand: { x: 0, y: 0, z: 0 }, reach: 0,
