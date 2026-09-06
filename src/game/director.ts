@@ -1534,10 +1534,18 @@ export class Director {
       const in22 = Math.abs(fpNow.z - FIELD.tryZ) < 22 || Math.abs(fpNow.z - FIELD.tryZFar) < 22;
       const ratio = (this.teams.A.nation.crowd + this.teams.B.nation.crowd) / 2;
       this.audio.update(dt, this.momentum, in22, ratio);
+      /* TARCS — the ears ride the broadcast camera, so a hit on the far
+       * touchline is quiet and off to the side while one under the lens is
+       * on top of you. Same rig the renderer uses, same coordinates. */
+      this.audio.setListener(this.cam.x, this.cam.h, this.cam.z, this.cam.yaw, this.cam.tilt);
       for (const ev of this.frameEvents) {
-        this.audio.event(ev.type, ev.type === 'TACKLE' ? ev.force : 0.5);
+        /* Every bus event carries its own world point; pass it so the one-shot
+         * is panned where it happened rather than flat in the centre. */
+        const at = 'x' in ev && 'z' in ev ? { x: ev.x, y: 1, z: ev.z } : null;
+        this.audio.event(ev.type, ev.type === 'TACKLE' ? ev.force : 0.5, at);
       }
     }
+
     /* SPEC_15 — the referee runs on his own integration, before the actor
      * stream is written, so the render sees the position he moved to. */
     stepReferee(this, this.ref, dt);

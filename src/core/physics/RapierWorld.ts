@@ -73,6 +73,59 @@ export const GRAVITY: Readonly<{ x: number; y: number; z: number }> = {
   z: 0,
 };
 
+/* ---- TARCS impact reporting ------------------------------------------- */
+/*
+ * THE AUDIO TAP. The physics core is the only place that knows what a hit
+ * actually WAS — the renderer sees a pose and the director sees a state
+ * machine, but the closing speed and the contact impulse exist for exactly one
+ * frame, inside the solver. Rather than let the presentation layer re-derive a
+ * number the solver already computed (and disagree with it), the world reports
+ * player-vs-player contacts to whoever asks.
+ *
+ * This stays a LISTENER API on purpose. `RapierWorld` is imported by the
+ * headless gym under Node, where there is no AudioContext and no DOM; it must
+ * never reach for one. The whole event path is also inert until somebody
+ * subscribes — no EventQueue is allocated and no collider has ActiveEvents set,
+ * so the gym's numbers are bit-identical to what they were before this existed.
+ */
+
+/** Minimum relative speed, in m/s, for a player-vs-player contact to be
+ *  reported. Below this two men are leaning on each other, not colliding. */
+export const IMPACT_MIN_RELATIVE_SPEED = 3.0;
+
+/** Contact-force magnitude (N) above which Rapier raises a force event. Set
+ *  low enough that a 3 m/s brush still measures, high enough that a ragdoll
+ *  resting on the turf does not. */
+export const IMPACT_FORCE_EVENT_THRESHOLD = 120;
+
+/** One pair of players may only report an impact this often (seconds). A pile
+ *  of eight limb colliders generates dozens of manifolds per step; without
+ *  this the tap machine-guns. */
+export const IMPACT_PAIR_COOLDOWN = 0.12;
+
+/** A player-vs-player contact worth reacting to. */
+export interface PlayerImpact {
+  /** Index of the two players involved, in registration order. */
+  playerA: number;
+  playerB: number;
+  /** Contact point in world metres (midpoint of the two colliders). */
+  x: number;
+  y: number;
+  z: number;
+  /** |v_a − v_b| in the frame BEFORE the solver resolved the contact, m/s. */
+  relativeSpeed: number;
+  /** The component of that relative velocity along the contact normal, m/s.
+   *  Equals `relativeSpeed` when no force event supplied a normal. */
+  closingSpeed: number;
+  /** Contact impulse magnitude in N·s. */
+  impulse: number;
+  /** True when `impulse` came from a Rapier contact-force event; false when it
+   *  is the reduced-mass estimate `m_eff · Δv`. */
+  measured: boolean;
+}
+
+export type PlayerImpactListener = (impact: PlayerImpact) => void;
+
 /** Rapier's WASM needs to be loaded once per process, before any API call. */
 let initPromise: Promise<void> | null = null;
 
@@ -231,6 +284,16 @@ interface ActiveCarrier {
   broken: boolean;
 }
 
+/** Player membership bit -> registration index (PLAYER<<0 is player 0). */
+function playerIndexOfBit(bit: number): number {
+  return Math.round(Math.log2(bit / BIT_PLAYER_BASE));
+}
+
+/** Stable key for an unordered pair of player indices. */
+function pairKey(a: number, b: number): string {
+  return a < b ? `${a}:${b}` : `${b}:${a}`;
+}
+
 /**
  * A thin, headless wrapper around one Rapier world.
  *
@@ -251,11 +314,32 @@ export class RapierWorld {
   private nextPlayerBit = 0;
 
   /** Active ball-carrier welds, keyed by the carried ball's collider handle.
-   *  A single Rapier `EventQueue` drains every contact-force event the welded
-   *  balls register, so the break detector runs once per step and not once per
-   *  carrier. */
+   *  The break detector runs once per step over the shared event queue below,
+   *  not once per carrier. */
   private readonly carriers = new Map<number, ActiveCarrier>();
-  private forceEvents: RAPIER.EventQueue | null = null;
+
+  /* ---- impact tap state (see PlayerImpact) ---- */
+  /** Collider handle -> the player that owns it and the body it hangs off. */
+  private readonly colliderOwner = new Map<number, { player: number; body: RAPIER.RigidBody }>();
+  /** Rigid-body handle -> its linear velocity captured BEFORE the last step.
+   *  Rapier reports events after the solver has already cancelled the closing
+   *  velocity, so the pre-step snapshot is the only honest source for "how
+   *  hard did these two meet". */
+  private readonly preStepVel = new Map<number, { x: number; y: number; z: number }>();
+  private readonly impactListeners = new Set<PlayerImpactListener>();
+  /** Pair key -> sim time at which that pair may report again. */
+  private readonly pairNextAt = new Map<string, number>();
+
+  /** THE ONE EVENT QUEUE. Both consumers — the ball-carrier break detector and
+   *  the player-impact tap — read from this single queue, because Rapier's
+   *  `world.step(queue)` takes exactly one and draining it twice would let
+   *  whichever consumer ran first swallow the other's events. `drainStepEvents`
+   *  makes the single pass and fans each event out to both. */
+  private eventQueue: RAPIER.EventQueue | null = null;
+  /** True once something has subscribed to impacts, so colliders registered
+   *  later are armed too. */
+  private impactEventsArmed = false;
+  private simTime = 0;
 
   private constructor(world: RAPIER.World) {
     this.world = world;
@@ -287,16 +371,63 @@ export class RapierWorld {
   /** Increment the simulation by one fixed step. */
   step(dt: number): void {
     this.world.timestep = dt;
-    if (this.carriers.size > 0) {
-      /* At least one welded ball is listening for break contacts. Its force
-       * events only arrive through an EventQueue handed to step(), so route
-       * through the shared queue (autoDrain clears it at the top of each step)
-       * and run the break detector over what this step produced. */
-      const queue = this.forceEvents ?? (this.forceEvents = new RAPIER.EventQueue(true));
-      this.world.step(queue);
-      this.drainBreakEvents(dt);
-    } else {
+    /* Two independent consumers may want events this step. Neither, and we
+     * take the original zero-overhead path byte for byte — which is what the
+     * headless gym runs. */
+    const wantImpacts = this.impactListeners.size > 0;
+    const wantBreaks = this.carriers.size > 0;
+    if (!wantImpacts && !wantBreaks) {
       this.world.step();
+      this.simTime += dt;
+      return;
+    }
+    const queue = this.eventQueue ?? (this.eventQueue = new RAPIER.EventQueue(true));
+    if (wantImpacts) this.captureVelocities();
+    this.world.step(queue);
+    this.simTime += dt;
+    this.drainStepEvents(dt, wantImpacts, wantBreaks);
+  }
+
+  /**
+   * Subscribe to player-vs-player impacts. Returns an unsubscribe function.
+   *
+   * The first subscription is what switches the machinery on: it allocates the
+   * shared EventQueue and sets ActiveEvents on every player collider registered
+   * so far (and any registered later). Unsubscribing leaves the queue in place
+   * but `step` short-circuits past the impact drain, so toggling audio
+   * mid-match is free.
+   */
+  onPlayerImpact(listener: PlayerImpactListener): () => void {
+    this.impactListeners.add(listener);
+    this.enableImpactEvents();
+    return () => {
+      this.impactListeners.delete(listener);
+    };
+  }
+
+  /** Allocate the shared queue and arm every known player collider. */
+  private enableImpactEvents(): void {
+    if (!this.eventQueue) this.eventQueue = new RAPIER.EventQueue(true);
+    this.impactEventsArmed = true;
+    for (const { collider } of this.playerColliders) this.armCollider(collider);
+  }
+
+  private armCollider(collider: RAPIER.Collider): void {
+    if (!this.impactEventsArmed) return;
+    collider.setActiveEvents(
+      RAPIER.ActiveEvents.COLLISION_EVENTS | RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS,
+    );
+    collider.setContactForceEventThreshold(IMPACT_FORCE_EVENT_THRESHOLD);
+  }
+
+  /** Snapshot every player body's linear velocity before the solver runs. */
+  private captureVelocities(): void {
+    this.preStepVel.clear();
+    for (const owner of this.colliderOwner.values()) {
+      const h = owner.body.handle;
+      if (this.preStepVel.has(h)) continue;
+      const v = owner.body.linvel();
+      this.preStepVel.set(h, { x: v.x, y: v.y, z: v.z });
     }
   }
 
@@ -396,8 +527,12 @@ export class RapierWorld {
     /* Release every live weld so the ball collider groups are restored before
      * the WASM backing the world is freed. */
     for (const active of [...this.carriers.values()]) this.releaseCarrier(active);
-    if (this.forceEvents) { this.forceEvents.free(); this.forceEvents = null; }
     this.carriers.clear();
+    this.impactListeners.clear();
+    this.colliderOwner.clear();
+    this.preStepVel.clear();
+    this.pairNextAt.clear();
+    if (this.eventQueue) { this.eventQueue.free(); this.eventQueue = null; }
     this.world.free();
   }
 
@@ -447,27 +582,160 @@ export class RapierWorld {
     return true;
   }
 
-  /** Read the step's contact-force events and break any weld an opponent's
-   *  tackle impulse `force * dt` has cleared. */
-  private drainBreakEvents(dt: number): void {
-    const queue = this.forceEvents;
-    if (!queue || this.carriers.size === 0) return;
+  /**
+   * ONE PASS OVER THE STEP'S EVENTS, fanned out to both consumers.
+   *
+   * The ball-carrier break detector and the player-impact tap both want
+   * contact-force events, and Rapier hands them over exactly once: a queue is
+   * emptied by the first `drainContactForceEvents` call, so two independent
+   * drains would mean whichever ran first silently ate the other's events. That
+   * is a genuinely nasty bug — welds that never break when audio is on, or hits
+   * that go silent when a carrier is holding the ball — so there is one drain,
+   * here, and each event is offered to whichever consumers are active.
+   */
+  private drainStepEvents(dt: number, wantImpacts: boolean, wantBreaks: boolean): void {
+    const queue = this.eventQueue;
+    if (!queue) return;
+    const batch = wantImpacts ? new Map<string, PlayerImpact>() : null;
+
     queue.drainContactForceEvents((event) => {
-      if (this.carriers.size === 0) return;
       const h1 = event.collider1();
       const h2 = event.collider2();
-      const active = this.carriers.get(h1) ?? this.carriers.get(h2);
-      if (!active || active.broken) return;
-      const otherHandle = active.ballHandle === h1 ? h2 : h1;
-      const other = this.world.getCollider(otherHandle);
-      /* force * dt is the impulse this blow carried. Only an OPPONENT's contact
-       * may break the weld — a team-mate bumping the carrier, or the ball
-       * brushing the pitch, must not spill it. */
-      const impulse = event.totalForceMagnitude() * dt;
-      if (impulse < active.breakImpulse) return;
-      if (other && !active.isOpponent(other, active.carrier)) return;
-      this.releaseCarrier(active, { impulse, by: other });
+
+      /* --- consumer 1: the ball-carrier weld --- */
+      if (wantBreaks && this.carriers.size > 0) {
+        const active = this.carriers.get(h1) ?? this.carriers.get(h2);
+        if (active && !active.broken) {
+          const otherHandle = active.ballHandle === h1 ? h2 : h1;
+          const other = this.world.getCollider(otherHandle);
+          /* force * dt is the impulse this blow carried. Only an OPPONENT's
+           * contact may break the weld — a team-mate bumping the carrier, or
+           * the ball brushing the pitch, must not spill it. */
+          const impulse = event.totalForceMagnitude() * dt;
+          if (impulse >= active.breakImpulse
+            && (!other || active.isOpponent(other, active.carrier))) {
+            this.releaseCarrier(active, { impulse, by: other });
+          }
+        }
+      }
+
+      /* --- consumer 2: the audio impact tap --- */
+      if (batch) {
+        const a = this.colliderOwner.get(h1);
+        const b = this.colliderOwner.get(h2);
+        if (a && b && a.player !== b.player) {
+          const impact = this.buildImpact(a, b, h1, h2, event.maxForceDirection());
+          if (impact) {
+            impact.impulse = Math.max(impact.impulse, event.totalForceMagnitude() * dt);
+            impact.measured = true;
+            this.mergeImpact(batch, impact);
+          }
+        }
+      }
     });
+
+    /* Collision-started events are impact-only: they catch pairs that met too
+     * gently to raise a force event but were still closing above the gate. */
+    queue.drainCollisionEvents((h1, h2, started) => {
+      if (!batch || !started) return;
+      const a = this.colliderOwner.get(h1);
+      const b = this.colliderOwner.get(h2);
+      if (!a || !b || a.player === b.player) return;
+      const impact = this.buildImpact(a, b, h1, h2, null);
+      if (impact) this.mergeImpact(batch, impact);
+    });
+
+    if (batch) this.dispatchImpacts(batch);
+  }
+
+  /** Measure one contact. Returns null when it is below the speed gate. */
+  private buildImpact(
+    a: { player: number; body: RAPIER.RigidBody },
+    b: { player: number; body: RAPIER.RigidBody },
+    handleA: number,
+    handleB: number,
+    normal: { x: number; y: number; z: number } | null,
+  ): PlayerImpact | null {
+    const va = this.preStepVel.get(a.body.handle) ?? a.body.linvel();
+    const vb = this.preStepVel.get(b.body.handle) ?? b.body.linvel();
+    const rx = va.x - vb.x;
+    const ry = va.y - vb.y;
+    const rz = va.z - vb.z;
+    const relativeSpeed = Math.hypot(rx, ry, rz);
+    if (relativeSpeed <= IMPACT_MIN_RELATIVE_SPEED) return null;
+
+    const closingSpeed = normal
+      ? Math.abs(rx * normal.x + ry * normal.y + rz * normal.z)
+      : relativeSpeed;
+
+    /* Reduced mass: the mass that actually has to be stopped in a two-body
+     * collision. m_eff · Δv is the impulse an inelastic hit would deliver, and
+     * it is the fallback whenever no force event measured the real one. */
+    const ma = a.body.mass();
+    const mb = b.body.mass();
+    const mEff = ma + mb > 1e-6 ? (ma * mb) / (ma + mb) : 0;
+
+    const pa = this.world.getCollider(handleA)?.translation();
+    const pb = this.world.getCollider(handleB)?.translation();
+    const at = pa && pb
+      ? { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2, z: (pa.z + pb.z) / 2 }
+      : a.body.translation();
+
+    return {
+      playerA: Math.min(a.player, b.player),
+      playerB: Math.max(a.player, b.player),
+      x: at.x,
+      y: at.y,
+      z: at.z,
+      relativeSpeed,
+      closingSpeed,
+      impulse: mEff * closingSpeed,
+      measured: false,
+    };
+  }
+
+  /**
+   *    * Fold a contact into the batch, keeping ONE impact per pair per step.
+   *
+   * Not a replace: the two sources measure different things and both are worth
+   * keeping. A contact-force event carries a real measured impulse and a real
+   * normal; a collision-started event carries the reduced-mass estimate, which
+   * is usually the LARGER number because the solver spreads one collision over
+   * several steps while `m_eff · Δv` is the whole inelastic impulse at once.
+   * Taking the max of the magnitudes but the OR of the `measured` flags keeps
+   * the loudest honest number without lying about where it came from.
+   */
+  private mergeImpact(batch: Map<string, PlayerImpact>, impact: PlayerImpact): void {
+    const key = pairKey(impact.playerA, impact.playerB);
+    const prev = batch.get(key);
+    if (!prev) {
+      batch.set(key, impact);
+      return;
+    }
+    prev.impulse = Math.max(prev.impulse, impact.impulse);
+    prev.measured = prev.measured || impact.measured;
+    /* A normal-projected closing speed is better information than the raw
+     * relative speed, so let a force event's number win even if it is smaller. */
+    if (impact.measured && !prev.measured) prev.closingSpeed = impact.closingSpeed;
+    prev.relativeSpeed = Math.max(prev.relativeSpeed, impact.relativeSpeed);
+  }
+
+  /** Publish the step's impacts, subject to the per-pair cooldown. */
+  private dispatchImpacts(batch: Map<string, PlayerImpact>): void {
+    for (const impact of batch.values()) {
+      const key = pairKey(impact.playerA, impact.playerB);
+      const nextAt = this.pairNextAt.get(key) ?? -Infinity;
+      if (this.simTime < nextAt) continue;
+      this.pairNextAt.set(key, this.simTime + IMPACT_PAIR_COOLDOWN);
+      for (const listener of this.impactListeners) {
+        try {
+          listener(impact);
+        } catch {
+          /* A listener that throws (a dead AudioContext, say) must never take
+           * the simulation down with it. */
+        }
+      }
+    }
   }
 
   /** Add the static flat pitch surface. */
@@ -495,7 +763,7 @@ export class RapierWorld {
         .setRestitution(spec.restitution ?? 0.1),
       body,
     );
-    this.registerPlayerCollider(collider, bit);
+    this.registerPlayerCollider(collider, bit, body);
     return body;
   }
 
@@ -522,7 +790,7 @@ export class RapierWorld {
           .setRestitution(spec.restitution ?? 0.05),
         body,
       );
-      this.registerPlayerCollider(collider, bit);
+      this.registerPlayerCollider(collider, bit, body);
       return body;
     };
 
@@ -615,8 +883,12 @@ export class RapierWorld {
     return body;
   }
 
-  private registerPlayerCollider(collider: RAPIER.Collider, bit: number): void {
+  private registerPlayerCollider(collider: RAPIER.Collider, bit: number, body: RAPIER.RigidBody): void {
     this.playerColliders.push({ collider, bit });
+    /* The impact tap needs collider -> (player, body) to resolve an event
+     * handle back into "who hit whom, and how fast were they going". */
+    this.colliderOwner.set(collider.handle, { player: playerIndexOfBit(bit), body });
+    this.armCollider(collider);
     this.refreshPlayerGroups();
   }
 
