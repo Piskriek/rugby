@@ -331,7 +331,11 @@ export class ThreeEnvironment {
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const t = Math.min(1, Math.abs(x) / halfW);
-      pos.setZ(i, -(1 - t * t) * 0.30 * s);
+      /* SIGN: the mesh is laid flat with rotation.x = -PI/2, which maps local
+       * +Z onto world +Y. The crown must therefore be POSITIVE here — a
+       * negative displacement sinks the pitch 0.3 m under the outer ground
+       * plane at y=0, which z-fights it away and hides every marking. */
+      pos.setZ(i, (1 - t * t) * 0.30 * s);
     }
     pos.needsUpdate = true;
     innerGeo.computeVertexNormals();

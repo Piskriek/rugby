@@ -347,6 +347,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             d.audio.setSurface(d.pitch.firm);
           }
           playersRef.current?.setSoiling(cond.mud, cond.wetness);
+          /* LEGACY is the budget tier: it drops physics fall-down along with
+           * the bloom and the shadows, and the men keep their canned tackle. */
+          if (playersRef.current) playersRef.current.ragdollEnabled = cond.quality !== 'LEGACY';
           playersRef.current?.setShadowStrength(cond.shadowStrength * (cond.shadows ? 0.55 : 1));
           const env = three.environment;
           if (env) {
