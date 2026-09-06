@@ -30,6 +30,9 @@ const widths = [8, 10, 10, 9, 8, 8, 9, 9, 12, 10];
 console.log(row(['diff', 'teleport', 'noBounce', 'tackles', 'chase', 'whip', 'freeze', 'encroach', 'offTarget', 'possChg'], widths));
 let anyFreeze = false;
 for (const diff of [0, 3, 6, 9]) {
+  /* Each difficulty is an independent condition: reseed so the RNG stream
+   * consumed by diff 0/3 does not silently decide what diff 6 measures. */
+  seedRng(diff);
   const r = runDeep(gateConfig(diff), seconds);
   if (r.watchdogTrips > 0) anyFreeze = true;
   console.log(row([

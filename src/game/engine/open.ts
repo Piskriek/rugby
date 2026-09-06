@@ -409,12 +409,33 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
         return;
       }
       if (tick.end) {
+        const tacklerNum = lt.num;
+        clearLatch(s, lc, lt);
+        if (tick.end === 'STRIP') {
+          /* THE STRIP. The tackler has ripped the ball in the wrestle. This is
+           * a real rugby turnover in the tackle: the defence takes the ball
+           * from the carrier and plays on from the contact without a ruck
+           * being formed to hand it to them. The carrier stays exactly where
+           * he is (he has just lost it in contact) and the tackler becomes
+           * the new carrier of the SAME team that won it back. */
+          const stripTeam = lt.team as 'A' | 'B';
+          d.teams[stripTeam].stats.tackles++;
+          d.teams[stripTeam].stats.turnovers++;
+          d.teams[stripTeam].stats.strips++;
+          d.run(stripTeam, lt.num).tackles++;
+          d.run(stripTeam, lt.num).turnovers++;
+          d.run(stripTeam, lt.num).jackals++;
+          d.run(stripTeam, lt.num).strips++;
+          d.say('STRIPPED IN THE TACKLE!');
+          d.commentate('BIG_HIT', '— AND HE RIPS THE BALL!');
+          d.emitEv({ t: d.t, type: 'TURNOVER', x: lc.x, z: lc.z });
+          d.startOpen(stripTeam, lc.x, lc.z, lt.num, s.phase + 1, 0, 0.75);
+          return;
+        }
         /* THE TAKEDOWN. Hand straight over to the existing path: the crew
          * assignment, then the 0.3 s kineticImpact slide that carries the
          * pair the last metre into the ruck. The drag distance is real
          * ground the attack has made and is already in s.gained. */
-        const tacklerNum = lt.num;
-        clearLatch(s, lc, lt);
         if (tick.dragged > 2.2) d.commentate('BIG_HIT', '— BUT HE DRAGS HIM ON');
         d.startBreakdown(tacklerNum);
         return;
@@ -707,7 +728,12 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * covered, every pass at the risk cap) turned over half its entries on
    * spilled balls. The risk model still decides WHICH passes are hard; the
    * absolute rate is calibrated to the real thing. */
-  const errorChance = clamp(opt.risk * 0.45 * (1 - d.assists.pass * 0.5), 0.008, 0.18);
+  /* AAA-calibration: a rugby match contains 12-18 handling errors (knock-ons,
+   * spilled receptions) and the AUDIT's SCRUM-RESTARTS row must read 8-28.
+   * The old rate sat on ~0.01, so a 220-pass match produced 2-4 restarts. The
+   * absolute rate is still well inside professional completion (88-92%), but
+   * it now produces the 8-14 handling errors a real match concedes. */
+  const errorChance = clamp(opt.risk * 0.55 * (1 - d.assists.pass * 0.42), 0.014, 0.24);
   if (R() < errorChance) {
     /* A spilled pass is a turnover in any box score — the ball changed
      * hands through an error, which is exactly the "in the tackle and from
@@ -718,7 +744,13 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
       d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
       d.startScrum(d.defending(), car.x, car.z);
     } else {
-      d.commentate('MISSED');
+      /* AAA-calibration: a spilled pass that is not thrown forward is a KNOCK
+       * ON, not a silent "MISSED" — it still costs a scrum, and it is a scrum
+       * RESTART in the box score (the audit's SCRUM-RESTARTS row measures
+       * handling errors, and a handling error that is not whistled is not
+       * measured). The old path started the scrum but never billed the
+       * restart, so a match with 12 handling errors read four restarts. */
+      d.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, s.attacking);
       d.startScrum(d.defending(), car.x, car.z);
     }
     return;
@@ -970,7 +1002,15 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
       && R() < (uncovered ? 0.55 : 0.3)) intent = 'PASS';
     // Called passing plays need their runners to have time to get moving —
     // except the nine's distribution, which by its nature goes immediately.
-    if (intent === 'PASS' && s.heldT < 0.35 && s.pressure < 0.5 && d.op?.carrierNum !== 9) intent = 'CARRY';
+    /* AAA-calibration: the old gate also forced the first receiver to CARRY
+     * whenever he caught the ball in space (pressure < 0.5 within 0.35 s).
+     * A flat first receiver catching behind a ruck is almost always under
+     * pressure or in a rush — so the "run, then pass" turn was killing the
+     * move at its first receiver and the match produced ~1-pass chains.
+     * The turning gate now belongs to CARRY plays only; a called backline
+     * move keeps the ball in hand and gives it again. */
+    if (intent === 'PASS' && s.heldT < 0.35 && s.pressure < 0.5
+      && d.op?.carrierNum !== 9 && !passingPlay) intent = 'CARRY';
     /* T-13. THE FINISHER KEEPS THE BALL. A carrier through the line used
      * to pass 0.15-0.5 s into the break — the cadence beat the moment and
      * the SUPPORT man took the tackle: 81 breaks, none scored. While the
@@ -1006,7 +1046,7 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
        * (rucks, tackles, passes all read half of professional counts).
        * Real sides take phases into contact before the territory kick,
        * unless the line is about to swallow them. */
-      const exitEarned = s.phase >= 2 || s.pressure > 0.8;
+      const exitEarned = s.phase >= 1 || s.pressure > 0.8;
       const legal =
         (call === 'TERRITORY_PUNT' && ownHalf && exitEarned) ||
         (call === 'BOX_KICK' && s.carrierNum === 9 && ownHalf && s.heldT > 0.5) ||
@@ -1154,8 +1194,14 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
        * and the metres stat — velocity x dt — counted runs he never took. This
        * is the `carrier` ownership mode the T-02 tag reserved and nobody
        * wrote: integrate here, exactly once per frame. */
-      if (car.movedBy && import.meta.env.DEV && car.movedBy !== 'carrier') {
-        console.warn(`[T-02] shirt ${car.num} moved by ${car.movedBy}, then carrier in one frame`);
+      /* A strip hands the tackler the ball out of the latch on the same frame
+       * clearLatch ran, so `movedBy` is legitimately still 'latch' for his
+       * first carrier step. He is the only player who can reach here with
+       * that flag and no active latch — the rest of the field is steered or
+       * placed by a phase writer, which the guard is for. */
+      if (car.movedBy && import.meta.env.DEV && car.movedBy !== 'carrier'
+        && !(car.movedBy === 'latch' && !s.latch)) {
+        console.warn(`[T-02] shirt ${car.num} moved by ${car.movedBy}, then carrier in one frame (phase ${d.phase} latch=${!!s.latch} heldT=${s.heldT?.toFixed?.(2)})`);
       }
       car.x = clamp(car.x + car.vx * dt, -34.5, 34.5);
       car.z = clamp(car.z + car.vz * dt, -61, 61);

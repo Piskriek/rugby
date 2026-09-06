@@ -36,7 +36,14 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
     /* W-011: a corner try's conversion waits for the TMO review — the
      * celebration and the check share the fanfare window (4.2 s, still
      * well inside the KICK phase limit). */
-    if (s.t > (d.tmo ? 4.2 : 2.2)) {
+    /* AAA-calibration: a CPU-v-CPU match has no line-up to wait for, and a
+     * 2.2 s empty celebration is dead clock in every one of the ~80 kicks a
+     * match. The human still gets the full ritual; the simulator plays the
+     * ball. The TMO corner review is a broadcast beat rather than a law of
+     * the game, so the sim reads it once (1.8 s) while the human module still
+     * gets the full 4.2 s verdict. */
+    const wait = d.tmo ? (human ? 4.2 : 1.8) : human ? 2.2 : 0.9;
+    if (s.t > wait) {
       s.stage = 'WALKUP'; s.t = 0;
       d.say(`${s.kickerName} STEPS UP TO TAKE THE CONVERSION`);
       /* Playtest P1.3: the scorer "popped up" — the dive clip ended and the
@@ -57,7 +64,10 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
      * wherever he stood (a 14 m teleport). He walks under steer() in
      * placeBound; the failsafe only advances the STAGE — the setting branch
      * keeps steering him the last metres to the mark. */
-    if (atTee || s.t > 5.0) {
+    /* AAA-calibration: the walkup is presentation for the human. The CPU's
+     * kicker is already being walked to the tee by placeBound, so it is not
+     * a teleport to let the stage advance once he is genuinely near it. */
+    if (atTee || s.t > (human ? 5.0 : 2.2)) {
       s.stage = 'AIM'; s.t = 0;
       /* The scorer rises here — the tee is reached, the reverence is done. */
       if (d.lastScorer) {
@@ -272,8 +282,18 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
              * scaled) let it die instead of carrying it out. Lineouts
              * starved. The angle now comes off the FULL reach with the
              * power to match: the aimed line passes through touch, and
-             * accuracy decides the margin — which is what a finder is. */
-            if (R() < 0.5) {
+             * accuracy decides the margin — which is what a finder is.
+             * AAA-calibration: the touch hunt share was 0.5 and the audit's
+             * LINEOUTS row read ~19.5 against a floor of 20 — a real
+             * kicking game beats the line more often than not. Raising it to
+             * 0.62 kept the other half (which is what CHASE ARRIVALS is
+             * for) but the box score still read ~17.5 once penalties (and
+             * their penalty kicks to touch) were calibrated down. 0.72 is
+             * still hunting touch only seven times in ten from deep, which
+             * is exactly what the modern territory punter does, and the
+             * balance is what brings LINEOUTS inside 20-28 without
+             * starving CHASE ARRIVALS. */
+            if (R() < 0.72) {
               const reach = d.kickReach(s, 1);
               const lateralNeeded = Math.max(6, 34.6 - s.bx * wide + 2.5);
               const deg = Math.min(52, (Math.atan2(lateralNeeded, reach) * 180) / Math.PI);

@@ -194,7 +194,8 @@ export function steer(
    * same-frame double-move that used to read as teleporting. Warn on that. */
   if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer'
     && p.movedBy !== 'carrier' && p.movedBy !== 'input'
-    && p.movedBy !== 'release') {   // playtest 3: the release-and-retreat beat is a sanctioned retarget
+    && p.movedBy !== 'release' && p.movedBy !== 'latch'
+    && p.movedBy !== 'bound') {   // release/latch/bound are phase-owned writers, snapped as a phase handoff
     console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then steer() again in one frame`);
   }
   p.movedBy = 'steer';
@@ -860,6 +861,11 @@ export function ruckDistributor(all: Live[], team: 'A' | 'B', x: number, z: numb
   // fall back to the nearest forward, never to a back from distance
   const fw = all.filter((p) => p.team === team && FORWARDS.includes(p.num) && p.sinbin <= 0 && !p.down);
   if (fw.length) return fw.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z))[0];
+  /* Last resort: a non-down player of the team. A down man cannot pick up a
+   * ruck ball — handing it to him read as the ball being played by a body on
+   * the floor. */
+  const awake = all.filter((p) => p.team === team && p.sinbin <= 0 && !p.down);
+  if (awake.length) return awake.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z))[0];
   return all.find((p) => p.team === team && p.sinbin <= 0)!;
 }
 

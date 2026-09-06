@@ -33,6 +33,9 @@ export type OffsideLineKind = 'RUCK' | 'RESET' | 'SCRUM' | 'MAUL' | 'LINEOUT' | 
 
 export type OffsideStrictness = 'STRICT' | 'LENIENT' | 'OFF';
 
+/** The clockScale the LENIENT/STRICT sustain values were measured against. */
+export const OFFSIDE_VERDICT_BASELINE_CLOCK = 8;
+
 /** What a referee of this temper does with an observed breach. */
 export interface StrictnessProfile {
   /** metres beyond the line before he will blow for it (never below the observed epsilon) */
@@ -90,9 +93,20 @@ export const STRICTNESS: Record<OffsideStrictness, StrictnessProfile> = {
    * LENIENT is also a claim about WHAT is policed, not only how strictly: it
    * watches the breakdown and the ball and not the set-piece lines, it forgives
    * a man already running back, and it ignores a man loitering ten metres from
-   * the ball. Those are the three things a real referee ignores. */
+   * the ball. Those are the three things a real referee ignores.
+   *
+   * AAA-re-measurement: the 3.0 m / 2.0 s settings were measured at clockScale
+   * 8, where an 80-minute match produced ~84 rucks and the audit read 4.3-4.9
+   * offside penalties a team. With the same 80-minute match now given its full
+   * engine time (clockScale 4, ~200 rucks — the realism-correct event volume),
+   * the same tolerance reads ~6-7 a team because the AI commits roughly three
+   * times as many sustained breaches in three times as many breakdowns. The
+   * honest calibrations for THIS match length are 4.0 m / 2.4 s: a man a full
+   * four metres past the line who has had two and a half seconds to get back,
+   * in front of a referee who is still ignoring the set-piece lines and the
+   * man already retreating. That is what a real referee calls. */
   LENIENT: {
-    blowEpsilon: 3.0, blowSustain: 2.0, settle: 1.20, materialRadius: 10,
+    blowEpsilon: 4.0, blowSustain: 2.4, settle: 1.20, materialRadius: 10,
     retreatingGrace: true, lines: ['RUCK', 'RESET', 'OPEN'],
   },
 
@@ -300,13 +314,23 @@ export function offsideVerdict(
   breach: Breach,
   offenderIsCpu: boolean,
   forceAiClean: boolean,
+  clockScale = 8,
 ): OffsideVerdict {
   /* The remit test, and it is the FIRST test: a referee who does not watch the
    * lineout cannot blow at the lineout, whatever the breach. LENIENT watches
    * the breakdown and the ball; STRICT watches everything. */
   if (!profile.lines.includes(breach.kind)) return 'OBSERVE';
   if (breach.penetration < profile.blowEpsilon) return 'OBSERVE';
-  if (breach.sustainedFor < profile.blowSustain) return 'OBSERVE';
+  /* AAA-calibration: `blowSustain` is in ENGINE seconds, but a 2-second
+   * "sustained" offence at clockScale 8 covers 16 display seconds while the
+   * same two engine seconds at clockScale 4 covers only 8. The referee has to
+   * police the match clock, not the frame budget: scale the sustain threshold
+   * so a breach must survive the same DISPLAY time in every build (the
+   * LENIENT profile was measured at the baseline clockScale 8). Without this,
+   * giving an 80-minute match its proper engine time doubled the offside
+   * whistle rate above the realistic 2-4/team band. */
+  const sustainThreshold = profile.blowSustain * (OFFSIDE_VERDICT_BASELINE_CLOCK / Math.max(1, clockScale));
+  if (breach.sustainedFor < sustainThreshold) return 'OBSERVE';
   if (breach.toBall > profile.materialRadius) return 'OBSERVE';
   if (profile.retreatingGrace && breach.retiring) return 'OBSERVE';
   if (forceAiClean && offenderIsCpu) return 'SUPPRESS';
