@@ -145,7 +145,9 @@ export class RapierWorld {
   /** Add a dynamic player proxy. Returns the body for external velocity control. */
   addPlayer(spec: PlayerSpec): RAPIER.RigidBody {
     const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(spec.x, spec.y, spec.z),
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(spec.x, spec.y, spec.z)
+        .setCcdEnabled(true),
     );
     this.world.createCollider(
       RAPIER.ColliderDesc.cuboid(spec.hx, spec.hy, spec.hz)
@@ -160,7 +162,9 @@ export class RapierWorld {
   /** Add a dynamic ball. */
   addBall(spec: BallSpec): RAPIER.RigidBody {
     const body = this.world.createRigidBody(
-      RAPIER.RigidBodyDesc.dynamic().setTranslation(spec.x, spec.y, spec.z),
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(spec.x, spec.y, spec.z)
+        .setCcdEnabled(true),
     );
     this.world.createCollider(
       RAPIER.ColliderDesc.ball(spec.radius)
