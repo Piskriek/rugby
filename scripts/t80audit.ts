@@ -26,6 +26,7 @@ const durs: number[] = [];
 let recT = 0, turnT = 0, penT = 0, stallT = 0;
 const rows: string[] = [];
 const stages = new Map<string, number>();
+const reasons = new Map<string, number>();
 
 for (let m = 0; m < matches; m++) {
   seedRng(seedBase + m * 10);
@@ -73,6 +74,8 @@ for (let m = 0; m < matches; m++) {
       const stallish = ep.stall || (!isRuck && !isTurn && !isPen && ep.dur > 2.8 && !ep.why);
       const kind = isRuck ? 'RECYCLE' : isTurn ? 'TURNOVER' : isPen ? 'PENALTY'
         : stallish ? 'STALL' : /^CONTACT/.test(ep.why || '') ? 'CONTACT-END' : 'MISC';
+      const rk = `${kind}|${(ep.why || '-').slice(0, 34)}`;
+      reasons.set(rk, (reasons.get(rk) ?? 0) + 1);
       tot.ep++; tot.ruck += ep.ruck; tot.turn += ep.turn; tot.pen += ep.pen;
       tot.stall += ep.stall; tot.contact += ep.contact;
       if (kind === 'MISC') tot.misc++;
@@ -100,5 +103,9 @@ console.log(`outcomes: RECYCLE ${tot.ruck} (${pct(tot.ruck)}) TURNOVER ${tot.tur
 console.log(`durations p50=${q(0.5)}s p90=${q(0.9)}s p99=${q(0.99)}s max=${q(1)}s`);
 console.log(`contact-frames/ep=${(tot.contact / N).toFixed(2)}`);
 console.log(`stages: ${[...stages.entries()].map(([k, n]) => `${k}=${n}`).join(' ')}`);
+console.log('reasons:');
+for (const [k, n] of [...reasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)) {
+  console.log(`  ${String(n).padStart(3)}  ${k}`);
+}
 console.log('\nrows:');
 for (const r of rows) console.log(' ', r);

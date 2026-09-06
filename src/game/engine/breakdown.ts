@@ -100,6 +100,14 @@ function latchMount(d: Director, s: BreakdownState, dir: number): void {
   sys.anchorBody(ball.id, s.contactX, ballZ, 16000, 2600);
   for (const slot of s.players) {
     const p = d.L(slot.team, slot.num);
+    /* ARRIVAL SPEED CAP. The open-play converger is sprinting at up to
+     * 10 m/s when the whistle falls; a body that keeps that into the bind
+     * arrives as a 12 m/s projectile (the jarring fault — the pile's worst
+     * pairs were all v≈10/3.4). A real clearout brakes as he closes: the
+     * hit is carried, not the full sprint. 5.5 m/s is still a hard arrival;
+     * the seek braking below finishes the settle. */
+    const sv = Math.hypot(p.vx, p.vz);
+    const vCap = sv > 5.5 ? 5.5 / sv : 1;
     const body = sys.spawn({
       kind: slot.role === 'CARRIER' ? 'CARRIER'
         : slot.role === 'TACKLER' ? 'TACKLER'
@@ -109,7 +117,7 @@ function latchMount(d: Director, s: BreakdownState, dir: number): void {
       x: p.x, z: p.z, y: 0, yaw: slot.role === 'TACKLER'
         ? yawToward(p.x, p.z, s.contactX, s.contactZ)
         : (slot.team === s.attacking ? (dir > 0 ? 0 : Math.PI) : (dir > 0 ? Math.PI : 0)),
-      vx: p.vx, vy: 0, vz: p.vz, yawVel: 0,
+      vx: p.vx * vCap, vy: 0, vz: p.vz * vCap, yawVel: 0,
       mass: bodyMass(p), radius: 0.55, down: slot.down, drive: 0,
       /* The shove is along each side's own attacking axis: the carrier side
        * drives +fwd, the defending side drives −fwd. `latticeNet` reads the
@@ -242,9 +250,21 @@ function latchTick(d: Director, s: BreakdownState, dt: number): void {
     if (b.kind === 'BALL') continue;
     const slot = s.players.find((q) => q.team === b.team && q.num === b.num);
     if (!slot) continue;
-    if (sys.bindCounts().joints === 0 && Math.hypot(b.x - slot.mx!, b.z - slot.mz!) < 0.25) sys.settle(b.id);
-    else if (!b.bound && Math.hypot(b.x - slot.mx!, b.z - slot.mz!) < 0.22) sys.settle(b.id);
-    else if (!b.bound) sys.seek(b.id, slot.mx!, slot.mz!);
+    const dd = Math.hypot(b.x - slot.mx!, b.z - slot.mz!);
+    if (sys.bindCounts().joints === 0 && dd < 0.25) sys.settle(b.id);
+    else if (!b.bound && dd < 0.22) sys.settle(b.id);
+    else if (!b.bound) {
+      sys.seek(b.id, slot.mx!, slot.mz!);
+      /* BIND-ZONE BRAKE. The arrival sheds speed over the last metre and a
+       * half — a man braces into the bind instead of hitting it at sprint
+       * (the jarring fault pairs were all v≈10 into a standing pile). The
+       * seek still pulls him in, the brake only removes the projectile
+       * component; the bind then takes over at ~1 m/s. */
+      if (dd < 1.5) {
+        const k = Math.exp(-(1.9 + (1.5 - dd) * 2.6) * dt);
+        b.vx *= k; b.vz *= k;
+      }
+    }
   }
   if (s.stage === 'CONTACT' || s.stage === 'PLACE' || s.stage === 'RUCK') tryTackleBind(d, s);
   if (s.stage === 'RUCK' && s.ruckFormed) tryRuckBinds(d, s, fwd);
@@ -344,7 +364,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * other phase. This baseline roll lives at the PLACE→RUCK transition
        * (the tackle, not the contest); the contest adds its own hazard
        * below when the defence is actually on top. */
-      if (R() < 0.036 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.015 + (d.slider(atk, 'aggression') / 100) * 0.03) {
         s.resultWhy = 'NOT RELEASING AT THE TACKLE';
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
@@ -490,8 +510,8 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * numbers path below); this is a grind-out, and both are steals.
      * The numbers call stays law-true: with equal or more men over the ball
      * a set jackal may take it; a man alone in there only slows it. */
-    if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
-    if (s.axis <= -0.6 && s.redT >= 0.45 && s.jackalActive
+      if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
+    if (s.axis <= -0.6 && s.redT >= 0.6 && s.jackalActive
       && s.defCrew.length >= s.crew.length && s.stage === 'RUCK') {
       d.teams[dTeam].stats.turnovers++;
       if (jackal) { d.run(dTeam, jackal.num).jackals++; d.teams[dTeam].stats.jackals++; }
@@ -527,7 +547,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * in the 22), not a raffle on every ruck. */
       if (s.jackalActive && jackal) {
         const redZone = Math.abs(atk === 'A' ? FIELD.tryZFar - s.contactZ : s.contactZ - FIELD.tryZ) < 22;
-        if (R() < (redZone ? 0.15 : 0.03)) {
+        if (R() < (redZone ? 0.08 : 0.02)) {
           s.resultWhy = 'NOT ROLLING AWAY — THE JACKAL HELD ON TOO LONG';
           d.beginPenalty(atk, REFEREE_CALLS.HANDS_IN, jackal.num);
           return;
@@ -563,7 +583,8 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
        * other phase. */
-      if (R() < 0.045 + (d.slider(atk, 'aggression') / 100) * 0.06) {
+      if (R() < 0.02 + (d.slider(atk, 'aggression') / 100) * 0.02) {
+        s.resultWhy = `NOT RELEASING — THE JACKAL HELD UNDER THE SHOVE (AXIS ${s.axis.toFixed(2)})`;
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
         return;
       }
@@ -578,8 +599,13 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
   if (s.ruckFormed) {
     /* SPEC_04: sample the actual pre-retreat actor positions and whistle only a
      * sustained breach. The writer owns the `offsides` stat; the physical
-     * walk-back below remains a no-teleport formation correction. */
-    if (d.sampleFormedRuckOffside(s, dt)) return;
+     * walk-back below remains a no-teleport formation correction. Name the
+     * reason for the audit/handoff ledger (the whistle owns the stat, the
+     * breakdown owns the narrative). */
+    if (d.sampleFormedRuckOffside(s, dt)) {
+      s.resultWhy = 'OFFSIDE AT THE RUCK — THE DEFENCE NEVER WENT BACK';
+      return;
+    }
     const fwd = s.attacking === 'A' ? 1 : -1;
     const atkLine = s.contactZ - fwd * 1.0;
     /* T-18. The hindmost foot is the LAW, but a defender does not set a
