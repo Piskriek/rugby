@@ -3,6 +3,7 @@ import { Director, Input, NO_INPUT, MatchConfig } from '../game/director';
 import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
+import { drawHealthOverlay } from '../render/renderHealth';
 import { drawCRT, project } from '../render/retro';
 import { ENV_3D, ThreeCanvas } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
@@ -403,6 +404,14 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
         if ((d.options.radar ?? 1) === 1) drawMinimap(ctx, d, view);
+
+        /* If the 3D layer failed, say so ON THE 2D LAYER — a diagnostic drawn
+         * inside a broken renderer is invisible for the very reason you need
+         * to read it. Silent unless the renderer actually reports a fault. */
+        {
+          const hr = threeRef.current?.healthReport?.();
+          if (hr) drawHealthOverlay(ctx, hr, view);
+        }
         const crt = d.options.crt ?? 1;
         if (crt > 0) drawCRT(ctx, view, crt === 2 ? 1.6 : 1);
         if (d.phase.includes('REPLAY')) {

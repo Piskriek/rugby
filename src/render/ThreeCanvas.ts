@@ -31,6 +31,7 @@
  *   world = (x · RENDER_SCALE, y · RENDER_SCALE, −z · RENDER_SCALE)
  */
 import * as THREE from 'three';
+import { assessRender, type HealthReport } from './renderHealth';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
@@ -52,6 +53,7 @@ export const DIAG = (() => {
     nopost: /[?&]nopost\b/.test(q),
     noibl: /[?&]noibl\b/.test(q),
     basic: /[?&]basic\b/.test(q),
+    health: /[?&]health\b/.test(q),
   };
 })();
 
@@ -214,6 +216,9 @@ export class ThreeCanvas {
    * `update()`, and sampling it before that would filter last match's sky.
    */
   private envStale = true;
+  /** Composer colour target, kept so its framebuffer can be interrogated. */
+  private rt: THREE.WebGLRenderTarget | null = null;
+  private health: HealthReport | null = null;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -309,6 +314,7 @@ export class ThreeCanvas {
       type: THREE.HalfFloatType,
       colorSpace: THREE.LinearSRGBColorSpace,
     });
+    this.rt = rt;
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.3, 0.6, 0.8);
@@ -499,6 +505,42 @@ export class ThreeCanvas {
      * They are query-string only and cost nothing when absent. */
     if (this.composer && ENV_3D && !DIAG.nopost) this.composer.render();
     else this.renderer.render(this.scene, this.camera);
+
+    /* SELF-DIAGNOSIS. renderer.info is only meaningful AFTER a draw, so it is
+     * sampled here rather than before. Frame 30 gives the loader time to
+     * finish and the first real camera to settle; sampling once keeps this
+     * free in the steady state. */
+    if (this.frame === 30) {
+      const info = this.renderer.info.render;
+      this.health = assessRender({
+        renderer: this.renderer,
+        scene: this.scene,
+        target: this.composer && !DIAG.nopost ? this.rt : null,
+        drawCalls: info.calls,
+        triangles: info.triangles,
+        bufferW: this.renderer.domElement.width,
+        bufferH: this.renderer.domElement.height,
+        cssW: this.dom.clientWidth,
+        cssH: this.dom.clientHeight,
+        contextLost: this.contextLost,
+      });
+      if (this.health.level === 'fail') {
+        console.warn('[render] ' + this.health.verdict);
+      }
+    }
+  }
+
+  /**
+   * The last health report, or null before frame 30.
+   *
+   * Shown automatically when it FAILS — a blank frame is exactly the case
+   * where the player cannot be expected to know to pass a debug flag — and
+   * on demand with ?health for a clean frame.
+   */
+  healthReport(): HealthReport | null {
+    if (!this.health) return null;
+    if (this.health.level === 'fail' || DIAG.health) return this.health;
+    return null;
   }
 
   /** Resolve the option bag into conditions and apply them if they changed. */
