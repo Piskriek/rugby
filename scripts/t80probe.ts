@@ -31,6 +31,11 @@ for (let m = 0; m < matches; m++) {
   const ages: number[] = [];
   let inEp = false;
   let eAge = 0, eTackle = false, eRuck = false;
+  /* TARCS gel evidence: every heave pulse, and the softened ruck-bind K
+   * actually in the lattice the moment a ruck is bound (3400 rig = not
+   * gel; ~1150 = gel regime), plus the pile's vertical motion. */
+  let heaves = 0, gelSamples = 0, gelKMin = 3400, gelKMax = 0;
+  let pileVySum = 0, pileVyFrames = 0;
   let guard = 60 * 500;
   while (!d.over && guard-- > 0) {
     d.update(dt, NO_INPUT, new Set());
@@ -52,6 +57,7 @@ for (let m = 0; m < matches; m++) {
         wPair = S.metrics.worstPair;
         wSnap = S.metrics.worstSnap;
       }
+
       instab += S.metrics.instabilityFrames;
       gateRejects += S.metrics.gateRejects;
       skipped += S.metrics.skippedBinds;
@@ -62,6 +68,14 @@ for (let m = 0; m < matches; m++) {
       for (const b of S.bodies) {
         if (Math.hypot(b.vx, b.vz) > 8.5) jarring++;
         if (!Number.isFinite(b.x + b.z + b.vx + b.vz)) console.log('  [probe] NON-FINITE body', b.kind, b.num);
+        if (b.bound && b.kind !== 'BALL') { pileVySum += Math.abs(b.vy); pileVyFrames++; }
+      }
+      heaves = Math.max(heaves, d.bd?.heaveCount ?? 0);
+      for (const j of S.joints) {
+        if (j.kind !== 'RUCK' || j.gel !== true) continue;
+        gelSamples++;
+        if (j.axes.tx.k < gelKMin) gelKMin = j.axes.tx.k;
+        if (j.axes.tx.k > gelKMax) gelKMax = j.axes.tx.k;
       }
       frameJoints += S.joints.length;
     } else if (inEp) {
@@ -85,4 +99,5 @@ for (let m = 0; m < matches; m++) {
   console.log(`  maxPen=${maxPen.toFixed(3)}m (worst=${wPair} @ (${wSnap.ax.toFixed(1)},${wSnap.az.toFixed(1)})<->(${wSnap.bx.toFixed(1)},${wSnap.bz.toFixed(1)}) v=${wSnap.va.toFixed(1)}/${wSnap.vb.toFixed(1)})`);
   console.log(`  maxBallDisp=${ballDisp.toFixed(3)}m instab=${instab} jarring=${jarring}`);
   console.log(`  gateRejects=${gateRejects} skippedBinds=${skipped} releases: ${rel}`);
+  console.log(`  gel: heaves=${heaves} ruckJointSamples=${gelSamples} ruckTxK=[${gelKMin.toFixed(0)}..${gelKMax.toFixed(0)}] meanPileVy=${(pileVySum / Math.max(1, pileVyFrames)).toFixed(3)}m/s`);
 }
