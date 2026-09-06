@@ -119,9 +119,18 @@ function simMatch(cfg: MatchConfig): Director {
   const d = new Director({ ...cfg, cpuA: true, cpuB: true });
   const dt = 1 / 60;
   let guard = 0;
-  // Run until the engine calls full time, with a hard iteration ceiling so a
-  // stalled state machine cannot hang the audit.
-  while (!d.over && guard < 60 * 60 * 14) {
+  /* AAA-calibration: the ceiling is an ANTI-HANG backstop over the real match
+   * length, not the simulation length. A full 80-minute match at the shipped
+   * clock compression (clockScale 4) needs 1200 engine seconds = 72,000
+   * update frames. The old 60*60*14 = 50,400-frame ceiling (840 engine
+   * seconds) was calibrated against clockScale 8, where a match needed only
+   * 600 engine seconds. At clockScale 4 it silently truncated every audited
+   * match at ~70 minutes — which is why the whole box score read ~70% of a
+   * real match (tackles ~80 rather than ~90+, lineouts ~11 rather than ~20).
+   * The ceiling is now 60*60*24 = 86,400 frames (1440 engine seconds), well
+   * clear of the real 80-minute requirement while still catching a stalled
+   * state machine. */
+  while (!d.over && guard < 60 * 60 * 24) {
     d.update(dt, NO_INPUT as Input, new Set<string>());
     guard++;
   }

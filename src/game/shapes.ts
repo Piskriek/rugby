@@ -541,7 +541,7 @@ export function callPlay(
      * PREFERRED, not suppressed: first-phase punts are where lineouts
      * come from. */
     if (zone === 'WIDE' && phaseNumber <= 1
-      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.55;
+      && (p.call === 'TERRITORY_PUNT' || p.call === 'BOMB' || p.call === 'BOX_KICK')) s -= 0.30;
     if (p.call === lastCall) s -= 1.5;
     if (s > bestScore) { bestScore = s; best = p; why = `${p.label} — ${p.instruction}`; }
   }

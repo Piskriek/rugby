@@ -34,7 +34,47 @@ import {
 import { maulUseItClock, maulUseItCall } from '../game/engine/setpieces';
 import { resetFacingDebug, recordFacingDebug } from './facingDebug';
 import type { ThreePlayerManager } from './ThreePlayerManager';
-import { ENV_3D } from './ThreeCanvas';
+import { ENV_3D, renderHealth } from './ThreeCanvas';
+
+/**
+ * Say what the 3D layer could not do, inside the frame.
+ *
+ * The whole reason this exists: a presentation failure used to be a featureless
+ * field plus a console message, and a player with a console message has no way to
+ * tell "broken" from "boring". Three lines in the corner turns the same event into
+ * a diagnosis the player can read out to anyone — and it is deliberately loud
+ * about the fact that the match is still being simulated correctly underneath.
+ */
+function drawRenderHealth(ctx: CanvasRenderingContext2D, v: View) {
+  const lines: string[] = [];
+  if (ENV_3D && renderHealth.world !== 'live') {
+    lines.push('3D WORLD UNAVAILABLE — FLAT VIEW');
+    lines.push('stadium drawn by the 2D layer; no actors until WebGL loads');
+  }
+  if (renderHealth.bodies === 'standin') {
+    lines.push('SQUAD MODEL MISSING — PLAIN BODIES');
+    lines.push('assets/models/rugby_player.glb did not load');
+  }
+  if (renderHealth.pipeline === 'direct') lines.push('POST CHAIN OFF (driver refused it)');
+  if (renderHealth.context === 'lost') lines.push('WEBGL CONTEXT LOST — WAITING');
+  if (!lines.length) return;
+  const h = 11 + lines.length * 10;
+  ctx.save();
+  ctx.globalAlpha = 0.88;
+  ctx.fillStyle = '#20140c';
+  ctx.fillRect(6, v.h - h - 6, 320, h);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = '#e8a13a';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(6.5, v.h - h - 5.5, 319, h - 1);
+  ctx.font = '900 9px ui-monospace, monospace';
+  ctx.textBaseline = 'middle';
+  lines.forEach((l, i) => {
+    ctx.fillStyle = i === 0 ? '#ffd27a' : '#c99a63';
+    ctx.fillText(l, 12, v.h - h + 5 + i * 10);
+  });
+  ctx.restore();
+}
 
 export function drawMatch(
   ctx: CanvasRenderingContext2D, d: Director, v: View,
@@ -49,14 +89,18 @@ export function drawMatch(
   const jy = shake?.y ?? (cam.shake ? (Math.random() - 0.5) * cam.shake * 11 : 0);
   const cam2: Camera = { ...cam, shake: 0 };
 
-  /* Stadium + pitch markings. Skipped under ENV_3D — ThreeEnvironment owns
-   * the turf, baked markings, mud-free dual-plane ground and uprights. */
-  if (!ENV_3D) {
+  /* Stadium + pitch markings. ThreeEnvironment owns the turf, the baked
+   * markings, the dual-plane ground and the uprights — but only while it is
+   * actually on screen. The 2D layer still knows how to draw a whole stadium,
+   * and `renderHealth` is how it learns that it has to: without this branch a
+   * WebGL failure is an empty page rather than an old-fashioned match. */
+  if (!ENV_3D || renderHealth.world !== 'live') {
     drawStadium(ctx, cam2, v, d.t, d.pitch);
     drawGoalPosts(ctx, cam2, v, -50, false);
   } else {
     ctx.clearRect(0, 0, v.w, v.h);
   }
+  drawRenderHealth(ctx, v);
 
   /* Feed the SPEC_06 debug HUD from the 3D animation state machine. */
   if (three) {

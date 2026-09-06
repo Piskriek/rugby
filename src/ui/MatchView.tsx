@@ -3,15 +3,55 @@ import { Director, Input, NO_INPUT, MatchConfig } from '../game/director';
 import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
-import { drawCRT, project } from '../render/retro';
-import { ENV_3D, ThreeCanvas } from '../render/ThreeCanvas';
+import {
+  DEFAULT_TUNING, createRigState, toggleViewMode, updateRig,
+  type RigInput,
+} from '../render/camera';
+import { PointerLock } from '../render/pointerLock';
+import TARCSHud from './TARCSHud';
+import {
+  RollingTimer, bodyMetrics, physicsMetrics, ruckMetrics,
+  type TarcsSnapshot,
+} from './tarcsMetrics';
+import { drawCRT, project, type Camera } from '../render/retro';
+import { ENV_3D, ThreeCanvas, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
+import { conditionsFor, qualityFor, type Conditions } from '../render/conditions';
+import { FxDirector } from '../render/fxDirector';
 import { Btn, Panel, Kbd } from './kit';
 import { DIFFICULTY_TABLE } from '../game/data';
 import { contractFor } from '../game/jlr';
 import { SpaceRemap } from './SpaceRemap';
 import { TutorialOverlay, CameraPanel } from './TutorialOverlay';
 import { stepAt } from '../game/tutorial';
+import { pollGamepad, emptyPrev, PrevGp } from '../game/gamepad';
+import { ScoreBug, MatchIntro, PlayerSpotlight, GamepadBadge, ConditionsStrip, FormStrip, TmoCard, CardCard, ReplayFrame } from './broadcast';
+import { LoadingScreen } from './LoadingScreen';
+
+/** Hand control back to the browser so it can paint and answer input. */
+const yieldToBrowser = () => new Promise<void>((r) => {
+  requestAnimationFrame(() => setTimeout(r, 0));
+});
+
+/**
+ * How long the boot is allowed to take before it is declared over anyway, and how
+ * long the squad rig in particular gets, in milliseconds.
+ *
+ * These are not timeouts on the *work* — nothing is cancelled, and a rig that lands
+ * afterwards still replaces the procedural bodies. They are timeouts on the
+ * *waiting*: the promise that the loading overlay is held behind. Two numbers, nine
+ * seconds apart, so that the usual slow case (a 6.3 MB GLB over a proxy) gives up on
+ * the rig first and gets a real kick-off with plain men, and the watchdog only fires
+ * if something earlier has gone wrong as well.
+ *
+ * What the 6 s is measured against, so nobody tunes it blind: `curl` through the dev
+ * server serves the whole 6.3 MB rig in 11 ms warm, and 15.9 s once — while the
+ * server was mid-restart, which is a broken pipeline, not a slow asset. The number
+ * that matters is the browser's own fetch of it across the preview proxy, and that is
+ * why `index.html` preloads the GLB at document time instead of waiting for the mount.
+ */
+const RIG_BUDGET_MS = 6000;
+const BOOT_BUDGET_MS = 15000;
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -30,6 +70,20 @@ export const KEYMAP: Record<string, string> = {
   r: 'replay', tab: 'stats', escape: 'pause',
   /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
   b: 'animDebug',
+  /* V toggles the player-driven first/third person rig (src/render/camera.ts). */
+  v: 'viewMode',
+  /* F3 toggles the TARCS physics/ruck/body telemetry overlay. */
+  f3: 'tarcs',
+  /* SPEC_25 — the two mouse buttons are keys by another name here: the same edge
+   * sets, the same hold semantics, the same remap table. Synthetic tokens so a
+   * `keys.current` entry means exactly one thing: something is being held.
+   * `n`/`m` are the keyboard's version of the same two holds, and they exist because
+   * a right mouse button is not universal hardware — `m` is held and RELEASED so the
+   * grip and the drop both have a keyboard shape. `v` was the obvious third letter and
+   * the view rig got it first, which is the right winner: a camera mode outranks an
+   * alias for a mouse button. */
+  mouse0: 'secure', mouse2: 'handsUp',
+  n: 'handsUp', m: 'secure',
 };
 
 export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }: {
@@ -49,10 +103,79 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const prev = useRef<Set<string>>(new Set());
   const [, force] = useState(0);
   const [showStats, setShowStats] = useState(false);
+
+  /* ---- player-driven first/third person rig (V) --------------------------
+   * Off by default: the broadcast director owns the camera unless the player
+   * explicitly takes it. `rigRef` holds the pure state from render/camera.ts;
+   * `plockRef` owns the browser pointer lock. */
+  const rigRef = useRef(createRigState('THIRD'));
+  const plockRef = useRef<PointerLock | null>(null);
+  const [rigOn, setRigOn] = useState(false);
+  const [rigLocked, setRigLocked] = useState(false);
+  const rigOnRef = useRef(false);
+  const rigCamRef = useRef<Camera>({
+    x: 0, z: 0, h: 1.68, yaw: 0, tilt: 0, fov: 1.2, shake: 0, horizon: 0.5, roll: 0,
+  });
   const [tick, setTick] = useState(0);
   const [slow, setSlow] = useState(1);
   /* SPEC_06 — always-available facing/strafe debug overlay, off by default. */
   const [showAnimDebug, setShowAnimDebug] = useState(false);
+
+  /* ---- TARCS debug telemetry (F3) ---------------------------------------
+   * The samplers are refs, not state: they are written every frame, and
+   * putting them in state would re-render React 60 times a second just to
+   * display a frame-time counter — the measurement would distort the thing
+   * being measured. `tarcs` state is refreshed on a slow interval instead. */
+  const [showTarcs, setShowTarcs] = useState(false);
+  const showTarcsRef = useRef(false);
+  const simTimer = useRef(new RollingTimer(90));
+  const frameTimer = useRef(new RollingTimer(90));
+  const [tarcs, setTarcs] = useState<TarcsSnapshot | null>(null);
+  const tarcsLive = useRef<TarcsSnapshot | null>(null);
+
+  /* Publish the telemetry to React at 10 Hz. The panel is sampled every frame
+   * but only RENDERED ten times a second: fast enough to read a spike, slow
+   * enough that the debug tool is not itself a measurable cost, and slow
+   * enough that the digits are legible rather than a blur. */
+  useEffect(() => {
+    if (!showTarcs) { setTarcs(null); return; }
+    const id = window.setInterval(() => {
+      if (tarcsLive.current) setTarcs({ ...tarcsLive.current });
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [showTarcs]);
+  /* AAA broadcast — match-day intro card and gamepad connection badge. */
+  const [intro, setIntro] = useState(true);
+  /* null once the world is built; drives the loading overlay until then. */
+  const [load, setLoad] = useState<{ stage: string; progress: number } | null>(
+    { stage: 'Preparing the ground', progress: 0 });
+  /* Mirror of `load` for the rAF loop, which closes over stale state. */
+  const loadingRef = useRef(true);
+  /** The stage the boot last announced, so the watchdog can say what it was waiting
+   *  for instead of clearing the overlay and leaving the player to guess. */
+  const bootStage = useRef('Preparing the ground');
+  const bootWatchdog = useRef(0);
+  /** non-null when the boot was abandoned at a stage that never finished. */
+  const [bootStall, setBootStall] = useState<string | null>(null);
+  const introRef = useRef(true);
+  const gpPrev = useRef<PrevGp>(emptyPrev());
+  const [gp, setGp] = useState<{ connected: boolean; name: string }>({ connected: false, name: '' });
+  /* AAA — spoken commentary reads only new feed lines, never repeats them. */
+  const spokenRef = useRef('');
+  /* SPEC_24 — the last conditions object handed to the renderer. `conditionsFor`
+   * caches, so identity is the change test: comparing the object is free and
+   * cannot drift out of step with a hand-written key. */
+  const condRef = useRef<Conditions | null>(null);
+  const fxRef = useRef<FxDirector | null>(null);
+  /* SPEC_24 — hit-stop, in seconds of real time still to be slowed down. */
+  const hitStopRef = useRef(0);
+  /* Camera shake contributed by the FX director, decayed here in real time. */
+  const fxShakeRef = useRef(0);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => { setIntro(false); introRef.current = false; }, 7500);
+    return () => window.clearTimeout(t);
+  }, []);
 
   if (!dirRef.current) {
     dirRef.current = new Director(cfg);
@@ -68,9 +191,27 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       dirRef.current?.audio.userGesture();
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
+    /* Pointer lock lives on the HUD canvas: it is the topmost full-bleed
+     * element, so it receives the click wherever the player aims. */
+    if (canvasRef.current && !plockRef.current) {
+      plockRef.current = new PointerLock(canvasRef.current, {
+        onChange: (locked) => setRigLocked(locked),
+      });
+    }
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+    /* Browser autoplay policy: the keydown above only covers players who reach
+     * the pitch via the keyboard. `armFirstGesture` catches every other route
+     * (touch, a click on the HUD, a pointer event from the menu) and removes
+     * itself once the context is actually running. */
+    dirRef.current?.audio.armFirstGesture(window);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      dirRef.current?.audio.disarmFirstGesture();
+      plockRef.current?.dispose();
+      plockRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -78,24 +219,195 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       e.preventDefault();
       dirRef.current?.setZoom(dirRef.current.zoom + Math.sign(e.deltaY) * 0.08);
     };
+    /* SPEC_25 — the mouse. Right button brings the hands up, left button takes the
+     * ball and releasing it drops it. `contextmenu` is suppressed on the canvas only,
+     * because the browser's own menu over the pitch would both eat the hold and make
+     * the game look broken; every other element keeps its menu. Mouseup is listened to
+     * on the window as well as the canvas, since a button released outside the frame
+     * still has to let the hands down — a stuck right button is a player permanently
+     * reaching, which is the kind of bug that reads as "the game froze". */
+    const down = (e: MouseEvent) => {
+      const b = e.button === 2 ? 'mouse2' : e.button === 0 ? 'mouse0' : null;
+      if (!b) return;
+      e.preventDefault();
+      keys.current.add(b);
+      dirRef.current?.audio.userGesture();
+    };
+    const up = (e: MouseEvent) => {
+      keys.current.delete(e.button === 2 ? 'mouse2' : e.button === 0 ? 'mouse0' : '');
+    };
+    const menu = (e: Event) => e.preventDefault();
     const c = canvasRef.current;
     c?.addEventListener('wheel', wheel, { passive: false });
-    return () => c?.removeEventListener('wheel', wheel);
+    c?.addEventListener('mousedown', down);
+    c?.addEventListener('contextmenu', menu);
+    window.addEventListener('mouseup', up);
+    return () => {
+      c?.removeEventListener('wheel', wheel);
+      c?.removeEventListener('mousedown', down);
+      c?.removeEventListener('contextmenu', menu);
+      window.removeEventListener('mouseup', up);
+    };
   }, []);
 
   /* The 3D layer: WebGL canvas + pooled GLB player manager. Created once.
    * Under ENV_3D this is the world (pitch, fog, uprights, actors); the 2D
    * canvas is a transparent HUD overlay stacked above it. */
+  /* ---------------------------------------------------------------- boot --
+   * Building the world is expensive: procedural turf maps, the stadium mesh
+   * set, the post-processing targets and a 6.3 MB rigged GLB. Doing all of it
+   * in one synchronous block starves the event loop for seconds — the browser
+   * cannot paint or answer input, and the tab looks frozen.
+   *
+   * So each stage awaits `yieldToBrowser()` before the next. The total work is
+   * unchanged, but it is now split across frames, so the loading screen
+   * animates and the window stays responsive throughout. */
   useEffect(() => {
     const host = threeDivRef.current;
     if (!host) return;
-    const three = new ThreeCanvas(host);
-    const players = new ThreePlayerManager(three);
-    threeRef.current = three;
-    playersRef.current = players;
-    players.load().catch((e) => console.error('player GLB load failed', e));
+    let cancelled = false;
+    let three: ThreeCanvas | null = null;
+
+    (async () => {
+      loadingRef.current = true; bootStage.current = 'Preparing the ground';
+      setLoad({ stage: 'Preparing the ground', progress: 0.04 });
+      /* THE LAST RESORT FOR A STALLED BOOT. Every stage of this sequence is now
+       * written so it cannot sit pending forever — the rig load is raced against a
+       * budget, the shader handover is caught, the WebGL layer is caught — but the
+       * rule the screenshot taught is that a loading screen is only ever as honest as
+       * the slowest thing it waits for, and a user staring at "BRINGING OUT THE
+       * TEAMS 66%" cannot tell a slow network from a broken game. So a single watchdog
+       * lifts the curtain anyway, naming the stage that did not finish, and whatever
+       * was still arriving is allowed to arrive late (the stand-in squad retires
+       * itself whenever the rig lands). A game you can play with plain men beats a
+       * progress bar you can admire. */
+      const stall = window.setTimeout(() => {
+        if (!loadingRef.current || cancelled) return;
+        loadingRef.current = false;
+        setBootStall(bootStage.current);
+        setLoad(null);
+      }, BOOT_BUDGET_MS);
+      bootWatchdog.current = stall;
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      // Stadium + procedural turf (~0.6 s).
+      /* Constructing the WebGL layer is the one boot step that can fail for
+       * reasons that have nothing to do with this code: no GL on the machine, a
+       * blocked context in a sandboxed frame, a driver that refuses the canvas.
+       * Letting that throw left the whole async boot dead in the water — the
+       * loading overlay never cleared and the 2D layer, which can draw this
+       * match on its own, was never told to. So: catch it, say so on screen, and
+       * carry on with the fallback view. */
+      try {
+        three = new ThreeCanvas(host);
+      } catch (e) {
+        three = null;
+        renderHealth.world = 'dead';
+        noteRenderFault('WebGL layer', e);
+      }
+      threeRef.current = three;
+      if (cancelled) return;
+
+      loadingRef.current = true; setLoad({ stage: 'Raising the stands', progress: 0.34 });
+      bootStage.current = 'Raising the stands';
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      /* The look goes on before the squads are named, so the first frame anyone
+       * sees is already the match's own weather. Read from the director rather
+       * than props because the options screen writes straight onto the live
+       * match config. */
+      const d0 = dirRef.current;
+      if (d0 && three) {
+        /* Wrapped, because this is one of the two stages that used to be able to end
+         * the boot without ending it: `applyConditions` reaches into shader uniforms
+         * of a material the environment builds lazily, and if that handover is not
+         * ready the throw escaped through an async body nothing was holding — so no
+         * error surfaced, no overlay cleared, and the screen sat on its progress bar
+         * at 34% forever. The weather is not worth a match: the 3D layer keeps its
+         * default look, and the engine still gets its audio and surface, which are
+         * the parts the simulation actually needs. */
+        try {
+          const cond0 = three.syncConditions(d0.options);
+          condRef.current = cond0;
+          three.particles?.setFog(cond0.fogColor, cond0.fogDensity * 14);
+          d0.audio.setWeather(cond0.precip === 'RAIN' ? cond0.precipDensity : 0, cond0.windSpeed);
+          d0.audio.setSurface(d0.pitch.firm);
+        } catch (e) {
+          noteRenderFault('weather on the 3D layer', e);
+        }
+      }
+      /* TARCS — hand the physics world the audio engine, so Rapier's own
+       * collision events drive the impact synthesiser directly. Safe before the
+       * Rapier bootstrap has resolved; ThreeCanvas defers the subscription. */
+      if (d0 && three) three.attachMatchAudio(d0.audio);
+      /* The FX director is the only presentation object in this tree allowed to
+       * hold both the particle pool and the stadium: it reads the simulation and
+       * writes light and matter into the frame, never back into the engine. */
+      if (three) fxRef.current = new FxDirector(three.particles, three.environment);
+
+      loadingRef.current = true; setLoad({ stage: 'Naming the squads', progress: 0.56 });
+      bootStage.current = 'Naming the squads';
+      await yieldToBrowser();
+      if (cancelled) return;
+
+      if (three) {
+        const players = new ThreePlayerManager(three);
+        playersRef.current = players;
+
+        loadingRef.current = true; setLoad({ stage: 'Bringing out the teams', progress: 0.66 });
+      bootStage.current = 'Bringing out the teams';
+        await yieldToBrowser();
+        if (cancelled) return;
+
+        /* THE RIG HAS A BUDGET, NOT A HANDSHAKE. 6.3 MB of skinned animation is a
+         * lot to pull through a dev proxy, and before this line the boot simply
+         * awaited the load — so a promise that never settled (which is what a throw
+         * inside a callback-shaped loader produced) left the game sitting at 66%
+         * with no error anywhere and no match behind it. A kick-off with procedural
+         * bodies is a worse-looking match; a kick-off that never happens is not a
+         * match at all.
+         *
+         * The race does not cancel anything. `players.load()` keeps running, and if
+         * it lands late `clearStandIn` retires the boxes in its own time — which is
+         * why the discard-catch below matters: after the timeout nobody is awaiting
+         * this promise, and a late failure must not become an unhandled rejection. */
+        let rigTimer = 0;
+        const boot = players.load();
+        boot.catch(() => { /* the manager has already said why, in renderHealth */ });
+        try {
+          await Promise.race([
+            boot,
+            new Promise<'slow'>((res) => { rigTimer = window.setTimeout(() => res('slow'), RIG_BUDGET_MS); }),
+          ]);
+        } catch {
+          /* Nothing to do here but let it go: the manager has already recorded
+           * the reason in `renderHealth`, put procedural bodies on the field, and
+           * left the console line. A squad whose model is missing is a match with
+           * plain men in it, not a match that stops. */
+        } finally {
+          window.clearTimeout(rigTimer);
+        }
+        if (cancelled) return;
+      }
+
+      setLoad({ stage: 'Kick-off', progress: 1 });
+      bootStage.current = 'Kick-off';
+      await yieldToBrowser();
+      if (cancelled) return;
+      window.clearTimeout(bootWatchdog.current);
+      loadingRef.current = false; setLoad(null);
+    })();
+
     return () => {
-      three.dispose();
+      cancelled = true;
+      /* A boot abandoned by React (StrictMode's double mount, a fast unmount, a
+       * quality switch that rebuilds the canvas) must not leave a timer that fires
+       * into a dead component and calls setState on it. */
+      window.clearTimeout(bootWatchdog.current);
+      fxRef.current = null;
+      three?.dispose();
       threeRef.current = null;
       playersRef.current = null;
     };
@@ -104,7 +416,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
-    const loop = (now: number) => {
+    const frame = (now: number) => {
       const d = dirRef.current!;
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
@@ -134,6 +446,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           case 'tackleDive': inp.tackleDive = true; break;
           case 'tackleSmother': inp.tackleSmother = true; break;
           case 'switchPlayer': inp.switchPlayer = true; break;
+          case 'handsUp': inp.handsUp = true; break;
+          case 'secure': inp.secure = true; break;
         }
       }
       // space is sprint while held and action on the edge
@@ -145,11 +459,42 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           rawPressed.add(raw);
         }
       }
+      /* SPEC_25 — Space doubles as the punt trigger. The engine only honours it inside
+       * the 300 ms drop window, so sprint and every other Space verb are untouched
+       * outside it: one physical key, two meanings, and the state machine is the only
+       * thing that decides which. */
+      if (pressed.has('action')) pressed.add('punt');
       /* Playtest P1.4: hold-to-kick needs the RELEASE edge too. */
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
-      inp.run = inp.sprint;
-      prev.current = new Set(keys.current);
+
+      /* AAA — the gamepad merges into the same verb stream as the keyboard:
+       * held input first, then the rising/falling edges for the kick-meter,
+       * waggles, pause and stats. */
+      const gf = pollGamepad(gpPrev.current);
+      gpPrev.current = gf;
+      /* The matchday card consumes the input that dismisses it: if the player
+       * skips with the pad's START that press must not also pause the match. */
+      const gpSkip = gf.connected && gf.pressed.length > 0;
+      const skip = introRef.current && (pressed.size > 0 || gpSkip);
+      if (skip) {
+        introRef.current = false; setIntro(false);
+        pressed.clear(); released.clear();
+        for (const k of Object.keys(NO_INPUT) as (keyof Input)[]) inp[k] = false;
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      } else {
+        if (gf.connected) {
+          Object.assign(inp, gf.input);
+          for (const k of gf.pressed) pressed.add(k);
+          for (const k of gf.released) released.add(k);
+          setGp((cur) => (cur.connected && cur.name === gf.name ? cur : { connected: true, name: gf.name }));
+        } else {
+          setGp((cur) => (cur.connected ? { connected: false, name: '' } : cur));
+        }
+        inp.run = inp.sprint;
+        prev.current = new Set(keys.current);
+      }
 
       /* CHAOS_SCRIM — C is the accessible stress-test trigger. It starts the
        * 14-body scrim from anywhere and restarts it while it is already live. */
@@ -168,9 +513,121 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       if (pressed.has('replay')) { if (!d.phase.includes('REPLAY')) d.enterReplay('REPLAY'); }
       /* SPEC_06 — B toggles the facing/strafe debug overlay. */
       if (pressed.has('animDebug')) setShowAnimDebug((v) => !v);
+      if (pressed.has('tarcs')) {
+        const on = !showTarcsRef.current;
+        showTarcsRef.current = on;
+        setShowTarcs(on);
+        /* Start each session clean so the first reading is this run's, not a
+         * stale mean from the last time the panel was open. */
+        if (on) { simTimer.current.reset(); frameTimer.current.reset(); }
+      }
 
-      d.gameSpeed = slow;
-      d.update(dt, inp, pressed, released);
+      /* ---- V: take or hand back the camera ------------------------------
+       * First V arms the rig and requests pointer lock. Subsequent presses
+       * flip first <-> third. ESC (browser-owned) drops the lock but leaves
+       * the rig armed, so the player keeps their view mode. */
+      if (pressed.has('viewMode')) {
+        if (!rigOnRef.current) {
+          rigOnRef.current = true;
+          setRigOn(true);
+          /* Seed from the director's current shot so taking control does not
+           * cut: the rig starts exactly where the broadcast camera was. */
+          const st = rigRef.current;
+          st.yaw = st.smoothYaw = d.cam.yaw;
+          st.pitch = st.smoothPitch = -d.cam.tilt;
+          st.posX = d.cam.x; st.posZ = d.cam.z; st.posH = d.cam.h;
+          plockRef.current?.request();
+        } else {
+          toggleViewMode(rigRef.current);
+          force((n) => n + 1);
+        }
+      }
+
+      /* Big hits squeeze three frames out of the second. `slow` is the player's
+       * own game-speed setting, so the dip multiplies it rather than fighting
+       * it, and it is driven by REAL time: slowing the simulation and then
+       * letting the slowdown feed itself is how a hit-stop becomes a flatline. */
+      const hitStop = hitStopRef.current > 0 ? 0.16 : 1;
+      hitStopRef.current = Math.max(0, hitStopRef.current - dt);
+      d.gameSpeed = slow * hitStop;
+      /* AAA — the world stays in the kickoff frame until the matchday card is
+       * dismissed; the presentation is a curtain, not a running clock behind
+       * the text. */
+      /* Time the SIM STEP specifically, not the whole frame: the frame also
+       * carries rendering and React, and a physics readout that includes them
+       * cannot tell you whether the engine or the renderer is the cost. */
+      if (!introRef.current && !loadingRef.current) {
+        if (showTarcsRef.current) {
+          const t0 = performance.now();
+          d.update(dt, inp, pressed, released);
+          simTimer.current.push(performance.now() - t0);
+        } else {
+          d.update(dt, inp, pressed, released);
+        }
+      }
+      if (showTarcsRef.current) frameTimer.current.push(dt * 1000);
+
+      /* While the loading screen is up the world is still being assembled, so
+       * there is nothing worth drawing and the boot stages need the main
+       * thread more than the renderer does. Skipping the draw here is what
+       * keeps the progress bar smooth instead of stuttering. */
+      if (loadingRef.current) { raf = requestAnimationFrame(loop); return; }
+
+      /* ---- player-driven camera rig ---------------------------------------
+       * Runs AFTER the sim so it reads this frame's ball, and BEFORE the draw
+       * so both the 2D and 3D layers consume the same Camera. Overwriting
+       * d.cam (rather than threading a second camera through the renderers)
+       * is what guarantees the two layers stay pixel-aligned — they already
+       * agree to within 2 px, and that property is worth preserving. */
+      if (rigOnRef.current) {
+        const st = rigRef.current;
+        const md = plockRef.current?.consume() ?? { dx: 0, dy: 0 };
+        const bp = d.ballPoint();
+        const rigInput: RigInput = {
+          fwd: inp.up, back: inp.down, left: inp.left, right: inp.right,
+          sprint: inp.sprint,
+          mouseDX: md.dx, mouseDY: md.dy,
+        };
+        const carrier = d.live.find((q) => d.op && q.team === d.op.attacking
+          && q.num === d.op.carrierNum);
+        const res = updateRig(
+          st,
+          {
+            self: carrier
+              ? { x: carrier.x, z: carrier.z, face: carrier.face ?? 0 }
+              : { x: bp.x, z: bp.z, face: 0 },
+            ball: bp,
+            ballLanding: d.landingPrediction(),
+          },
+          rigInput, dt, DEFAULT_TUNING, rigCamRef.current,
+        );
+        /* Keep the director's own shake so impacts still register. */
+        res.camera.shake = d.cam.shake;
+        Object.assign(d.cam, res.camera);
+      }
+
+      /* ---- TARCS telemetry ------------------------------------------------
+       * Composed every frame into a ref (cheap, no re-render); the interval
+       * below publishes it to React at a readable rate. */
+      if (showTarcsRef.current) {
+        const carrierNum = d.op ? d.op.carrierNum : null;
+        const carrierTeam = d.op ? d.op.attacking : null;
+        tarcsLive.current = {
+          physics: physicsMetrics(simTimer.current, frameTimer.current),
+          ruck: ruckMetrics(d.bd ?? null),
+          bodies: bodyMetrics(
+            d.live.map((q) => ({
+              team: q.team, num: q.num, vx: q.vx, vz: q.vz,
+              stamina: q.stamina,
+              /* A body is "ACTIVE" when the ragdoll solver owns it. The
+               * renderer is the only thing that knows, so ask it; when the
+               * 3D layer is absent (headless/2D) nobody is ragdolled. */
+              ragdoll: playersRef.current?.isRagdolled(q.team, q.num) ?? false,
+            })),
+            carrierNum, carrierTeam,
+          ),
+        };
+      }
 
       /* ---- draw ---- */
       const cv = canvasRef.current;
@@ -197,17 +654,80 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         const three = threeRef.current;
         if (three) {
           three.resize();
-          three.syncCamera({ ...d.cam, shake: 0 }, view, jx, jy);
+          /* One camera offset for the whole frame: the 2D pitch and the 3D squad
+           * are shaken by the same numbers, which is the only reason they do not
+           * slide apart when a ruck collapses. */
+          const shake = (d.cam.shake || 0) + fxShakeRef.current;
+          fxShakeRef.current = Math.max(0, fxShakeRef.current - dt * 2.4);
+          three.syncCamera({ ...d.cam, shake }, view, jx, jy);
           playersRef.current?.update(d, view, d.cam, dt);
+          /* ONE conditions object per frame, resolved from the options the engine
+           * already owns, pushed into the sky, the turf, the crowd and the kit.
+           * `syncConditions` is what makes the option screen live mid-match;
+           * the identity test makes polling it free. */
+          const cond = three.syncConditions(d.options);
+          if (cond !== condRef.current) {
+            condRef.current = cond;
+            three.particles?.setFog(cond.fogColor, cond.fogDensity * 14);
+            d.audio.setWeather(cond.precip === 'RAIN' ? cond.precipDensity : 0, cond.windSpeed);
+            d.audio.setSurface(d.pitch.firm);
+          }
+          playersRef.current?.setSoiling(cond.mud, cond.wetness);
+          /* FLAT 16-BIT drops the live solve along with the bloom and the
+           * shadows — but it does not go back to a canned hug: the tier replays a
+           * fall that was solved offline instead (ragdollClips.ts). Any fall
+           * already in progress is released here, because the switch can move
+           * mid-match from the menu. */
+          if (playersRef.current) playersRef.current.ragdollEnabled = cond.quality !== 'LEGACY';
+          if (cond.quality === 'LEGACY') playersRef.current?.clearFalls();
+          /* LEGACY is the budget tier: it drops physics fall-down along with
+           * the bloom and the shadows, and the men keep their canned tackle. */
+          if (playersRef.current) playersRef.current.ragdollEnabled = cond.quality !== 'LEGACY';
+          playersRef.current?.setShadowStrength(cond.shadowStrength * (cond.shadows ? 0.55 : 1));
           const env = three.environment;
           if (env) {
             const recent = d.t - d.bannerAt < 2.2;
             const b = (d.banner || '').toUpperCase();
             if (recent && b.includes('TRY')) env.flashAdBoard('TRY');
             else if (recent && /(PENALTY|YELLOW|CARD|NO GOOD)/.test(b)) env.flashAdBoard('PENALTY');
-            env.update(d.t, dt);
+            env.update(d.t, dt, three.camera);
           }
-          three.render();
+          /* IMPACT FX: turf, mud, dust, breath, blood, confetti, pitch scars,
+           * crowd, press flashes — and the two numbers that come back out. */
+          const fxPulse = fxRef.current?.update(d, cond, dt) ?? { impact: 0, shake: 0 };
+          if (fxPulse.impact > 0) {
+            hitStopRef.current = Math.max(hitStopRef.current, 0.05 + fxPulse.impact * 0.07);
+            fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.impact * 9);
+          }
+          if (fxPulse.shake > 0) fxShakeRef.current = Math.min(12, fxShakeRef.current + fxPulse.shake);
+          /* THE FLOOR. A solved body kicks up a second line of turf when it
+           * arrives a second time — a roll, a skip, a knee on the deck. The
+           * manager reports the contacts, this spends them, because the pitch
+           * and the weather belong to the renderer and the fall does not. */
+          const hits = playersRef.current?.drainGroundHits() ?? [];
+          /* The solver reports every joint that reached the deck; the frame does
+           * not need all of them. A knee and an elbow landing 0.1 s apart are one
+           * cloud of turf, not six, and the wear canvas is already running to a
+           * budget. Take the heaviest few. */
+          if (hits.length) {
+            hits.sort((a, b) => b.force - a.force);
+            let spent = 0;
+            for (const h of hits) {
+              if (h.force < 0.22 || spent >= 3) continue;
+              spent++;
+              three.environment?.addScar(h.x, h.z, 0.55 + h.force * 0.5);
+              three.particles?.emit(cond.mud > 0.5 ? 'MUD' : 'DUST', {
+                count: 3 + Math.round(h.force * 6), x: h.x * 1.65,
+                /* the turf is domed; clods that spawn at y=0 start inside it at
+                 * the centre of the field and pop out a metre later */
+                y: 0.06 + (three.environment?.riseAt(h.x) ?? 0), z: -h.z * 1.65,
+                speed: 0.9 + h.force, up: 0.5, scale: 0.8, opacity: 0.55,
+              });
+            }
+          }
+          /* The weather itself: precipitation, wet ground, mist, lamp haze. */
+          three.updateMatchDay(d.cam, view, dt);
+          three.render(dt);
         }
         /* SPEC_06 — facing/strafe live per-actor readouts (toggle with B). */
         if (showAnimDebug) drawFacingStrafeOverlay(ctx, d.phase, view);
@@ -230,15 +750,55 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         }
         if (d.paused) drawWipe(ctx, view, 0.5);
       }
+    };
+    /* THE LOOP HAS TO OUTLIVE ITS OWN FRAME. The reschedule used to sit at the
+     * bottom of the body, so one exception anywhere in the draw chain — and that
+     * chain reaches a 6 MB GLB, an effect composer, and a GL context that can be
+     * lost mid-frame — skipped the reschedule and stopped the picture for the
+     * rest of the session, while the panels kept moving because a `setInterval`
+     * drives them. A dead canvas next to a live HUD is the single most confusing
+     * failure this project has had, and it was self-inflicted by this ordering. */
+    let frameFaults = 0;
+    const loop = (now: number) => {
       raf = requestAnimationFrame(loop);
+      try {
+        frame(now);
+        frameFaults = 0;
+      } catch (e) {
+        frameFaults++;
+        noteRenderFault(`frame ${frameFaults}`, e);
+        /* Three bad frames in a row is not a transient: step back from the 3D
+         * world entirely and let the 2D stadium carry the match. */
+        if (frameFaults >= 3) renderHealth.world = 'dead';
+      }
     };
     raf = requestAnimationFrame(loop);
     const ui = setInterval(() => setTick((t) => t + 1), 110);
     return () => { cancelAnimationFrame(raf); clearInterval(ui); };
-  }, [slow, showAnimDebug]);
+  }, [slow, showAnimDebug, intro]);
 
   const d = dirRef.current!;
   const A = d.A, B = d.B;
+  /* AAA — spoken commentary overlays the feed every live tick when enabled.
+   * Uses the browser speech engine, so no audio assets are required. */
+  useEffect(() => {
+    if ((d.options.spokenCommentary ?? 0) < 1) return;
+    const line = d.feed[0]?.text ?? '';
+    if (!line || line === spokenRef.current) return;
+    spokenRef.current = line;
+    try {
+      if (!('speechSynthesis' in window)) return;
+      const u = new SpeechSynthesisUtterance(line.replace(/\s+/g, ' '));
+      u.rate = 1.02;
+      u.pitch = 0.82;
+      u.volume = 0.6;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch {
+      /* a browser without voices just stays silent */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick]);
   const density = ['MINIMAL', 'STANDARD', 'FULL', 'TELEMETRY'][d.options.hud ?? 1];
   const ctrl = d.ctrlPlayer;
   const contract = ctrl ? contractFor(ctrl.num) : null;
@@ -278,6 +838,23 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
        * the 2D canvas paints the pitch and WebGL is a transparent actor layer. */}
       <canvas ref={canvasRef} className={`absolute inset-0 h-full w-full ${ENV_3D ? 'z-[2]' : 'z-0'}`} />
       <div ref={threeDivRef} className={`pointer-events-none absolute inset-0 ${ENV_3D ? 'z-0' : 'z-[1]'}`} />
+      {/* TARCS telemetry. z-50, click-through, so it can never interfere with
+        * pointer lock or the interactive menu layers above it. */}
+      {showTarcs && tarcs && <TARCSHud snapshot={tarcs} />}
+      {/* Player-camera status. Tells you which rig owns the view and, when the
+        * pointer is not locked, how to get it back — a pointer-locked mode
+        * with no visible way to re-enter it after ESC is a trap. */}
+      {rigOn && (
+        <div className="pointer-events-none absolute left-1/2 top-3 z-[40] -translate-x-1/2
+                        rounded border border-emerald-400/60 bg-slate-950/85 px-3 py-1.5
+                        font-mono text-[11px] font-bold tracking-wide text-emerald-300">
+          {rigRef.current.mode === 'FIRST' ? 'FIRST PERSON' : 'THIRD PERSON'}
+          <span className="ml-2 font-normal text-slate-400">V to switch</span>
+          {!rigLocked && (
+            <span className="ml-2 font-normal text-amber-300">· click to look</span>
+          )}
+        </div>
+      )}
       {/* Layer 2 — every HUD panel lives inside this wrapper so the 3D players
        * can never cover the score bar, commentary, or phase readouts. */}
       <div className="pointer-events-none absolute inset-0 z-10">
@@ -312,50 +889,54 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         </div>
       )}
 
-      {/* SCORE BAR */}
-      <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
-        <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
-          <div className="flex items-center gap-3">
-            <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
-            <span className="text-[11px] text-[#6f7f96]">v</span>
-            <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
-            <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
-            <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
-            <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+      {/* SCORE BAR — AAA broadcast bug by default, heritage 1991 from OPTIONS */}
+      {(d.options.broadcast ?? 1) >= 1 ? (
+        <ScoreBug d={d} objective={objective} density={density} />
+      ) : (
+        <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+          <div className="border-2 border-[#e8cf46] bg-[#0d1220]/95 px-3 py-1">
+            <div className="flex items-center gap-3">
+              <span className="text-[15px] font-black text-[#e2664f]">{A.nation.short}</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{A.score}</span>
+              <span className="text-[11px] text-[#6f7f96]">v</span>
+              <span className="text-[22px] font-black tabular-nums text-[#f4efe2]">{B.score}</span>
+              <span className="text-[15px] font-black text-[#7fa3e6]">{B.nation.short}</span>
+              <span className="ml-2 border-l border-[#3d4b66] pl-2 text-[11px] tabular-nums text-[#e8cf46]">{d.clockText}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#6f7f96]">{d.half === 1 ? '1ST HALF' : '2ND HALF'}</span>
+              <span className="text-[9px] tracking-[0.2em] text-[#8fa0b8]">{DIFFICULTY_TABLE[d.difficulty]?.name}</span>
+            </div>
+            {objective && (
+              <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
+                {objective.name} — TARGET {objective.target}
+              </div>
+            )}
+            {(d.live.some((p) => p.sinbin > 0)) && (
+              <div className="mt-0.5 flex gap-2">
+                {(['A', 'B'] as const).map((t) => {
+                  const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
+                  if (!binned.length) return null;
+                  return (
+                    <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
+                      <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
+                      {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            {density !== 'MINIMAL' && (
+              <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
+                <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
+                  {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
+                </span>
+                <span>·</span><span>{d.phase.replace('_', ' ')}</span>
+                {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
+                {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
+              </div>
+            )}
           </div>
-          {objective && (
-            <div className="mt-0.5 text-[9px] tracking-[0.16em] text-[#e8cf46]">
-              {objective.name} — TARGET {objective.target}
-            </div>
-          )}
-          {(d.live.some((p) => p.sinbin > 0)) && (
-            <div className="mt-0.5 flex gap-2">
-              {(['A', 'B'] as const).map((t) => {
-                const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
-                if (!binned.length) return null;
-                return (
-                  <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
-                    <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
-                    {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
-                  </span>
-                );
-              })}
-            </div>
-          )}
-          {density !== 'MINIMAL' && (
-            <div className="mt-0.5 flex items-center gap-2 text-[9px] tracking-[0.16em] text-[#8fa0b8]">
-              <span className={d.possession === 'A' ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>
-                {d.possession === 'A' ? '◀ ' + A.nation.short : B.nation.short + ' ▶'}
-              </span>
-              <span>·</span><span>{d.phase.replace('_', ' ')}</span>
-              {d.op && <><span>·</span><span>PHASE {d.op.phase}</span></>}
-              {d.momentum !== 0 && <><span>·</span><span className={d.momentum > 0 ? 'text-[#e2664f]' : 'text-[#7fa3e6]'}>MOMENTUM {d.momentum > 0 ? A.nation.short : B.nation.short}</span></>}
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
       {/* CONTROLLED PLAYER NAMEPLATE — four channels so you always know who you are */}
       {ctrl && (
@@ -447,6 +1028,12 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>CONTACTS</span><span className="text-[#f4efe2]">{d.chaos.contacts}</span></div>
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>DIVES</span><span className="text-[#f4efe2]">{d.chaos.dives}</span></div>
             <div className="flex justify-between text-[9px] text-[#7f8ea6]"><span>FPS</span><span className={d.chaosFps >= 60 ? 'text-[#6ee7a0]' : 'text-[#ffd76a]'}>{d.chaosFps || '—'}</span></div>
+            <div className="flex justify-between text-[9px] text-[#7f8ea6]">
+              <span>PHYSICS</span>
+              <span className={d.chaos.physicsReady ? 'text-[#6ee7a0]' : d.chaos.physicsError ? 'text-[#ff6a5a]' : 'text-[#ffd76a]'}>
+                {d.chaos.physicsReady ? `TARCS ${d.chaos.physics?.lastStepMs.toFixed(1)} MS` : d.chaos.physicsError || 'BOOTING'}
+              </span>
+            </div>
           </Panel>
         )}
         {d.phase === 'OPEN_PLAY' && d.op && density !== 'MINIMAL' && ctrlTeam(d) === d.op.attacking && (
@@ -522,8 +1109,20 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · <Kbd>C</Kbd> CHAOS SCRIM · WHEEL ZOOM</div>
+        {/* SPEC_25 — the catch and the punt, on the one surface a player reads. The
+            window is printed because 300 ms is not a number anyone can feel, and a
+            control that fails silently reads as a broken game. */}
+        <div className="mt-0.5">
+          <Kbd>RMB</Kbd> HANDS UP · <Kbd>LMB</Kbd> SECURE · RELEASE <Kbd>LMB</Kbd> DROP ·{' '}
+          <Kbd>SPACE</Kbd> PUNT IN{' '}
+          <span className={d.bc.state === 'DROP_BALL' ? 'text-[#ffd76a]' : 'text-[#5f6f86]'}>
+            {(d.bc.window * 1000).toFixed(0)} MS
+          </span>
+        </div>
+        <div className="mt-0.5 text-[#5f6f86]">GAMEPAD: STICK MOVE · <Kbd>A</Kbd> ACTION · <Kbd>X</Kbd>/<Kbd>Y</Kbd> PASS · <Kbd>B</Kbd> TACKLE · <Kbd>RB</Kbd> KICK</div>
         <div className="mt-0.5">GAME SPEED {Math.round(slow * 100)}% — <button className="pointer-events-auto text-[#e8cf46]" onClick={() => setSlow(slow === 1 ? 0.75 : slow === 0.75 ? 0.5 : slow === 0.5 ? 0.35 : 1)}>CHANGE</button></div>
         {showAnimDebug && <div className="mt-0.5 text-[#ffd76a]"><Kbd>B</Kbd> FACING/STRAFE DEBUG ON — TOGGLE</div>}
+        {showTarcs && <div className="mt-0.5 text-[#ffd76a]"><Kbd>F3</Kbd> TARCS TELEMETRY ON — TOGGLE</div>}
       </div>
 
       {/* STATS */}
@@ -545,6 +1144,55 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
             <div className="mt-2 flex justify-end"><Btn small onClick={() => setShowStats(false)}>CLOSE</Btn></div>
           </Panel>
         </div>
+      )}
+
+      {/* AAA BROADCAST — matchday intro, player spotlight, controller badge */}
+      {(d.options.broadcast ?? 1) >= 1 && <PlayerSpotlight d={d} />}
+      <GamepadBadge connected={gp.connected} name={gp.name} />
+
+      {/* SPEC_24 — the conditions the simulation is actually playing in, the
+        * season form behind the fixture, and the two moments a broadcast never
+        * shows in a sprite game: the TMO card and the sending-off. */}
+      {(d.options.broadcast ?? 1) >= 1 && (
+        <div className="pointer-events-none absolute left-1/2 top-[58px] -translate-x-1/2">
+          <ConditionsStrip d={d}
+            cond={condRef.current ?? conditionsFor(d.options, qualityFor(d.options))} />
+        </div>
+      )}
+      {(d.options.broadcast ?? 1) >= 1 && <FormStrip d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <TmoCard d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <CardCard d={d} />}
+      {(d.options.broadcast ?? 1) >= 1 && <ReplayFrame d={d} />}
+      {!load && intro && (d.options.broadcast ?? 1) >= 1 && <MatchIntro d={d} />}
+
+      {/* BOOT NOTICE — shown only when the boot was cut off at a stage that never
+          finished. It is the difference between "the game is slow today" and a silent
+          degradation nobody can explain, so it says what stopped, what is running
+          instead, and how to make it stop nagging. It is dismissed by the same
+          controls the render-health chip uses, and it survives until the next boot
+          because a player needs to be able to read it after the kick-off they just
+          missed. */}
+      {bootStall && (
+        <div className="pointer-events-auto absolute left-1/2 top-[92px] -translate-x-1/2 border-2 border-[#e8cf46] bg-[#0d1220]/96 px-3 py-1.5 text-[10px] leading-snug tracking-[0.1em] text-[#e8cf46]">
+          <span className="font-black">BOOT CUT SHORT</span>
+          <span className="text-[#9fb0c8]"> — “{bootStall}” never finished. The match is playing on
+            the fallback layer{renderHealth.bodies === 'standin' ? ' with procedural bodies' : ''}.
+            {' '}A slow link explains it; <span className="text-[#e8cf46]">RELOAD</span> once the link settles.
+            <button className="ml-2 border border-[#3d4b66] px-1 text-[9px] text-[#7f8ea6]"
+              onClick={() => setBootStall(null)}>OK</button>
+          </span>
+        </div>
+      )}
+
+      {/* LOADING — covers the world build so the tab never appears frozen. */}
+      {load && (
+        <LoadingScreen
+          stage={load.stage}
+          progress={load.progress}
+          homeName={A?.nation?.name}
+          awayName={B?.nation?.name}
+          venue={d.options.timeofday === 3 ? 'UNDER LIGHTS' : undefined}
+        />
       )}
 
       {/* PAUSE / HALF TIME / FULL TIME */}

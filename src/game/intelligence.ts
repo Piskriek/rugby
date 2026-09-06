@@ -192,9 +192,10 @@ export function steer(
    * following them within a frame is a retarget, not a fight. A PLACEMENT is
    * different: it sets position outright, and steering on top of one is the
    * same-frame double-move that used to read as teleporting. Warn on that. */
-  if (import.meta.env.DEV && p.movedBy && p.movedBy !== 'steer'
+  if (import.meta.env?.DEV && p.movedBy && p.movedBy !== 'steer'
     && p.movedBy !== 'carrier' && p.movedBy !== 'input'
-    && p.movedBy !== 'release') {   // playtest 3: the release-and-retreat beat is a sanctioned retarget
+    && p.movedBy !== 'release' && p.movedBy !== 'latch'
+    && p.movedBy !== 'bound') {   // release/latch/bound are phase-owned writers, snapped as a phase handoff
     console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then steer() again in one frame`);
   }
   p.movedBy = 'steer';
@@ -335,9 +336,15 @@ export function separate(
        * resolved the contact by the time it matters), the carrier brushes through
        * and the defender yields — the actual tackle stays owned by the radius
        * test in upOpen, so there is no double-fire.
-       */
+       *
+       * T-80. A BOUND pair — anywhere in the pod, either side — is exempt from
+       * the projection pass entirely: the ruck's overlap is real contact being
+       * resolved by the 6DOF bind lattice, not two men occupying one metre of
+       * grass, and shoving bound bodies apart here fights the solver (the
+       * scrum/maul packs are pinned afterwards anyway, so the exemption changes
+       * nothing there). */
+      if (a.bound || b.bound) continue;
       if (a.team === b.team) {
-        if (a.bound || b.bound) continue;
         const min = 1.05;
         if (d > min) continue;
         const push = (min - d) * 0.5;
@@ -860,6 +867,11 @@ export function ruckDistributor(all: Live[], team: 'A' | 'B', x: number, z: numb
   // fall back to the nearest forward, never to a back from distance
   const fw = all.filter((p) => p.team === team && FORWARDS.includes(p.num) && p.sinbin <= 0 && !p.down);
   if (fw.length) return fw.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z))[0];
+  /* Last resort: a non-down player of the team. A down man cannot pick up a
+   * ruck ball — handing it to him read as the ball being played by a body on
+   * the floor. */
+  const awake = all.filter((p) => p.team === team && p.sinbin <= 0 && !p.down);
+  if (awake.length) return awake.sort((a, b) => Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z))[0];
   return all.find((p) => p.team === team && p.sinbin <= 0)!;
 }
 

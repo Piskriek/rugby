@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Recorded Tackle Physics — Lab</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body, #lab { height: 100%; margin: 0; overflow: hidden; background: #0b1322; }
+      body { font-family: ui-sans-serif, system-ui, sans-serif; color: #dbe6f3; }
+      #lab canvas { display: block; }
+      #panel {
+        position: absolute; top: 10px; left: 10px; width: 300px; max-height: calc(100% - 20px);
+        overflow-y: auto; background: rgba(9, 16, 30, 0.92); border: 1px solid #24344e;
+        border-radius: 10px; padding: 12px 14px; font-size: 12px; line-height: 1.45;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); z-index: 5;
+      }
+      #panel h1 { font-size: 15px; margin: 0 0 2px; color: #fff; }
+      #panel .sub { color: #8fa3c0; margin-bottom: 10px; }
+      #panel h2 { font-size: 12px; margin: 12px 0 6px; color: #7fd1a8; text-transform: uppercase; letter-spacing: 0.06em; }
+      #panel label { display: block; margin-top: 6px; color: #b9c6da; }
+      #panel input[type=range] { width: 100%; }
+      #panel .rowlab { color: #dbe6f3; }
+      #panel button {
+        margin-top: 8px; padding: 6px 10px; border-radius: 6px; border: 0; cursor: pointer;
+        background: #2563eb; color: #fff; font-weight: 600; font-size: 12px;
+      }
+      #panel button.secondary { background: #33415c; margin-left: 6px; }
+      #panel button:hover { filter: brightness(1.15); }
+      #panel .val { float: right; color: #9fd9ff; font-variant-numeric: tabular-nums; }
+      #readout { margin-top: 8px; padding: 6px 8px; background: #101d33; border-radius: 6px;
+        color: #9fd9ff; font-size: 11px; white-space: pre-line; border: 1px solid #1d2d49; }
+      #legend { position: absolute; left: 10px; bottom: 10px; z-index: 4; font-size: 11px; color: #9db4d3;
+        background: rgba(9, 16, 30, 0.85); border: 1px solid #24344e; padding: 8px 12px; border-radius: 8px; }
+      #legend b { color: #e8f0fb; }
+      #stagelab {
+        position: absolute; left: 50%; top: 14px; transform: translateX(-50%); z-index: 6;
+        font-size: 17px; font-weight: 700; letter-spacing: 0.05em; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.8);
+        background: rgba(9, 16, 30, 0.82); border: 1px solid #2c3e60; padding: 7px 16px; border-radius: 999px;
+        transition: opacity 0.2s; pointer-events: none; }
+      #stagelab small { font-weight: 400; color: #9fb6d8; font-size: 12px; }
+      #bdstatus {
+        position: absolute; right: 14px; bottom: 12px; z-index: 4; width: 270px; font-size: 11px; color: #c4d3e8;
+        background: rgba(9, 16, 30, 0.9); border: 1px solid #24344e; padding: 8px 12px; border-radius: 10px;
+        line-height: 1.5; display: none; }
+      #bdstatus b { color: #fff; }
+      #bdstatus .duel { border-top: 1px dashed #24344e; margin-top: 6px; padding-top: 6px; color: #8fa3c0; }
+      #hint { position: absolute; right: 14px; top: 12px; z-index: 4; font-size: 11px; color: #7f93b0;
+        background: rgba(9, 16, 30, 0.75); padding: 6px 10px; border-radius: 8px; border: 1px solid #1c2a42; }
+      ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: #2c3a52; border-radius: 4px; }
+      .seg { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+      .seg button { margin: 0; padding: 4px 8px; background: #24344e; font-weight: 500; }
+      .seg button.on { background: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <div id="lab"></div>
+    <div id="legend">
+      <b>row 1</b> carrier felled FACE-FIRST &nbsp;·&nbsp; <b>row 2</b> felled onto his BACK &nbsp;·&nbsp;
+      <b>row 3</b> side hit — falls to his RIGHT &nbsp;·&nbsp; <b>row 4</b> side hit mirrored — LEFT &nbsp;·&nbsp;
+      <b>row 5</b> tackler ROLL-off &nbsp;·&nbsp; columns = impact speed 2.5 / 6 / 10 m/s
+    </div>
+    <div id="hint">drag to orbit · wheel to zoom · every body replays a <b>recorded</b> fall from the baked bank · <b>breakdown loop</b> runs in the lane to the right</div>
+    <div id="stagelab"></div>
+    <div id="bdstatus"></div>
+    <div id="panel">
+      <h1>Tackle Physics Lab</h1>
+      <div class="sub">recorded-fall playback — 180 precomputed tackles, nearest-match at run time</div>
+      <h2>Grid</h2>
+      <label>stagger <span class="val" id="vStagger">on</span></label>
+      <input type="range" id="stagger" min="0" max="100" value="60" />
+      <button id="goStagger">restart grid</button>
+      <h2>Lab actor — live descriptor</h2>
+      <label>situation <span class="val" id="vKind">carrier hit</span></label>
+      <div class="seg" id="segKind">
+        <button data-k="FALL" class="on">carrier hit</button>
+        <button data-k="ROLL">tackler rolls off</button>
+      </div>
+      <label>hit direction <span class="val" id="vDir">forward</span></label>
+      <div class="seg" id="segDir">
+        <button data-d="F" class="on">forward</button>
+        <button data-d="B">backward</button>
+        <button data-d="S">lateral — right</button>
+        <button data-d="S2">lateral — left</button>
+      </div>
+      <label>carrier speed <span class="val" id="vSpeed">6.0 m/s</span></label>
+      <input type="range" id="speed" min="25" max="100" value="60" />
+      <label>tackle height <span class="val" id="vH">0.60 (hip)</span></label>
+      <input type="range" id="hitH" min="0" max="100" value="60" />
+      <label>tackler mass ÷ carrier mass <span class="val" id="vMass">1.00</span></label>
+      <input type="range" id="massR" min="85" max="120" value="100" />
+      <div>
+        <button id="goLab">drop the tackle</button>
+        <button class="secondary" id="holdLab">hold on turf</button>
+      </div>
+      <div id="readout"></div>
+      <h2>Ruck pile</h2>
+      <button id="goPile">crash five bodies into a pile</button>
+      <button class="secondary" id="clearPile">clear</button>
+      <h2>Breakdown theatre</h2>
+      <div class="sub">tackle → spill → jackal → clean → ball-out · pure physics/contact.ts resolvers drive the outcome · seed <span class="val" id="bdSeed">0</span></div>
+      <button id="goBD">run the breakdown (loops)</button>
+    </div>
+    <script type="module" src="/src/lab/main.ts"></script>
+  </body>
+</html>
