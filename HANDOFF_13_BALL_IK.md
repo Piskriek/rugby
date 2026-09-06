@@ -18,9 +18,8 @@ two-bone IK, the free-ball physics, and the mouse verbs that drive them:
   on the foot sphere's own contact test, on an arc anchored to the ball's predicted height.
   The solver is one `acos` and one `sqrt` per arm per frame, live — no bake, no curve.
   **0 B/frame, ~2.1 µs/frame** for the whole machine (measured by slope, see §3).
-* **`src/game/director.ts`** — `Input.handsUp/secure/punt` (+ `NO_INPUT`, + `v`/`n`
-  aliases + the tutorial line), the `bc` field created with the match and ticked after the
-  phase switch, `bcGrip` for the strip maths.
+* **`src/game/director.ts`** — `Input.handsUp/secure/punt` + `NO_INPUT`, the `bc` field
+  created with the match and ticked after the phase switch, `bcGrip` for the strip maths.
 * **`src/render/ThreePlayerManager.ts`** — `d.bc?.free` drives the ball mesh (a free ball
   has no carrier); `syncHands` gained a craft block that publishes the solved hand/elbow
   targets in the pitch mapping the renderer itself uses; `applyCatchElbow` + the
@@ -74,8 +73,10 @@ have.
 
 ## 4. Verification — measured
 
-* `npx tsc --noEmit` clean; `npx vite build` green; `ballikprobe` **ALL PASS on seeds 1–5**.
-* `gatecheck` 18 gates: audit `PASS 5324 · WARN 4 · FAIL 5` — the same baseline as session
+* `npx tsc --noEmit` clean; `npx vite build` green; `ballikprobe` **ALL PASS on seeds 1–5**,
+  including on the merged tree that carries another session's first/third-person rig.
+* `gatecheck` 21 gates (three of them that session's `cameraverify`/`viewprobe`/
+  `healthverify`, wired here): audit `PASS 5324 · WARN 4 · FAIL 5` — the same baseline as session
   12, i.e. the mouse cannot break a match and the new verbs cost the integrity ledger
   nothing; `handsprobe`, `sceneaudit` 19/19, `teleprobe` 0 teleports, `bootcheck`, `build`.
 * Soak: RMB/LMB/Space hammered in random order for 20 s per seed with random movement →
@@ -93,14 +94,23 @@ have.
    working on the numbers. The next refactor is one owner for the arm target per frame, and
    it should be the engine's — the magnet's `onBall` seconds are the proof a catch should
    have happened, which is a better secure test than distance alone.
-2. **Gamepad parity is one line each** (`RB+X` for hands-up, `LB` for punt) — deliberately
-   left out so the mouse path is the one under test, and `KEYMAP` is where to put it.
+2. **Gamepad parity is one line each** — `pollGamepad` already returns a `pressed` token
+   set that `MatchView` merges into the same verb stream, so a pad button mapped to
+   `handsUp`/`secure` inherits the whole machine. Deliberately left out so the mouse path
+   is the one under test.
 3. **A punt that lands in a jackal** should be a turnover contest, not a `startOpen` reset —
    the resolution is honest but coarse, and `resolveLoose` is the single function to change.
 4. **The strip window is a constant, not a feel** — 1.15 m / 0.55 s are reasonable and
    unproven; a `gripcheck` harness on the strip rate (with and without `bcGrip`) is the
    measurement that would justify them, and it is ~40 lines.
-5. Nothing here touches `render/retro.ts` / `coronal.ts` / `rig.ts`, so the art contract and
+5. **`breakdownverify` is red on the branch and it is not this feature.** Its
+   "defensive commitment varies" check measures `bd.defCrew.length` across 69 breakdowns
+   and gets 3 every time; it is red on the remote camera commit alone (`2abbe8e`, verified
+   in a throwaway worktree), i.e. before this session merged anything. The cause is the
+   baked ruck plan authoring one crew number instead of a distribution — the fix belongs in
+   the bake, and the check's premise is the session-12 lesson ("zero variance made the steal
+   unreachable"), so it stays wired out of the verdict until somebody varies `defCrew`.
+6. Nothing here touches `render/retro.ts` / `coronal.ts` / `rig.ts`, so the art contract and
    the golden 96-px reference are untouched; if a future session restyles the ball,
    the free-ball mapping in `updateBall` and the ±9 cm two-hand offset in `ballcraft.ts`
    are the two numbers to re-check (a ball whose drawn radius moves must also move the

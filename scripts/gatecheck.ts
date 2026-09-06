@@ -112,6 +112,24 @@ const GATES: Gate[] = [
     budget: 300,
   },
   {
+    id: 'cameraverify', file: 'cameraverify',
+    asks: 'the unified first/third-person rig: one owner for the look, a lens that cannot leave the enclosure, cost in nanoseconds',
+    cmd: [...VN, 'scripts/cameraverify.ts'],
+    budget: 300,
+  },
+  {
+    id: 'viewprobe', file: 'viewprobe',
+    asks: 'the matchday picture is not a black rectangle — meshes, lights and something other than sky',
+    cmd: [...VN, 'scripts/viewprobe.ts'],
+    budget: 300,
+  },
+  {
+    id: 'healthverify', file: 'healthverify',
+    asks: 'a broken picture says so: the render-health ladder ranks a root cause above its own symptom',
+    cmd: [...VN, 'scripts/healthverify.ts'],
+    budget: 240,
+  },
+  {
     id: 'turfverify', file: 'turfverify',
     asks: 'the turf is one mesh, outward normals, and it builds in a frame budget',
     cmd: [...VN, 'scripts/turfverify.ts'],

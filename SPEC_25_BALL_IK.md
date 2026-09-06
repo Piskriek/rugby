@@ -27,9 +27,10 @@ button is held, and during the boot's arc.
 Nothing in the engine consumed mouse input on either branch: `Input` was WASD plus six
 keys plus gamepad. So RMB is hands-up, LMB is secure, and Space is the punt **edge inside
 the drop window only** — outside it Space is exactly what it was, sprint/action, because
-the state machine answers for the key only while it owns it. `v`/`n` are aliases for the
-same two verbs for keyboards that cannot hold a right button, and the tutorial line in
-`Director.stepTutorial` names them.
+the state machine answers for the key only while it owns it. `n` and `m` are the keyboard's version of the same two holds (`m` is held and released,
+so the grip and the drop both have a keyboard shape); `v` was the obvious third letter and
+the first/third-person rig claimed it during this work's merge, which is the right winner
+— a camera mode outranks an alias for a mouse button.
 
 First and third person are not two features here. They are the two `CamMode`s this engine
 already has: `SHOULDER` is first person (`eyeY 1.62`, the man's own head), `CABLE` and
@@ -164,9 +165,13 @@ scripts/ballikprobe.ts           NEW 12 checks — 3 solved-arm, 2 secure/refuse
 scripts/gatecheck.ts             ballikprobe wired into the verdict
 ```
 
-Accepted by: `tsc` clean; `ballikprobe` ALL PASS on seeds 1–5; `gatecheck` 18 gates —
-audit at baseline `PASS 5324 · WARN 4 · FAIL 5` (all LAW-66), `handsprobe`, `sceneaudit`
-19/19, `teleprobe` 0 teleports, `build` green.
+Accepted by: `tsc` clean; `ballikprobe` ALL PASS on seeds 1–5; `gatecheck` **21 gates ALL
+GREEN** — audit at baseline `PASS 5324 · WARN 4 · FAIL 5` (all LAW-66), `handsprobe`,
+`sceneaudit`, `teleprobe` 0 teleports, `build` green — measured on the tree **after merging
+the remote's first/third-person camera and locomotion rig** (`src/render/camera.ts`,
+`pointerLock.ts`), because the punt aims along the lens and the lens moved under it. The
+merged tree is what the probe passed on, and `cameraverify`, `viewprobe` and `healthverify`
+were wired into the verdict as part of that merge so their work is guarded too.
 
 ## 7. What this deliberately does not do
 
