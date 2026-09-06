@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "NODE_OPTIONS=--max-old-space-size=4096 tsc && vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview",
     "test:env": "node tools/_verify_env.mjs",
     "gym:tackle": "tsx harness/gym/tackle-gym.ts",
