@@ -327,8 +327,11 @@ export interface BreakdownState {
     hand?: number; strip?: number; mx?: number; mz?: number }[];
   /** T-80 — spring-bind fend-offs counted this breakdown. */
   latchedBreaks?: number;
-  /** T-80 — the jackal has used his one rip attempt (density-scaled). */
+  /** T-80/TARCS — the jackal has used his one poach attempt (density-scaled). */
   stealAttempted?: boolean;
+  /** TARCS — seconds since the last gelatinous heave pulse, and the count
+   *  of pulses so far (audit/probe read both to prove the pile jostles). */
+  heaveT?: number; heaveCount?: number;
   crew: number[]; defCrew: number[];
   /* Playtest 2: J/K pressed during the fight buffers the distribution —
    * the nine passes the MOMENT the ball is out. Cleared unless the ruck

@@ -16,8 +16,8 @@ import {
   planArrivalForce, planDefenceForce, planBallOut, planSlotOf, ruckPresence,
 } from './breakdownPlan';
 import { stepHands, publishHands, windowSlow, defHold, stripTimeFor } from './hands';
-import { throughGate } from './latch';
-import type { LatchVec } from './latch';
+import { throughGate, LATCH_FIELD_X, LATCH_FIELD_Z } from './latch';
+import type { LatchVec, LatchAxes, LatchSystem } from './latch';
 
 /* PART 2 — MULTI-STAGE TACKLE PHYSICS.
  *
@@ -219,11 +219,39 @@ const SUSTAINED_HANDS_SECONDS = 0.85;
  * failed rip releases him: no second bite, the referee paces it. */
 const RIP_BASE = 1.0;
 
+/* ============================ TARCS — GELATINOUS PILE-UPS ============================
+ * A ruck is a bag of struggling bodies, not a rigid frame. The moment it
+ * forms, every RUCK bind is re-priced DOWN: K at ~1/3 and C at ~3/5 (the
+ * ERP/CFM-equivalent compliance of this lattice), so the pile sags, shudders
+ * and wobbles against its own binds instead of holding a stiff box. The
+ * tackle bind (carrier↔tackler) stays firm — the hit is a hard event — only
+ * the pile is the jelly. Separately, every RUCK_HEAVE_S the pile takes a
+ * subtle upward heave so the solver never settles it to sleep.
+ * -------------------------------------------------------------------- */
+const RUCK_GEL_K = 0.34;
+const RUCK_GEL_C = 0.58;
+const RUCK_HEAVE_S = 0.5;
+const RUCK_HEAVE_VY = 0.13;    // base upward impulse, m/s
+const RUCK_HEAVE_VAR = 0.10;   // random spread, m/s
+const RUCK_HEAVE_LAT = 0.05;   // whisper of lateral stir, m/s
+
+/** Re-price any ruck binds already in the lattice (in place, idempotent). */
+function softenRuckJoints(sys: LatchSystem): void {
+  for (const j of sys.joints) {
+    if (j.kind !== 'RUCK' || j.gel) continue;
+    for (const k of Object.keys(j.axes) as (keyof LatchAxes)[]) {
+      const a = j.axes[k];
+      j.axes[k] = { k: a.k * RUCK_GEL_K, c: a.c * RUCK_GEL_C, rest: a.rest, max: a.max };
+    }
+    j.gel = true;
+  }
+}
+
 /** Attacking arrival density at the ruck: the attack's support count vs the
  *  defence's contesting jackals. When the attack has at least as many bodies
- *  in the pile as the defence, the clearout is on the jackal — his rip
- *  attempt is HALF as likely to stick. Outnumbered support does not scale
- *  the roll: a set jackal either rips it or he does not. */
+ *  in the pile as the defence, the clearout is on the jackal — his poach
+ *  attempt (sustained hands or grind/rip) is HALF as likely to stick.
+ *  Outnumbered support does not scale the roll: the law is numbers. */
 function jackalDensityMul(s: BreakdownState): number {
   return s.crew.length >= s.defCrew.length ? 0.5 : 1;
 }
@@ -248,14 +276,21 @@ function latchMount(d: Director, s: BreakdownState, dir: number): void {
   /* The ball body — the contest's aggregate mass. It sits half a stride in
    * front of the contact point, at the carrier's feet, where a ruck actually
    * forms — never underneath the carrier's torso capsule (deep initial
-   * overlap made the contact spring eject it through the pile). */
-  const ballZ = s.contactZ + fwd * 0.6;
+   * overlap made the contact spring eject it through the pile).
+   * TARCS — a ruck runs to the touchline; the anchor must keep the BALL's
+   * centre inside the field by its radius. Anchored at z=±61 (what the wall
+   * clamp allows) a pile pressed to the line wedged the ball and the
+   * carrier coincident against the wall — the 0.77 m boundary fault. The
+   * ball rides half a radius off the line, and nothing is pinned at the
+   * wall's exact plane. */
+  const ballX = clamp(s.contactX, -LATCH_FIELD_X + LATCH_BALL_R, LATCH_FIELD_X - LATCH_BALL_R);
+  const ballZ = clamp(s.contactZ + fwd * 0.6, -LATCH_FIELD_Z + LATCH_BALL_R, LATCH_FIELD_Z - LATCH_BALL_R);
   const ball = sys.spawn({
     kind: 'BALL', team: s.attacking, num: 0,
-    x: s.contactX, z: ballZ, y: 0.3, yaw: 0, vx: 0, vy: 0, vz: 0, yawVel: 0,
+    x: ballX, z: ballZ, y: 0.3, yaw: 0, vx: 0, vy: 0, vz: 0, yawVel: 0,
     mass: LATCH_BALL_M, radius: LATCH_BALL_R, down: true, drive: 0, driveDir: fwd,
   });
-  sys.anchorBody(ball.id, s.contactX, ballZ, 16000, 2600);
+  sys.anchorBody(ball.id, ballX, ballZ, 16000, 2600);
   for (const slot of s.players) {
     const p = d.L(slot.team, slot.num);
     /* ARRIVAL SPEED CAP. The open-play converger is sprinting at up to
@@ -386,6 +421,10 @@ function tryRuckBinds(d: Director, s: BreakdownState, fwd: number): void {
      * its centre (entrants bind from both sides, so the 0.22 m rest strain
      * is the shoulder pressed into the ball — soft, never breaking). */
     const shoulder: LatchVec = { x: b.team === s.attacking ? -0.12 : 0.12, y: 1.22, z: 0.55 };
+    /* TARCS — the bind is born at the FULL rig; the ruck's gel re-price
+     * happens the moment the ruck forms (`softenRuckJoints` in latchTick),
+     * so "dynamically lower when the ruck forms" is literal: one softening,
+     * exactly once, never a compounding factor. */
     sys.bind({
       kind: 'RUCK', a: b.id, b: ball.id,
       anchorA: shoulder, anchorB: { x: 0, y: 0.14, z: 0 },
@@ -426,6 +465,31 @@ function latchTick(d: Director, s: BreakdownState, dt: number): void {
   }
   if (s.stage === 'CONTACT' || s.stage === 'PLACE' || s.stage === 'RUCK') tryTackleBind(d, s);
   if (s.stage === 'RUCK' && s.ruckFormed) tryRuckBinds(d, s, fwd);
+  /* TARCS — the pile is jelly only while the ruck is alive. Re-price any
+   * binds that predate the formation (idempotent, in place), so a replay or
+   * a torn-down episode that re-enters mid-pile still wobbles. */
+  if (s.stage === 'RUCK' && s.ruckFormed) softenRuckJoints(sys);
+
+  /* TARCS — THE HEAVE. Every RUCK_HEAVE_S the pile takes a subtle,
+   * randomized upward impulse: a jostling bag of bodies never settles to
+   * sleep, the binds breathe, and the wobble reads in the line of men. The
+   * impulse is small (0.13-0.23 m/s on an 88-115 kg body — a shoulder
+   * heave, not a hop), vertical first, with a whisper of lateral stir so
+   * the pile ripples rather than bounces. The BALL body is skipped and the
+   * horizontal contest is untouched: the shove that decides the ruck is the
+   * same force it always was, so the ledge on the turnover/penalty ledger
+   * does not move with the wobble. */
+  s.heaveT = (s.heaveT ?? 0) + dt;
+  if (s.stage === 'RUCK' && s.heaveT >= RUCK_HEAVE_S) {
+    s.heaveT = 0;
+    s.heaveCount = (s.heaveCount ?? 0) + 1;
+    for (const b of sys.bodies) {
+      if (b.kind === 'BALL' || !b.bound) continue;
+      b.vy += RUCK_HEAVE_VY + R() * RUCK_HEAVE_VAR;
+      b.vx += (R() - 0.5) * RUCK_HEAVE_LAT * 2;
+      b.vz += (R() - 0.5) * RUCK_HEAVE_LAT * 2;
+    }
+  }
 
   // drives are assigned by the axis model before this step (sideForce writes
   // them through `driveBody`), so the shove reaches the contest THROUGH the
@@ -732,13 +796,13 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * numbers path below); this is a grind-out, and both are steals.
      * The numbers call stays law-true: with equal or more men over the ball
      * a set jackal may take it; a man alone in there only slows it.
-     * T-80: the rip is ONE ATTEMPT per breakdown, and the attempt is scaled
-     * by the attacking arrival density — a clearout already on the jackal
-     * halves the chance the hold converts; outnumbered, a set jackal rips
-     * it outright (the roll is the density multiplier, not a coin flip on
-     * top of the law). A failed rip is not a second chance: the referee
-     * manages it (use-it / not-releasing), and the attack's clearout time
-     * is what it earned. */
+     * TARCS/T-80: the rip is ONE ATTEMPT per breakdown, and the attempt is
+     * scaled by the attacking arrival density — a clearout already on the
+     * jackal halves the chance the hold converts; outnumbered, a set
+     * jackal rips it outright (the roll is the density multiplier, not a
+     * coin flip on top of the law). A failed rip is not a second chance:
+     * the referee manages it (use-it / not-releasing), and the attack's
+     * clearout time is what it earned. */
     if (s.axis < -0.5) s.redT += dt; else s.redT = Math.max(0, s.redT - dt * 2);
     if (s.axis <= -0.6 && s.redT >= SUSTAINED_HANDS_SECONDS && s.jackalActive
       && s.defCrew.length >= s.crew.length && s.stage === 'RUCK' && !s.stealAttempted) {
@@ -759,6 +823,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
        * and the contest resolves cleanly. The re-clear wins the axis back:
        * the ball was on his side only while he had hands on it. */
       s.jackalActive = false;
+      s.jackalClearedAt = s.t;
       s.redT = 0;
       s.axis = Math.max(s.axis, -0.3);
     }
@@ -787,7 +852,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * and either one strengthens the other: at half a metre of advantage a grip has
      * to be nearly a second old, at the very edge of the rip a short one is enough.
      * A single threshold in a two-factor test is just a coin with extra steps. */
-    const grindDepth = s.axis < -0.62 ? 0.12 : s.axis < -0.35 ? 0.45 : -1;
+    const grindDepth = s.axis < -0.62 ? 0.28 : s.axis < -0.35 ? 0.8 : -1;
     const grind = grindDepth >= 0
       && h.bestDefOnBall >= stripTimeFor(presence(s).atk) + grindDepth;
 
@@ -867,7 +932,12 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * resolves one way or the other in 0.9 s, so a second of anything was a number
      * no episode could pay. 0.6 is the longest red run the contest actually
      * produces, which makes the path reachable without making it common. */
-    else if ((s.axis <= -0.75 || grind) && presence(s).def > presence(s).atk) {
+    else if ((s.axis <= -0.75 || grind) && presence(s).def > presence(s).atk
+      && s.jackalActive && !s.stealAttempted) {
+      /* TARCS — the rip and the grind-out are the SAME law answered on two
+       * clocks, so they share the one attempt per breakdown; a failed poach
+       * is never a second bite at the ball. */
+      s.stealAttempted = true;
       /* which clock ran out first — read BEFORE the clamp, because the clamp is what
        * makes the two indistinguishable afterwards */
       const rip = s.axis <= -0.75;
@@ -910,16 +980,21 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
           d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
           return;
         }
-        /* The strip failed with the hands still on it: the ball stays pinned, the
-         * clock on it runs, and the attack pays for the second the defence spent
-         * grinning at the ball instead of presenting it. */
+        /* The strip failed with the hands still on it — and the attempt is
+         * spent. The referee tells him to release (no second bite; the law's
+         * "release or the ball goes"), the ball comes back and the attack
+         * re-clears. Without this the contest deadlocked to the 3 s clock. */
+        s.jackalActive = false;
+        s.jackalClearedAt = s.t;
+        s.redT = 0;
+        s.axis = Math.max(s.axis, -0.3);
         h.lastBreakAt = s.t;
       }
       /* T-18. Real referees ping not-releasing two to four times a match,
        * not eleven — the rate was ending a red-zone possession in every
-       * other phase. Per-second, not per-frame: a hazard that rolls 2-4%
-       * every 16 ms is a lottery, 2-4% a second is the referee's whistle. */
-      const noHands = h.bestDefOnBall < 0.12 ? 0.03 : 0;
+       * other phase. Per-second, not per-frame: a hazard that rolls 4-10%
+       * every 16 ms is a lottery, a fraction per second is the whistle. */
+      const noHands = h.bestDefOnBall < 0.12 ? 0.02 : 0;
       if (R() < dt * (0.02 + (d.slider(atk, 'aggression') / 100) * 0.02 + noHands)) {
         s.resultWhy = `NOT RELEASING — THE JACKAL HELD UNDER THE SHOVE (AXIS ${s.axis.toFixed(2)})`;
         d.beginPenalty(dTeam, REFEREE_CALLS.NOT_RELEASING, s.players[0].num);
@@ -1223,6 +1298,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     contestMeter: 0.5, meterDir: 1, meterOn: false, waggle: 0,
     commitA, commitB: 2, advantageOf: 0, stealAttempted: false,
     axis: 0, axisVel: 0, contestT: 0, redT: 0,
+    heaveT: 0, heaveCount: 0,
     hitKind, hitSpeed: closing,
   };
   /* T-40 — choreograph the ruck NOW, while every man is still standing where the

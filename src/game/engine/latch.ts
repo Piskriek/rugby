@@ -452,6 +452,9 @@ export interface LatchJoint {
    *  carrier torso. For a ruck: entrant shoulder ↦ ball. */
   anchorA: LatchVec; anchorB: LatchVec;
   axes: LatchAxes;
+  /** TARCS — true once the ruck has re-priced this bind into the
+   *  gelatinous regime (K/C lowered); guards against double-softening. */
+  gel?: boolean;
   /** Joint fails when translation tension exceeds breakN or rotational
    *  torque exceeds breakNm. */
   breakN: number; breakNm: number;
@@ -489,7 +492,8 @@ const CAP_F = 14000;         // N per channel (a pile impact, not an explosion)
 const K_CONTACT = 42000;     // N/m penetration stiffness (stiff = no clipping)
 const C_CONTACT = 1950;      // N·s/m normal damping (~0.5 critical for 105 kg)
 const MU = 0.55;             // tangential friction coefficient
-const FIELD_X = 34.5, FIELD_Z = 61;
+export const LATCH_FIELD_X = 34.5, LATCH_FIELD_Z = 61;
+const FIELD_X = LATCH_FIELD_X, FIELD_Z = LATCH_FIELD_Z;
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 
@@ -869,6 +873,7 @@ export class LatchSystem {
             A.vx += nx * dvA; A.vz += nz * dvA;
             B.vx += nx * dvB; B.vz += nz * dvB;
           }
+
         }
       }
     }
@@ -927,6 +932,75 @@ export class LatchSystem {
         b.yaw = 0; b.yawVel = 0; b.upright = 1;
         this.metrics.instabilityFrames++;
       }
+    }
+
+    /* ---- 4. WALL UNMERGE — the clamp just ran, and it can put a body
+     * BACK onto its partner: a pile driven into touch presses a man onto
+     * the ball anchored off the line, the contact split pushes the pair
+     * apart, and the clamp re-pins the man on the very frame it did. The
+     * pair then sits coincident at the wall (the 0.77 m boundary fault).
+     * This pass runs AFTER the clamp, boundary pairs only, and separates
+     * them the way `latchMount` seats a fresh pile — except here the wall
+     * is a hard body, so a correction a body cannot take (it points into
+     * the clamp) is handed to the other body, and if the pair is still
+     * overlapping after that (both pinned on the same axis) the remainder
+     * slides along the wall. Bounded and cheap: ≤3 passes, wall pairs
+     * only, ≤0.15 m a frame. */
+    for (let pass = 0; pass < 3; pass++) {
+      let still = false;
+      for (let i = 0; i < this.bodies.length; i++) {
+        for (let k = i + 1; k < this.bodies.length; k++) {
+          const A = this.bodies[i], B = this.bodies[k];
+          const atXW = Math.abs(A.x) > FIELD_X - 0.35 || Math.abs(B.x) > FIELD_X - 0.35;
+          const atZW = Math.abs(A.z) > FIELD_Z - 0.35 || Math.abs(B.z) > FIELD_Z - 0.35;
+          if (!atXW && !atZW) continue;
+          const dx = B.x - A.x, dz = B.z - A.z;
+          const d = Math.hypot(dx, dz);
+          const min = A.radius + B.radius;
+          if (d >= min - 0.005) continue;
+          const imA = 1 / Math.max(1, A.mass), imB = 1 / Math.max(1, B.mass);
+          const wA = imA / (imA + imB), wB = 1 - wA;
+          const nx = d > 0.001 ? dx / d : 0;
+          const nz = d > 0.001 ? dz / d : 0;
+          const corr = Math.min(min - d, 0.15) * 0.9;
+          /* hand each body only the part of the correction it can take */
+          let cA = corr * wA, cB = corr * wB;
+          if (nz > 0.001 && B.z >= FIELD_Z - 0.001) { cA += cB; cB = 0; }   // +z wall
+          else if (nz < -0.001 && B.z <= -FIELD_Z + 0.001) { cA += cB; cB = 0; }
+          if (nz < -0.001 && A.z <= -FIELD_Z + 0.001) { cB += cA; cA = 0; }
+          else if (nz > 0.001 && A.z >= FIELD_Z - 0.001) { cB += cA; cA = 0; }
+          if (nx > 0.001 && B.x >= FIELD_X - 0.001) { cA += cB; cB = 0; }
+          else if (nx < -0.001 && B.x <= -FIELD_X + 0.001) { cA += cB; cB = 0; }
+          if (nx < -0.001 && A.x <= -FIELD_X + 0.001) { cB += cA; cA = 0; }
+          else if (nx > 0.001 && A.x >= FIELD_X - 0.001) { cB += cA; cA = 0; }
+          const moved = (Math.abs(nx) + Math.abs(nz)) > 0;
+          if (moved) {
+            A.x -= nx * cA; A.z -= nz * cA;
+            B.x += nx * cB; B.z += nz * cB;
+            A.x = clamp(A.x, -FIELD_X, FIELD_X); A.z = clamp(A.z, -FIELD_Z, FIELD_Z);
+            B.x = clamp(B.x, -FIELD_X, FIELD_X); B.z = clamp(B.z, -FIELD_Z, FIELD_Z);
+          }
+          const d2 = Math.hypot(B.x - A.x, B.z - A.z);
+          if (d2 < min - 0.005) {
+            /* still overlapped: slide the remainder along the free axis */
+            const rem = (min - d2) * 0.9;
+            if (atZW) {
+              const sgn = Math.abs(B.x - A.x) > 0.01
+                ? Math.sign(B.x - A.x) : (A.num + B.num) % 2 ? 1 : -1;
+              A.x -= sgn * rem * wA; B.x += sgn * rem * wB;
+            } else {
+              const sgn = Math.abs(B.z - A.z) > 0.01
+                ? Math.sign(B.z - A.z) : (A.num + B.num) % 2 ? 1 : -1;
+              A.z -= sgn * rem * wA; B.z += sgn * rem * wB;
+            }
+            A.x = clamp(A.x, -FIELD_X, FIELD_X); A.z = clamp(A.z, -FIELD_Z, FIELD_Z);
+            B.x = clamp(B.x, -FIELD_X, FIELD_X); B.z = clamp(B.z, -FIELD_Z, FIELD_Z);
+            const d3 = Math.hypot(B.x - A.x, B.z - A.z);
+            if (d3 < min - 0.005) still = true;
+          }
+        }
+      }
+      if (!still) break;
     }
     for (const j of this.joints) j.age += dt;
   }
