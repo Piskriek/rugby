@@ -21,7 +21,7 @@
  * a tackled player inverting completely is exactly the case that exposes it.
  */
 import * as THREE from 'three';
-import { RagdollBody, NODE } from './ragdoll';
+import { NODE } from './ragdoll';
 
 /** The bones the ragdoll drives, in the naming conventions this rig may use. */
 const RAG_BONES = {
@@ -78,11 +78,20 @@ const SEED_FROM: ReadonlyArray<readonly [number, RagBoneKey]> = [
   [NODE.FOOT_R, 'calfR'],
 ];
 
+/* The pelvis bone's bind-pose position, captured the first time we see it.
+ * Physics is applied as a delta on top of this, so a ragdoll never teleports
+ * the hips to the origin of the rig. */
+const _restCache = new WeakMap<THREE.Object3D, THREE.Vector3>();
+function pelvisRest(b: THREE.Object3D): THREE.Vector3 {
+  let r = _restCache.get(b);
+  if (!r) { r = b.position.clone(); _restCache.set(b, r); }
+  return r;
+}
+
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qp = new THREE.Quaternion();
-const _m = new THREE.Matrix4();
 const _scale = new THREE.Vector3();
 
 /**
@@ -159,25 +168,42 @@ export function captureRestDirs(bones: RagBones): RestDirs {
  * 1 is fully physics-driven. Blending in over a few frames is what makes the
  * transition from clip to ragdoll invisible.
  */
+export interface PoseSource { readonly pos: Float32Array }
+
 export function driveRig(
-  bones: RagBones, rest: RestDirs, body: RagdollBody,
+  bones: RagBones, rest: RestDirs, body: PoseSource,
   root: THREE.Object3D, renderScale: number, blend: number,
+  origin?: THREE.Vector3,
 ): void {
   if (!bones.pelvis || blend <= 0) return;
 
-  /* --- 1. the pelvis carries the whole body's translation ---------------
-   * The root Object3D stays where the game says the player is; the pelvis
-   * bone is offset within it so the physical body can travel independently
-   * of the logical position without desyncing the two. */
+  /* --- 1. the pelvis carries the body's translation, RELATIVELY ---------
+   *
+   * This must be an offset from where the fall STARTED, never an absolute
+   * world position. The engine keeps writing root.position every frame (it
+   * slides a tackled man toward the ruck), and the pelvis bone is a child of
+   * that root — so driving the pelvis to an absolute world point means the
+   * local offset has to grow to cancel the root's motion. The body appears
+   * to stretch away from its own legs and snap back: the jank.
+   *
+   * Expressing physics as a delta from the seed origin lets the two
+   * authorities coexist. The engine owns where the player IS; the ragdoll
+   * owns how he moves RELATIVE to that. Neither fights the other. */
   const pelvis = bones.pelvis;
-  const px = body.pos[NODE.PELVIS * 3] * renderScale;
-  const py = body.pos[NODE.PELVIS * 3 + 1] * renderScale;
-  const pz = body.pos[NODE.PELVIS * 3 + 2] * renderScale;
+  const ox = origin ? origin.x : 0;
+  const oy = origin ? origin.y : 0;
+  const oz = origin ? origin.z : 0;
+  const px = (body.pos[NODE.PELVIS * 3] - ox) * renderScale;
+  const py = (body.pos[NODE.PELVIS * 3 + 1] - oy) * renderScale;
+  const pz = (body.pos[NODE.PELVIS * 3 + 2] - oz) * renderScale;
   if (pelvis.parent) {
-    _v.set(px, py, pz);
-    pelvis.parent.updateWorldMatrix(true, false);
-    _m.copy(pelvis.parent.matrixWorld).invert();
-    _v.applyMatrix4(_m);
+    /* Rest offset plus the physical delta, both in parent space. Rotating the
+     * delta by the inverse parent rotation keeps it world-aligned even though
+     * the root spins to face the play. */
+    pelvis.parent.matrixWorld.decompose(_v2, _qp, _scale);
+    _v.set(px, py, pz).applyQuaternion(_qp.invert());
+    _v.divide(_scale);
+    _v.add(pelvisRest(pelvis));
     pelvis.position.lerp(_v, blend);
   }
 

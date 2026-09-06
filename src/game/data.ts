@@ -396,10 +396,10 @@ export interface OptionItem { id: string; label: string; values: string[]; def: 
 export const OPTION_ITEMS: OptionItem[] = [
   { id: 'halfLength', label: 'HALF LENGTH', values: ['2 MIN', '5 MIN', '10 MIN', '20 MIN', '40 MIN'], def: 1, note: 'Clock compression keeps a 40-minute half inside a real session.', cat: 'MATCH' },
   { id: 'difficulty', label: 'SKILL LEVEL', values: ['0 ROOKIE', '1 CLUB', '2 DISTRICT', '3 COUNTY', '4 TRIALIST', '5 INTERNATIONAL', '6 LEGEND', '7 ELITE', '8 SUPREME', '9 MYTHIC'], def: 3, note: 'Ten rungs. 0-6 shipped in 1991; 7-9 are the Five Nations Edition ceiling.', cat: 'MATCH' },
-  { id: 'weather', label: 'WEATHER', values: ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'], def: 1, note: 'Wet ball widens handling error probability and shortens kick distances.', cat: 'CONDITIONS' },
+  { id: 'weather', label: 'WEATHER', values: ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'], def: 0, note: 'Wet ball widens handling error probability and shortens kick distances.', cat: 'CONDITIONS' },
   { id: 'pitch', label: 'PITCH', values: ['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'], def: 1, note: 'Footing alters acceleration, sidestep success and maul traction.', cat: 'CONDITIONS' },
   { id: 'wind', label: 'WIND', values: ['CALM', 'LIGHT', 'BREEZY', 'STRONG', 'GUSTING'], def: 1, note: 'Cross-wind pushes the ball off line on every kick and restart.', cat: 'CONDITIONS' },
-  { id: 'timeofday', label: 'KICK-OFF', values: ['MIDDAY', 'AFTERNOON', 'TWILIGHT', 'FLOODLIT'], def: 2, note: 'Changes crowd shading and the vignette weight.', cat: 'CONDITIONS' },
+  { id: 'timeofday', label: 'KICK-OFF', values: ['MIDDAY', 'AFTERNOON', 'TWILIGHT', 'FLOODLIT'], def: 1, note: 'Changes crowd shading and the vignette weight.', cat: 'CONDITIONS' },
   /* SPEC_12. The REFEREE slider is RETIRED. It promised to drive "penalty
    * frequency, card threshold and advantage length" and was read by nothing in
    * the engine — a control that advertised an effect it did not have. Vague

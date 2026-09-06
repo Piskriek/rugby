@@ -187,5 +187,99 @@ const restOf = (b: RagdollBody, a: number, c: number) => {
     missing.length ? `MISSING: ${missing.join(', ')}` : '13/13 bones');
 }
 
+/* ---- 10. YAW INVARIANCE — the assumption the bake rests on ----------
+ * The clip library stores no world direction: a fall is baked in body-local
+ * space and rotated at playback. That is only legitimate if rotating the
+ * inputs about Y rotates the result exactly. Gravity is the only external
+ * axis and it is vertical, so it should hold — but if it ever stops holding
+ * (a wind force, a directional ground effect) every baked tackle silently
+ * starts pointing the wrong way. */
+{
+  const P = [[0,1.0,0],[0,1.35,0],[0,1.62,0],[-0.19,1.45,0],[0.19,1.45,0],
+    [-0.30,1.05,0.10],[0.30,1.05,0.10],[-0.10,0.55,0],[0.10,0.55,0],
+    [-0.10,0.09,0.04],[0.10,0.09,0.04]];
+  const runYaw = (th: number): Float32Array => {
+    const sd = new Float32Array(NODE_COUNT * 3);
+    for (let i = 0; i < NODE_COUNT; i++) {
+      const x = P[i][0], z = P[i][2];
+      sd[i * 3] = x * Math.cos(th) - z * Math.sin(th);
+      sd[i * 3 + 1] = P[i][1];
+      sd[i * 3 + 2] = x * Math.sin(th) + z * Math.cos(th);
+    }
+    const b = new RagdollBody();
+    b.reset(sd, [6 * Math.cos(th), 0, 6 * Math.sin(th)],
+      [2.6 * Math.cos(th), 1.9, 2.6 * Math.sin(th)], 0.5);
+    for (let f = 0; f < 100; f++) b.update(1 / 60);
+    return b.pos;
+  };
+  const th = 1.1, base = runYaw(0), rot = runYaw(th);
+  let mx = 0;
+  for (let i = 0; i < NODE_COUNT; i++) {
+    const x = base[i * 3], z = base[i * 3 + 2];
+    mx = Math.max(mx,
+      Math.abs(x * Math.cos(th) - z * Math.sin(th) - rot[i * 3]),
+      Math.abs(base[i * 3 + 1] - rot[i * 3 + 1]),
+      Math.abs(x * Math.sin(th) + z * Math.cos(th) - rot[i * 3 + 2]));
+  }
+  check('solver is yaw-invariant (bake is valid)', mx < 0.01, `max drift ${(mx * 1000).toFixed(2)} mm`);
+}
+
+/* ---- 11. the solver is deterministic ---------------------------------
+ * Baking is only meaningful if the same inputs give the same fall. */
+{
+  const sd = new Float32Array(NODE_COUNT * 3);
+  for (let i = 0; i < NODE_COUNT; i++) { sd[i * 3 + 1] = 1.6 - i * 0.12; }
+  const run = (): number[] => {
+    const b = new RagdollBody();
+    b.reset(sd, [4, 0, 1], [2, 1.9, 0], 0.4);
+    for (let f = 0; f < 80; f++) b.update(1 / 60);
+    return Array.from(b.pos);
+  };
+  const a = run(), c = run();
+  let d = 0; for (let i = 0; i < a.length; i++) d = Math.max(d, Math.abs(a[i] - c[i]));
+  check('solver is deterministic', d === 0, `max diff ${d}`);
+}
+
+/* ---- 12. every baked clip is usable ----------------------------------
+ * The baker rejects bad takes, but a corrupt decode or a truncated buffer
+ * would surface as a fall that snaps to the origin or flies off. Check the
+ * shipped library the way the runtime will actually read it. */
+{
+  const { RagdollPlayback, pickClip, CLIP_COUNT, CLIP_SECONDS } = await import('../src/render/ragdollClips');
+  /* Clips store positions as a DELTA from the seed pelvis, so the origin must
+   * be a realistic standing pelvis height (~1 m) for the absolute heights
+   * below to mean anything. Passing y=0 would put every head underground and
+   * a max() check would silently read 0. */
+  let worstHead = -Infinity, worstTravel = 0, bad = 0;
+  const play = new RagdollPlayback();
+  for (let c = 0; c < CLIP_COUNT; c++) {
+    play.start(c, 0.7, [10, 1.0, -5], 1);
+    for (let t = 0; t < CLIP_SECONDS * 60; t++) play.update(1 / 60);
+    for (let i = 0; i < play.pos.length; i++) if (!Number.isFinite(play.pos[i])) bad++;
+    // pelvis y is index 1; head is node 2
+    worstHead = Math.max(worstHead, play.pos[2 * 3 + 1]);
+    worstTravel = Math.max(worstTravel,
+      Math.hypot(play.pos[0] - 10, play.pos[2] + 5));
+  }
+  check('all baked clips decode finite', bad === 0, `${CLIP_COUNT} clips, ${bad} bad values`);
+  check('all baked clips end on the ground', worstHead < 0.95 && worstHead > 0,
+    `worst head ${worstHead.toFixed(2)} m above turf`);
+  check('no baked clip slides absurdly', worstTravel < 7, `worst travel ${worstTravel.toFixed(1)} m`);
+
+  /* Playback must be cheaper than solving, or the bake bought nothing. */
+  const t0 = performance.now();
+  for (let r = 0; r < 2000; r++) { play.start(r % CLIP_COUNT, 1.2, [0, 0, 0], 1); play.update(1 / 60); }
+  const per = (performance.now() - t0) / 2000;
+  check('playback is cheap', per < 0.02, `${per.toFixed(4)} ms per body per frame`);
+
+  // selection must be stable and in range
+  let inRange = true;
+  for (let a = 0; a < 64; a++) {
+    const i = pickClip((a / 64) * Math.PI * 2, 0.9, a);
+    if (i < 0 || i >= CLIP_COUNT) inRange = false;
+  }
+  check('clip selection stays in range', inRange, 'all 64 headings resolve');
+}
+
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');
 if (!ok) process.exit(1);
