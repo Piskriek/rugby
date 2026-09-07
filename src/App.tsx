@@ -50,6 +50,7 @@ export default function App() {
     (saved?.classicProgress && CLASSIC_MATCHES.find((m) => m.id === saved.classicProgress)) || null);
 
   const cfg: MatchConfig = useMemo(() => ({
+    M_ID: `${home}_v_${away}`,
     homeId: home, awayId: away, kitA, kitB,
     difficulty: options.difficulty,
     halfLength: [2, 5, 10, 20, 40][options.halfLength] ?? 5,

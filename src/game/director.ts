@@ -481,6 +481,8 @@ const RECOVER_ANCHOR_SLACK = 0.06;
 export interface Slider { id: string; label: string; lo: string; hi: string; v: number; step: number; affects: string[] }
 
 export interface MatchConfig {
+  /** Optional match identifier for external payloads, tournaments, and tracking. */
+  M_ID?: string;
   /** Framing gain for the squad (Director.camScale). Optional: undefined keeps
    *  the shipped default. A config field rather than a constant because the
    *  number is a judgement about the size of the screen the match is played on,
@@ -877,14 +879,17 @@ export class Director {
   advantageShown = false;
   lawsExplained = new Set<string>();
   shakeT = 0; /* T-03: engine-internal — engine/camera.ts writes the shake */
+  /** Match identifier, guaranteed to be present for external telemetry and tournament tracking. */
+  M_ID: string;
 
   constructor(public cfg: MatchConfig) {
-    this.options = cfg.options;
-    this.difficulty = cfg.difficulty;
-    this.assists = cfg.assists ?? { pass: 0.7, tackle: 0.7, kick: 0.7 };
-    this.gameSpeed = cfg.speed ?? 1;
-    if (typeof cfg.camScale === 'number') this.camScale = cfg.camScale;
-    this.halfLength = cfg.halfLength * 60;
+    this.M_ID = cfg?.M_ID ?? `${cfg?.homeId ?? 'ENG'}_v_${cfg?.awayId ?? 'NZL'}`;
+    this.options = cfg?.options ?? {};
+    this.difficulty = cfg?.difficulty ?? 5;
+    this.assists = cfg?.assists ?? { pass: 0.7, tackle: 0.7, kick: 0.7 };
+    this.gameSpeed = cfg?.speed ?? 1;
+    if (typeof cfg?.camScale === 'number') this.camScale = cfg.camScale;
+    this.halfLength = (cfg?.halfLength ?? 5) * 60;
     // Every half resolves in about 150 s of real time whatever its length.
     /* T-18. The clock compressor. 12x starved the box score: every benchmark
      * is per 80-minute MATCH, and at 12x the engine only got ~400 s to produce
@@ -894,10 +899,10 @@ export class Director {
      * half — a normal video-game rugby pace) without touching any law, speed
      * or difficulty table. */
     this.clockScale = clamp(this.halfLength / 150, 1, 8);
-    this.pitch = pitchConditions(['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'][cfg.options.pitch ?? 1]);
+    this.pitch = pitchConditions(['FIRM', 'STANDARD', 'SOFT', 'MUDDY', 'FROZEN'][cfg?.options?.pitch ?? 1]);
     this.teams = {
-      A: this.makeRun(cfg.homeId, cfg.kitA, cfg.slidersA, cfg.backlineA, cfg.defenceA, cfg.lineoutA, cfg.scrumA, cfg.cpuA, cfg.kickerA),
-      B: this.makeRun(cfg.awayId, cfg.kitB, cfg.slidersB, cfg.backlineB, cfg.defenceB, cfg.lineoutB, cfg.scrumB, cfg.cpuB, cfg.kickerB),
+      A: this.makeRun(cfg?.homeId ?? 'ENG', cfg?.kitA ?? 0, cfg?.slidersA ?? [], cfg?.backlineA ?? 'BL-SPLIT', cfg?.defenceA ?? 'DF-UMBRELLA', cfg?.lineoutA ?? 'LO-5', cfg?.scrumA ?? 'SC-8-3', cfg?.cpuA ?? false, cfg?.kickerA),
+      B: this.makeRun(cfg?.awayId ?? 'NZL', cfg?.kitB ?? 0, cfg?.slidersB ?? [], cfg?.backlineB ?? 'BL-SPLIT', cfg?.defenceB ?? 'DF-UMBRELLA', cfg?.lineoutB ?? 'LO-5', cfg?.scrumB ?? 'SC-8-3', cfg?.cpuB ?? true, cfg?.kickerB),
     };
     // Start on the cable rig, behind halfway, looking down the pitch.
     this.cam = { x: 0, z: -18, h: 13, yaw: 0, tilt: 0.55, fov: 0.42, shake: 0, horizon: 0.42, roll: 0 };

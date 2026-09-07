@@ -30,7 +30,20 @@ import { LoadingScreen } from './LoadingScreen';
 
 /** Hand control back to the browser so it can paint and answer input. */
 const yieldToBrowser = () => new Promise<void>((r) => {
-  requestAnimationFrame(() => setTimeout(r, 0));
+  let settled = false;
+  const finish = () => {
+    if (!settled) {
+      settled = true;
+      r();
+    }
+  };
+  const rafId = requestAnimationFrame(() => {
+    setTimeout(finish, 0);
+  });
+  setTimeout(() => {
+    cancelAnimationFrame(rafId);
+    finish();
+  }, 100);
 });
 
 /**
@@ -180,6 +193,12 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   if (!dirRef.current) {
     dirRef.current = new Director(cfg);
     if (tutorial) dirRef.current.startTutorial();
+    if (typeof window !== 'undefined') {
+      (window as any).match = dirRef.current;
+      (window as any).director = dirRef.current;
+      (window as any).M_ID = dirRef.current.M_ID;
+      (window as any).data = { M_ID: dirRef.current.M_ID, cfg: dirRef.current.cfg };
+    }
   }
 
   useEffect(() => {
@@ -417,7 +436,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     let raf = 0;
     let last = performance.now();
     const frame = (now: number) => {
-      const d = dirRef.current!;
+      const d = dirRef.current;
+      if (!d) return;
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
 
@@ -571,7 +591,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
        * there is nothing worth drawing and the boot stages need the main
        * thread more than the renderer does. Skipping the draw here is what
        * keeps the progress bar smooth instead of stuttering. */
-      if (loadingRef.current) { raf = requestAnimationFrame(loop); return; }
+      if (loadingRef.current) return;
 
       /* ---- player-driven camera rig ---------------------------------------
        * Runs AFTER the sim so it reads this frame's ball, and BEFORE the draw
@@ -777,7 +797,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     return () => { cancelAnimationFrame(raf); clearInterval(ui); };
   }, [slow, showAnimDebug, intro]);
 
-  const d = dirRef.current!;
+  const d = dirRef.current;
+  if (!d) return null;
   const A = d.A, B = d.B;
   /* AAA — spoken commentary overlays the feed every live tick when enabled.
    * Uses the browser speech engine, so no audio assets are required. */
@@ -1191,7 +1212,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           progress={load.progress}
           homeName={A?.nation?.name}
           awayName={B?.nation?.name}
-          venue={d.options.timeofday === 3 ? 'UNDER LIGHTS' : undefined}
+          venue={d?.options?.timeofday === 3 ? 'UNDER LIGHTS' : undefined}
         />
       )}
 
