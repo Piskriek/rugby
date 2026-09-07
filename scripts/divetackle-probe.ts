@@ -42,7 +42,7 @@ const NO_INPUT: any = {
   kick: false, grubber: false, drop: false,
   contact: false, fend: false, step: false, dummy: false,
   tackleDive: false, tackleSmother: false, switchPlayer: false,
-  action: false,
+  action: false, distribute: false,
   handsUp: false, secure: false, punt: false,
 };
 

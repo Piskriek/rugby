@@ -17,6 +17,7 @@ import {
 } from './breakdownPlan';
 import { stepHands, publishHands, windowSlow, defHold, stripTimeFor } from './hands';
 import { throughGate, LATCH_FIELD_X, LATCH_FIELD_Z } from './latch';
+import { releaseAll as releaseLatchAll, assertNoLatchLeaks } from './latch';
 import type { LatchVec, LatchAxes, LatchSystem } from './latch';
 import { ruckGateGeometry, ruckClusterOf } from './gates';
 import { FLANK_CLEARANCE_M } from './forwardPack';
@@ -1427,4 +1428,60 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   latchMount(d, d.bd!, dir);
   if (d.isHuman(atk)) d.showHint('A/D POUND TO CLEAR OUT — OR WAIT FOR THE NINE', 2.6);
   d.setCtrl(atk, 9);
+}
+
+/* ================== BREAKDOWN WHISTLE TEARDOWN ==================
+ *
+ * The single teardown path every stoppage trigger uses: scrums, penalties,
+ * half-time and full-time all land here instead of each hand-rolling a
+ * partial release. The purge is UNCONDITIONAL — a whistle during an active
+ * multi-man contest ends the contest, and anything the contest owned (latch
+ * welds, bound bodies, drag links across all thirty entities) is gone on
+ * the whistle frame itself. Idempotent, so rapid frame-adjacent stoppage
+ * triggers (a second whistle landing before the first teardown's phase
+ * transition completes) purge the fresh bind set exactly like the first.
+ */
+
+/** Breakdown-side residue the headless probes can read. Zero is the contract. */
+export interface BreakdownTeardownResidual {
+  leakedJoints: number;
+  unreleasedBound: number;
+  dragLinks: number;
+  purgedJoints: number;
+  purgedBodies: number;
+  purgedDragLinks: number;
+  purgedLatchObjects: number;
+}
+
+/**
+ * Tear the current breakdown down unconditionally and hand the phase back
+ * to the caller. Returns the residue + purge ledger. Callers pass the phase
+ * they are entering so the returned ledger can be attributed; the assignment
+ * itself is the caller's (stoppage phase builders vary).
+ */
+export function teardownBreakdown(d: Director, reason = 'WHISTLE'): BreakdownTeardownResidual {
+  const sys = d.latches as unknown as LatchSystem | undefined;
+  const report = sys
+    ? releaseLatchAll(sys, d.live, d.op ?? null, reason)
+    : { jointsPurged: 0, bodiesReleased: 0, dragLinksPurged: 0, latchObjectsCleared: 0 };
+  const residual = sys
+    ? assertNoLatchLeaks(sys, d.live, d.op ?? null, `breakdown:${reason}`)
+    : { leakedJoints: 0, unreleasedBound: 0, dragLinks: 0 };
+  if (d.bd) {
+    d.bd.waggle = 0;
+    d.bd.meterOn = false;
+    d.bd.advantageOf = 0;
+    d.bd.stealAttempted = false;
+    d.bd.heaveT = 0;
+    d.bd.heaveCount = 0;
+  }
+  return {
+    leakedJoints: residual.leakedJoints,
+    unreleasedBound: residual.unreleasedBound,
+    dragLinks: residual.dragLinks,
+    purgedJoints: report.jointsPurged,
+    purgedBodies: report.bodiesReleased,
+    purgedDragLinks: report.dragLinksPurged,
+    purgedLatchObjects: report.latchObjectsCleared,
+  };
 }

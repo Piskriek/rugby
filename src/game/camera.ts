@@ -193,5 +193,25 @@ export function mapInputToWorld(
   return { vx: rx * lat + fx * dep, vz: rz * lat + fz * dep };
 }
 
+/* SUBJECT TRACKING — how the frame hands over from a man to the ball.
+ *
+ * Below the minimum blend the subject still owns the frame (a pop pass never
+ * yanks the camera); above the maximum the ball does (a bomb is unwatchable
+ * any other way); between them the subject travels with the separation in
+ * metres. Kicks in flight frame from the landing mark the same way, so the
+ * chase reads from where the ball is going, not where the kicker stood.
+ */
+export const TRACK_BLEND_METRES = 18;
+export const TRACK_BLEND_MIN = 0.35;
+export const TRACK_BLEND_MAX = 0.8;
+
+export function blendSubjectToBall(
+  subject: { x: number; z: number }, ball: { x: number; z: number },
+): { x: number; z: number } {
+  const dist = Math.hypot(ball.x - subject.x, ball.z - subject.z);
+  const w = Math.min(TRACK_BLEND_MAX, Math.max(TRACK_BLEND_MIN, dist / TRACK_BLEND_METRES));
+  return { x: subject.x + (ball.x - subject.x) * w, z: subject.z + (ball.z - subject.z) * w };
+}
+
 export const CAMERA_DATA_POINTS =
   CAM_MODES.length * 9 + Object.keys(ZOOM_STEPS).length * 6 + 8;

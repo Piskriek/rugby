@@ -80,6 +80,7 @@ export const KEYMAP: Record<string, string> = {
   i: 'contact', f: 'fend', g: 'step',
   x: 'tackleDive', c: 'tackleSmother',
   e: 'dummy', q: 'switchPlayer',
+  t: 'distribute',
   r: 'replay', tab: 'stats', escape: 'pause',
   /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
   b: 'animDebug',
@@ -466,6 +467,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           case 'tackleDive': inp.tackleDive = true; break;
           case 'tackleSmother': inp.tackleSmother = true; break;
           case 'switchPlayer': inp.switchPlayer = true; break;
+          case 'distribute': inp.distribute = true; break;
           case 'handsUp': inp.handsUp = true; break;
           case 'secure': inp.secure = true; break;
         }
@@ -892,7 +894,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
               {d.actionBar
                 .filter((a) => (d.options.showControls ?? 1) === 2
                   || a.primary
-                  || ['A / D', 'SPACE', 'J', 'K', 'X', 'C'].includes(a.key))
+                  || ['A / D', 'SPACE', 'J', 'K', 'T', 'X', 'C', 'Q'].includes(a.key))
                 .slice(0, (d.options.showControls ?? 1) === 2 ? 99 : 7)
                 .map((a, i) => (
                   <div key={i} className={`flex items-baseline gap-1.5 ${a.primary ? 'bg-[#6ee7a0]/15 px-1' : ''}`}>
@@ -903,6 +905,31 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                   </div>
                 ))}
             </div>
+            {/* CHARGE METERS — the held pass and kick charges, live. A tap never
+                shows here (it throws on release); a hold fills the bar toward
+                the flat bullet / the raking kick. */}
+            {(d.op?.passHold ?? 0) > 0 && (
+              <div className="mt-1 border-t border-[#26314a] pt-0.5">
+                <div className="flex items-baseline justify-between">
+                  <span className="text-[8px] font-black tracking-[0.2em] text-[#e8cf46]">PASS CHARGE</span>
+                  <span className="text-[8px] text-[#a9b6c8]">{(d.op?.passHold ?? 0) >= 0.6 ? 'FLAT AND HARD' : `${Math.round((d.op?.passHold ?? 0) * 100)}%`}</span>
+                </div>
+                <div className="mt-0.5 h-1.5 bg-[#26314a]">
+                  <div className="h-1.5 bg-[#e8cf46]" style={{ width: `${Math.round((d.op?.passHold ?? 0) * 100)}%` }} />
+                </div>
+              </div>
+            )}
+            {(d.op?.kickCharge ?? 0) > 0 && (
+              <div className="mt-1 border-t border-[#26314a] pt-0.5">
+                <div className="flex items-baseline justify-between">
+                  <span className="text-[8px] font-black tracking-[0.2em] text-[#6ee7a0]">KICK CHARGE</span>
+                  <span className="text-[8px] text-[#a9b6c8]">{d.op?.kickKind} {Math.round((d.op?.kickCharge ?? 0) * 100)}%</span>
+                </div>
+                <div className="mt-0.5 h-1.5 bg-[#26314a]">
+                  <div className="h-1.5 bg-[#6ee7a0]" style={{ width: `${Math.round((d.op?.kickCharge ?? 0) * 100)}%` }} />
+                </div>
+              </div>
+            )}
             <div className="mt-1 border-t border-[#26314a] pt-0.5 text-[7px] leading-tight text-[#5f6f86]">
               SPACE = {d.contextVerb.label} · changeable in OPTIONS
             </div>
@@ -1337,6 +1364,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                   <Btn onClick={() => { d.paused = false; force((n) => n + 1); }}>RESUME</Btn>
                   <Btn onClick={() => { d.camMode = d.camMode === 'BROADCAST' ? 'CHASE' : d.camMode === 'CHASE' ? 'TACTICAL' : 'BROADCAST'; force((n) => n + 1); }}>CAMERA: {d.camMode}</Btn>
                   <Btn onClick={() => { d.options.radar = (d.options.radar ?? 1) === 1 ? 0 : 1; force((n) => n + 1); }}>RADAR {(d.options.radar ?? 1) === 1 ? 'ON' : 'OFF'}</Btn>
+                  <Btn onClick={() => { d.options.autoSwitch = (d.options.autoSwitch ?? 0) === 1 ? 0 : 1; force((n) => n + 1); }}>AUTO SWITCH {(d.options.autoSwitch ?? 0) === 1 ? 'ON' : 'OFF'}</Btn>
                   <Btn onClick={() => { d.assists.pass = d.assists.pass > 0.5 ? 0.2 : 1; d.assists.tackle = d.assists.pass; d.assists.kick = d.assists.pass; force((n) => n + 1); }}>
                     ASSISTS {d.assists.pass > 0.5 ? 'ON' : 'OFF'}
                   </Btn>

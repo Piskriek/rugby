@@ -429,6 +429,7 @@ export const OPTION_ITEMS: OptionItem[] = [
   { id: 'ruckWaggle', label: 'RUCK WAGGLE', values: ['MANUAL', 'AUTO'], def: 0, note: 'Original reviewers noted auto-rucks favoured the CPU. It still does.', cat: 'CONTROLS' },
   { id: 'control', label: 'CONTROL SCHEME', values: ['CLASSIC 1-BUTTON', 'MODERN KEYS', 'KEYBOARD DEFAULT'], def: 2, note: 'Classic replicates the single-fire-button original.', cat: 'CONTROLS' },
   { id: 'spaceAction', label: 'SPACE DOES', values: ['AUTO (MOST LOGICAL)', 'PASS', 'KICK', 'TAKE CONTACT', 'TACKLE', 'SPRINT'], def: 0, note: 'AUTO reads the situation: offload under pressure, pass when clear, sprint into a gap, tackle when defending. Override it if something else suits you better.', cat: 'CONTROLS' },
+  { id: 'autoSwitch', label: 'AUTO SWITCH', values: ['OFF', 'ON'], def: 0, note: 'Hands you the best-placed interceptor when your man cannot get there. Never fires inside 2.5 s of a manual Q pick, so it cannot undo you.', cat: 'CONTROLS' },
   { id: 'showControls', label: 'CONTROLS PANEL', values: ['OFF', 'TOP LEFT', 'TOP LEFT + ALL'], def: 1, note: 'The live control list at the top left, with the most logical action highlighted.', cat: 'DISPLAY' },
   { id: 'radar', label: 'RADAR', values: ['OFF', 'ON'], def: 1, note: 'The transparent pitch map, top right.', cat: 'DISPLAY' },
   { id: 'autoReplay', label: 'AUTO REPLAY', values: ['OFF', 'SCORES', 'EVERYTHING'], def: 1, note: 'Five replay variants shipped with the original, varying in speed and dimension.', cat: 'DISPLAY' },

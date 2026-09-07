@@ -181,8 +181,25 @@ export const CLIP_LATCH_HANG = 'latchHang';
 /**
  * Link two men. Pure bookkeeping plus the two `Live` back-references the
  * renderer, the steering skip and the speed tax all read.
+ *
+ * TEARDOWN HARDENING — overwriting a live `s.latch` without cutting the old
+ * pair's links strands them: the old carrier keeps the 28% drag tax with a
+ * phantom defender attached. The contact paths that call here are gated on
+ * `!s.latch`, but a whistle teardown racing a contact frame can still land
+ * two begins back to back, so a stale latch is cut unconditionally first
+ * whenever the squad is handed in (the open-play call sites always do).
  */
-export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived: boolean): LatchState {
+export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived: boolean, live?: Live[]): LatchState {
+  if (s.latch && live) {
+    const stale = s.latch;
+    for (const p of live) {
+      if ((p.team === stale.carrierTeam && p.num === stale.carrierNum)
+        || (p.team === stale.tacklerTeam && p.num === stale.tacklerNum)) {
+        p.latchedBy = null; p.latchingOnto = null; p.latchDrag = undefined;
+        if (p.movedBy === 'latch') p.movedBy = undefined;
+      }
+    }
+  }
   carrier.latchedBy = playerId(tackler);
   carrier.latchDrag = LATCH_SPEED_MULT;
   tackler.latchingOnto = playerId(carrier);
@@ -211,8 +228,22 @@ export function beginLatch(s: OpenPlayState, carrier: Live, tackler: Live, dived
 
 /** Unlink two men. Safe to call with either side already gone. */
 export function clearLatch(s: OpenPlayState, carrier?: Live | null, tackler?: Live | null) {
-  if (carrier) { carrier.latchedBy = null; carrier.latchDrag = undefined; }
-  if (tackler) tackler.latchingOnto = null;
+  if (carrier) {
+    carrier.latchedBy = null; carrier.latchDrag = undefined;
+    /* TEARDOWN HARDENING — a cleared link must not leave the struggle clip
+     * behind for the next episode to wear: the gait picker re-asserts the
+     * correct clip next frame, and `ready` is the neutral handoff. The
+     * `movedBy` ownership tag is deliberately NOT touched here — it resets
+     * each frame (director T-02), and think() reads the stale 'latch' value
+     * as "hold position through the takedown frame" (director think:latched
+     * skip). Clearing it would hand both men a formation mark mid-takedown.
+     * The whistle path (releaseAll) owns the full tag reset instead. */
+    if (carrier.clip === CLIP_LATCH_CARRY) { carrier.clip = 'ready'; carrier.clipT = 0; }
+  }
+  if (tackler) {
+    tackler.latchingOnto = null;
+    if (tackler.clip === CLIP_LATCH_HANG) { tackler.clip = 'ready'; tackler.clipT = 0; }
+  }
   s.latch = undefined;
 }
 
@@ -675,13 +706,21 @@ export class LatchSystem {
   }
 
   /** Whistle / phase teardown: every bind releases (bodies keep their
-   *  positions so nothing snaps when the presentation takes over). */
+   *  positions so nothing snaps when the presentation takes over).
+   *
+   *  TEARDOWN HARDENING — a whistle must leave ZERO live constraints behind,
+   *  not just zero joints: the soft world anchors are constraints too (the
+   *  ball's ground-mark spring keeps integrating against a ruck that no
+   *  longer exists), so they release with the binds. The next mount re-seats
+   *  everything it needs. Idempotent: calling twice frame-adjacently — a
+   *  whistle racing a second stoppage — purges the second bind set exactly
+   *  like the first. */
   clear(reason: string): void {
     for (const j of this.joints) {
       if (!j.broken) { j.broken = true; j.reason = reason; this.metrics.brokenJoints++; this.noteRelease(reason); }
     }
     this.joints = [];
-    for (const b of this.bodies) { b.bound = false; b.seeking = false; b.drive = 0; }
+    for (const b of this.bodies) { b.bound = false; b.seeking = false; b.drive = 0; b.anchor = undefined; }
   }
 
   /** A powerful fend: impulse J (N·s) through the carrier's body along his
@@ -1063,4 +1102,102 @@ export class LatchSystem {
     for (const j of this.joints) { if (j.kind === 'TACKLE') tackle++; else ruck++; }
     return { joints: this.joints.length, tackle, ruck };
   }
+}
+
+/* ================== TEARDOWN LATCH HARDENING ==================
+ *
+ * The whistle teardown contract, in one place so the breakdown teardown, the
+ * director's releaseAll and the headless probes cannot drift apart:
+ *
+ *   - every lattice weld (a LatchSystem joint) is purged,
+ *   - every binding constraint (a bound lattice body, an anchor, a seek) is
+ *     released,
+ *   - every drag link (the open-play latchedBy/latchingOnto pair plus the
+ *     live latch object) is cut across all thirty player entities,
+ *
+ * unconditionally — no "unless the drag is still live" carve-outs. A whistle
+ * during an active multi-man contest ends the contest; anything the contest
+ * owned must be gone on the whistle frame itself, not one frame later via
+ * the leak guard. All three entry points are idempotent, so rapid,
+ * frame-adjacent stoppage triggers purge the second bind set exactly like
+ * the first instead of tripping over their own residue.
+ */
+
+/** What one unconditional purge removed. All counts are pre-purge reads. */
+export interface LatchPurgeReport {
+  jointsPurged: number;
+  bodiesReleased: number;
+  dragLinksPurged: number;
+  latchObjectsCleared: number;
+}
+
+/** Live lattice welds — joints the solver is still integrating. */
+export function countLiveJoints(sys: LatchSystem): number {
+  return sys.joints.length;
+}
+
+/** Lattice bodies still carrying a binding constraint. */
+export function countBoundBodies(sys: LatchSystem): number {
+  let n = 0;
+  for (const b of sys.bodies) if (b.bound) n++;
+  return n;
+}
+
+/** Open-play drag links alive across the squad, plus the latch object itself.
+ * A lone `latchDrag` tax with the links already cut still counts: it is the
+ * residue that would tax the next episode's pace. */
+export function countDragLinks(live: Live[], op?: OpenPlayState | null): number {
+  let n = op?.latch ? 1 : 0;
+  for (const p of live) if (p.latchedBy || p.latchingOnto || p.latchDrag !== undefined) n++;
+  return n;
+}
+
+/**
+ * Purge every weld, bind and drag link unconditionally. Safe to call with an
+ * already-clean system, and safe to call twice on adjacent frames.
+ */
+export function releaseAll(
+  sys: LatchSystem, live: Live[], op?: OpenPlayState | null, reason = 'WHISTLE',
+): LatchPurgeReport {
+  const report: LatchPurgeReport = {
+    jointsPurged: sys.joints.length,
+    bodiesReleased: 0,
+    dragLinksPurged: 0,
+    latchObjectsCleared: op?.latch ? 1 : 0,
+  };
+  for (const b of sys.bodies) if (b.bound) report.bodiesReleased++;
+  sys.clear(reason);
+  for (const p of live) {
+    if (p.latchedBy || p.latchingOnto || p.latchDrag !== undefined) {
+      p.latchedBy = null;
+      p.latchingOnto = null;
+      p.latchDrag = undefined;
+      if (p.movedBy === 'latch') p.movedBy = undefined;
+      if (p.clip === CLIP_LATCH_CARRY || p.clip === CLIP_LATCH_HANG) { p.clip = 'ready'; p.clipT = 0; }
+      report.dragLinksPurged++;
+    }
+  }
+  if (op?.latch) op.latch = undefined;
+  return report;
+}
+
+/**
+ * Assert the post-teardown invariant: 0 live joints, 0 bound bodies, 0 drag
+ * links. Returns the residue counts; warns in dev when the purge left
+ * anything behind so a headless harness reports the precise leak instead of
+ * tuning past it.
+ */
+export function assertNoLatchLeaks(
+  sys: LatchSystem, live: Live[], op?: OpenPlayState | null, where = 'teardown',
+): { leakedJoints: number; unreleasedBound: number; dragLinks: number } {
+  const leakedJoints = countLiveJoints(sys);
+  const unreleasedBound = countBoundBodies(sys);
+  const dragLinks = countDragLinks(live, op);
+  if ((leakedJoints + unreleasedBound + dragLinks) > 0 && import.meta.env?.DEV) {
+    console.warn(
+      `[latch-teardown] ${where}: purge left ${leakedJoints} joints, `
+      + `${unreleasedBound} bound bodies, ${dragLinks} drag links behind`,
+    );
+  }
+  return { leakedJoints, unreleasedBound, dragLinks };
 }

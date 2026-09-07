@@ -17,7 +17,7 @@
 import {
   Camera, FIELD, PitchConditions, pitchConditions,
 } from '../render/retro';
-import { CamMode, ZoomSetting, mapInputToWorld, KICKOFF_CENTER } from './camera';
+import { CamMode, ZoomSetting, mapInputToWorld, KICKOFF_CENTER, blendSubjectToBall } from './camera';
 import { TutorialState, newTutorial, stepAt, TUTORIAL } from './tutorial';
 import {
   shapeById, defenceById, DEFENCE_CHANNELS, ARCHETYPE_SHAPE,
@@ -88,13 +88,13 @@ import {
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
-import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
+import { upBreakdown, startBreakdown, inKineticImpact, teardownBreakdown } from './engine/breakdown';
 import { sampleSlot, planSlotOf } from './engine/breakdownPlan';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen, pendulumMark } from './behaviour/backline-echelon';
-import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
+import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, doPassToNum as throwPassToNum, cpuCarrier } from './engine/open';
 import { LatchSystem } from './engine/latch';
 
 /* ============================ INPUT ============================ */
@@ -107,6 +107,9 @@ export interface Input {
   contact: boolean; fend: boolean; step: boolean; dummy: boolean;
   tackleDive: boolean; tackleSmother: boolean; switchPlayer: boolean;
   action: boolean;
+  /* HUMAN DISTRIBUTION — the T key. A human carrier (usually the nine)
+   * releases down the echelon: 9 → 10 → 12 → …, one key, no side to pick. */
+  distribute: boolean;
   /* SPEC_25 — the catch/punt verbs. `handsUp` is a HOLD (right mouse), `secure` is a
    * HOLD whose release is the drop (left mouse), and `punt` is the edge press of the
    * kick key inside the drop window. They are here rather than in a side channel so a
@@ -119,7 +122,7 @@ export const NO_INPUT: Input = {
   passL: false, passR: false, cutL: false, cutR: false,
   kick: false, grubber: false, drop: false,
   contact: false, fend: false, step: false, dummy: false,
-  tackleDive: false, tackleSmother: false, switchPlayer: false, action: false,
+  tackleDive: false, tackleSmother: false, switchPlayer: false, action: false, distribute: false,
   handsUp: false, secure: false, punt: false,
 };
 
@@ -278,6 +281,16 @@ export interface OpenPlayState {
    * match never pauses for a punt — only tee kicks get the ritual. */
   kickCharge: number;
   kickKind: 'PUNT' | 'GRUBBER' | 'DROP_GOAL' | '';
+  /* HUMAN DISTRIBUTION — the held pass charge, mirroring the kick charge.
+   * 0 = not charging; >0 = J/K (or U/O for the cut-out) is held and the
+   * flat-vs-loop window is building; released = throw. A tap throws
+   * immediately, so the legacy instant pass is the zero-charge case. */
+  passHold: number;
+  passKind: 'PASS' | 'CUT_OUT' | '';
+  /* HUMAN DISTRIBUTION — the pace of the ball currently in flight: 1 is the
+   * standard loop, up to 1.5 for a fully held flat bullet. Written at
+   * release, read by the flight carry. */
+  passPace: number;
   /** Playtest P3.10: a step buys the beat and pays in pace — 0.78 at the
    * step, back to 1 in about half a second. */
   speedDebt: number;
@@ -683,6 +696,14 @@ const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const approach = (a: number, b: number, rate: number, dt: number) => a + (b - a) * (1 - Math.exp(-rate * dt));
 const blankTally = (): TeamTally => ({ A: 0, B: 0 });
 
+/* SWITCHING MATRIX tuning. The grace window is the promise that the auto-
+ * switcher never undoes a deliberate Q pick; the margin is the promise that
+ * it only moves control when the current man genuinely cannot get there —
+ * measured in seconds-to-contact so a sprinter and a prop are judged on
+ * the same clock. */
+const AUTO_SWITCH_GRACE = 2.5;
+const AUTO_SWITCH_MARGIN = 1.0;
+
 /** Nearest-rank quantile keeps the reported P90 tied to observed slots. */
 const percentile = (values: readonly number[], p: number) => {
   if (!values.length) return 0;
@@ -814,6 +835,15 @@ export class Director {
   live: Live[] = [];
   ctrl = 0;                      // index into live
   passOpts: PassOption[] = [];
+  /* SWITCHING MATRIX — match seconds of the last MANUAL (Q / bumper-tap)
+   * defender switch. The auto-switcher refuses to move control inside the
+   * grace window after one, so it never fights — or silently undoes — a
+   * deliberate human pick. */
+  lastManualSwitch = -99;
+  /* SWITCHING MATRIX — index into `live` of the ranked best interceptor, or
+   * -1 when the ranking has no eligible candidate. Recomputed on demand (a
+   * switch press, the auto-switch tick), never cached across a phase change. */
+  bestInterceptor = -1;
 
   teams: { A: TeamRun; B: TeamRun };
   /** Match-total occurrence ledger; only `recordSetPieceEvent` may increment it. */
@@ -958,6 +988,11 @@ export class Director {
   /** W-011: a live TMO review of a corner grounding. Null unless a try is
    * being checked; the conversion's FANFARE stage holds while it is live. */
   tmo: { t: number; name: string; short: string; angle: number; said: boolean } | null = null;
+  replayOf: Phase | null = null;
+  replayTimer = 0;
+  refSignal = 0;
+  refSignalText = '';
+  /* SPEC_15 — the referee is an actor. His body is integrathort: string; angle: number; said: boolean } | null = null;
   replayOf: Phase | null = null;
   replayTimer = 0;
   refSignal = 0;
@@ -1169,7 +1204,7 @@ export class Director {
           'L PUNT', 'H GRUBBER', 'P DROP', 'I CONTACT', 'F FEND', 'G STEP',
         ].filter(Boolean).join('  ·  ');
       }
-      return 'X DIVING TACKLE · C SMOTHER · Q SWITCH DEFENDER';
+      return 'X DIVING TACKLE · C SMOTHER · Q SWITCH DEFENDER (SMART)';
     }
     return 'A / D RUN · SPACE SPRINT';
   }
@@ -1226,7 +1261,14 @@ export class Director {
   fireContext() {
     const cv = this.contextVerb;
     switch (cv.act) {
-      case 'pass': { const o = this.passOpts[0]; if (o) this.doPass(o.side, false); return; }
+      /* The nine's AUTO release goes down the echelon rather than to a side —
+       * first receiver is the 10 on his shoulder. Every other carrier keeps
+       * the legacy best-option pass. Human path only (fireContext fires from
+       * the human verb branch), so CPU matches are untouched. */
+      case 'pass': {
+        if (this.op && this.op.carrierNum === 9 && this.distributePass()) return;
+        const o = this.passOpts[0]; if (o) this.doPass(o.side, false); return;
+      }
       case 'kick':
         if (this.op) this.startKick(this.op.attacking, 'PUNT', { x: this.op.carrierX, z: this.op.carrierZ }, this.op.carrierNum);
         return;
@@ -1263,10 +1305,14 @@ export class Director {
         if (l) add('J', `PASS LEFT TO ${l.player.num}`);
         if (r) add('K', `PASS RIGHT TO ${r.player.num}`);
         add('U / O', 'CUT-OUT PASS');
+        if (this.op.carrierNum === 9) {
+          const eco = this.echelonTarget();
+          add('T', eco ? `DISTRIBUTE TO ${eco.num}` : 'DISTRIBUTE (NO RECEIVER)');
+        }
         add('L', 'PUNT'); add('H', 'GRUBBER'); add('P', 'DROP GOAL');
         add('F', 'FEND'); add('G', 'STEP'); add('E', 'DUMMY'); add('I', 'TAKE CONTACT');
       } else {
-        add('X', 'DIVING TACKLE'); add('C', 'SMOTHER'); add('Q', 'SWITCH DEFENDER');
+        add('X', 'DIVING TACKLE'); add('C', 'SMOTHER'); add('Q', this.autoSwitchEnabled() ? 'SWITCH DEFENDER (AUTO)' : 'SWITCH DEFENDER (SMART)');
       }
     }
     if (this.kk && (this.kk.stage === 'AIM' || this.kk.stage === 'METER')) { add('A / D', 'AIM'); add('SPACE', cv.label); }
@@ -1405,7 +1451,7 @@ export class Director {
         if (this.passOpts.some((o) => o.side === 1)) out.push('PASS RIGHT (K)');
         out.push('PUNT (L)', 'GRUBBER (H)', 'DROP GOAL (P)', 'TAKE CONTACT (I)', 'FEND (F)', 'STEP (G)');
       } else {
-        out.push('DIVING TACKLE (X)', 'SMOTHER (C)', 'SWITCH DEFENDER (Q)');
+        out.push('DIVING TACKLE (X)', 'SMOTHER (C)', 'SWITCH DEFENDER (Q — SMART)');
       }
       out.push('RUN (A/D)', 'SPRINT (SPACE)');
     }
@@ -3886,11 +3932,21 @@ export class Director {
    * Focus for the CAMERA alone. focusPoint() deliberately stays on the carrier while a
    * pass is in the air, because the formation anchor is measured from it; the camera has
    * no such obligation, and a pass that flies to a lead-projected aim travels far enough
-   * to leave a carrier-anchored frame. While the ball is live, the ball is the subject.
+   * to leave a carrier-anchored frame. While the ball is live, the subject BLENDS from
+   * the carrier to the ball with the separation: a short pop pass keeps the carrier in
+   * frame, a thirty-metre bomb hands the frame to the ball. Kicks in flight (no open
+   * episode) track the ball against the landing mark the same way.
    */
   cameraFocus(): { x: number; z: number } {
     if (this.chaos) return { x: this.chaos.player.x, z: this.chaos.player.z };
-    if (this.op && this.op.ball.live) return { x: this.op.ball.x, z: this.op.ball.z };
+    if (this.op && this.op.ball.live) {
+      const s = this.op;
+      return blendSubjectToBall({ x: s.carrierX, z: s.carrierZ }, { x: s.ball.x, z: s.ball.z });
+    }
+    if (this.kk && this.kk.stage === 'FLIGHT') {
+      const k = this.kk;
+      return blendSubjectToBall({ x: k.landX, z: k.landZ }, { x: k.bx, z: k.bz });
+    }
     return this.focusPoint();
   }
 
@@ -4288,6 +4344,9 @@ export class Director {
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
     const f = this.focusPoint();
+    /* SWITCHING MATRIX — the opt-in auto-switch runs off the same freshly
+     * read positions as everything else in think(), before any mover acts. */
+    this.tickAutoSwitch(dt);
 
     /* SPEC_11. The single live openside sign. `s.open * flip` was identically
      * +1 — `open` is ±1 and `flip` was its own sign — so the attacking shape
@@ -5477,6 +5536,7 @@ export class Director {
       lineBreak: false,
       current: { label: '' },
       burst: 0, burstCd: 0, stepCd: 0, fendCd: 0, dive: 0, kickCharge: 0, kickKind: '', speedDebt: 1,
+      passHold: 0, passKind: '', passPace: 1,
       originZ: z, originX: x,
       /* T-18. The first decision comes after the carrier has actually taken the
        * ball to the line — not on the frame it arrived. `protect` is now opt-in
@@ -5547,18 +5607,189 @@ export class Director {
     if (best) this.setCtrl(def, best.num);
   }
 
-  cycleDefender() {
+  /* ================== SWITCHING MATRIX ==================
+   *
+   * Defence switching picks the man who can actually make the next tackle,
+   * not whoever stands nearest the ball: an interceptor is ranked by how
+   * fast he can CLOSE on the carrier (distance off his own top pace), with
+   * a heavy bonus for already being goal-side of the carrier and a penalty
+   * for a man on the floor, in the bin, or committed to a dive he cannot
+   * steer out of. Q cycles the ranked three; the auto-switcher (opt-in)
+   * hands control to the ranked best only when the current man cannot get
+   * there and never inside the grace window after a manual pick.
+   */
+
+  /**
+   * Rank every eligible defender of `team` as the next interceptor of the
+   * point (x, z), best first. Pure read of live state — safe to call from
+   * probes. Empty when nobody is eligible (all down / binned).
+   */
+  rankInterceptors(team: 'A' | 'B', x: number, z: number): Live[] {
+    const atkDir: -1 | 1 = team === 'A' ? 1 : -1;
+    const scored: { p: Live; score: number }[] = [];
+    for (const p of this.live) {
+      if (p.team !== team || p.sinbin > 0 || p.down) continue;
+      const dist = Math.hypot(p.x - x, p.z - z);
+      /* seconds for HIM to close, at his own top pace — aose-one sprinter
+       * twenty out beats a tighthead ten out. */
+      const pace = Math.max(1.5, maxSpeed(p, false, true, p.stamina));
+      let score = dist / pace;
+      /* goal-side is the tackle that matters: between the carrier and the
+       * line he defends. Facing the wrong way or upfield of the ball is a
+       * chase, not an interception. */
+      const goalSide = (p.z - z) * atkDir < -0.5;
+      if (goalSide) score -= 1.1;
+      if (p.clip === 'dive') score += 2.5;   // committed — cannot be re-aimed
+      if ((p.recoverT ?? 0) > 0) score += 2.0; // still getting up
+      if (p.latchingOnto || p.latchedBy) score -= 0.6; // already in the fight
+      scored.push({ p, score });
+    }
+    scored.sort((a, b) => a.score - b.score);
+    return scored.map((s) => s.p);
+  }
+
+  /** The ranked-best interceptor's index into `live`, or -1 if none. */
+  updateBestInterceptor(team: 'A' | 'B', x: number, z: number): number {
+    const ranked = this.rankInterceptors(team, x, z);
+    this.bestInterceptor = ranked.length
+      ? this.live.findIndex((p) => p === ranked[0])
+      : -1;
+    return this.bestInterceptor;
+  }
+
+  /** Note a deliberate human pick — the auto-switcher stands off after it. */
+  noteManualSwitch() {
+    this.lastManualSwitch = this.t;
+  }
+
+  /** The AUTO SWITCH option: 0 = off (Q only), 1 = on (grace-respecting). */
+  autoSwitchEnabled(): boolean {
+    return (this.options.autoSwitch ?? 0) === 1;
+  }
+
+  /**
+   * Smart switch: Q jumps to the ranked-best interceptor when he is not
+   * already controlled, otherwise cycles the ranked next two — so a first
+   * tap always grabs the right man and repeat taps still walk the options.
+   */
+  smartSwitch() {
     const def = this.defending();
     const f = this.focusPoint();
-    const cands = this.live
-      .map((p, i) => ({ p, i }))
-      .filter((c) => c.p.team === def && c.p.sinbin <= 0 && !c.p.down)
-      .sort((a, b) => Math.hypot(a.p.x - f.x, a.p.z - f.z) - Math.hypot(b.p.x - f.x, b.p.z - f.z))
-      .slice(0, 3);
-    if (!cands.length) return;
-    const idx = cands.findIndex((c) => c.i === this.ctrl);
-    this.ctrl = cands[(idx + 1) % cands.length].i;
+    const ranked = this.rankInterceptors(def, f.x, f.z).slice(0, 3);
+    if (!ranked.length) return;
+    this.noteManualSwitch();
+    const cur = this.live[this.ctrl];
+    if (!cur || cur.team !== def || cur.num !== ranked[0].num) {
+      const at = this.live.findIndex((p) => p === ranked[0]);
+      if (at >= 0) this.ctrl = at;
+    } else if (ranked.length > 1) {
+      const idx = ranked.findIndex((p) => p.num === cur.num);
+      const next = ranked[(idx + 1) % ranked.length];
+      const at = this.live.findIndex((p) => p === next);
+      if (at >= 0) this.ctrl = at;
+    }
+    this.bestInterceptor = this.live.findIndex((p) => p === ranked[0]);
     this.showHint(`CONTROLLING ${this.teams[def].players[this.ctrlPlayer.num - 1].name} — ${contractFor(this.ctrlPlayer.num).pos}`, 2);
+  }
+
+  cycleDefender() {
+    this.smartSwitch();
+  }
+
+  /**
+   * The auto-switch tick: hands control to the ranked-best interceptor when
+   * the human is defending, the option is on, the grace window after his
+   * last manual pick has expired, and the best man is strictly better
+   * placed than the currently controlled one. Never fires while the human
+   * is mid-tackle input or while a pass/kick charge is held.
+   */
+  tickAutoSwitch(dt: number) {
+    if (!this.autoSwitchEnabled()) return;
+    if (this.phase !== 'OPEN_PLAY' || !this.op) return;
+    const def = this.defending();
+    if (!this.isHuman(def)) return;
+    if (this.t - this.lastManualSwitch < AUTO_SWITCH_GRACE) return;
+    const cur = this.live[this.ctrl];
+    if (!cur || cur.team !== def) return;
+    if (cur.clip === 'dive' || cur.clip === 'tackle') return;
+    if (this.op.passHold > 0 || this.op.kickCharge > 0) return;
+    const f = this.focusPoint();
+    const ranked = this.rankInterceptors(def, f.x, f.z);
+    if (!ranked.length) return;
+    this.bestInterceptor = this.live.findIndex((p) => p === ranked[0]);
+    if (ranked[0] === cur) return;
+    /* Only move when the current man genuinely cannot get there: the best
+     * interceptor must be at least a full second closer to the contact. */
+    const atkDir: -1 | 1 = def === 'A' ? 1 : -1;
+    const tta = (p: Live) => {
+      const pace = Math.max(1.5, maxSpeed(p, false, true, p.stamina));
+      const goalSide = (p.z - f.z) * atkDir < -0.5;
+      return Math.hypot(p.x - f.x, p.z - f.z) / pace - (goalSide ? 1.1 : 0);
+    };
+    if (tta(cur) - tta(ranked[0]) < AUTO_SWITCH_MARGIN) return;
+    const at = this.live.findIndex((p) => p === ranked[0]);
+    if (at >= 0) {
+      this.ctrl = at;
+      this.say(`SWITCHING TO ${this.ctrlPlayer.num} — HE HAS THE ANGLE`);
+    }
+    void dt;
+  }
+
+  /* ================== ATTACK DISTRIBUTION ==================
+   *
+   * The SHOULDERS hierarchy: 9 → 10 → 12 → 13 → 11 → 14 → 15. `echelonTarget`
+   * names the next alive man down the line from the carrier; `distributePass`
+   * throws to him (cutting out a smothered link on the way); `doPassToNum`
+   * is the numbered shirt the pass is addressed to rather than a side, so the
+   * ball travels down the backline instead of sideways.
+   *
+   *  This is the HUMAN nine's release (the T key, or SPACE on AUTO) plus the
+   *  numbered-pass API the probes drive. The CPU nine deliberately keeps the
+   *  priority/side selection: its trajectories are what every gate samples,
+   *  and the echelon walk is a player mechanic, not a brain transplant.
+   */
+
+  /** Next alive man down the echelon from the carrier, or null. */
+  echelonTarget(): Live | null {
+    const s = this.op;
+    if (!s || this.phase !== 'OPEN_PLAY') return null;
+    const atk = s.attacking;
+    const order = [10, 12, 13, 11, 14, 15];
+    if (s.carrierNum === 9) {
+      const ten = this.L(atk, 10);
+      return ten.sinbin <= 0 && !ten.down ? ten : null;
+    }
+    const at = order.indexOf(s.carrierNum);
+    const candidates = at >= 0 ? order.slice(at + 1) : order;
+    for (const num of candidates) {
+      const p = this.L(atk, num);
+      if (p.sinbin <= 0 && !p.down) return p;
+    }
+    return null;
+  }
+
+  /**
+   * Throw the distribution pass down the echelon. Returns true when a pass
+   * left the carrier's hands (including a whistled or spilled one — the
+   * phase moved on either way), false when there was nobody to throw to.
+   */
+  distributePass(): boolean {
+    const s = this.op;
+    if (!s || this.phase !== 'OPEN_PLAY' || s.ball.live) return false;
+    const target = this.echelonTarget();
+    if (!target) return false;
+    const order = [9, 10, 12, 13, 11, 14, 15];
+    const gap = order.indexOf(target.num) - order.indexOf(s.carrierNum);
+    return this.doPassToNum(target.num, gap > 1);
+  }
+
+  /**
+   * Address a pass to a numbered shirt instead of a side. The receiver must
+   * be one of the live pass options (the reviewed context still applies), so
+   * a number nobody can legally reach throws nothing and says why.
+   */
+  doPassToNum(num: number, cutOut: boolean): boolean {
+    return throwPassToNum(this, num, cutOut);
   }
 
   refreshPassOptions() {
@@ -5806,19 +6037,17 @@ export class Director {
    * jump — must call this or it will leave players frozen where they stood.
    */
   releaseAll() {
-    /* ENDURANCE — the drag links die with the cast. A whistle blown while a
-     * latch is mid-drag (a penalty, a reset, a stoppage restart) used to
-     * leave both men linked until the top-level leak guard got to it on a
-     * LATER frame: a one-to-two-frame kinematic lock where the carrier
-     * still paid the 28% drag tax into the restart formation. Release them
-     * on the whistle frame itself — but only when the drag is actually over:
-     * an advantage play-on keeps a live `op.latch`, and that linked pair is
-     * still the story on the field, so its links stay. */
-    if (!this.op || !this.op.latch) {
-      for (const p of this.live) {
-        if (p.latchedBy || p.latchingOnto) { p.latchedBy = null; p.latchingOnto = null; }
-      }
-    }
+    /* TEARDOWN HARDENING — the purge is UNCONDITIONAL. The old shape kept an
+     * active drag's links alive across the whistle (advantage play-on), and a
+     * second whistle landing before the play-on resolved then raced the
+     * top-level leak guard: the stranded pair kept the 28% drag tax and the
+     * stale kinematics into the restart formation, one rapid-whistle edge
+     * case at a time. A whistle ends the contest — every lattice weld, every
+     * bound state, every drag link across all thirty entities, gone on the
+     * whistle frame itself. Advantage re-seeds through the ordinary contest
+     * entry when play resumes. Idempotent, so frame-adjacent stoppages purge
+     * the fresh bind set exactly like the first. */
+    teardownBreakdown(this, 'WHISTLE');
     for (const p of this.live) {
       p.down = false;
       p.bound = false;
@@ -5837,8 +6066,6 @@ export class Director {
     this.ml = undefined;
     this.scrim = undefined;
     this.lo = undefined;
-    /* T-80 — the whistle / phase teardown releases every bind. */
-    this.latches.clear('WHISTLE');
   }
 
   /* ============================ MAUL ============================ */

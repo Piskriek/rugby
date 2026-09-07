@@ -73,7 +73,7 @@ for (let i = 0; i < 60 * 60; i++) {
     left: false, right: false, up: false, down: false, run: charge, sprint: charge,
     passL: false, passR: false, cutL: false, cutR: false, kick: false, grubber: false,
     drop: false, contact: false, fend: false, step: false, dummy: false,
-    tackleDive: false, tackleSmother: false, switchPlayer: false, action: false,
+    tackleDive: false, tackleSmother: false, switchPlayer: false, action: false, distribute: false,
     handsUp: false, secure: false, punt: false,
   }, new Set(), new Set());
   phases.add(d.phase);

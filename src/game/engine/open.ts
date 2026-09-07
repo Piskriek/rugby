@@ -11,6 +11,7 @@ import { DIFFICULTY_TABLE } from '../data';
 import { contractFor } from '../jlr';
 import {
   passOptions, widestGap, avoidTouch, maxSpeed, FORWARDS,
+  Live, PassOption,
 } from '../intelligence';
 import { defenceMark } from '../intelligence';
 import { R } from './rng';
@@ -32,6 +33,18 @@ import {
   forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
 } from '../forwardAttackGates';
 
+/* HUMAN DISTRIBUTION tuning. A held pass key charges toward the flat bullet
+ * in under a second; the flat threshold is the hold at which the hint flips
+ * from the standard loop to FLAT AND HARD. A fully held bullet flies half as
+ * fast again as the standard ball — and is a quarter again as hard to take. */
+const PASS_HOLD_FULL_SECONDS = 0.8;
+const PASS_HOLD_FLAT_AT = 0.6;
+const PASS_PACE_CHARGED = 1.5;
+/* KICK CHARGE tuning. A tap (press and release inside a few frames) is the
+ * quick dink off the boot at the floor power; a hold builds to the full
+ * raking kick. Same strike either way — the charge only sets the power. */
+const TAP_KICK_POWER = 0.3;
+
 export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) {
 
   if (!d.op) { d.startOpen(d.possession, 0, -10); return; }
@@ -48,7 +61,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     /* Playtest 3: a throw flies at ~13 m/s OVER ITS OWN LENGTH — a 6 m pop
      * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
      * made every pass feel like a teleport. */
-    s.passT += dt * (13 / s.passDist);
+    s.passT += dt * (13 * s.passPace / s.passDist);
     /* T-40, REWRITTEN BY SPEC_13.
      *
      * The receiver was steered to `ball.z + dir * 1.0` — a point one metre in
@@ -75,7 +88,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * solved at release, not a man who is being pushed forward to meet it. */
     const dx = s.passTargetX - s.ball.x, dz = s.passTargetZ - s.ball.z;
     const dd = Math.max(0.01, Math.hypot(dx, dz));
-    const step = Math.min(dd, PASS_SPEED * dt);
+    const step = Math.min(dd, PASS_SPEED * s.passPace * dt);
     s.ball.x += (dx / dd) * step;
     s.ball.z += (dz / dd) * step;
     s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
@@ -86,7 +99,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * a ball that jumped forward at the moment of the catch. */
     const toRec = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
     const arrived = dd <= step;
-    if (toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) || arrived || s.passT >= 1.35) {
+    if (toRec <= Math.max(0.55, PASS_SPEED * s.passPace * dt * 1.05) || arrived || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
       /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
@@ -108,6 +121,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * pass. Reset the carry clock for the new man. */
       s.heldT = 0;
       s.protect = 0.2;
+      s.passPace = 1;
       /* T-18. THE RELEASE. A receiver running a CALLED passing play has
        * decided before the ball arrives — he draws and gives inside half a
        * second. The old flat 0.3-0.8 s cadence meant the rushing defender
@@ -209,10 +223,37 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     if (pressed.has('fend') && s.fendCd <= 0) { s.fendCd = 1.6; d.doFend(); }
     if (pressed.has('dummy')) d.doDummy();
     if (pressed.has('action') && s.burstCd <= 0) { s.burst = 0.8; s.burstCd = 5.5; }
-    if (pressed.has('passL')) { d.doPass(-1, false); return; }
-    if (pressed.has('passR')) { d.doPass(1, false); return; }
-    if (pressed.has('cutL')) { d.doPass(-1, true); return; }
-    if (pressed.has('cutR')) { d.doPass(1, true); return; }
+    /* HUMAN DISTRIBUTION — the T key releases down the echelon (9 → 10 →
+     * 12 → …), one key, no side to pick. Instant like the legacy pass tap:
+     * the held-charge game belongs to the aimed J/K/U/O throws. */
+    if (pressed.has('distribute')) { d.distributePass(); return; }
+    /* HUMAN DISTRIBUTION — TAP OR HOLD. A tap throws the standard loop the
+     * moment the key comes up (the legacy instant pass is the zero-charge
+     * case); a hold charges toward the flat bullet, released to throw. The
+     * side and the cut-out resolve from the key RELEASED, so changing your
+     * mind mid-hold throws where your fingers are, not where they were. */
+    const passKeys: Record<string, { side: -1 | 1; cut: boolean }> = {
+      passL: { side: -1, cut: false }, passR: { side: 1, cut: false },
+      cutL: { side: -1, cut: true }, cutR: { side: 1, cut: true },
+    };
+    if (s.passHold > 0) {
+      s.passHold = Math.min(1, s.passHold + dt / PASS_HOLD_FULL_SECONDS);
+      d.showHint(s.passHold >= PASS_HOLD_FLAT_AT
+        ? `${s.passKind === 'CUT_OUT' ? 'CUT-OUT ' : ''}FLAT AND HARD — RELEASE TO THROW`
+        : 'PASS CHARGING — RELEASE FOR THE STANDARD BALL', 0.3);
+      let want = '';
+      for (const k of Object.keys(passKeys)) if (released.has(k)) want = k;
+      if (want) {
+        const { side, cut } = passKeys[want];
+        s.passPace = 1 + s.passHold * (PASS_PACE_CHARGED - 1);
+        s.passHold = 0; s.passKind = '';
+        d.doPass(side, cut); return;
+      }
+    } else {
+      for (const k of Object.keys(passKeys)) {
+        if (pressed.has(k)) { s.passHold = 0.001; s.passKind = passKeys[k].cut ? 'CUT_OUT' : 'PASS'; break; }
+      }
+    }
     /* Playtest P1.4: RUN AND HOLD. The old press fired startKick straight
      * into the AIM state, which froze the whole match while the meter ran —
      * a punt from hand paused the game. Now the key HELDS: charge builds
@@ -230,11 +271,18 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
         if (kickKeys[want] !== s.kickKind) {
           s.kickCharge = 0; s.kickKind = '';   // changed his mind mid-charge
         } else {
+          /* KICK RESOLVE — TAP OR HOLD. A tap never saw the charge build, so
+           * it strikes the quick dink at the floor power; a hold strikes the
+           * raking kick at the held charge. Same strike, same ritual either
+           * way — only the power on the boot differs, and the call names
+           * which one it was. */
           const kind = s.kickKind;
-          const pow = Math.max(0.3, s.kickCharge);
+          const tapped = s.kickCharge < TAP_KICK_POWER;
+          const pow = Math.max(TAP_KICK_POWER, s.kickCharge);
           s.kickCharge = 0; s.kickKind = '';
           d.startKick(s.attacking, kind, { x: car.x, z: car.z }, s.carrierNum);
           if (d.kk) d.launch(pow, d.kickerAccuracy(d.kk), 0);
+          if (tapped) d.say(`QUICK ${kind} OFF THE BOOT — NO CHARGE`);
           return;
         }
       }
@@ -456,7 +504,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
          * not put the man down on the frame it lands. The drag decides
          * that. The dive flag is true here by construction — he left his
          * feet to make it. */
-        beginLatch(s, car, tp, dive);
+        beginLatch(s, car, tp, dive, d.live);
         return;
       }
       d.teams[dTeam].stats.missed++;
@@ -564,7 +612,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * 0.6 s drag timer expires — at which point the existing
        * startBreakdown path and its 0.3 s kineticImpact slide finish the
        * job exactly as before. */
-      beginLatch(s, car, tackler, tackler.clip === 'dive');
+      beginLatch(s, car, tackler, tackler.clip === 'dive', d.live);
       return;
     }
     if (R() < 0.1 * dt * 10) d.commentate('BIG_HIT');
@@ -712,8 +760,57 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   const opt = opts.find((o) => o.side === side);
   if (!opt) {
     d.showHint(cutOut ? 'NOBODY TO SKIP TO ON THAT SIDE' : 'NO RECEIVER ON THAT SIDE', 1.6);
+    s.passPace = 1;
     return;
   }
+  throwPass(d, s, car, opt, cutOut, s.passPace);
+}
+
+/**
+ * Address a pass to a numbered shirt. The number must name one of the live
+ * pass options — the same reviewed context and the same error and throw-
+ * forward law as a side-addressed pass — so a shirt nobody can legally reach
+ * throws nothing and says why. Returns true when the ball left the hands
+ * (a whistled or spilled throw still moved the phase on).
+ */
+export function doPassToNum(d: Director, num: number, cutOut: boolean): boolean {
+  const s = d.op;
+  if (!s || d.phase !== 'OPEN_PLAY' || s.ball.live || num === s.carrierNum) return false;
+  const gate = d.forwardAttackGateReporter();
+  const car = d.L(s.attacking, s.carrierNum);
+  const forwardContext = !d.isHuman(s.attacking) ? {
+    enabled: true,
+    attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1,
+    noteRejection: () => d.notePassCandidateRejected(),
+  } : undefined;
+  let opt = passOptions(car, d.live, s.open, false, 0, forwardContext, gate)
+    .find((o) => o.player.num === num);
+  let cut = false;
+  if (!opt) {
+    opt = passOptions(car, d.live, s.open, true, 0, forwardContext, gate)
+      .find((o) => o.player.num === num);
+    cut = !!opt;
+  }
+  if (!opt) {
+    d.showHint(`NO PASS ON TO ${num}`, 1.6);
+    return false;
+  }
+  throwPass(d, s, car, opt, cut || cutOut, 1);
+  return true;
+}
+
+/**
+ * THE THROW — shared by side-addressed, number-addressed and distributed
+ * passes. Selection (which receiver) stays with the caller; everything from
+ * the error roll to the release law to the flight dispatch to the backline's
+ * anticipatory run-on is one path, so a numbered pass is refereed exactly
+ * like a sided one. `pace` is the held-charge ball pace: 1 is the standard
+ * loop, up to 1.5 for the flat bullet — faster over the ground, harder to take.
+ */
+export function throwPass(
+  d: Director, s: OpenPlayState, car: Live, opt: PassOption, cutOut: boolean, pace: number,
+) {
+  const gate = d.forwardAttackGateReporter();
   d.teams[s.attacking].stats.passes++;
   d.run(s.attacking, s.carrierNum).passes++;
 
@@ -728,7 +825,10 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * The old rate sat on ~0.01, so a 220-pass match produced 2-4 restarts. The
    * absolute rate is still well inside professional completion (88-92%), but
    * it now produces the 8-14 handling errors a real match concedes. */
-  const errorChance = clamp(opt.risk * 0.55 * (1 - d.assists.pass * 0.42), 0.014, 0.24);
+  /* A held flat bullet is harder to take than the standard loop — the pace
+   * tax is zero at pace 1, so every CPU and every tapped pass keeps the
+   * calibrated rate untouched. */
+  const errorChance = clamp(opt.risk * 0.55 * (1 - d.assists.pass * 0.42) * (1 + (pace - 1) * 0.5), 0.014, 0.24);
   if (R() < errorChance) {
     /* A spilled pass is a turnover in any box score — the ball changed
      * hands through an error, which is exactly the "in the tackle and from
@@ -814,6 +914,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
     pendingReceiver: s.pendingReceiver ?? null,
     passT: s.passT,
     passDist: s.passDist,
+    passPace: s.passPace,
     carrierNum: s.carrierNum,
   } : undefined;
   s.ball.live = true;
@@ -825,6 +926,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   s.passTargetX = aim.x;
   s.passTargetZ = aim.z;
   s.passDist = Math.max(3.5, aim.dist);
+  s.passPace = pace;
   if (gate && flightBefore) {
     const flightAfter = {
       ballLive: s.ball.live,
@@ -834,11 +936,12 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
       pendingReceiver: s.pendingReceiver ?? null,
       passT: s.passT,
       passDist: s.passDist,
+      passPace: s.passPace,
       carrierNum: s.carrierNum,
     };
     for (const failure of forwardAttackStateWriteFailures(
       `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter,
-      ['ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist'],
+      ['ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist', 'passPace'],
     )) gate(failure);
     for (const failure of forwardAttackPassDispatchFailures(
       `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter, opt.player.num,
@@ -859,7 +962,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * ball flies at, so nobody is chasing anybody), at RUN_ON_SPEED_FRACTION
    * of his own maximum sprint — comfortably over the 60% the line needs to
    * cross the gain line rather than reach for it. */
-  const flightT = Math.max(0.01, s.passDist / PASS_SPEED);
+  const flightT = Math.max(0.01, s.passDist / (PASS_SPEED * pace));
   for (const runner of d.live) {
     if (runner.team !== s.attacking || runner.sinbin > 0 || runner.down) continue;
     if (runner.num === car.num || runner.num === opt.player.num) continue;
@@ -1117,11 +1220,12 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
           pendingReceiver: s.pendingReceiver ?? null,
           passT: s.passT,
           passDist: s.passDist,
+          passPace: s.passPace,
           carrierNum: s.carrierNum,
         };
         for (const failure of forwardAttackStateWriteFailures(
           `open:cpu-pass-dispatch:${s.attacking}${car.num}`, beforeDispatch, afterDispatch,
-          ['aiIntent', 'ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist'],
+          ['aiIntent', 'ballLive', 'ballX', 'ballY', 'ballZ', 'pendingReceiver', 'passT', 'passDist', 'passPace'],
         )) gate(failure);
         for (const failure of forwardAttackPassDispatchFailures(
           `open:cpu-pass-dispatch:${s.attacking}${car.num}`, beforeDispatch, afterDispatch,
