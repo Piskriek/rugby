@@ -474,14 +474,8 @@ export function drawStadium(ctx: Ctx, cam: Camera, v: View, t: number, cond?: Pi
 
 /* ---------------- Post effects ---------------- */
 export function drawCRT(ctx: Ctx, v: View, intensity = 1) {
-  ctx.globalAlpha = 0.055 * intensity;
-  ctx.fillStyle = '#000';
-  for (let y = 0; y < v.h; y += 3) ctx.fillRect(0, y, v.w, 1);
-  ctx.globalAlpha = 0.05 * intensity;
-  const g = ctx.createLinearGradient(0, 0, v.w, 0);
-  g.addColorStop(0, 'rgba(255,0,0,1)'); g.addColorStop(0.5, 'rgba(0,255,0,1)'); g.addColorStop(1, 'rgba(0,0,255,1)');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, v.w, v.h);
-  ctx.globalAlpha = 1;
+  // Disabled post-processing fullscreen shader pass
+  void ctx; void v; void intensity;
 }
 
 void PIX; void GRASS;

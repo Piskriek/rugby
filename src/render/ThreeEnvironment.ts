@@ -128,9 +128,6 @@ export class ThreeEnvironment {
   private cond: Conditions | null = null;
   private scarHold = 0;
   private scarCount = 0;
-  private flashLevel = 0;
-  private flashes!: THREE.Points;
-  private flashMat!: THREE.ShaderMaterial;
 
   constructor(scene: THREE.Scene, renderer: THREE.WebGLRenderer) {
     this.scene = scene;
@@ -162,16 +159,9 @@ export class ThreeEnvironment {
   applyConditions(cond: Conditions): void {
     this.cond = cond;
     if (this.pitchMat) {
-      /* Wet grass goes darker and bluer and loses roughness — a sheen, in a
-       * PBR surface, IS a roughness drop. Frost does the opposite: pale and
-       * scattering. Both are read off the engine's own wetness, not guessed. */
-      this.pitchMat.roughness = Math.max(0.22, 1 - cond.sheen * 0.62);
-      this.pitchMat.color.setRGB(
-        1 - cond.wetness * 0.10 - cond.frost * 0.02,
-        1 - cond.wetness * 0.04 + cond.frost * 0.06,
-        1 + cond.wetness * 0.08 + cond.frost * 0.18,
-      );
-      this.pitchMat.envMapIntensity = 0.35 + cond.sheen * 0.8;
+      this.pitchMat.roughness = 0.85;
+      this.pitchMat.color.setRGB(1, 1, 1);
+      this.pitchMat.envMapIntensity = 0.35;
     }
     /* Fog is authored with the sky, not with the stands, but it is the stands
      * that have to obey it: 500 m of concrete reaching a horizon that is not
@@ -180,11 +170,7 @@ export class ThreeEnvironment {
     for (const l of this.floodLights) l.intensity = cond.floodIntensity * 900 * RENDER_SCALE * RENDER_SCALE;
     const cm = this.crowd?.material as THREE.MeshStandardMaterial | undefined;
     if (cm) {
-      cm.color.setRGB(
-        1 - cond.crowdDamp * 0.40,
-        1 - cond.crowdDamp * 0.44,
-        1 - cond.crowdDamp * 0.26,
-      );
+      cm.color.setRGB(1, 1, 1);
     }
     if (this.lampMat) {
       this.lampMat.color.setRGB(
@@ -241,7 +227,6 @@ export class ThreeEnvironment {
     if (!(u > 0 && u < W && v > 0 && v < H)) return;
     const cond = this.cond;
     const mud = cond ? cond.mud : 0.45;
-    const wet = cond ? cond.wetness : 0.25;
     /* Two to four dabs, not up to four per call at full force: with the spacing
      * rule this is a patch of turned soil about a metre across. */
     const n = 1 + Math.round(force * (0.9 + mud * 1.7));
@@ -260,12 +245,6 @@ export class ThreeEnvironment {
       ctx.beginPath();
       ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
       ctx.fill();
-      if (wet > 0.55) {
-        ctx.fillStyle = `rgba(158,182,202,${0.05 + wet * 0.08})`;
-        ctx.beginPath();
-        ctx.ellipse(0, -ry * 0.4, rx * 1.3, ry * 0.45, 0, 0, Math.PI * 2);
-        ctx.fill();
-      }
       ctx.restore();
     }
     this.scarCount++;
@@ -305,7 +284,7 @@ export class ThreeEnvironment {
 
   /** A burst of press flashes down the touchline. `n` is 0..1. */
   cameraFlashes(n: number): void {
-    this.flashLevel = Math.min(1, this.flashLevel + n);
+    void n;
   }
 
   private mat(color: number, map?: THREE.Texture, rough = 0.85, metal = 0): THREE.MeshStandardMaterial {
@@ -368,11 +347,9 @@ export class ThreeEnvironment {
       roughnessMap: roughTex,
       normalMap: normTex,
       normalScale: new THREE.Vector2(0.65, 0.65),
-      roughness: 1,
+      roughness: 0.85,
       metalness: 0,
-      // Grass is a dense volume of thin blades: a little forward scatter at
-      // grazing angles is what stops a lit pitch looking like painted board.
-      dithering: true,
+      dithering: false,
     });
 
     // Tessellated so the pitch can carry a very slight crown (real pitches are
@@ -739,73 +716,6 @@ export class ThreeEnvironment {
     this.crowd.instanceMatrix.needsUpdate = true;
     if (this.crowd.instanceColor) this.crowd.instanceColor.needsUpdate = true;
     this.group.add(this.crowd);
-    this.buildFlashField();
-  }
-
-  /**
-   * PRESS BOXES. A bank of camera flashes does not animate, it POPS, so this is
-   * one additive `Points` cloud over a third of the crowd with the flash
-   * decision made in the shader from a per-point phase. The CPU writes one
-   * float per frame — the burst level — and never touches a vertex.
-   */
-  private buildFlashField(): void {
-    const n = this.crowd.count;
-    const N = Math.floor(n / 3);
-    const s = RENDER_SCALE;
-    const pos = new Float32Array(N * 3);
-    const phase = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const b = i * 3 * 4;
-      pos[i * 3] = this.crowdBase[b] + 0.4 * s;
-      pos[i * 3 + 1] = this.crowdBase[b + 1] + 0.6 * s;
-      pos[i * 3 + 2] = this.crowdBase[b + 2];
-      phase[i] = Math.random();
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
-    this.flashMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      fog: false,
-      uniforms: {
-        uTime: { value: 0 }, uLevel: { value: 0 }, uRate: { value: 1.4 },
-        uColor: { value: new THREE.Color('#fff6de') }, uPixel: { value: 2.4 },
-      },
-      vertexShader: /* glsl */ `
-        precision highp float;
-        attribute float aPhase;
-        uniform float uTime, uLevel, uRate, uPixel;
-        varying float vOn;
-        void main() {
-          float cell = fract(sin(aPhase * 91.7) * 4381.2);
-          float live = step(1.0 - clamp(uLevel, 0.0, 1.0), cell);
-          float pulse = fract(uTime * uRate * (0.6 + cell) + aPhase);
-          vOn = live * (1.0 - smoothstep(0.0, 0.07, pulse));
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          gl_Position = projectionMatrix * mv;
-          gl_PointSize = uPixel * (1.0 + vOn * 2.4);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        precision highp float;
-        uniform vec3 uColor;
-        varying float vOn;
-        void main() {
-          float d = length(gl_PointCoord - 0.5);
-          float a = (1.0 - smoothstep(0.05, 0.5, d)) * vOn;
-          if (a < 0.01) discard;
-          gl_FragColor = vec4(uColor * (1.0 + a * 2.2), a);
-        }
-      `,
-    });
-    this.flashes = new THREE.Points(g, this.flashMat);
-    this.flashes.frustumCulled = false;
-    this.flashes.renderOrder = 8;
-    this.flashes.name = 'PressFlashes';
-    this.flashes.visible = false;
-    this.group.add(this.flashes);
   }
 
   /* ----------------------------------------------------------- floodlights */
@@ -880,18 +790,6 @@ export class ThreeEnvironment {
      * frame a ruck forms. */
     this.scarHold -= dt;
     if (this.turfDirty && this.scarHold <= 0) this.flushTurf();
-    if (this.flashMat) {
-      this.flashLevel = Math.max(0, this.flashLevel - dt * 1.05);
-      const on = this.flashLevel > 0.002 || (this.cond?.floodlit ?? false);
-      this.flashes.visible = on;
-      if (on) {
-        const u = this.flashMat.uniforms;
-        u.uTime.value = time;
-        u.uRate.value = 1.1 + (this.cheer > 0.15 ? 2.6 : 0);
-        u.uLevel.value = (this.cond?.floodlit ? 0.05 : 0.0)
-          + this.flashLevel * 0.8 + Math.min(0.18, this.cheer * 0.12);
-      }
-    }
     if (this.adMode !== 'NORMAL') {
       this.adHold -= dt;
       if (this.adHold <= 0) this.flashAdBoard('NORMAL');

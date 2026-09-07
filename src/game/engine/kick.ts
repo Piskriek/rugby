@@ -8,7 +8,6 @@ import { Director, KickState, Input } from '../director';
 import type { Live } from '../intelligence';
 import { FIELD } from '../../render/retro';
 import { R } from './rng';
-import { wetnessOf, windOf, WEATHERS } from './weather';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { CHASE_ORDER, CHASE_LANES } from '../shapes';
 import { assignReceiver } from '../intelligence';
@@ -28,7 +27,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
    * receiver control were dead zones for the defender switch. */
   if (!human && pressed.has('switchPlayer')) { d.cycleDefender(); return; }
   const diff = DIFFICULTY_TABLE[clamp(d.difficulty, 0, 9)];
-  const wind = windOf(d.options);
+  const wind = 0;
 
   /* T-32. The conversion ritual: fanfare (celebrate), then the walk to the tee.
    * The kick button is dead until the kicker has actually set the ball. */
@@ -492,14 +491,13 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
   void input;
 }
 
-export function launch(d: Director, power: number, accuracy: number, wind: number) {
+export function launch(d: Director, power: number, accuracy: number, _wind = 0) {
 
   const s = d.kk!;
-  const wet = wetnessOf(WEATHERS[d.options.weather ?? 1]);
   const assist = d.isHuman(s.kicker) ? d.assists.kick : 0.5;
-  /* Accuracy is the kicker's + weather, not the launch. It widens the angle
+  /* Accuracy is the kicker's + assist, not the launch. It widens the angle
    * spread but never changes how far the ball goes. */
-  const acc = clamp(accuracy - wet * 0.05 + assist * 0.08, 0.1, 0.99);
+  const acc = clamp(accuracy + assist * 0.08, 0.1, 0.99);
 
   /* T-24 KICK POWER. The old code set velocity to `dist * 0.72` and flight
    * time to `dist / k`, so actual travel was `dist² × 0.72` — a 46 m punt flew
@@ -522,7 +520,7 @@ export function launch(d: Director, power: number, accuracy: number, wind: numbe
             : 2.0);   // punt — a flat, chasing territory kick
 
   const speed = dist / Math.max(0.6, hang);
-  const spread = (1 - acc) * 9 + wind * 6;
+  const spread = (1 - acc) * 9;
   const angRad = (((R() - 0.5) * spread + s.aim * 10) * Math.PI) / 180;
   const vz = Math.cos(angRad) * speed * s.dir;
   const vx = Math.sin(angRad) * speed;
