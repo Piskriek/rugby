@@ -57,14 +57,21 @@ import { updateCamera } from './engine/camera';
 import { makeCraft, stepCraft, type BallCraft } from './engine/ballcraft';
 import {
   RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
+  stepAdvantageWatch, openAdvantageWatch, advantageWindowEngineS,
+  type AdvantageWatch, type AdvantageSensor,
 } from './engine/referee';
+import {
+  RuckGateLedger, ruckGateGeometry, ruckGateRoster, ruckGateWindow,
+  ruckClusterOf, SIDE_ENTRY_CALL, GATE_SETTLE_S, gateBlows, GATE_STRICTNESS,
+  RUCK_GATE_PROFILE,
+} from './engine/gates';
 import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import {
   liveOffsideLines, penetrationOf, offsideVerdict, STRICTNESS, OffsideLedger,
   legalMarkZ, legalZFor, clampPitchZ, CLEAN_MARGIN_METRES,
-  insideCorridor, clampOntoLegalSide,
+  insideCorridor, clampOntoLegalSide, scrumhalfReleased, preReleaseWhistle,
   type OffsideLine, type StrictnessProfile,
 } from './engine/offside';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
@@ -104,6 +111,10 @@ export const NO_INPUT: Input = {
   tackleDive: false, tackleSmother: false, switchPlayer: false, action: false,
   handsUp: false, secure: false, punt: false,
 };
+
+/** TARCS — the entry-gate fallback: a ruck with no cached roster has no gate,
+ *  and an empty set is exactly that. Shared constant, zero per-frame cost. */
+const EMPTY_GATE_ROSTER: ReadonlySet<string> = new Set<string>();
 
 /* ============================ PHASES & STATE ============================ */
 
@@ -819,6 +830,17 @@ export class Director {
   /* SPEC_12: the offside windows, keyed by line kind and possession, so they
    * survive a ruck re-forming instead of resetting the referee's memory. */
   private readonly offsideLedger = new OffsideLedger();
+  /* TARCS — RUCK ENTRY GATES. The per-ruck corridor memory, and the identity
+   * of the breakdown instance it belongs to: a new `bd` mints a new serial
+   * and a wiped board. `sideEntryStats` is the referee's own ledger for the
+   * offence, deliberately OUTSIDE the SPEC_12 formation counts so the offside
+   * diagnostics keep measuring exactly what they always measured. */
+  private readonly ruckGateLedger = new RuckGateLedger();
+  private ruckGateBd: BreakdownState | null = null;
+  private ruckGateRosterCache: Set<string> | null = null;
+  /** engine time the current ruck's gate window opened, for the settle grace. */
+  private ruckGateOpenedAt = 0;
+  sideEntryStats = { observed: { A: 0, B: 0 }, whistled: { A: 0, B: 0 } };
   /* SPEC_13: the Law 11 ledger. `passLawSamples` is every release's relative
    * velocity, kept so the audit can grade the distribution and not just the
    * count — a mean of zero with a tail of six is still a broken game. */
@@ -910,6 +932,13 @@ export class Director {
   advantage = 0;
   advantageTeam: 'A' | 'B' = 'A';
   advantageShown = false;
+  /* TARCS — the referee's advantage memory (engine/referee.ts). The Director
+   * owns the instance and every write it triggers; the sequencing itself is
+   * pure and testable without a match. Null when no advantage is running. */
+  advWatch: AdvantageWatch | null = null;
+  /* A wind-back the kick flight has not yet let through: the whistle is
+   * earned, the restart waits for the ball to come down. */
+  pendingWindback = false;
   lawsExplained = new Set<string>();
   shakeT = 0; /* T-03: engine-internal — engine/camera.ts writes the shake */
   /** Match identifier, guaranteed to be present for external telemetry and tournament tracking. */
@@ -2079,20 +2108,39 @@ export class Director {
 
     if (this.advantage > 0) {
       this.advantage -= dt;
-      // advantage is over the moment the attacking side gains real ground
-      if (this.op && (this.op.carrierZ - this.op.originZ) * this.op.dir > 6) {
+      /* TARCS — the sequenced advantage. `stepAdvantageWatch` (engine/referee.ts)
+       * reads a one-frame sensor of the game — who has the ball, how far the
+       * carrier has marched from the mark, whether a kick landed in
+       * territory — and returns the official's decision. Ten metres of ground
+       * or an effective kick is "ADVANTAGE OVER"; the beneficiary losing the
+       * ball, or the window running out without gain, is the whistle and the
+       * restart AT THE MARK of the infringement. */
+      const out = this.advWatch ? stepAdvantageWatch(this.advWatch, this.advantageSensor(), dt) : 'PLAY_ON';
+      if (out === 'OVER') {
         this.advantage = 0;
         // Advantage taken. The penalty is gone, not merely deferred — leaving
         // pendingPenalty set here stranded it forever and it would re-fire later.
         this.pendingPenalty = null;
+        this.advWatch = null;
         this.say('ADVANTAGE OVER — PLAY ON');
-      } else if (this.advantage <= 0 && this.pendingPenalty) {
-        /* A ball in the air finishes its flight. The whistle brings play
-         * back for the penalty, but the ball still comes down — killing a
-         * mid-air kick left a ball that vanished at 1.3 m and never
-         * bounced. This re-fires every frame, so the penalty resolves the
-         * instant the kick is done. */
-        if (!this.kk || this.kk.stage !== 'FLIGHT') this.resolvePenalty();
+      } else if (out === 'WINDBACK') {
+        this.advantage = 0;
+        this.pendingWindback = true;   // the sweep below performs it, on the kick's other side
+      }
+    }
+    /* THE DEFERRED WHISTLE. A ball in the air finishes its flight. The whistle
+     * brings play back for the award, but the ball still comes down — killing a
+     * mid-air kick left a ball that vanished at 1.3 m and never bounced. The
+     * sweep re-fires every frame (NOT inside the countdown's own block, which
+     * is no longer true once the window has run out), so the award lands the
+     * instant the kick is done, whether it was deferred by expiry or by the
+     * flight guard. */
+    if ((!this.kk || this.kk.stage !== 'FLIGHT') && this.advantage <= 0) {
+      if (this.pendingWindback) {
+        this.pendingWindback = false;
+        this.windBackAdvantage();
+      } else if (this.pendingPenalty) {
+        this.resolvePenalty();
       }
     }
 
@@ -2124,6 +2172,11 @@ export class Director {
        * nobody ever asked. A whistle tears the phase down, so this runs after
        * the phase updater and before the players are told where to stand. */
       if (this.enforceOffsideLines(dt)) return;
+      /* TARCS — the ruck entry gates. Same slot in the frame for the same
+       * reason: the physics/kinematics update has written every position this
+       * tick, the formation has not been steered yet, and a whistle here
+       * tears the phase down before any mover can chase it. */
+      if (this.enforceRuckEntryGates()) return;
 
       /* LATCH-AND-DRAG — THE LEAK GUARD. The two link fields live on `Live`,
        * which outlives the episode: a whistle, a try or a kick tears `op`
@@ -2509,7 +2562,7 @@ export class Director {
             const tk = `${team}:${line.kind}`;
             byTeamKind[tk] = (byTeamKind[tk] ?? 0) + 1;
           }
-          const verdict = offsideVerdict(profile, breach, !this.isHuman(team), forceAiClean);
+          let verdict = offsideVerdict(profile, breach, !this.isHuman(team), forceAiClean);
           /* OBSERVE keeps looking. This was a `break` once, which meant the
            * first sustained offender in the team decided the matter: a man
            * loitering half a metre past the line hid the man five metres past
@@ -2517,6 +2570,22 @@ export class Director {
            * The harness caught it — 1381 CPU episodes, 0 CPU whistles — and it
            * is the clearest possible argument for measuring the funnel instead
            * of trusting the count. */
+          /* TARCS — THE PRE-RELEASE WINDOW. LENIENT's 4 m / 2.4 s was
+           * calibrated on loitering across whole phases; at the breakdown the
+           * window a defender has to influence the ruck is the life of the
+           * ruck itself, so a man more than a stride over his own hindmost-
+           * foot line while the ball is still IN the ruck — before the
+           * scrumhalf has released or played it — is blown on the second
+           * question (`preReleaseWhistle`, engine/offside.ts). The retreat
+           * grace and the materiality limit still apply, Force-AI-Clean
+           * still suppresses the CPU rather than punishing the player, and
+           * the one-whistle-per-window latch is the RUCK line's own, so this
+           * can never stack a second whistle on the same ruck. */
+          if (verdict === 'OBSERVE' && line.kind === 'RUCK' && profile.lines.includes('RUCK')
+            && this.bd && preReleaseWhistle(breach, !scrumhalfReleased(this.bd),
+              profile.materialRadius, profile.retreatingGrace)) {
+            verdict = forceAiClean && !this.isHuman(team) ? 'SUPPRESS' : 'WHISTLE';
+          }
           if (verdict === 'OBSERVE') continue;
           if (verdict === 'WHISTLE' && this.offsideWarnedHalf[team] !== this.half) {
             /* The first material offence by this side this half is spoken, not
@@ -2564,6 +2633,172 @@ export class Director {
     }
     this.offsideLedger.expire(this.t);
     return false;
+  }
+
+  /* ==================== TARCS — THE RUCK ENTRY GATES ====================
+   *
+   * The referee's per-frame look at Law 15.12/15.15 entry: every team gets a
+   * rectangular corridor at the breakdown — the lateral bounds of the contact
+   * cluster, its front edge the hindmost foot of that team's own bound players
+   * — and an uncommitted player who crosses into the contest box having never
+   * stood in his own corridor since the ruck formed has entered from the side.
+   *
+   * THE OBSERVER, NOT THE ENGINE. This runs after the phase's physics/
+   * kinematics have written every position this tick and BEFORE the formation
+   * is steered, in the same slot SPEC_12's lines occupy — and like them it
+   * moves nobody: no velocity is touched, no mark is rewritten. The decision
+   * comes out of the pure geometry in `engine/gates.ts`; the only write here
+   * is the whistle, which goes through `beginPenalty` like every penalty in
+   * the game — so side entry inherits the advantage sequencing (a 10-second
+   * window for the non-offending side, wind-back at the mark if it comes to
+   * nothing) and the sanction ledger, exactly once, from one place.
+   *
+   * THE OFF SWITCH. `options.offside === 2` (the referee-OFF mode) makes this
+   * observe and count and never blow — the OFF-changes-no-counts contract of
+   * SPEC_12 extends to the gates for free: the entry ledger fills either way.
+   */
+  private static ruckGateSerial = 0;
+
+  enforceRuckEntryGates(): boolean {
+    const bd = this.bd;
+    const live = this.phase === 'BREAKDOWN' && !!bd && ruckGateWindow(bd!);
+    if (!live || !bd) {
+      if (this.ruckGateLedger.active()) this.ruckGateLedger.end();
+      this.ruckGateBd = null;
+      return false;
+    }
+    /* a new ruck instance — a new gate, drawn from new feet. The roster is
+     * fixed at the tackle (mid-ruck commits move `commitA`, never the set),
+     * so it is built once per ruck and cached on the instance. */
+    if (this.ruckGateBd !== bd) {
+      this.ruckGateBd = bd;
+      this.ruckGateRosterCache = ruckGateRoster(bd);
+      this.ruckGateOpenedAt = this.t;
+      this.ruckGateLedger.begin(++Director.ruckGateSerial);
+    }
+    const cluster = ruckClusterOf(bd, this.live);
+    const geo = ruckGateGeometry(cluster);
+    if (!geo) { this.ruckGateLedger.end(); return false; }
+    /* Exemptions — and each is the law, not mercy: the roster IS the gate,
+     * the controlled scrum-half at the base may come from any side (15.12),
+     * and a man on the floor cannot choose his entry vector. */
+    const ctrl = this.live[this.ctrl];
+    const halfback = ctrl && ctrl.team === bd.attacking && ctrl.num === 9
+      ? `${ctrl.team}:${ctrl.num}` : '';
+    const hit = this.ruckGateLedger.observe(geo, this.live, {
+      roster: this.ruckGateRosterCache ?? EMPTY_GATE_ROSTER, halfback,
+    });
+    if (!hit) return false;
+    const team = hit.player.team;
+    this.sideEntryStats.observed[team]++;
+    /* THE TEMPER. Every material entry is OBSERVED and counted; the shipped
+     * referee WHISTLES at the ones the law actually punishes — a man two or
+     * more metres in front of his own hindmost-foot plane, once the ruck has
+     * settled and the tackle's own arrivals have landed (GATE_SETTLE_S). The
+     * OFF dial keeps the observation honest and drops the whistle, exactly as
+     * SPEC_12 does for the lines. */
+    const temper: typeof RUCK_GATE_PROFILE = (this.options.offside ?? 1) === 2
+      ? { blowPenetrationM: RUCK_GATE_PROFILE.blowPenetrationM, blows: false }
+      : (this.options.offside ?? 1) === 0 ? GATE_STRICTNESS.STRICT : RUCK_GATE_PROFILE;
+    const settled = this.t - this.ruckGateOpenedAt > GATE_SETTLE_S;
+    if (!gateBlows(temper, hit.penetration, settled)) return false;
+    this.ruckGateLedger.markPenalised(team);
+    /* An entrant through the front door is in OFFSIDE GROUND at the ruck —
+     * the box score books him with the offside family — and the side-entry
+     * call itself is a penalty. */
+    this.teams[team].stats.offsides++;
+    this.sideEntryStats.whistled[team]++;
+    const opp: 'A' | 'B' = team === 'A' ? 'B' : 'A';
+    this.beginPenalty(opp, SIDE_ENTRY_CALL, hit.player.num);
+    return true;
+  }
+
+  /* ==================== TARCS — THE ADVANTAGE SEQUENCER ====================
+   *
+   * The Director half of `engine/referee.ts`'s sequencing: the sensor view the
+   * pure step function reads, the freeze-and-restart the wind-back performs,
+   * and the one place a knock-on's advantage is opened.
+   */
+
+  /** A one-frame readout for `stepAdvantageWatch`: who has the ball, how far
+   *  the carrier has marched, and the ground the beneficiary's last kick
+   *  gained. Nothing else is load-bearing — the watch keeps its own mark. */
+  advantageSensor(): AdvantageSensor {
+    const carrier = this.op
+      ? { z: this.op.carrierZ, dir: this.op.dir }
+      : null;
+    let kick: { gained: number } | null = null;
+    const k = this.kk;
+    if (k && (k.stage === 'FLIGHT' || k.stage === 'RESULT')) {
+      /* A kick is "effective" when it puts the beneficiary's side in the
+       * territory the infringement alone did not: measure the flight along
+       * the kicker's own attacking axis, from strike point to landing. */
+      kick = { gained: (k.landZ - k.bz) * k.dir };
+    }
+    return { possession: this.possession, carrier, kick };
+  }
+
+  /**
+   * No advantage was gained (or the ball was given back): THE WHISTLE, THE
+   * FREEZE, THE RESTART AT THE MARK. A penalty advantage winds back to the
+   * penalty itself — `resolvePenalty` runs the choice machine at the mark,
+   * and the mark is the one captured at the infringement (T-18), never the
+   * spot play happened to die at. A restart advantage — the knock-on — winds
+   * back to a scrum at the place the ball went forward.
+   */
+  windBackAdvantage() {
+    const w = this.advWatch;
+    this.advWatch = null;
+    this.advantage = 0;
+    this.pendingWindback = false;
+    if (!w || w.award === 'PENALTY') { this.resolvePenalty(); return; }
+    /* The scrum award: tear the phase down to a freeze the same way every
+     * other whistle does (the T-18 freeze contract), THEN restart at the
+     * mark. The call is spoken now, not at the infringement — the point of
+     * playing the advantage was that no penalty is conceded until the referee
+     * comes back. */
+    const opp: 'A' | 'B' = w.team === 'A' ? 'B' : 'A';
+    this.releaseAll();
+    this.kk = undefined;
+    this.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, opp);
+    this.refSay('ADVANTAGE OVER — SCRUM TO ' + this.teams[w.team].nation.short.toUpperCase(), 'LAW_CALL', 3.0);
+    this.startScrum(w.team, w.markX, w.markZ);
+  }
+
+  /**
+   * A hand-contact event where the ball went FORWARD off the hands (the test
+   * itself is `engine/throwforward.ts` — see the knock-on vector). A forward
+   * loss of possession is the restart family, not the penalty family: the
+   * referee raises the arms, play runs while the NON-offending side tries to
+   * gather and march, and if that does not come off inside the window the
+   * whistle brings a scrum back to the spot of the knock. Returns true when
+   * the referee has taken the event (advantage opened or scrum awarded) —
+   * `false` means OFF-mode grading only: the spill is a loose ball and the
+   * laws stay out of the bounce.
+   */
+  openKnockOnAdvantage(offender: 'A' | 'B', x: number, z: number): boolean {
+    if ((this.options.fwdPass ?? 1) === 2) return false;      // referee OFF: measure, never blow
+    if (this.advWatch || this.over) return true;              // one advantage at a time
+    const opp: 'A' | 'B' = offender === 'A' ? 'B' : 'A';
+    const windowS = advantageWindowEngineS(this.options.advantage);
+    if (windowS <= 0) {
+      this.releaseAll();
+      this.kk = undefined;
+      this.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, offender);
+      this.startScrum(opp, x, z);
+      return true;
+    }
+    this.advantage = windowS;
+    this.advantageTeam = opp;
+    this.advWatch = openAdvantageWatch({
+      team: opp, award: 'SCRUM', markX: x, markZ: z,
+      originZ: z, startsOwned: this.possession === opp, window: windowS,
+    });
+    this.refSignal = 1.8;
+    this.refSignalText = 'ADVANTAGE — KNOCK ON';
+    this.say('KNOCKED FORWARD — ADVANTAGE, PLAY ON');
+    this.showHint('ADVANTAGE — THE DEFENCE MAY KEEP THE BALL', 2.2);
+    return true;
   }
 
   /** Eligible to be sampled against the RUCK line: unbound, not chasing. */
@@ -2825,6 +3060,8 @@ export class Director {
     this.op = undefined;
     this.pendingPenalty = null;
     this.advantage = 0;
+    this.advWatch = null;
+    this.pendingWindback = false;
     // Restart cleanly in open play with whoever should have the ball.
     const team = this.possession;
     const dir = team === 'A' ? 1 : -1;
@@ -4683,6 +4920,8 @@ export class Director {
     this.passOpts = [];
     this.pendingPenalty = null;
     this.advantage = 0;
+    this.advWatch = null;
+    this.pendingWindback = false;
     this.refBubbles = [];
     this.possession = 'A';
     this.phase = 'CHAOS_SCRIM';
@@ -5579,6 +5818,18 @@ export class Director {
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
     this.tryLock = { at: this.t, team, num };
+    /* TARCS — a try outranks any advantage still running: once points are on
+     * the board the referee does not come back for the penalty. (Left alone,
+     * the countdown expired through the conversion ritual and the wind-back
+     * fired a penalty INTO the conversion setup — the same class of straggler
+     * the "advantage taken clears pendingPenalty" fix exists for.) */
+    if (this.advantage > 0 || this.pendingPenalty || this.advWatch) {
+      this.advantage = 0;
+      this.pendingPenalty = null;
+      this.advWatch = null;
+      this.pendingWindback = false;
+      this.say('ADVANTAGE OVER — TRY SCORED');
+    }
     const p = this.teams[team].players[num - 1];
     /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
      * that ends in a slide on the turf, not the grounded pose. Open play
@@ -5694,6 +5945,8 @@ export class Director {
     const p = this.pendingPenalty;
     this.pendingPenalty = null;
     this.advantage = 0;
+    this.advWatch = null;
+    this.pendingWindback = false;
     const f = p ?? { x: this.focusPoint().x, z: this.focusPoint().z, team: this.possession as 'A' | 'B', free: false };
     this.say('QUICK TAP — AND THEY GO');
     this.startOpen(f.team, f.x, f.z, 9, 1);
