@@ -491,23 +491,12 @@ export class ThreeMatchDay {
     }
 
     /* -------------------------------------------------------------- mist */
-    const mistA = (cond.weather === 'FOG' ? 0.5 : 0.12) * (0.4 + cond.fogDensity * 26)
-      + cond.steam * 0.1;
     for (let i = 0; i < this.mist.length; i++) {
-      const m = this.mist[i];
-      m.position.x += Math.sin(this.t * 0.08 + i) * cond.windSpeed * dt * 0.6 * s;
-      m.position.z -= Math.cos(this.t * 0.05 + i * 1.7) * cond.windSpeed * dt * 0.4 * s;
-      /* Billboard toward the rig, so a mist bank never shows its edge. */
-      m.lookAt(cam.x * s, m.position.y, -cam.z * s);
-      const mat = m.material as THREE.MeshBasicMaterial;
-      const target = Math.min(0.5, mistA) * (0.55 + 0.45 * Math.sin(this.t * 0.3 + i * 2.1));
-      mat.opacity += (Math.max(0, target) - mat.opacity) * Math.min(1, dt * 1.6);
-      mat.color.set(cond.fogColor);
+      this.mist[i].visible = false;
     }
 
     /* ------------------------------------------------- floodlight shafts */
-    const coneA = cond.floodIntensity * (cond.weather === 'FOG' ? 0.2 : 0.075)
-      + cond.precipDensity * 0.035 * cond.floodIntensity;
+    const coneA = cond.floodIntensity * (cond.weather === 'FOG' ? 0.2 : 0.075);
     for (const cone of this.cones) {
       const mat = cone.material as THREE.MeshBasicMaterial;
       mat.opacity += (coneA - mat.opacity) * Math.min(1, dt * 2);
@@ -519,23 +508,7 @@ export class ThreeMatchDay {
     }
 
     /* --------------------------------------------------------- rain / snow */
-    const pr = this.precipMat.uniforms;
-    const on = cond.precip !== 'NONE' && cond.precipDensity > 0.01 && cond.quality !== 'LEGACY';
-    this.precip.visible = on;
-    if (on) {
-      const snow = cond.precip === 'SNOW';
-      pr.uTime.value = this.t;
-      pr.uFall.value = snow ? 9 : 78 + cond.windSpeed * 2.4;
-      pr.uSpan.value = snow ? 70 : 96;
-      pr.uBox.value = 180;
-      pr.uSize.value = snow ? 1.6 : 2.6 + cond.windSpeed * 0.06;
-      pr.uSlant.value = cond.windSlant;
-      pr.uMode.value = snow ? 1 : 0;
-      (pr.uWind.value as THREE.Vector3).set(cond.windX * cond.windSpeed, 0, cond.windZ * cond.windSpeed);
-      (pr.uCam.value as THREE.Vector2).set(cam.x * s, -cam.z * s);
-      pr.uOpacity.value = (snow ? 0.75 : 0.42) * (0.35 + cond.precipDensity * 0.75);
-      (pr.uColor.value as THREE.Color).set(snow ? '#eaf2ff' : cond.fogColor).lerp(new THREE.Color('#cfe2f6'), 0.45);
-    }
+    this.precip.visible = false;
 
     /* ---------------------------------------------------------- wet layer */
     const wetA = cond.sheen * 0.5 + cond.puddles * 0.34;
@@ -615,7 +588,7 @@ export class ThreeMatchDay {
       this.key.shadow.map?.dispose();
       this.key.shadow.map = null;
     }
-    this.precip.visible = cond.precip !== 'NONE' && cond.quality !== 'LEGACY';
+    this.precip.visible = false;
     for (const c of this.cones) (c.material as THREE.MeshBasicMaterial).visible = cond.quality !== 'LEGACY';
   }
 

@@ -55,7 +55,6 @@ function drawRenderHealth(ctx: CanvasRenderingContext2D, v: View) {
     lines.push('SQUAD MODEL MISSING — PLAIN BODIES');
     lines.push('assets/models/rugby_player.glb did not load');
   }
-  if (renderHealth.pipeline === 'direct') lines.push('POST CHAIN OFF (driver refused it)');
   if (renderHealth.context === 'lost') lines.push('WEBGL CONTEXT LOST — WAITING');
   if (!lines.length) return;
   const h = 11 + lines.length * 10;

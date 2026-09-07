@@ -58,7 +58,6 @@ import { makeCraft, stepCraft, type BallCraft } from './engine/ballcraft';
 import {
   RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
 } from './engine/referee';
-import { wetnessOf, windOf, WEATHERS } from './engine/weather';
 import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
@@ -4882,13 +4881,12 @@ export class Director {
       return;
     }
     const car = this.L(this.op.attacking, this.op.carrierNum);
-    const wet = wetnessOf(WEATHERS[this.options.weather ?? 1]);
     const forwardContext = !this.isHuman(this.op.attacking) ? {
       enabled: true,
       attackDirection: (this.op.dir < 0 ? -1 : 1) as -1 | 1,
       noteRejection: () => this.notePassCandidateRejected(),
     } : undefined;
-    const next = passOptions(car, this.live, this.op.open, false, wet, forwardContext, gate);
+    const next = passOptions(car, this.live, this.op.open, false, 0, forwardContext, gate);
     this.passOpts = next;
     this.checkForwardAttackState(gate, 'Director.refreshPassOptions:replace', before,
       { passOpts: signature(this.passOpts) }, ['passOpts']);
@@ -5438,18 +5436,15 @@ export class Director {
 
   /**
    * Accuracy is the kicker's, not the player's reflexes. His KCK rating sets the
-   * floor, the wet ball and the wind take away from it. This is the fix for
-   * "a slight joystick wobble completely depletes the power".
+   * floor. This is the fix for "a slight joystick wobble completely depletes the power".
    */
   kickerAccuracy(s: KickState): number {
     const k = this.L(s.kicker, s.kickerNum);
-    const wet = wetnessOf(WEATHERS[this.options.weather ?? 1]);
-    const wind = windOf(this.options);
     const assist = this.isHuman(s.kicker) ? this.assists.kick : 0.5;
-    return clamp(0.30 + (k.attrs.SKL / 100) * 0.6 - wet * 0.12 - wind * 0.18 + assist * 0.12, 0.15, 0.99);
+    return clamp(0.30 + (k.attrs.SKL / 100) * 0.6 + assist * 0.12, 0.15, 0.99);
   }
 
-  launch(power: number, accuracy: number, wind: number) { /* T-03: engine/kick */ return launch(this, power, accuracy, wind); }
+  launch(power: number, accuracy: number, wind = 0) { /* T-03: engine/kick */ return launch(this, power, accuracy, wind); }
 
 
   kickScored( /* T-03: engine-internal */s: KickState) {

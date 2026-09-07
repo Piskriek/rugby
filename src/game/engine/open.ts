@@ -17,7 +17,6 @@ import { R } from './rng';
 import { steer } from '../intelligence';
 import { PlayCall } from '../shapes';
 import { REFEREE_CALLS } from '../data';
-import { wetnessOf, windOf, WEATHERS } from './weather';
 import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal, PASS_SPEED } from './throwforward';
 import { approach } from './approach';
 import { clamp } from './clamp';
@@ -235,7 +234,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
           const pow = Math.max(0.3, s.kickCharge);
           s.kickCharge = 0; s.kickKind = '';
           d.startKick(s.attacking, kind, { x: car.x, z: car.z }, s.carrierNum);
-          if (d.kk) d.launch(pow, d.kickerAccuracy(d.kk), windOf(d.options));
+          if (d.kk) d.launch(pow, d.kickerAccuracy(d.kk), 0);
           return;
         }
       }
@@ -702,7 +701,6 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   const s = d.op!;
   const gate = d.forwardAttackGateReporter();
   const car = d.L(s.attacking, s.carrierNum);
-  const wet = wetnessOf(WEATHERS[d.options.weather ?? 1]);
   /* The CPU's actual pass execution receives the same reviewed context as its
    * preview/side selection; humans keep the neutral legacy ordering. */
   const forwardContext = !d.isHuman(s.attacking) ? {
@@ -710,7 +708,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
     attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1,
     noteRejection: () => d.notePassCandidateRejected(),
   } : undefined;
-  const opts = passOptions(car, d.live, s.open, cutOut, wet, forwardContext, gate);
+  const opts = passOptions(car, d.live, s.open, cutOut, 0, forwardContext, gate);
   const opt = opts.find((o) => o.side === side);
   if (!opt) {
     d.showHint(cutOut ? 'NOBODY TO SKIP TO ON THAT SIDE' : 'NO RECEIVER ON THAT SIDE', 1.6);
@@ -1082,10 +1080,9 @@ export function cpuCarrier(d: Director, dt: number, s: OpenPlayState) {
        * has supplied a stronger ranked release. */
       const gate = d.forwardAttackGateReporter();
       const car = d.L(s.attacking, s.carrierNum);
-      const wet = wetnessOf(WEATHERS[d.options.weather ?? 1]);
       const cutOut = R() < 0.18;
       const forwardContext = { enabled: true, attackDirection: (s.dir < 0 ? -1 : 1) as -1 | 1 };
-      const opts = passOptions(car, d.live, s.open, cutOut, wet, forwardContext, gate);
+      const opts = passOptions(car, d.live, s.open, cutOut, 0, forwardContext, gate);
       const left = opts.find((o) => o.side === -1);
       const right = opts.find((o) => o.side === 1);
       const priorityPick = opts.find((option) => option.priority !== 'NONE');

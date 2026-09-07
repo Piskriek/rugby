@@ -29,8 +29,9 @@
  *    change how the match plays. `director.ts` must be able to run headless
  *    with this module deleted.
  */
-import { wetnessOf, windOf, WEATHERS } from '../game/engine/weather';
 import { pitchConditions } from './retro';
+
+export const WEATHERS = ['CLEAR', 'OVERCAST', 'DRIZZLE', 'RAIN', 'FOG', 'COLD SNAP', 'GALE'];
 
 export type Precip = 'NONE' | 'RAIN' | 'SNOW';
 export type Quality = 'LEGACY' | 'STANDARD' | 'FULL';
@@ -281,13 +282,12 @@ export function resolveConditions(
   const W = WEATHER_LOOK[weather] ?? WEATHER_LOOK.OVERCAST;
   const P = pitchConditions(pitchKind);
 
-  const wetness = Math.min(1, wetnessOf(weather) * W.wetMul);
-  const wind = windOf(options as Record<string, number>);
+  const wetness = 0;
   /* Wind direction is a fixed bearing (W->E-NE) for the match. A per-frame
    * random bearing would make the flags and the rain disagree with the ball's
    * lateral drift, which the kick solver has already committed to. */
   const windDir = 2.42;
-  const windSpeed = wind * 17 + 0.6;
+  const windSpeed = 0;
 
   /* Pitch state. The engine says: firmness changes footing, wear accumulates.
    * The renderer adds: what comes off the ground when a man hits it, and what

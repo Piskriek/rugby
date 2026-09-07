@@ -86,10 +86,9 @@ import { ThreeEnvironment } from '../src/render/ThreeEnvironment';
 import { ThreeMatchDay } from '../src/render/ThreeMatchDay';
 import { ThreeParticles } from '../src/render/ThreeParticles';
 import { FxDirector } from '../src/render/fxDirector';
-import { resolveConditions, type Quality } from '../src/render/conditions';
+import { resolveConditions, type Quality, WEATHERS } from '../src/render/conditions';
 import { Director, NO_INPUT } from '../src/game/director';
 import { gateConfig } from '../src/game/gates';
-import { WEATHERS } from '../src/game/engine/weather';
 
 let failures = 0;
 function check(name: string, fn: () => void) {
