@@ -1,127 +1,150 @@
 import { expand, PointTuple } from './types';
 
 // 1 — LOOSEHEAD PROP (100 points)
+// Set piece: left of the hooker in the 3-4-1 block, pinned to a 0.7 m bind tolerance (engine/forwardPack.ts scrumBindProfile),
+// lowest centre of mass in the pack. Lineout: FRONT lifter of the front pod (line order 1 4 3 5 6 8 7).
+// Open play: wide man of the short-carry pod off the 9, outside the ruck box; a primary clearer who enters
+// STRICTLY through the gate — behind his own hindmost foot, inside the lateral band (engine/gates.ts).
 const t: PointTuple[] = [
   // own-scrum-mid
-  ['own-scrum-mid', 1, 48.5, 39.5, 'Bind on hooker, left of the scrum, feet split, spine in line with the tunnel.', 'Never swap sides: if 3 is on the loose head, re-form the scrum, do not free-lance.'],
-  ['own-scrum-mid', 2, 48.5, 39.5, 'Hold the square on the hit, take the tighthead upwards, protect the channel-1 ball.', 'If the scrum wheels, follow the wheel, do not detach before the ball is out.'],
-  ['own-scrum-mid', 3, 50, 41, 'Stay bound until 8 picks or 9 clears, then break left-and-forward off the scrum.', 'If 8 picks blind, stay bound one extra beat and become his first cleaner.'],
-  ['own-scrum-mid', 4, 53, 46, 'Track the ball infield at 8-10m depth as the second-wave cleaner.', 'If 3 already trails the ball carrier, take the far shoulder of the ruck instead.'],
-  ['own-scrum-mid', 5, 55, 44, 'Arrive at ruck 2, seal the near post, then set as short-side pod ball-carrier.', 'If the ruck is already secure, peel off and stand as the +1 pillar for 9.'],
+  ['own-scrum-mid', 1, 48.5, 39.5, 'Bind on the hooker, left of the scrum; spine along the tunnel, hips low, chin off the chest.', 'If 3 is the left bind, you are the tighthead today — mirror his job.'],
+  ['own-scrum-mid', 2, 48.5, 39.5, 'Hold the 0.7 m bind tolerance on the hit: the front row does not shuffle for its seat once bound.', 'If the scrum surges, ride it bound — never stand up out of it.'],
+  ['own-scrum-mid', 3, 48.5, 40, 'Stay bound and low until 8 picks or 9 clears; you are the platform, not the option.', 'If the scrum wheels past 45, keep the bind and let the referee reset.'],
+  ['own-scrum-mid', 4, 52.5, 44, 'Break late. Trail the first carry at 6 m depth as the second-wave cleaner; come from behind the ball.', 'If the first ruck is already secure, hold your line and be the next pod.'],
+  ['own-scrum-mid', 5, 55, 44, 'Set as the wide man of the pod one pass off the new ruck, outside the box edge.', 'If the pod is stocked, stand as pillar on the ruck\'s blind edge.'],
+
   // def-scrum-22
-  ['def-scrum-22', 1, 16.5, 41.5, 'Bind low on the loose head against their tighthead; target a dominant hit to kill their exit.', 'If the scrum is under pressure, prioritise stability over the wheel.'],
-  ['def-scrum-22', 2, 16.5, 41.5, 'Hold, then wheel them towards the blindside touch to shorten their options.', 'If already wheeling, keep pressure square rather than over-rotating into a penalty.'],
-  ['def-scrum-22', 3, 17, 44, 'On the ball leaving, detach and become the first inside pillar right of the scrum.', 'If 3 has taken the pillar, take the second post one metre outside him.'],
-  ['def-scrum-22', 4, 20, 47, 'Fold with the ball, stay square, no more than 3m from the ruck edge.', 'If 2 already fills the guard slot, drop to sweeper behind the guard.'],
-  ['def-scrum-22', 5, 22, 50, 'Reset as pillar for phase 2, tackle low, do not chase out of the line.', 'If the ball goes wide, trail infield as the inside-shoulder cover.'],
+  ['def-scrum-22', 1, 16.5, 41.5, 'Bind on the hooker, left side, low; the loosehead lifts the tighthead opposite.', 'Never swap sides mid-scrum — the tunnel decides who binds where.'],
+  ['def-scrum-22', 2, 16.5, 41.5, 'Hold the bind through the drive; stay inside your seat tolerance until the ball is out.', 'If we get a shove on, drive square — do not chase a wheel.'],
+  ['def-scrum-22', 3, 17, 43, 'On the ball out, break behind our own hindmost foot before you go anywhere.', 'If their 8 picks, tackle from the side of the scrum, not the front.'],
+  ['def-scrum-22', 4, 20, 46, 'Fold with the ball at guard depth, three metres off their ruck, entering only through our gate.', 'If the guard is taken, be the next man out — never pass through the pile.'],
+  ['def-scrum-22', 5, 22, 50, 'Reset as the blind pillar for their second phase: on the hindmost-foot line, square.', 'If the ball goes wide, fold inside along the line, never across the ruck.'],
+
   // own-lineout-att-5
-  ['own-lineout-att-5', 1, 95, 12, 'Front lifter at position 2 in the lineout, 5m in from touch.', 'If 3 is already front lifter, become the back lifter of the same pod.'],
-  ['own-lineout-att-5', 2, 95, 12.5, 'Lift, then immediately bind to the jumper as the front of the maul.', 'If the maul is already sealed, join at the back and drive through the hips.'],
-  ['own-lineout-att-5', 3, 96.5, 14, 'Drive at 45 degrees towards the posts, keep the maul square and legal.', 'If the maul is stopped, release and set as the pick-and-go carrier.'],
-  ['own-lineout-att-5', 4, 98, 18, 'Convert to short carrier: one-out pick from 9 at the goal-line, low body height.', 'If 2 has the pick, become his latch and drive him over.'],
-  ['own-lineout-att-5', 5, 98, 22, 'Re-set on the near post of the new ruck for the next goal-line phase.', 'If already two players on the post, fold to the far side to balance the pods.'],
+  ['own-lineout-att-5', 1, 95, 9.5, 'FRONT of the line: front lifter of the front pod, 4 behind you, both hands on his shorts.', 'If the call is tail, hold your slot and be ready to peel.'],
+  ['own-lineout-att-5', 2, 95, 9.5, 'On the hooker\'s release lift 4 — the front pod goes on the throw, not the call.', 'If 3 lifts first, match his timing; two lifters, one lift.'],
+  ['own-lineout-att-5', 3, 95.5, 10.5, 'Land him and bind the front of the maul: low, square to their line.', 'If the ball is ripped early, become the maul\'s front shield.'],
+  ['own-lineout-att-5', 4, 97.5, 12.5, 'Drive at the posts at 45 degrees; legs pumping, never let the maul go sideways.', 'If the maul stalls, be the one-out pick option beside it.'],
+  ['own-lineout-att-5', 5, 98, 16, 'Reset on the near post of the new ruck for the next goal-line pick.', 'If 8 picks, latch on his hip and drive him over.'],
+
   // def-lineout-mid
-  ['def-lineout-mid', 1, 50, 86, 'Stand at the front of the defensive lineout, at the 5m line, ready to lift or block.', 'If 3 is at the front, take the position 2 slot as the counter-lift.'],
-  ['def-lineout-mid', 2, 50, 86, 'Contest front ball or hold the ground to prevent the front peel.', 'If the throw goes long, stay put — do not chase down the lineout.'],
-  ['def-lineout-mid', 3, 48, 84, 'On the ball down, become the first defender off the front, guard the 5m channel.', 'If the guard is filled, become the second man and cover the short side to touch.'],
-  ['def-lineout-mid', 4, 46, 78, 'Fold with the ball infield, stay connected, no gaps larger than 1.5m.', 'If a back-rower is already inside you, hold your channel and let him lead.'],
-  ['def-lineout-mid', 5, 45, 70, 'Set as ruck pillar for their phase 2, low tackle height on their tight carrier.', 'If the ball is kicked, turn and chase infield to the ruck-side sweeper line.'],
+  ['def-lineout-mid', 1, 49, 91, 'FRONT of our defensive line, one metre back, marking their front lifter.', 'If 3 is the front, take second slot and lift 4.'],
+  ['def-lineout-mid', 2, 49, 91, 'Read the hooker\'s grip; hold the front so a front peel has nowhere to go.', 'If the throw goes long, do not chase it — hold the front gap.'],
+  ['def-lineout-mid', 3, 48, 89, 'On the ball down, come round the front — not through the line — to the tackle.', 'If they maul, bind on the front and drive low.'],
+  ['def-lineout-mid', 4, 46, 80, 'Fold infield with the ball at guard depth; enter any ruck through our gate only.', 'If the guards are set, slide one wider.'],
+  ['def-lineout-mid', 5, 45, 72, 'Set as the pillar on the touch side of their phase-two ruck.', 'If they go open, fold along the hindmost-foot line.'],
+
   // att-phase-mid
-  ['att-phase-mid', 1, 53, 44, 'Stand as the left-hand man of the 3-man pod one pass from the ruck.', 'If the pod already has three, drop to the tail of the next pod out.'],
-  ['att-phase-mid', 2, 54, 45, 'Square up, hands ready, take the pass on the gain line at pace.', 'If the ball goes past the pod, follow as inside support runner.'],
-  ['att-phase-mid', 3, 56, 46, 'Carry into the inside shoulder of the last defender in the pod channel.', 'If 4 is carrying, latch on his left hip and drive him past the gain line.'],
-  ['att-phase-mid', 4, 57, 47, 'Present the ball long down the middle, roll away instantly to free the ruck.', 'If cleaned out over, roll to the openside and be ready to be the next pillar.'],
-  ['att-phase-mid', 5, 58, 40, 'Get up and reload into the near pod for phase +1 within 4 seconds.', 'If the pod is full, become the +1 short-side option for the scrum-half.'],
+  ['att-phase-mid', 1, 53, 44, 'Wide man of the pod one pass off the 9 — outside the ruck\'s box edge, never on it.', 'If the pod is stocked, be the +1 behind the hub.'],
+  ['att-phase-mid', 2, 54, 45, 'Square up, hands up, flat: the short carry is yours if 9 goes tight.', 'If the ball goes wide, run the decoy line hard and straight.'],
+  ['att-phase-mid', 3, 56, 46, 'Carry at the inside shoulder of the last pod defender; low, leg drive, no lateral.', 'If 2 carries, latch on his hip and drive him.'],
+  ['att-phase-mid', 4, 57, 47, 'Present long down the middle; roll away; a prop on the ground is a slow ruck.', 'If the jackal is on, get up and clear him — through the gate.'],
+  ['att-phase-mid', 5, 58, 40, 'Reload into the next pod within four seconds, approaching behind our hindmost foot.', 'If the pod is set, be the pillar on the blind edge.'],
+
   // def-line-mid
-  ['def-line-mid', 1, 44, 47, 'Pillar A: guard the ruck, feet on the gain line, one step from the ruck edge.', 'If 3 already at pillar, become post/guard one metre outside him.'],
-  ['def-line-mid', 2, 44, 45, 'Hold, do not bite in; watch the 9 snipe and the short pick.', 'If the 9 goes the other way, fold immediately with the ball to the new ruck.'],
-  ['def-line-mid', 3, 43, 43, 'Tackle low and hard on any tight carrier; chop, do not go for the ball.', 'If a team-mate makes the tackle, be the first over the ball to slow it.'],
-  ['def-line-mid', 4, 43, 40, 'Fold to the new breakdown, always arriving on the inside of the ball.', 'If two forwards fold with you, one stays as the sweeper behind the pillars.'],
-  ['def-line-mid', 5, 43, 38, 'Re-set as pillar for phase 2, communicate the pillar/post/guard count aloud.', 'If short of numbers, hold width and let the back-rower fill the ruck edge.'],
+  ['def-line-mid', 1, 44, 47, 'PILLAR: on the hindmost-foot line, three metres off the ball, outside the box on the near side.', 'If the pillar is taken, be the guard one wider.'],
+  ['def-line-mid', 2, 44, 45, 'Hold — no line speed from the pillar; watch the pick and the 9 snipe.', 'If the ball moves on, fold along the line, never through the ruck.'],
+  ['def-line-mid', 3, 43, 43, 'Chop tackle the tight carrier; low, through the legs, then get up.', 'If a team-mate tackles, get over the ball only through our gate.'],
+  ['def-line-mid', 4, 43, 40, 'Fold to the next breakdown coming from behind it — round the box, in through the mouth.', 'If two are folding, hold the pillar you have.'],
+  ['def-line-mid', 5, 43, 38, 'Reset as pillar for phase two; call the count.', 'If short on the far side, hold width, do not compress.'],
+
   // kickoff-receive
-  ['kickoff-receive', 1, 35, 30, 'Front-line receiver at the 10m line, left of centre, in a lifting pod.', 'If the pod is full, take the pocket 5m behind as the safety catcher.'],
-  ['kickoff-receive', 2, 33, 26, 'Track the flight, call "mine/yours" early; lift the jumper if not catching.', 'If the ball is short, become the first man to the contest and seal.'],
-  ['kickoff-receive', 3, 31, 24, 'Seal the catcher on landing, form the receiving maul, drive one metre.', 'If a ruck forms instead, clean out and stay on your feet.'],
-  ['kickoff-receive', 4, 29, 26, 'Present for the exit: set the platform for 9 to box kick or 10 to clear.', 'If the ball is spun wide, run a tracking line infield at 10m depth.'],
-  ['kickoff-receive', 5, 30, 34, 'Chase the exit kick in the inside chase channel, then re-set the line.', 'If beaten by the counter, funnel infield and become the trailing cover.'],
+  ['kickoff-receive', 1, 35, 30, 'Front-line receiver at the 10 m line, left pod.', 'If the kick goes right, run the arc to be the first cleaner.'],
+  ['kickoff-receive', 2, 33, 26, 'Track the flight; the catcher is the lock, you are his shield.', 'If the ball is short, be the man under it.'],
+  ['kickoff-receive', 3, 31, 24, 'Seal the catcher on landing: bind from behind him, square, low.', 'If the catch is spilled, first hands on it.'],
+  ['kickoff-receive', 4, 29, 26, 'Set the platform for 9: hold the ruck square so the box kick is clean.', 'If the platform is safe, stand as pillar.'],
+  ['kickoff-receive', 5, 30, 34, 'Chase the exit kick in the inside channel, connected.', 'If the chase is stocked, hold the second wave.'],
+
   // kickoff-chase
-  ['kickoff-chase', 1, 49, 36, 'Stand on the halfway line in the second chase wave, left of the kicker.', 'If the contest pod is complete, become the inside-seam chaser.'],
-  ['kickoff-chase', 2, 55, 33, 'Chase in a connected line, 2m behind the front chasers, never offside.', 'If the front chase is beaten, slow down and fill the front-line gap.'],
-  ['kickoff-chase', 3, 60, 32, 'Arrive at the contest as the seal/cleaner if we win it, tackler if not.', 'If two players are already at the contest, hold as the first pillar.'],
-  ['kickoff-chase', 4, 58, 36, 'Set the ruck-side pillar for their exit ruck, deny the short-side snipe.', 'If they kick immediately, turn and chase back to the 22.'],
-  ['kickoff-chase', 5, 55, 40, 'Re-set into the defensive line at the ruck edge, low and square.', 'If out of position, run infield behind the line and fill the last gap.'],
+  ['kickoff-chase', 1, 49, 36, 'Halfway line, second chase wave, left of the kicker.', 'If the kick is short, be the contest man.'],
+  ['kickoff-chase', 2, 55, 33, 'Chase in a connected line; do not overrun the first wave.', 'If they catch clean, set the tackle line.'],
+  ['kickoff-chase', 3, 60, 32, 'Arrive at the contest as the seal if we win it — from behind the ball.', 'If they win it, be the pillar on their ruck.'],
+  ['kickoff-chase', 4, 58, 36, 'Set the pillar for their exit ruck, on the hindmost foot.', 'If the ball goes wide, fold along the line.'],
+  ['kickoff-chase', 5, 55, 40, 'Reset into the defensive line at the ruck edge.', 'If they kick, drop to trail the chase.'],
+
   // exit-box-kick
-  ['exit-box-kick', 1, 13, 40, 'Left post of the box-kick ruck, forming the protection L for the 9.', 'If 3 has the post, join the ruck as the extra sealing body.'],
-  ['exit-box-kick', 2, 13, 40, 'Stay square, absorb the pressure, protect the 9\'s kicking pocket.', 'If pressure comes from the blindside, shuffle across and block legally.'],
-  ['exit-box-kick', 3, 15, 43, 'On the kick, detach and get behind the ball fast — do not stay offside.', 'If the kick is charged down, sprint to the ball as the first cover.'],
-  ['exit-box-kick', 4, 20, 45, 'Trail the chase at 10m, filling the inside channel.', 'If a chaser is beaten, become the mid-field brake in front of the counter.'],
-  ['exit-box-kick', 5, 26, 46, 'Re-set into the defensive line just infield of the chase contest.', 'If the ball is returned, funnel infield and defend the inside shoulder.'],
+  ['exit-box-kick', 1, 13, 40, 'Left post of the box-kick ruck: bound, low, protecting the 9.', 'If the post is taken, be the far post.'],
+  ['exit-box-kick', 2, 13, 40, 'Stay square until the ball leaves the 9\'s hands; no early break.', 'If their forwards charge, take the hit and hold.'],
+  ['exit-box-kick', 3, 15, 43, 'On the kick, break behind the ruck and trail the chase.', 'If the kick is charged down, first man on the ball.'],
+  ['exit-box-kick', 4, 20, 45, 'Trail the chase at 10 m; be the second wave at the contest.', 'If they run it back, set the tackle inside.'],
+  ['exit-box-kick', 5, 26, 46, 'Reset into the defensive line infield of the chase corner.', 'If the ball is kicked back, drop to secure the catch.'],
+
   // counter-deep
-  ['counter-deep', 1, 12, 45, 'Run back hard to be an option inside the catcher, 8-10m depth.', 'If 3 is inside the catcher, swing wider and become the second wave.'],
-  ['counter-deep', 2, 15, 50, 'Offer the tight inside pass; keep the counter running away from touch.', 'If the counter goes outside you, track infield as the trailing cleaner.'],
-  ['counter-deep', 3, 20, 55, 'Sprint the arc, first man to the tackle contest to secure the counter ruck.', 'If someone is over the ball already, take the far post and stay on your feet.'],
-  ['counter-deep', 4, 24, 55, 'Clean, then reload into the near pod for the next phase from the 22.', 'If we are still in our 22, be the safe carrier that gets us to the 22 line.'],
-  ['counter-deep', 5, 28, 50, 'Take a one-out carry to earn the metres for a clean exit kick.', 'If 8 or 4 has the carry, latch and drive.'],
+  ['counter-deep', 1, 12, 45, 'Run back hard to be the inside option for the catcher.', 'If a back is inside, offer the tight support line.'],
+  ['counter-deep', 2, 15, 50, 'Offer the tight inside pass; keep the counter alive.', 'If they kick again, drop to the ruck.'],
+  ['counter-deep', 3, 20, 55, 'Sprint the arc to the first counter ruck, through the gate.', 'If it is secure, hold as pillar.'],
+  ['counter-deep', 4, 24, 55, 'Clean the first threat past the ball — from behind, square.', 'If no threat, stay on your feet and set the pod.'],
+  ['counter-deep', 5, 28, 50, 'Take a one-out carry to earn a clean exit.', 'If 9 wants to kick, hold the ruck square.'],
+
   // red-zone-22
-  ['red-zone-22', 1, 80, 52, 'Inside man of the two-man tight pod one pass off the ruck.', 'If the pod is set, become the latch on the ball carrier.'],
-  ['red-zone-22', 2, 81, 53, 'Short, hard carry at the inside shoulder of the post defender.', 'If 2 has the carry, latch left hip and drive low through the tackle.'],
-  ['red-zone-22', 3, 82.5, 54, 'Fight for the extra metre; keep the ball off the deck, present long.', 'If held up, work back through the tackle and place towards our side.'],
-  ['red-zone-22', 4, 83, 52, 'Roll away and reload immediately — red-zone tempo is the whole game.', 'If slow to rise, stay down and out of the way, do not clutter the ruck.'],
-  ['red-zone-22', 5, 84, 48, 'Set on the far post of the new ruck to balance both sides of the pods.', 'If both posts are filled, become the second-phase carrier one pass out.'],
+  ['red-zone-22', 1, 80, 52, 'Inside man of the two-man tight pod one pass off the ruck.', 'If the pod is set, latch.'],
+  ['red-zone-22', 2, 81, 53, 'Short carry at the post defender; low, square, no lateral.', 'If 3 carries, bind and drive him.'],
+  ['red-zone-22', 3, 82.5, 54, 'Fight for the extra metre; keep the ball off the deck.', 'If held up, twist and place back.'],
+  ['red-zone-22', 4, 83, 52, 'Roll away and reload — red-zone tempo is the weapon.', 'If contested, clear the jackal through the gate.'],
+  ['red-zone-22', 5, 84, 48, 'Set on the far post of the new ruck, off the box edge.', 'If manned, be the next carrier.'],
+
   // goal-line-def
-  ['goal-line-def', 1, 4, 47, 'Pillar on the near side of their ruck, feet on our own goal line.', 'If the pillar slot is taken, be the second pillar, shoulder-to-shoulder.'],
-  ['goal-line-def', 2, 3.5, 47, 'No line speed — hold the line, deny the pick-and-go, tackle above the ball.', 'If they go the other side, shuffle, never turn your back on the ball.'],
-  ['goal-line-def', 3, 3, 46, 'Make the double tackle: low man, wrap legs, stop the leg drive dead.', 'If you are the second man, get under the ball and hold him up.'],
-  ['goal-line-def', 4, 3, 45, 'Compete for the held-up ball or the jackal only when clearly on your feet.', 'If 7 is already jackaling, seal in front of him and let him work.'],
-  ['goal-line-def', 5, 3.5, 44, 'Re-set on the line before the next phase, count pillars aloud, no dog-legs.', 'If numbers are short on the far side, sprint across behind the line.'],
+  ['goal-line-def', 1, 4, 47, 'Pillar on the near side of their ruck, on our line.', 'If the pillar is taken, be the guard.'],
+  ['goal-line-def', 2, 3.5, 47, 'No line speed — hold and hit.', 'If they go wide, shuffle, never cross.'],
+  ['goal-line-def', 3, 3, 46, 'Double tackle: the low man.', 'If second in, get under the ball.'],
+  ['goal-line-def', 4, 3, 45, 'Compete only on your feet and clearly through the gate.', 'If 7 has the jackal, seal in front of him.'],
+  ['goal-line-def', 5, 3.5, 44, 'Reset on the line before the next phase.', 'If they spread, spread with them.'],
+
   // att-maul
-  ['att-maul', 1, 92, 17, 'Front-left of the maul, bound on the ball-carrying pod, hips low.', 'If the front is full, bind at the second row of the maul and drive.'],
-  ['att-maul', 2, 93, 18, 'Drive with short, choppy steps; keep the maul moving and legal.', 'If the maul swings, stay bound and reangle towards the posts.'],
-  ['att-maul', 3, 94.5, 20, 'Transfer the ball back through the pod, keep the front square.', 'If the maul stalls, be the first to break and pick from the base.'],
-  ['att-maul', 4, 96, 22, 'On the drive over, follow the ball, then seal any counter-ruck attempt.', 'If a try is scored, retreat immediately for the restart position.'],
-  ['att-maul', 5, 95, 26, 'If halted, detach and set as the near post for the pick-and-go phase.', 'If 3 is on the near post, take the wide side of the maul remnant.'],
+  ['att-maul', 1, 92, 17, 'Front-left of the maul, low, bound.', 'If the front is set, bind on the side.'],
+  ['att-maul', 2, 93, 18, 'Drive with short steps; keep it square.', 'If it wheels, straighten it.'],
+  ['att-maul', 3, 94.5, 20, 'Transfer the ball back through the pod.', 'If the ball is at the back, drive harder.'],
+  ['att-maul', 4, 96, 22, 'On the drive over, keep binding.', 'If stopped, be the one-out pick.'],
+  ['att-maul', 5, 95, 26, 'If halted, peel as the short carry option.', 'If it goes, stay bound.'],
+
   // turnover-att
-  ['turnover-att', 1, 33, 44, 'On the steal, become the immediate cleaner/protector of the new possession.', 'If the ball is already secure, sprint infield to be the first carrier option.'],
-  ['turnover-att', 2, 35, 47, 'Get depth quickly — do not stand flat and clog the transition space.', 'If a back is taking the ball, run a hard decoy line to hold their defender.'],
-  ['turnover-att', 3, 39, 50, 'Trail the break at 10m, on the inside of the ball carrier.', 'If two forwards trail, one takes the outside shoulder instead.'],
-  ['turnover-att', 4, 44, 52, 'Arrive first at the next ruck; secure ball in transition, that is the priority.', 'If the ruck is safe, stand as the first pillar for the next phase.'],
-  ['turnover-att', 5, 48, 48, 'Reload into a two-man pod to keep the tempo going against a broken defence.', 'If the pod is set, drift to the openside as the extra body.'],
+  ['turnover-att', 1, 33, 44, 'On the steal, second body over the ball — from behind it.', 'If secure, get depth as the carry option.'],
+  ['turnover-att', 2, 35, 47, 'Get depth quickly; do not clog the transit.', 'If a back leads, run a decoy line.'],
+  ['turnover-att', 3, 39, 50, 'Trail the break at 10 m.', 'If two trail inside, go outside.'],
+  ['turnover-att', 4, 44, 52, 'Arrive first at the next ruck; secure it, entering behind the ball.', 'If safe, set the pillar.'],
+  ['turnover-att', 5, 48, 48, 'Reload a two-man pod to keep the tempo.', 'If set, be the extra body.'],
+
   // turnover-def
-  ['turnover-def', 1, 60, 47, 'On losing the ball, get onside instantly — get behind the ball line.', 'If already onside, sprint to the inside shoulder of their carrier.'],
-  ['turnover-def', 2, 56, 48, 'Fill the nearest hole in the scramble line; do not chase the ball.', 'If the hole is filled, drop off as the second-wave brake infield.'],
-  ['turnover-def', 3, 50, 48, 'Run a shepherding line, forcing them back inside towards our cover.', 'If they are outside you, keep running the arc and never give up the chase.'],
-  ['turnover-def', 4, 44, 47, 'Make the trailing tackle from behind, or become the pillar at the ruck.', 'If a tackle is made in front of you, be first over the ball.'],
-  ['turnover-def', 5, 40, 46, 'Re-set the pillars for their phase 2, communicate the numbers to the 9.', 'If we are short on the openside, fold with the ball rather than hold.'],
+  ['turnover-def', 1, 60, 47, 'On losing the ball, get behind the ball line first.', 'If onside already, fill the nearest hole.'],
+  ['turnover-def', 2, 56, 48, 'Fill the nearest hole in the scramble line.', 'If filled, second brake.'],
+  ['turnover-def', 3, 50, 48, 'Shepherd, do not chase heels.', 'If they cut back, commit.'],
+  ['turnover-def', 4, 44, 47, 'Trailing tackle from behind or pillar their ruck.', 'If a jackal is on, protect him.'],
+  ['turnover-def', 5, 40, 46, 'Reset the pillars, slow it down legally.', 'If short, fold with the ball.'],
+
   // tap-pen
-  ['tap-pen', 1, 69, 34, 'Stand tight on the mark, at the 9\'s left hip, ready for the immediate carry.', 'If 2 is the tapper, become the latch on his outside hip.'],
-  ['tap-pen', 2, 70.5, 35, 'Take the tap-and-go pass at pace before their line resets 10m back.', 'If they have retreated, hold and set a pod instead of forcing the carry.'],
-  ['tap-pen', 3, 72, 36, 'Carry hard at the retreating defender; win the collision, get the quick ball.', 'If tackled short, present the ball immediately for another quick tap tempo.'],
-  ['tap-pen', 4, 73, 36, 'Roll away and rise fast; tempo is the entire value of the quick tap.', 'If the ruck is under threat, stay and seal instead.'],
-  ['tap-pen', 5, 74, 33, 'Set the near pod for phase 2 on the short side.', 'If the short side is manned, fold openside as the second pod tail.'],
+  ['tap-pen', 1, 69, 34, 'Tight on the mark as the first pod.', 'If 8 is the tap carrier, latch.'],
+  ['tap-pen', 2, 70.5, 35, 'Take the tap-and-go pass at pace.', 'If they are set, hold the pod.'],
+  ['tap-pen', 3, 72, 36, 'Carry hard at the retreating defender.', 'If tackled, present fast.'],
+  ['tap-pen', 4, 73, 36, 'Roll away and rise fast; tempo is the value.', 'If contested, clear the jackal from behind.'],
+  ['tap-pen', 5, 74, 33, 'Set the near pod for phase two on the short side.', 'If set, be the pillar.'],
+
   // pen-goal
-  ['pen-goal', 1, 72, 44, 'Stand behind the kicker on the left, quiet, out of his eyeline.', 'If crowded, move 5m infield to keep the kicker\'s run-up clear.'],
-  ['pen-goal', 2, 72, 44, 'Watch the strike; be ready to advance the moment the ball is kicked.', 'If the kick looks short, start moving to be first to a charge-down bounce.'],
-  ['pen-goal', 3, 60, 45, 'On the kick, retreat towards halfway to set the restart-receive line.', 'If we miss and they run it, stop and defend the counter first.'],
-  ['pen-goal', 4, 52, 42, 'Take up the 10m-line kick-off receive slot in the front lifting pod.', 'If the pod is full, take the safety pocket behind the pod.'],
-  ['pen-goal', 5, 45, 40, 'Set feet, eyes up, ready to lift or seal on the restart.', 'If a back is under the ball, protect him and form the maul.'],
+  ['pen-goal', 1, 72, 44, 'Behind the kicker on the left.', 'If the kick is quick, hold.'],
+  ['pen-goal', 2, 72, 44, 'Watch the strike; ready to advance.', 'If short, chase.'],
+  ['pen-goal', 3, 60, 45, 'On the kick, jog back to the restart shape.', 'If it misses, be the drop-out chaser.'],
+  ['pen-goal', 4, 52, 42, 'Take the 10 m-line receive slot as the front lifter.', 'If manned, second wave.'],
+  ['pen-goal', 5, 45, 40, 'Set feet; be the shield for the catcher.', 'If they kick short, seal.'],
+
   // drop-out-22
-  ['drop-out-22', 1, 21, 42, 'Line up on the 22 to the left of the kicker in the chase wave.', 'If the front chase is loaded, take the second wave inside channel.'],
-  ['drop-out-22', 2, 26, 40, 'Chase in a straight line, connected with your neighbours, stay onside.', 'If the kick is long, slow to a jog and set the defensive line instead.'],
-  ['drop-out-22', 3, 32, 38, 'Contest or tackle the catcher immediately; deny the counter-attack.', 'If two chasers are already there, become the first-arriving pillar.'],
-  ['drop-out-22', 4, 30, 42, 'Fold into the ruck-side pillar as they set up their attack.', 'If they kick back, turn and become the escort for our catcher.'],
-  ['drop-out-22', 5, 28, 45, 'Re-set line, tight channels, expect their forwards to carry at us.', 'If they attack wide, fold with the ball and hold the inside shoulder.'],
+  ['drop-out-22', 1, 21, 42, 'On the 22 left of the kicker, chase wave.', 'If the kick is long, second wave.'],
+  ['drop-out-22', 2, 26, 40, 'Chase straight; connected.', 'If they catch clean, set the tackle.'],
+  ['drop-out-22', 3, 32, 38, 'Contest or tackle the catcher immediately.', 'If they run, set the line.'],
+  ['drop-out-22', 4, 30, 42, 'Fold into the ruck-side pillar as they attack — through our gate.', 'If the pillar is set, guard.'],
+  ['drop-out-22', 5, 28, 45, 'Reset the line.', 'If they kick back, drop.'],
+
   // wide-edge
-  ['wide-edge', 1, 57, 72, 'Fold to the openside as the last forward, filling the 10-15m channel.', 'If the channel is filled, stay as the short-side seal on the previous ruck.'],
-  ['wide-edge', 2, 58, 76, 'Run the trailing support line 5m inside and behind the ball.', 'If a back is already the inside option, become the cleaner target instead.'],
-  ['wide-edge', 3, 60, 80, 'Arrive at the wide breakdown first, secure the ball, do not over-commit.', 'If the ball is safe, stand up as the pillar on the touchline side.'],
-  ['wide-edge', 4, 61, 78, 'Guard the short side after the wide ruck — most tries come from the reload.', 'If 3 is on the short side, fold back openside and become the pod tail.'],
-  ['wide-edge', 5, 62, 70, 'Reload infield towards the middle pod so the field is balanced 1-3-3-1.', 'If the middle pod is set, hold as a 4th forward for the far edge.'],
+  ['wide-edge', 1, 57, 72, 'Fold to the openside as the last forward.', 'If the fold is stocked, hold the middle pod.'],
+  ['wide-edge', 2, 58, 76, 'Trailing support line 5 m inside and behind the ball.', 'If the ball comes back, pillar.'],
+  ['wide-edge', 3, 60, 80, 'Arrive at the wide ruck — behind the ball, in through the gate, clear the first threat.', 'If secure, stay on your feet.'],
+  ['wide-edge', 4, 61, 78, 'Guard the short side after the wide ruck.', 'If 6 has it, hold the far post.'],
+  ['wide-edge', 5, 62, 70, 'Reload infield to the middle pod.', 'If set, be the +1.'],
+
   // broken-field-def
-  ['broken-field-def', 1, 42, 62, 'Turn and run the shepherding arc, aiming for a point in front of their carrier.', 'If a faster team-mate is on that arc, take the inside line behind him.'],
-  ['broken-field-def', 2, 38, 58, 'Never chase directly behind — cut the angle to the touchline side.', 'If they cut back inside, brake and hold the inside channel.'],
-  ['broken-field-def', 3, 33, 55, 'Force them towards the touchline and our covering back three.', 'If the winger has him covered, stop and cover the inside support runner.'],
-  ['broken-field-def', 4, 30, 52, 'Tackle the support runner or fill the pillar at the resulting ruck.', 'If the pillar is filled, be the jackal-protector shield in front of 7.'],
-  ['broken-field-def', 5, 28, 48, 'Re-set as pillar and call the reorganised defensive numbers aloud.', 'If we are outnumbered wide, drift and never let the line dog-leg.'],
+  ['broken-field-def', 1, 42, 62, 'Turn and run the shepherding arc.', 'If a back has the arc, trail.'],
+  ['broken-field-def', 2, 38, 58, 'Never chase directly behind — cut the angle.', 'If they pass, take the support runner.'],
+  ['broken-field-def', 3, 33, 55, 'Force them to the touchline and our back three.', 'If they cut inside, commit.'],
+  ['broken-field-def', 4, 30, 52, 'Tackle the support runner or fill the pillar at the ruck.', 'If both taken, sweep.'],
+  ['broken-field-def', 5, 28, 48, 'Reset as pillar; call the reorganised numbers.', 'If short, hold width.'],
 ];
 
 export default expand(1, t);

@@ -66,6 +66,12 @@ import {
   RUCK_GATE_PROFILE,
 } from './engine/gates';
 import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/behaviour';
+import {
+  evaluateForwardTree, routeThroughGate, plantedUrgency, isForwardShirt,
+  scrumBindProfile, frontRowStability,
+  LINEOUT_LINE_THROWING, LINEOUT_LINE_DEFENDING, lineoutRole, ROUTE_FIELD_HALF_M,
+  type PackContext, type PackMark,
+} from './engine/forwardPack';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import {
@@ -150,6 +156,9 @@ export interface ScrumState {
   yaw: number; netDrive: number; collapseRisk: number;
   strikeClock: number; wheelDir: number; resets: number;
   ready: number; cadence: string;
+  /** FORWARD PACK — 0..1, how bound and how low the two front rows are this
+   *  frame (engine/forwardPack.ts). Written by placeBound, read by upScrum. */
+  frontRowStability?: number;
 }
 
 export interface LineoutState {
@@ -841,6 +850,17 @@ export class Director {
   /** engine time the current ruck's gate window opened, for the settle grace. */
   private ruckGateOpenedAt = 0;
   sideEntryStats = { observed: { A: 0, B: 0 }, whistled: { A: 0, B: 0 } };
+  /**
+   * FORWARD PACK — the steering layer's own ledger, the mirror of the
+   * referee's: how many frames a forward's mark was rewritten to his team's
+   * gate waypoint (`routed`), how many frames a tree node owned a forward's
+   * mark (`treeMarks`), and per-node counts so a probe can prove each branch
+   * of each tree actually fires in a match.
+   */
+  packStats = { routed: { A: 0, B: 0 }, treeMarks: 0, nodes: {} as Record<string, number> };
+  /** the ruck geometry computed by `enforceRuckEntryGates` this frame, for think() */
+  private ruckGeoThisFrame: ReturnType<typeof ruckGateGeometry> = null;
+  private ruckGeoDrawnAt = -1;
   /* SPEC_13: the Law 11 ledger. `passLawSamples` is every release's relative
    * velocity, kept so the audit can grade the distribution and not just the
    * count — a mean of zero with a tail of six is still a broken game. */
@@ -2662,6 +2682,7 @@ export class Director {
   enforceRuckEntryGates(): boolean {
     const bd = this.bd;
     const live = this.phase === 'BREAKDOWN' && !!bd && ruckGateWindow(bd!);
+    this.ruckGeoThisFrame = null;
     if (!live || !bd) {
       if (this.ruckGateLedger.active()) this.ruckGateLedger.end();
       this.ruckGateBd = null;
@@ -2679,6 +2700,10 @@ export class Director {
     const cluster = ruckClusterOf(bd, this.live);
     const geo = ruckGateGeometry(cluster);
     if (!geo) { this.ruckGateLedger.end(); return false; }
+    /* FORWARD PACK — the same geometry, handed to think() this frame so the
+     * steering routes every free forward against the gate the referee is
+     * actually judging, not a second copy of it. */
+    this.ruckGeoThisFrame = geo;
     /* Exemptions — and each is the law, not mercy: the roster IS the gate,
      * the controlled scrum-half at the base may come from any side (15.12),
      * and a man on the floor cannot choose his entry vector. */
@@ -3123,6 +3148,10 @@ export class Director {
       const set = ['CROUCH', 'BIND', 'SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE', 'OUT'].includes(s.stage);
       const yawR = (s.yaw * Math.PI) / 180;
       const cosY = Math.cos(yawR), sinY = Math.sin(yawR);
+      /* FORWARD PACK — the front row's low centre-of-mass stabilisation is
+       * measured here from the bound offsets and priced into the collapse
+       * risk by upScrum (`s.frontRowStability`). */
+      const frontRowOffsets: number[] = [];
       /* T-16/NO-TELEPORT. The packs used to be pinned to their slots from the
        * first SCRUM frame — sixteen men arriving instantly from wherever the
        * last phase left them, up to 80 m away in one frame. The ASSEMBLE stage
@@ -3137,7 +3166,13 @@ export class Director {
         const wx = ax.x + dx * cosY - dz * sinY;
         const wz = ax.z + dx * sinY + dz * cosY;
         const off = Math.hypot(wx - p.x, wz - p.z);
-        if (!set || off > 1.15) {
+        /* FORWARD PACK — RIGID BINDING BY ROW. The front row is pinned
+         * tightest (0.7 m): three men whose spines ARE the tunnel cannot
+         * wander half a body-width and still be a scrum. The engine room
+         * binds inside a metre, the eight keeps the old 1.15 m latitude at
+         * the base. The settle itself stays bounded (D-2). */
+        const bind = scrumBindProfile(slot.row, slot.num);
+        if (!set || off > bind.bindTolerance) {
           p.tx = wx; p.tz = wz;
           p.urgency = set ? 0.85 : 1;
           p.job = 'GET TO YOUR SCRUM SLOT';
@@ -3147,6 +3182,7 @@ export class Director {
            * biggest potential snap of the three set pieces. */
           if (this.settleToward(p, wx, wz, dt, 'bound')) { p.vx = 0; p.vz = 0; }
           p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+          if (slot.row === 1) frontRowOffsets.push(off);
         }
         /* PART 3 — SCRUM ORIENTATION IS THE LAW, NOT A PREFERENCE.
          * A pack binds head-on down the engagement axis, which runs ALONG
@@ -3160,11 +3196,12 @@ export class Director {
           if (s.stage === 'DRIVE' || s.stage === 'BASE' || s.stage === 'STRIKE') clip(p, 'scrumDrive');
           else if (s.stage === 'ENGAGE') clip(p, 'scrumCrouch');
           else clip(p, 'scrumBind');
-          p.job = slot.row === 1 ? 'FRONT ROW — BIND AND DRIVE THROUGH THE SHOULDERS'
-            : slot.row === 2 ? 'SECOND ROW — PUSH ON THE HOOKER'
-              : 'BACK ROW — CONTROL THE BALL AT THE BASE';
+          p.job = bind.job;
         }
       }
+      /* the low-COM condition: the pack is in or past its crouch */
+      const crouched = ['CROUCH', 'BIND', 'SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE'].includes(s.stage);
+      s.frontRowStability = frontRowStability(frontRowOffsets, crouched);
       for (const n of s.nine) {
         const p = this.L(n.team, 9);
         const dx = n.x - ax.x, dz = n.z - ax.z + s.netDrive;
@@ -3400,7 +3437,18 @@ export class Director {
         const baseX = clamp(s.contactX + (s.contactX > 0 ? -1.8 : 1.8), -32, 32);
         const baseZ = s.contactZ - fwdA * 1.4;
         const off = Math.hypot(baseX - dist9.x, baseZ - dist9.z);
-        if (off > 0.45) {
+        /* FORWARD PACK — the base is behind the hindmost foot, but the man
+         * sent there (the nine, or the 8 / 2 / 7 standing in for a nine who
+         * is in the pile) may be on the wrong side of it. The same gate rule
+         * the free forwards obey: round the box, in through the mouth. */
+        const gated = routeThroughGate(dist9.team, { x: dist9.x, z: dist9.z }, { x: baseX, z: baseZ },
+          this.ruckGeoThisFrame, this.ruckGateLedger.hasPassed(dist9.team, dist9.num), 0, { x: dist9.vx, z: dist9.vz });
+        if (gated.routed) {
+          this.packStats.routed[dist9.team]++;
+          dist9.tx = clamp(gated.mark.x, -ROUTE_FIELD_HALF_M, ROUTE_FIELD_HALF_M); dist9.tz = clamp(gated.mark.z, -59, 59); dist9.urgency = 1;
+          dist9.job = 'GET TO THE BASE — THROUGH THE GATE';
+          steer(dist9, dt, true);
+        } else if (off > 0.45) {
           dist9.tx = baseX; dist9.tz = baseZ; dist9.urgency = 1;
           dist9.job = 'GET TO THE BASE — YOUR BALL';
           steer(dist9, dt, true);
@@ -3913,6 +3961,99 @@ export class Director {
     return { x: x >= 0 ? POST_CORRIDOR : -POST_CORRIDOR, z: mz };
   }
 
+  /* ==================== FORWARD PACK — THE POSITIONAL TREES ====================
+   *
+   * The last formation writer for shirts 1–8 before the steer, and the ONLY
+   * writer that knows the ruck gate exists. Every other mark source — the
+   * dataset, the shape slot, the CPU planner, the hip roles, the channel map
+   * — writes as before; this runs over the result and, when the man's tree
+   * has an opinion for the live situation, replaces the mark; then, whatever
+   * the mark, routes it through his team's entry gate if the straight run
+   * would cross the contest box (`engine/forwardPack.ts`).
+   *
+   * The write goes through `writeThinkPlayer` under its own label so the
+   * SPEC_02 gate audit sees one more named writer, not an anonymous poke;
+   * the steer that follows is still the single integration writer (T-02).
+   *
+   * Returns true when the man's mark was owned by a tree node this frame —
+   * telemetry only; the caller steers either way.
+   */
+  private applyForwardPack(
+    gate: ForwardAttackGateReporter | undefined, p: Live, busy: boolean,
+  ): boolean {
+    if (p.carrier || p.bound || p.down) return false;
+    if (this.isHuman(p.team) && p === this.ctrlPlayer) return false;
+    /* the TREES are the forwards'; the GATE RULE below is everyone's — the
+     * referee's ledger judges a wing arriving from the side exactly as it
+     * judges a prop, so the wing is routed exactly as the prop is */
+    const forward = isForwardShirt(p.num);
+    const bd = this.bd;
+    const inRuck = !!bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY');
+    const phase: PackContext['phase'] = inRuck ? 'BREAKDOWN' : this.phase === 'OPEN_PLAY' ? 'OPEN_PLAY' : 'OPEN_PLAY';
+    if (!inRuck && this.phase !== 'OPEN_PLAY') return false;
+    const attacking: 'A' | 'B' = inRuck ? bd!.attacking : (this.op?.attacking ?? this.possession);
+    const dir: 1 | -1 = attacking === 'A' ? 1 : -1;
+    const f = this.focusPoint();
+    /* the gate geometry: the referee's own while his window is open, else
+     * drawn here from the same cluster so the routing starts the frame the
+     * bodies go to ground, not the frame the whistle becomes possible */
+    if (inRuck && !this.ruckGeoThisFrame && this.ruckGeoDrawnAt !== this.t) {
+      this.ruckGeoDrawnAt = this.t;
+      this.ruckGeoThisFrame = ruckGateGeometry(ruckClusterOf(bd!, this.live));
+    }
+    const geo = inRuck ? this.ruckGeoThisFrame : null;
+    const inRoster = inRuck && (this.ruckGateRosterCache?.has(`${p.team}:${p.num}`) ?? false);
+    const loose = this.bc.state === 'LOOSE' && this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
+    const op = this.op;
+    const carrier = !inRuck && op ? (() => { const c = this.L(op.attacking, op.carrierNum); return { num: c.num, x: c.x, z: c.z }; })() : null;
+    const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
+    const ctx: PackContext = {
+      phase, team: p.team, attacking, dir, sigma: p.team === 'A' ? 1 : -1,
+      p: { x: p.x, z: p.z }, ball: f, mark: { x: p.tx, z: p.tz },
+      geo, stage: inRuck ? bd!.stage : '', ruckFormed: inRuck ? bd!.ruckFormed : false,
+      inRoster, loose, carrier, latched: !!op?.latch, busy, toLine,
+    };
+    let owned = false;
+    let m: PackMark | null = forward ? evaluateForwardTree(p.num, ctx) : null;
+    let mark = m ? { x: m.x, z: m.z } : { x: p.tx, z: p.tz };
+    /* THE GATE RULE — over whichever mark won. A man already through, or
+     * already in the corridor, or already resident in the pile is left alone;
+     * the man whose next stride would breach the box from the side is sent to
+     * the gate mouth first. The lateral bias spreads several men across the
+     * band instead of stacking them on one point. */
+    const passed = inRuck && this.ruckGateLedger.hasPassed(p.team, p.num);
+    const bias = ((p.num * 37) % 5 - 2) * 0.22;
+    const routed = inRuck
+      ? routeThroughGate(p.team, ctx.p, mark, geo, passed, bias, { x: p.vx, z: p.vz })
+      : { mark, routed: false as const, leg: 'none' as const };
+    if (routed.routed) {
+      this.packStats.routed[p.team]++;
+      mark = routed.mark;
+    }
+    if (m || routed.routed) {
+      owned = !!m;
+      const urgency = m ? plantedUrgency(m, ctx.p) : Math.max(p.urgency, 0.95);
+      const job = routed.routed
+        ? `${m ? m.job : p.job} — THROUGH THE GATE`
+        : m!.job;
+      const node = m ? m.node : 'gate-only';
+      this.packStats.nodes[node] = (this.packStats.nodes[node] ?? 0) + 1;
+      if (m) this.packStats.treeMarks++;
+      /* a routed waypoint may use the touchline's last metre; a tree mark
+       * keeps the formation's own 33 m clamp */
+      const xLim = routed.routed ? ROUTE_FIELD_HALF_M : 33;
+      const bm = this.boundMark(clamp(mark.x, -xLim, xLim), mark.z);
+      this.writeThinkPlayer(gate, `think:forward-pack:${p.team}${p.num}:${node}`, p,
+        ['tx', 'tz', 'job', 'urgency'] as const, () => {
+          p.tx = clamp(bm.x, -xLim, xLim);
+          p.tz = clamp(bm.z, -59, 59);
+          p.urgency = clamp(urgency, 0, 1);
+          p.job = job;
+        });
+    }
+    return owned;
+  }
+
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
     const s = this.shape();
@@ -4238,6 +4379,7 @@ export class Director {
          * exceptions above and below. */
         if (this.op && this.op.podHold > 0
             && Math.hypot(p.tx - f.x, p.tz - f.z) <= POD_HOLD_ANCHOR_METRES) {
+          this.applyForwardPack(gate, p, false);
           steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
@@ -4261,6 +4403,7 @@ export class Director {
               p.urgency = this.op?.lineBreak ? 1 : 0.92;
               p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
             });
+          this.applyForwardPack(gate, p, false);
           steer(p, dt, true, gate, `think:hip-support-steer:${p.team}${p.num}`);
           continue;
         }
@@ -4341,6 +4484,7 @@ export class Director {
                 p.job = dsm.job;
                 p.urgency = 0.9;
               });
+            this.applyForwardPack(gate, p, false);
             steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
@@ -4641,6 +4785,11 @@ export class Director {
         }
       }
 
+      /* FORWARD PACK — the positional trees for 1–8 and the gate rule, the
+       * last formation writer before the steer. A converger or a cover
+       * chaser is busy: his tree is consulted (the gate rule still binds him)
+       * but the open-play nodes that would pull him off the tackle stand down. */
+      this.applyForwardPack(gate, p, convergers.has(p.num) || coverChase.has(p.num));
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
@@ -5560,8 +5709,14 @@ export class Director {
 
   /* ============================ LINEOUT ============================ */
 
-  static readonly LINE_A = [4, 5, 6, 7, 8, 3, 1];
-  static readonly LINE_B = [4, 5, 6, 7, 8, 3];
+  /* FORWARD PACK — the lineout is thrown to the LOCKS. The line is three
+   * pods front to tail (1·4·3 / 5·6 / 8·7): the locks are the front and
+   * middle jumpers with a prop in front and behind each of them as lifters,
+   * the eight is the tail jumper. `LINE_B` is the same shape minus the 7,
+   * who stays out of the line as the roving tackler. Authored once in
+   * engine/forwardPack.ts. */
+  static readonly LINE_A = LINEOUT_LINE_THROWING;
+  static readonly LINE_B = LINEOUT_LINE_DEFENDING;
   static readonly LO_CALLS = [
     { kind: 'FRONT', label: 'FRONT BALL', targetX: -1.8, jumpers: 4 },
     { kind: 'MIDDLE', label: 'MIDDLE + DRIVE', targetX: -3.4, jumpers: 5 },
@@ -5583,7 +5738,9 @@ export class Director {
         players.push({
           id: id++, num: nums[i], team: t,
           x: side * (30 - i * 0.62), z: zn + (t === 'A' ? -0.7 : 0.7),
-          handY: 0, role: i < 3 ? 'JUMPER' : i < 5 ? 'LIFTER' : 'SCRUMMY',
+          /* FORWARD PACK — role by SHIRT, not by position in the line: the
+           * locks (and the eight) jump, the props and flankers lift. */
+          handY: 0, role: lineoutRole(nums[i]),
         });
       }
     }

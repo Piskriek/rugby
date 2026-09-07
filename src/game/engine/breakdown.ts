@@ -18,6 +18,9 @@ import {
 import { stepHands, publishHands, windowSlow, defHold, stripTimeFor } from './hands';
 import { throughGate, LATCH_FIELD_X, LATCH_FIELD_Z } from './latch';
 import type { LatchVec, LatchAxes, LatchSystem } from './latch';
+import { ruckGateGeometry, ruckClusterOf } from './gates';
+import { FLANK_CLEARANCE_M } from './forwardPack';
+import type { Live } from '../intelligence';
 
 /* PART 2 — MULTI-STAGE TACKLE PHYSICS.
  *
@@ -1027,11 +1030,64 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * the line rides the ball body the lattice is solving. */
     const defLine = ballZ0 + fwd * 3.0;
     const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
+    /* FORWARD PACK — THE WALK-BACK GOES ROUND THE RUCK. A man in front of
+     * his line who is laterally level with the pile used to be walked back
+     * THROUGH it — eight metres a second through the contest box from the
+     * wrong side, which is the side entry the gate ledger then logged with
+     * his formation job on it. The retreat is still eight metres a second
+     * and still a formation correction, but a step that would carry him into
+     * the box is spent sideways instead, to the nearer in-field flank, and
+     * the back-pedal resumes once he is clear. */
+    const geo = ruckGateGeometry(ruckClusterOf(s, d.live));
+    const box = geo ? geo.volume : null;
+    /* the band is the box plus most of the flank clearance the steering
+     * layer uses: a man retreating along the box's very edge is a man the
+     * pile's next drift swallows (the cluster is the LIVE roster, crew still
+     * arriving included, so the box breathes by metres in a second) */
+    const inBand = (p: Live) => !!box && p.x > box.minX - FLANK_CLEARANCE_M * 0.75 && p.x < box.maxX + FLANK_CLEARANCE_M * 0.75;
+    /* the box lies between him and his line: he is outside it on the far
+     * side, so every step back is a step toward its edge — sidestep now,
+     * not at the edge (the edge itself moves as the pile drifts) */
+    const blockedAtk = (p: Live) => !!box && (p.z - (fwd > 0 ? box.maxZ : box.minZ)) * fwd > -0.2;
+    const blockedDef = (p: Live) => !!box && ((fwd > 0 ? box.minZ : box.maxZ) - p.z) * fwd > -0.2;
+    /* beside the pile: level with it along z. A man here is not walked back
+     * along the box's edge (the edge moves); he is stepped out to the flank
+     * first, then walked back. A man the box has already caught is left to
+     * the router's exit leg. */
+    const beside = (p: Live) => !!box && p.z >= box.minZ - 0.5 && p.z <= box.maxZ + 0.5
+      && !(p.x >= box.minX && p.x <= box.maxX);
+    const inside = (p: Live) => !!box && p.z >= box.minZ && p.z <= box.maxZ && p.x >= box.minX && p.x <= box.maxX;
+    const sidestep = (p: Live) => {
+      const b = box!;
+      const cx = (b.minX + b.maxX) / 2;
+      const right = b.maxX + FLANK_CLEARANCE_M, left = b.minX - FLANK_CLEARANCE_M;
+      const side = left < -34 ? 1 : right > 34 ? -1 : p.x >= cx ? 1 : -1;
+      const target = side > 0 ? right : left;
+      /* never a step that crosses the box: a man on the far side of a box
+       * pinned against touch holds this frame and lets the router plan */
+      if ((target - p.x) * (target - cx) < 0) return;
+      p.x += Math.sign(target - p.x) * Math.min(RETREAT, Math.abs(target - p.x));
+    };
     for (const p of d.live) {
       if (p.sinbin > 0 || p.down) continue;
+      if (s.players.some((q) => q.team === p.team && q.num === p.num)) {
+        /* the roster is the pile: the old rule, untouched */
+        if (p.team === s.attacking) {
+          if ((p.z - atkLine) * fwd > 0) p.z -= Math.min(RETREAT, Math.abs(p.z - (atkLine - fwd * 0.3))) * fwd;
+        } else if ((defLine - p.z) * fwd > 0) p.z += Math.min(RETREAT, Math.abs((defLine + fwd * 0.3) - p.z)) * fwd;
+        continue;
+      }
       if (p.team === s.attacking) {
-        if ((p.z - atkLine) * fwd > 0) p.z -= Math.min(RETREAT, Math.abs(p.z - (atkLine - fwd * 0.3))) * fwd;
-      } else if ((defLine - p.z) * fwd > 0) p.z += Math.min(RETREAT, Math.abs((defLine + fwd * 0.3) - p.z)) * fwd;
+        if ((p.z - atkLine) * fwd > 0) {
+          if (inside(p)) continue;
+          if (inBand(p) && (beside(p) || blockedAtk(p))) sidestep(p);
+          else p.z -= Math.min(RETREAT, Math.abs(p.z - (atkLine - fwd * 0.3))) * fwd;
+        }
+      } else if ((defLine - p.z) * fwd > 0) {
+        if (inside(p)) continue;
+        if (inBand(p) && (beside(p) || blockedDef(p))) sidestep(p);
+        else p.z += Math.min(RETREAT, Math.abs((defLine + fwd * 0.3) - p.z)) * fwd;
+      }
     }
   }
 

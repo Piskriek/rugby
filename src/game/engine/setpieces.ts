@@ -10,6 +10,8 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
 import { clamp } from './clamp';
 import { scrumBlock } from '../behaviour/setpiece-overrides';
+import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor } from './forwardPack';
+import { FIELD } from '../../render/retro';
 import { approach } from './approach';
 import {
   MAUL_REGATE_WINDOW_COUNT,
@@ -17,6 +19,22 @@ import {
   resolveMaulRegate,
 } from '../maulRegate';
 import type { MaulExitState } from '../maulRegate';
+
+/**
+ * FORWARD PACK — the two lifters bound to a jumper: the men immediately in
+ * front of and behind him in his team's line (ordered by position along the
+ * line), each of whom must be a LIFTER. Pure over the lineout roster.
+ */
+function podLifters<T extends { num: number; team: 'A' | 'B'; x: number; role: string }>(
+  players: T[], team: 'A' | 'B', jumperNum: number,
+): T[] {
+  const line = players.filter((q) => q.team === team && (q.role === 'JUMPER' || q.role === 'LIFTER'))
+    .sort((a, b) => Math.abs(a.x) - Math.abs(b.x));
+  const idx = line.findIndex((q) => q.num === jumperNum);
+  if (idx < 0) return [];
+  const nums = liftersFor(line.map((q) => q.num), idx);
+  return line.filter((q) => nums.includes(q.num));
+}
 
 /** The calls that exist to be driven — the index set the CPU leans on in
  * the attacking 22, where a five-metre lineout is a try invitation. */
@@ -121,7 +139,11 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
       const F = (t: 'A' | 'B') => {
         const base = 4600 + s.packs[t].fitness * 26;
         const w = clamp(s.packs[t].waggle, 0, 60);
-        return base * (0.72 + (w / 60) * 0.34);
+        /* FORWARD PACK — the engine room. The locks' power multiplies the
+         * pack's transmitted force: a 4 and 5 who drive through the hips of
+         * their props are worth up to 6% either way. */
+        const eng = engineRoomFactor([d.L(t, 4), d.L(t, 5)].filter((p) => p.sinbin <= 0).map((p) => p.attrs.PWR));
+        return base * (0.72 + (w / 60) * 0.34) * eng;
       };
       s.packs.A.forceTransmitted = F('A');
       s.packs.B.forceTransmitted = F('B');
@@ -130,7 +152,10 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
       const net = (fa - fb) / 5200;
       s.netDrive += net * dt * 0.42;
       s.yaw = approach(s.yaw, clamp(net * 26 * s.wheelDir, -45, 45), 1.1, dt);
-      s.collapseRisk = clamp(0.04 + Math.abs(net) * 0.42, 0, 1);
+      /* FORWARD PACK — a bound, low front row is a stable scrum. The raw
+       * risk is the shove imbalance; the front rows' binding and centre of
+       * mass (placeBound writes it) take up to 40% of it away. */
+      s.collapseRisk = stabilisedCollapseRisk(clamp(0.04 + Math.abs(net) * 0.42, 0, 1), s.frontRowStability ?? 0);
       s.ball.z = clamp(s.ball.z - (feed === 'A' ? 1 : -1) * dt * 1.6 + net * dt * 0.8, -1.6, 1.6);
 
       if (Math.abs(s.yaw) > 45) {
@@ -159,6 +184,22 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
           d.recordSetPieceOutcome('scrums', feed);
         }
         d.scrim = undefined;
+        /* FORWARD PACK — NUMBER 8 AT THE BASE. On our own feed, close to
+         * their line (or on a deterministic one-in-five call elsewhere), the
+         * eight picks from the base and goes himself instead of the nine
+         * clearing it: the base slot is his own (row 3, ~1.94 m back), so
+         * the hand-off is a pick-up where he already stands. A won-against-
+         * the-head ball always goes to the nine — the eight is not there. */
+        const eight = d.L(winner, 8);
+        const toLine = Math.max(0, winner === 'A' ? FIELD.tryZFar - ax.z : ax.z - FIELD.tryZ);
+        const pick = !against && eight.sinbin <= 0
+          && eightPicksFromScrum(winner === feed, toLine, ax.x, ax.z)
+          && (d.options.firstReceiver ?? 0) !== 1;
+        if (pick) {
+          d.say('EIGHT PICKS FROM THE BASE');
+          d.startOpen(winner, ax.x, ax.z + (winner === 'A' ? -1.94 : 1.94), 8, 1, 0, 0.55);
+          break;
+        }
         /* PLAYTEST 4: the mark is the nine's own base slot (2.95) — he has
          * stood there through the drive, so the hand-off reads as a pick-up
          * at the back of the scrum, not a teleport to the tunnel. */
@@ -289,8 +330,11 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
         js.sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x));
         const q = js[0];
         const live = d.L(team, q.num);
-        const lifters = s.players.filter((w) => w.team === team && w.role === 'LIFTER'
-          && d.L(team, w.num).sinbin <= 0);
+        /* FORWARD PACK — THE LIFT TRIGGER. Only the two men bound either
+         * side of the jumper at the ball lift him (the front and back lifter
+         * of his pod); the rest of the line holds and is ready to peel. */
+        const lifters = podLifters(s.players, team, q.num)
+          .filter((w) => d.L(team, w.num).sinbin <= 0);
         const pows = lifters.map((w) => d.L(team, w.num).attrs.PWR);
         const liftQ = pows.length ? pows.reduce((a, b) => a + b, 0) / pows.length / 100 : 0;
         const both = Math.min(1, pows.length / 2);
@@ -341,11 +385,16 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       p.handY = approach(p.handY, target, 6, dt);
     } else if (p.role === 'LIFTER') {
       /* T-06: one shared timeline — the lifters' hands rise with their own
-       * jumper, half a beat behind him, instead of animating alone. */
-      const near = s.players
+       * jumper, half a beat behind him, instead of animating alone.
+       * FORWARD PACK: a lifter goes up only with the jumper he is BOUND TO —
+       * the man immediately beside him in the line; a lifter two pods away
+       * holds his ground. */
+      const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
+      const atBall = contesting ? s.players
         .filter((q) => q.team === p.team && q.role === 'JUMPER')
-        .sort((a, b) => Math.abs(a.x - p.x) - Math.abs(b.x - p.x))[0];
-      if (near) p.handY = approach(p.handY, near.handY * 0.5, 6, dt);
+        .sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x))[0] : undefined;
+      const mine = atBall && podLifters(s.players, p.team, atBall.num).some((w) => w.num === p.num) ? atBall : undefined;
+      p.handY = approach(p.handY, mine ? mine.handY * 0.5 : 0, 6, dt);
     }
   }
 }

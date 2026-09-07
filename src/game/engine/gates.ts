@@ -322,6 +322,19 @@ export class RuckGateLedger {
   }
 
   markPenalised(team: 'A' | 'B') { this.penalised.add(team); }
+
+  /**
+   * FORWARD PACK — has this man stood in his own corridor since the ruck
+   * formed? A pure read of the same row `observe()` writes, so the steering
+   * layer (`engine/forwardPack.ts`) routes a man to the gate against exactly
+   * the memory the whistle will judge him by, and stops detouring him the
+   * frame the referee would stop caring. False when the ledger is idle or
+   * the man has not been seen yet.
+   */
+  hasPassed(team: 'A' | 'B', num: number): boolean {
+    if (this.serial < 0) return false;
+    return this.rows.get(`${team}:${num}`)?.passedGate === true;
+  }
 }
 
 /* ================================ ELIGIBILITY ================================ */
