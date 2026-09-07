@@ -403,6 +403,8 @@ export interface ChaosScrimState {
   allies: Live[];
   rivals: Live[];
   playerNum: number;
+  /** TARCS stiff-arm window for the carrier, measured in Rapier sim seconds. */
+  fendEnd: number | null;
   ballSecured: boolean;
   ballState: 'SECURED' | 'DROP_BALL';
   spawnX: number;
@@ -691,6 +693,10 @@ const CHAOS_DIVE_RANGE = 11;
 const CHAOS_DIVE_SECONDS = 0.62;
 /** Ragdoll latch is released if the pair is dragged apart past this. */
 const CHAOS_LATCH_BREAK = 2.3;
+/** TARCS stiff-arm duration and actuation strength. */
+const CHAOS_FEND_SECONDS = 0.4;
+const CHAOS_FEND_ANGULAR_SPEED = 28;
+const CHAOS_FEND_LINEAR_IMPULSE = 16;
 
 /** A small closed set of fan offsets behind the carrier (A runs toward +z). */
 const CHAOS_ALLY_FAN = [
@@ -1501,7 +1507,7 @@ export class Director {
   private chaosPhysicsSerial = 0;
 
   /** Drive the TARCS world: steer the TABS ragdolls, step, and write back. */
-  private updateChaosPhysics(dt: number, input: Input, c: ChaosScrimState): void {
+  private updateChaosPhysics(dt: number, input: Input, pressed: Set<string>, c: ChaosScrimState): void {
     const phys = c.physics!;
     const player = c.player;
     player.controlled = true;
@@ -1542,6 +1548,65 @@ export class Director {
     };
 
     drive(0, pvx, pvz, 0);
+
+    /* TARCS FEND — this is deliberately applied to the live eight-body TABS
+     * ragdoll, not the separate articulated-ragdoll motor. The arm bodies are
+     * light enough to swing quickly, but the high angular damping makes them
+     * behave like stiff steel rods during the contact window. */
+    const carrierRag = phys.ragdolls[0];
+    const armL = phys.ragdolls[0].bodies[2];
+    const armR = phys.ragdolls[0].bodies[3];
+    const setFendDamping = (damping: number) => {
+      armL.setAngularDamping(damping);
+      armR.setAngularDamping(damping);
+    };
+
+    if (pressed.has('fend')) {
+      /* `fendEnd` belongs to the chaos carrier and uses Rapier time so a slow
+       * render frame cannot lengthen or shorten the physical action. */
+      c.fendEnd = phys.world.simTime + CHAOS_FEND_SECONDS;
+
+      /* A vertical arm rotates into the horizontal travel direction around
+       * the perpendicular axis (v.z, 0, -v.x). Prefer the velocity being
+       * driven this frame, then the solver's last velocity, then the carrier's
+       * facing so a fend from rest still has a deterministic reach. */
+      const fendVx = mag > 0 ? pvx : player.vx;
+      const fendVz = mag > 0 ? pvz : player.vz;
+      const fendSpeed = Math.hypot(fendVx, fendVz);
+      const fendDirX = fendSpeed > 0.15 ? fendVx / fendSpeed : 0;
+      const fendDirZ = fendSpeed > 0.15 ? fendVz / fendSpeed : player.face || 1;
+      const armSwing = {
+        x: fendDirZ * CHAOS_FEND_ANGULAR_SPEED,
+        y: 0,
+        z: -fendDirX * CHAOS_FEND_ANGULAR_SPEED,
+      };
+      setFendDamping(10);
+      armL.setAngvel(armSwing, true);
+      armR.setAngvel(armSwing, true);
+
+      /* Drive through the fend as well as swinging the arms. Rapier resolves
+       * the resulting rigid-arm/NPC contacts natively, so a diving rival is
+       * swatted by the same solver rather than a scripted separation rule. */
+      const fendImpulse = {
+        x: fendDirX * CHAOS_FEND_LINEAR_IMPULSE,
+        y: 0,
+        z: fendDirZ * CHAOS_FEND_LINEAR_IMPULSE,
+      };
+      carrierRag.hips.applyImpulse(fendImpulse, true);
+      carrierRag.chest.applyImpulse(fendImpulse, true);
+    }
+
+    if (c.fendEnd !== null) {
+      if (phys.world.simTime < c.fendEnd) {
+        setFendDamping(10);
+      } else {
+        setFendDamping(0.05);
+        c.fendEnd = null;
+      }
+    } else {
+      /* Keep the normal ragdoll tuning explicit, including after a restart. */
+      setFendDamping(0.05);
+    }
 
     /* SIX FRIENDLY BODIES — fan behind the carrier. */
     for (let i = 0; i < c.allies.length; i++) {
@@ -1604,6 +1669,14 @@ export class Director {
       phys.world.step(CHAOS_FIXED_DT);
       phys.accumulator -= CHAOS_FIXED_DT;
       phys.lastStepMs = performance.now() - t0;
+    }
+
+    /* The fixed-step loop may cross the deadline after the pre-step check. Do
+     * the restore here too so the steel-arm tuning ends on the first frame in
+     * which Rapier time is outside the fend window. */
+    if (c.fendEnd !== null && phys.world.simTime >= c.fendEnd) {
+      setFendDamping(0.05);
+      c.fendEnd = null;
     }
 
     /* Write the solver back into the Live actors the renderer already reads. */
@@ -1678,7 +1751,7 @@ export class Director {
    * renderer's fake-ragdoll layer reads, so a single latch exercises the
    * full TARCS ragdoll visual while the other 13 bodies keep colliding.
    */
-  private updateChaos(dt: number, input: Input) {
+  private updateChaos(dt: number, input: Input, pressed: Set<string>) {
     const c = this.chaos;
     if (!c) return;
     c.t += dt;
@@ -1693,7 +1766,7 @@ export class Director {
     /* Once the TARCS world is live it owns the bodies; the paper-doll
      * steer/separate fallback only covers the WASM boot window. */
     if (c.physicsReady && c.physics) {
-      this.updateChaosPhysics(dt, input, c);
+      this.updateChaosPhysics(dt, input, pressed, c);
       return;
     }
 
@@ -1898,7 +1971,7 @@ export class Director {
      * brain, no set-piece cabinet. It is a dedicated 14-body stress loop
      * that ends by streaming the same actor contracts the match uses. */
     if (this.chaos) {
-      this.updateChaos(dt, input);
+      this.updateChaos(dt, input, pressed);
       this.frameEvents = this.eventBus.splice(0);
       this.updateCamera(dt);
       this.syncActors();
@@ -4549,6 +4622,7 @@ export class Director {
       allies,
       rivals,
       playerNum,
+      fendEnd: null,
       ballSecured: true,
       ballState: 'SECURED',
       spawnX: sx,

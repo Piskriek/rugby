@@ -341,7 +341,8 @@ export class RapierWorld {
   /** True once something has subscribed to impacts, so colliders registered
    *  later are armed too. */
   private impactEventsArmed = false;
-  private simTime = 0;
+  /** Fixed-step simulation time, exposed to gameplay systems for timed physics actions. */
+  simTime = 0;
 
   private constructor(world: RAPIER.World) {
     this.world = world;
