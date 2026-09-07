@@ -85,7 +85,10 @@ import {
   ruckOffsidePlanes,
   type OffsideLine, type StrictnessProfile,
 } from './engine/offside';
-import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
+import {
+  beginPenalty, resolvePenalty, lawCall, card,
+  tryGroundingSpot, goalLineZ, TOUCH_IN_GOAL_X_M, CONVERSION_TEE_MIN_M, CONVERSION_TEE_MAX_M,
+} from './engine/laws';
 import { endHalf, resumeSecondHalf, endMatch } from './engine/clock';
 import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact, teardownBreakdown } from './engine/breakdown';
@@ -214,6 +217,16 @@ export interface KickState {
   landX: number; landZ: number;
   bounces: number; result: string;
   chasers: { num: number; lane: string }[];
+  /** SPEC_07 — the tee mark this kick was launched from. Law 12's ten-metre
+   * rule is measured from here, not from wherever the ball has rolled to. */
+  markX: number; markZ: number;
+  /** SPEC_07 — latched once a RESTART has travelled ten metres into the
+   * receiving half (in flight or on the roll); before that, neither side
+   * may play the ball (Law 12.9). */
+  tenCrossed?: boolean;
+  /** SPEC_07 — goal-post geometry at the plane crossing: the measured
+   * clearances over the crossbar and inside the uprights. */
+  crossing?: { x: number; y: number; z: number; uprightM: number; barM: number };
   /** T-16/NO-TELEPORT. At a restart the thirty walk to their formation slots
    *  under steer(); they are never snapped into place. The kick is not struck
    *  (by the CPU) until the formation has assembled — Law 12's ten metres is
@@ -3013,10 +3026,27 @@ export class Director {
   tryGuardBlocks = 0;
   tryGuardLog: string[] = [];
 
+  /* SPEC_07 — the locked-in touchdown coordinate (x_try, z_try) of the last
+   * try, captured the millisecond the award lands, before the teardown
+   * touches a single entity. The conversion tee is placed on the line
+   * through this spot, and the probe asserts the capture is exact. */
+  trySpot: { x: number; z: number; team: 'A' | 'B' } | null = null;
+
   private noteTryGuardBlock() {
     this.tryGuardBlocks++;
     const line = `${this.clockText} — BLOCKED duplicate TRY trigger (${this.teams[this.tryLock!.team].nation.short} #${this.tryLock!.num})` +
       ` — lock held since ${this.tryLock!.at.toFixed(1)}s, score stays ${this.teams.A.score}-${this.teams.B.score}`;
+    this.tryGuardLog.push(line);
+    if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
+  }
+
+  /** A grounding trigger whose raw spot sat outside the in-goal band (beyond
+   * the reach tolerance or past touch-in-goal): the spot is corrected onto
+   * the lawful bounds and the correction is surfaced in the same
+   * pause-panel log as the guard blocks — a silent coordinate clamp is an
+   * unexplained conversion line, which is worse than the note. */
+  private noteTryGroundingClamp(rawX: number, rawZ: number, x: number, z: number) {
+    const line = `${this.clockText} — TRY spot corrected from (${rawX.toFixed(1)}, ${rawZ.toFixed(1)}) onto the in-goal bounds (${x.toFixed(1)}, ${z.toFixed(1)})`;
     this.tryGuardLog.push(line);
     if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
   }
@@ -6286,6 +6316,7 @@ export class Director {
       aim: 0, landX: x, landZ: z + dir * 30,
       bounces: 0, result: '', chasers: [], form: undefined, formReady: 0,
       fromPenalty: this.penaltyTouchKick,
+      markX: x, markZ: z, tenCrossed: false,
     };
     this.penaltyTouchKick = false;
     this.phase = 'KICK';
@@ -6447,6 +6478,20 @@ export class Director {
     }
     const team = this.possession;
     const num = this.op?.carrierNum ?? (this.ml ? 8 : 8);
+    /* SPEC_07 — capture and lock the touchdown coordinate BEFORE the
+     * teardown touches anything. The grounding spot is the ball-carrier's
+     * exact position at the instant the ball was pressed down (open play:
+     * the live carrier; maul: the pack centre). A dive/lunge trigger that
+     * fires within the reach tolerance short of the plane grounds ON the
+     * goal line (Law 21.1's plane); a raw spot outside the in-goal bounds
+     * is corrected onto them and the correction is surfaced in the
+     * pause-panel log. */
+    const dir: 1 | -1 = team === 'A' ? 1 : -1;
+    const rawX = this.op?.carrierX ?? this.ml?.x ?? 0;
+    const rawZ = this.op?.carrierZ ?? this.ml?.z ?? goalLineZ(dir);
+    const spot = tryGroundingSpot(dir, rawX, rawZ);
+    if (!spot.legal || spot.clamped) this.noteTryGroundingClamp(rawX, rawZ, spot.x, spot.z);
+    this.trySpot = { x: spot.x, z: spot.z, team };
     this.tryLock = { at: this.t, team, num };
     /* TARCS — a try outranks any advantage still running: once points are on
      * the board the referee does not come back for the penalty. (Left alone,
@@ -6464,11 +6509,18 @@ export class Director {
     /* T-31. The scorer DIVES for the line (W-15/R-07) — a horizontal launch
      * that ends in a slide on the turf, not the grounded pose. Open play
      * only: a maul try is shoved over the line by eight men, not dived. */
-    if (this.op) {
-      const scorer = this.live.find((q) => q.team === team && q.num === num);
-      if (scorer) { scorer.clip = 'dive'; scorer.clipT = 0; }
-    }
-    const tryX = this.op?.carrierX ?? this.ml?.x ?? 0;
+    const scorer = this.op ? this.live.find((q) => q.team === team && q.num === num) : undefined;
+    const lineBreak = this.op?.lineBreak === true;
+    /* SPEC_07 — THE HARDENED TEARDOWN FUNNEL. A try freezes phase play: the
+     * releaseAll() funnel runs teardownBreakdown() and purges every lattice
+     * weld, bound body and drag link across all thirty entities before any
+     * award state is written — the grounding frame itself guarantees 0
+     * leaked joints, exactly like a whistle, and the scoring side starts the
+     * conversion ritual with a clean board. */
+    this.releaseAll();
+    this.op = undefined;
+    this.kk = undefined;
+    if (scorer) { scorer.clip = 'dive'; scorer.clipT = 0; }
     this.teams[team].score += POINTS.TRY;
     this.run(team, num).metres += 20;
     this.lastScorer = { num, name: p.name, team, min: this.minute, kind: 'TRY' };
@@ -6478,8 +6530,8 @@ export class Director {
     /* T-08: the try is the loudest event of all. T-09: a try EARNED — seven
      * phases of build, or finished off a live line break — draws from the
      * TRY_BUILT bank, not the try-from-nothing pool. */
-    this.emitEv({ t: this.t, type: 'TRY', x: tryX, z: this.op?.carrierZ ?? 0, num });
-    const built = this.phasesGained >= 6 || this.op?.lineBreak === true;
+    this.emitEv({ t: this.t, type: 'TRY', x: spot.x, z: spot.z, num });
+    const built = this.phasesGained >= 6 || lineBreak;
     this.commentate(built ? 'TRY_BUILT' : 'TRY', `— ${p.name}`);
     this.phasesGained = 0;
     this.gainWindow.length = 0;
@@ -6488,7 +6540,7 @@ export class Director {
      * ritual (FANFARE) holds until the check completes. The |x| >= 15 m
      * test is the corner channel — a try under the posts is never
      * checked, exactly as a real referee plays on. */
-    const corner = Math.abs(tryX) >= 15;
+    const corner = Math.abs(spot.x) >= 15;
     if (corner) {
       this.tmo = { t: 0, name: p.name, short: this.teams[team].nation.short, angle: 18 + R() * 34, said: false };
       this.banner_(`ON-FIELD DECISION: TRY — TMO CHECKING THE GROUNDING`);
@@ -6497,11 +6549,42 @@ export class Director {
       this.banner_(`TRY! ${this.teams[team].nation.short} — ${p.name}`);
     }
     this.shake(0.7);
-    this.clearRuck();
-    this.op = undefined; this.ml = undefined; this.bd = undefined;
-    /* T-36. The conversion is taken from in line with where the ball was grounded
-     * (tryX), at the kicker's chosen distance. 22 m back is the standard tee. */
-    this.startKick(team, 'GOAL', { x: tryX, z: team === 'A' ? FIELD.tryZFar - 22 : FIELD.tryZ + 22 });
+    /* SPEC_07 — the conversion tee: placed on the line through the locked
+     * touchdown spot (x = x_try), backed up to the kicker's optimal range,
+     * between 20 m and 30 m from the goal line. */
+    this.startKick(team, 'GOAL', this.conversionTee(team, spot));
+  }
+
+  /** SPEC_07 — conversion placement. The tee sits on the line through the
+   * touchdown spot (x = x_try) and is backed up along that line to the
+   * kicker's optimal distance: 20 m from the goal line minimum, out to 30 m
+   * for a kicker whose rating carries the longer strike. */
+  private conversionTee(team: 'A' | 'B', spot: { x: number; z: number }): { x: number; z: number } {
+    const dir = team === 'A' ? 1 : -1;
+    const goal = goalLineZ(dir);
+    const kicker = this.L(team, this.teams[team].kicker);
+    const skill = kicker ? kicker.attrs.SKL : 60;
+    const back = clamp(
+      CONVERSION_TEE_MIN_M + (skill / 100) * (CONVERSION_TEE_MAX_M - CONVERSION_TEE_MIN_M),
+      CONVERSION_TEE_MIN_M, CONVERSION_TEE_MAX_M,
+    );
+    return {
+      x: clamp(spot.x, -TOUCH_IN_GOAL_X_M, TOUCH_IN_GOAL_X_M),
+      z: goal - dir * back,
+    };
+  }
+
+  /** Law 12 — a restart that fails to travel ten metres into the receiving
+   * half (lands or rolls dead short of the ten-metre line, or is kicked
+   * directly into touch before reaching it) is an infringement: the referee
+   * awards a scrum to the receiving side at the centre spot. */
+  restartInfringed(kicker: 'A' | 'B') {
+    const receiver: 'A' | 'B' = kicker === 'A' ? 'B' : 'A';
+    this.lawCall('RESTART_NOT_TEN', REFEREE_CALLS.RESTART_NOT_TEN, kicker);
+    this.releaseAll();
+    this.kk = undefined;
+    this.say(`RESTART NOT TEN — SCRUM TO ${this.teams[receiver].nation.short} AT THE CENTRE`);
+    this.startScrum(receiver, 0, 0);
   }
 
   /** Law 12 — a drop-out is taken from anywhere on the 22-metre line. */

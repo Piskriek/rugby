@@ -577,6 +577,10 @@ export const REFEREE_CALLS: Record<string, string> = {
    * `s.t` accrued unbounded and the match simply stopped. Sanctioned as a
    * free kick, which under Law 12 is what a delayed restart concedes. */
   DELAY_KICKOFF: 'FREE KICK — TIME WASTING AT THE RESTART',
+  /* SPEC_07 — Law 12.9: a restart that fails to travel ten metres into the
+   * receiving half (or is kicked directly into touch before reaching it) is
+   * an infringement; the referee awards a scrum at the centre spot. */
+  RESTART_NOT_TEN: 'SCRUM — RESTART DID NOT TRAVEL TEN METRES',
 };
 
 /* ============================ 9. COMPETITIONS ============================ */

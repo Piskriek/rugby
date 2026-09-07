@@ -12,6 +12,7 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { CHASE_ORDER, CHASE_LANES } from '../shapes';
 import { assignReceiver } from '../intelligence';
 import { clamp } from './clamp';
+import { GOAL_CROSSBAR_M, GOAL_UPRIGHT_HALF_SPAN_M } from './laws';
 
 /** RC2-3 — seconds a side may take over a restart before it is a free kick.
  *  Generous enough that a human aiming and charging (charge alone is 1.6 s)
@@ -377,6 +378,12 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       if (s.t > strikeAt && formed) { d.launch(s.power, s.accuracy, wind); return; }
     }
   } else if (s.stage === 'FLIGHT') {
+    /* SPEC_07 — the position at the top of this frame, so the goal-plane
+     * crossing can be interpolated between frames instead of sampled: the
+     * upright/crossbar test then judges the continuous TRAJECTORY, not a
+     * frame-snapshot that under-reads the height by up to 0.2 m on the
+     * way down (which flipped borderline corner conversions into misses). */
+    const px = s.bx, py = s.by, pz = s.bz;
     s.vy -= 9.81 * dt;
     s.bx += s.vx * dt;
     s.bz += s.vz * dt;
@@ -411,16 +418,42 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
     const h0 = s.history[0];
     s.distance = Math.hypot(s.bx - (h0?.x ?? s.bx), s.bz - (h0?.z ?? s.bz));
 
+    /* SPEC_07 — Law 12.9. A restart must travel ten metres into the receiving
+     * half (measured from the tee mark, in flight or on the roll) before
+     * either side may play it. Latch the crossing the frame it happens. */
+    if (s.type === 'RESTART' && !s.tenCrossed && (s.bz - s.markZ) * s.dir >= 10) {
+      s.tenCrossed = true;
+    }
+
     if (s.profile.atGoal) {
       const gz = s.dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
       const crossIn = s.dir > 0 ? s.bz >= gz : s.bz <= gz;
-      if (crossIn && s.by > 0.5 && s.by < 20) {
-        if (Math.abs(s.bx) < 2.8) { d.kickScored(s); return; }
-        d.kickMissed(s, 'WIDE OF THE UPRIGHT'); return;
+      if (crossIn && s.by < 20) {
+        /* SPEC_07 — goal-post geometry at the plane crossing. The kick is
+         * judged the instant the trajectory crosses the goal line
+         * (interpolated between the frames it straddles): above the 3.0 m
+         * crossbar and inside the 5.6 m upright span is a score, and the
+         * clearances are measured and stored for the probe and the replay.
+         * A ball crossing below the bar is missed IMMEDIATELY (the old
+         * 0.5 m floor let under-the-bar kicks roll dead and linger). */
+        let cx = s.bx, cy = s.by;
+        if (pz !== gz && (pz - gz) * (s.bz - gz) < 0) {
+          const f = (gz - pz) / (s.bz - pz);
+          cx = px + f * (s.bx - px);
+          cy = py + f * (s.by - py);
+        }
+        const uprightM = GOAL_UPRIGHT_HALF_SPAN_M - Math.abs(cx);
+        const barM = cy - GOAL_CROSSBAR_M;
+        s.crossing = { x: cx, y: cy, z: gz, uprightM, barM };
+        if (barM <= 0) { d.kickMissed(s, 'UNDER THE CROSSBAR'); return; }
+        if (uprightM <= 0) { d.kickMissed(s, 'WIDE OF THE UPRIGHT'); return; }
+        d.kickScored(s); return;
       }
     }
     /* CONTEST — while the ball is in the air or on the bounce, any player close
-     * enough can catch it. This is what makes the chase worth doing. */
+     * enough can catch it. This is what makes the chase worth doing. (Law 12.9:
+     * a restart short of the ten-metre line may not be contested — the referee
+     * owns that ball.) */
     /* T-18. A ball within ~2 m of touch is LET OUT — nobody fields it, the
      * lineout is the better outcome. Contesting touch-bound balls was why
      * a whole kicking game produced zero lineouts. */
@@ -429,7 +462,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
      * the first two frames of flight, so the ball was being "caught in the
      * air" at the kicker's feet by whoever stood next to him. Every touch
      * hunt died that way; there were no lineouts. */
-    if (!s.profile.atGoal && s.bounces <= 2 && Math.abs(s.bx) < 32.5 && s.vy < 0) {
+    if (!s.profile.atGoal && (s.type !== 'RESTART' || s.tenCrossed) && s.bounces <= 2 && Math.abs(s.bx) < 32.5 && s.vy < 0) {
       /* NO-TELEPORT: the catch radius matches startOpen's close-place guard
        * (SPEC_05: 1.0 m). Catching at 1.5 m meant the catcher was then PLACED
        * on the ball — a 1.3-1.5 m single-frame jump the audit rightly flags.
@@ -467,8 +500,23 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
      * 3 s (a bomb's hang is 3.4 s) must be allowed to come down, or the
      * phase ends mid-flight and the audit rightly flags a ball that never
      * bounced. */
-    if (stopped || s.bounces > 6 || (s.t > 3.0 && s.by <= 0.12 && s.vy === 0)) { d.kickLanded(s); return; }
+    if (stopped || s.bounces > 6 || (s.t > 3.0 && s.by <= 0.12 && s.vy === 0)) {
+      /* SPEC_07 — Law 12.9: a restart that dies short of the ten-metre line
+       * is an infringement — referee's scrum at the centre spot, never a
+       * contest for a ball that was never legally live. */
+      if (s.type === 'RESTART' && !s.tenCrossed) { d.restartInfringed(s.kicker); return; }
+      /* SPEC_07 — a GOAL kick that never reached the posts is a miss, and
+       * the conversion/penalty window closes on it exactly like a made or
+       * wide one (a drop goal that lands short stays live — the ball is in
+       * play, which is what makes a drop goal a drop goal). */
+      if (s.profile.atGoal && s.type === 'GOAL') { d.kickMissed(s, 'SHORT — NO GOOD'); return; }
+      d.kickLanded(s); return;
+    }
     if (Math.abs(s.bx) > 34.6) {
+      /* SPEC_07 — Law 12.9: a restart kicked directly into touch before
+       * travelling ten metres is the same infringement — scrum at the
+       * centre. Once the ten has been crossed, touch is ordinary touch. */
+      if (s.type === 'RESTART' && !s.tenCrossed) { d.restartInfringed(s.kicker); return; }
       // 50:22 gives the throw to the side that kicked it
       const fromOwn = Math.abs(s.bz - s.dir * 50) > 50;
       if (s.type === 'FIFTY_22' && fromOwn) {

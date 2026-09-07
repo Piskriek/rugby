@@ -8,6 +8,97 @@
 import { Director } from '../director';
 import { R } from './rng';
 import { advantageWindowEngineS, openAdvantageWatch } from './referee';
+import { FIELD } from '../../render/retro';
+
+/* ====================== SPEC_07 — SCORING GEOMETRY ======================
+ *
+ * The numbers the scoring engine must be built on, in one place, so the
+ * goal-post test, the in-goal grounding test and the headless probe all
+ * measure the SAME field.
+ */
+
+/** Law 1.4 — the goal posts: 5.6 m between the uprights, the crossbar
+ * 3.0 m above the ground. A kick scores only when it passes through the
+ * span above the bar. */
+export const GOAL_UPRIGHT_SPAN_M = 5.6;
+export const GOAL_UPRIGHT_HALF_SPAN_M = GOAL_UPRIGHT_SPAN_M / 2;
+export const GOAL_CROSSBAR_M = 3.0;
+
+/** The touch lines run through the in-goal to the dead-ball line: a
+ * grounding counts only inside touch-in-goal, |x| ≤ 34.6 m. */
+export const TOUCH_IN_GOAL_X_M = 34.6;
+
+/** Law 21.1 — the reach. The engine's dive/lunge triggers may fire up to
+ * this far short of the goal line; the ball then counts as grounded ON the
+ * plane. A trigger beyond the tolerance is an anomaly (no engine site can
+ * produce one) and is flagged as such. */
+export const TRY_REACH_TOLERANCE_M = 2.4;
+
+/** SPEC_07 — conversion tee band: Law 8 asks for a place kick on a line
+ * through the touchdown spot; the kicker backs up to his optimal range,
+ * never closer than 20 m and never further than 30 m from the goal line. */
+export const CONVERSION_TEE_MIN_M = 20;
+export const CONVERSION_TEE_MAX_M = 30;
+
+/** The goal line at the end this attack is running at (+1 attacks +z). */
+export function goalLineZ(dir: 1 | -1): number {
+  return dir > 0 ? FIELD.tryZFar : FIELD.tryZ;
+}
+
+/** The dead-ball line behind that goal line. */
+export function deadBallLineZ(dir: 1 | -1): number {
+  return dir > 0 ? FIELD.deadZFar : FIELD.deadZ;
+}
+
+/** Law 21 — in-goal is the area past the goal line, before the dead-ball
+ * line, inside touch-in-goal. */
+export function inGoalBounds(dir: 1 | -1, x: number, z: number): boolean {
+  const goal = goalLineZ(dir);
+  const dead = deadBallLineZ(dir);
+  const past = dir > 0 ? z >= goal : z <= goal;
+  const short = dir > 0 ? z < dead : z > dead;
+  return past && short && Math.abs(x) <= TOUCH_IN_GOAL_X_M;
+}
+
+export interface TryGrounding {
+  /** The locked touchdown coordinate (x_try, z_try) — what the conversion
+   * line and the score ledger are drawn from. */
+  x: number;
+  z: number;
+  /** Metres past the goal line (0 = grounded on the plane itself). */
+  depth: number;
+  /** False only when the trigger fired beyond the reach tolerance short of
+   * the goal line — an anomaly no engine site can produce; the caller
+   * surfaces it in the watchdog log rather than letting it pass silently. */
+  legal: boolean;
+  /** True when the raw trigger had to be corrected onto the plane or the
+   * touch-in-goal / dead-ball bounds. */
+  clamped: boolean;
+}
+
+/** Lock the touchdown coordinate from a grounding trigger.
+ *
+ * A dive that grounds the ball a hair short of the plane counts ON the goal
+ * line (Law 21.1's plane). Lateral overshoot is clamped into touch-in-goal
+ * (the engine's own touch rules keep the carrier inside it), and depth past
+ * the dead-ball line is clamped to the in-goal band — the dead-ball line
+ * itself is a touch-down, never a try. */
+export function tryGroundingSpot(dir: 1 | -1, x: number, z: number): TryGrounding {
+  const goal = goalLineZ(dir);
+  const dead = deadBallLineZ(dir);
+  const band = (dead - goal) * dir;
+  const depth = (z - goal) * dir;
+  const legal = depth >= -TRY_REACH_TOLERANCE_M;
+  const clamped = depth < 0 || depth > band || Math.abs(x) > TOUCH_IN_GOAL_X_M;
+  const cd = Math.min(Math.max(depth, 0), band - 0.01);
+  return {
+    x: Math.min(Math.max(x, -TOUCH_IN_GOAL_X_M), TOUCH_IN_GOAL_X_M),
+    z: goal + dir * cd,
+    depth: cd,
+    legal,
+    clamped,
+  };
+}
 
 export function beginPenalty(d: Director, team: 'A' | 'B', call: string, offenderNum: number, free = false) {
 
