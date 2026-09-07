@@ -128,7 +128,7 @@ const sigmaOf = (team: 'A' | 'B'): -1 | 1 => (team === 'A' ? 1 : -1);
  * position is furthest back along that team's own attacking axis. Every
  * offside line in the game is either this or the ball.
  */
-function hindmostFoot(players: { team: 'A' | 'B'; z: number }[], team: 'A' | 'B'): number | null {
+function hindmostFoot(players: readonly { team: 'A' | 'B'; z: number }[], team: 'A' | 'B'): number | null {
   const sig = sigmaOf(team);
   let best: number | null = null;
   for (const q of players) {
@@ -526,3 +526,99 @@ export function legalMarkZ(lines: OffsideLine[], p: Live, margin: number): numbe
 
 /** Field bounds, for the post-shove projection (a shove may not invent a mark). */
 export const clampPitchZ = (z: number) => Math.max(FIELD.deadZ, Math.min(FIELD.deadZFar, z));
+
+/* ==================== TARCS — THE DYNAMIC PLANE PROJECTION ====================
+ *
+ * The registry above already polices these lines, but the projection itself —
+ * the two transverse offside planes Z_off for a ruck or a maul, each drawn
+ * through the hindmost foot of that team's LAST participating player — is a
+ * law, and a law deserves one named expression the referee, the entry gates
+ * (`engine/gates.ts`) and a headless probe can all read without going through
+ * the registry's closure machinery.
+ */
+
+/** The team's own attacking axis sign. Exported for gates and probes. */
+export const offsideSigma = sigmaOf;
+
+/** The hindmost foot of one team's players in a contest — the plane's z. */
+export function hindmostFootZ(players: readonly { team: 'A' | 'B'; z: number }[], team: 'A' | 'B'): number | null {
+  return hindmostFoot(players, team);
+}
+
+/** The pair of planes for one contest: `A` = Z_off_teamA, `B` = Z_off_teamB. */
+export interface OffsidePlanes {
+  A: TeamLine | null;
+  B: TeamLine | null;
+}
+
+export function offsidePlanesFor(cluster: readonly { team: 'A' | 'B'; z: number }[]): OffsidePlanes {
+  const out: OffsidePlanes = { A: null, B: null };
+  for (const team of ['A', 'B'] as const) {
+    const z = hindmostFoot(cluster, team);
+    if (z !== null) out[team] = { z, dir: sigmaOf(team) };
+  }
+  return out;
+}
+
+/**
+ * The two planes at a ruck, from its live roster. A team with nobody bound has
+ * no plane: you cannot be offside against a contest you are not in.
+ */
+export function ruckOffsidePlanes(bd: { players: readonly { team: 'A' | 'B'; z: number }[] }): OffsidePlanes {
+  return offsidePlanesFor(bd.players);
+}
+
+/** The two planes at a maul, from the bound bodies. */
+export function maulOffsidePlanes(bound: readonly Live[]): OffsidePlanes {
+  return offsidePlanesFor(bound.filter((p) => p.bound));
+}
+
+/**
+ * HAS THE BALL LEFT THE RUCK — the scrum-half gate on the line.
+ *
+ * At a ruck both teams' lines are static hindmost-foot lines ONLY until the
+ * ball leaves the ruck or the halfback (Position 9) moves it; then the line
+ * begins to follow the ball and the offside engine's OPEN line takes over. The
+ * engine's breakdown stages are the authoritative record of that moment: the
+ * ball is IN the ruck while the contest is at RUCK, and it is out (heeled,
+ * turned over, or cleared to the nine) from RECYCLE on.
+ */
+export function scrumhalfReleased(bd: { stage: string; ruckFormed: boolean }): boolean {
+  if (!bd.ruckFormed) return false;
+  return bd.stage !== 'CONTACT' && bd.stage !== 'PLACE' && bd.stage !== 'RUCK';
+}
+
+/**
+ * THE PRE-RELEASE WINDOW — the referee's harsher temper while the ball is
+ * still in the ruck.
+ *
+ * LENIENT's 4.0 m / 2.4 s was calibrated against loiterers in open phases;
+ * it cannot see the crime that matters at the breakdown, which is a defender
+ * STANDING over the line while his team-mates contest the ball — the window is
+ * a second long because a ruck is a second long, and by the time 2.4 seconds
+ * have passed the ball is gone and the phase has moved on. So inside the
+ * window, the tolerance is a man's stride (2.0 m) and half a heartbeat
+ * (0.7 s). A retreating man is still forgiven: the play-on is the play-on.
+ * The one-whistle-per-window latch is shared with the ordinary RUCK line, so
+ * this cannot stack a second penalty onto an offence the registry already
+ * blew for.
+ */
+export const PRE_RELEASE_EPSILON_M = 2.0;
+export const PRE_RELEASE_SUSTAIN_S = 0.7;
+
+/**
+ * Does a breach observed at a ruck line deserve the pre-release whistle the
+ * ordinary profile forgave? Pure: the caller has already run `offsideVerdict`
+ * and received OBSERVE; this is the second question, asked only while the ball
+ * is in the ruck.
+ */
+export function preReleaseWhistle(
+  breach: Breach, inRuck: boolean, materialRadius: number, retreatingGrace: boolean,
+): boolean {
+  if (!inRuck) return false;
+  if (breach.penetration < PRE_RELEASE_EPSILON_M) return false;
+  if (breach.sustainedFor < PRE_RELEASE_SUSTAIN_S) return false;
+  if (breach.toBall > materialRadius) return false;
+  if (retreatingGrace && breach.retiring) return false;
+  return true;
+}

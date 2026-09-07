@@ -408,3 +408,142 @@ function refSignalDuration(clip: string): number {
     default: return 0.8;
   }
 }
+
+/* ================================================================== *
+ * TARCS — ADVANTAGE & WHISTLE SEQUENCING
+ * ================================================================== */
+
+/**
+ * The advantage window, in SECONDS OF PLAY — the clock the referee stands on
+ * the field with: engine time, the same seconds the frame loop ticks. The
+ * DISPLAY match clock is compressed by the build's clockScale and is the
+ * scoreboard's problem, not the official's: he judges how long play ran with
+ * an arm raised, and ten seconds of that is what Law 7.4 allows before he
+ * either calls advantage over or brings the game back.
+ */
+export const ADVANTAGE_WINDOW_S = 10;
+
+/**
+ * The territory that CASHES the advantage: a clean 10 metres gained past the
+ * mark of the infringement, or an effective kick. The number is the law's
+ * own yardstick at the restart (the 10 m offside line) used as the yardstick
+ * for "has this advantage been worth having" — anything less and the referee
+ * brings play back, which is the whole point of playing it: the reward must
+ * be visible before it is banked.
+ */
+export const ADVANTAGE_TERRITORY_M = 10;
+
+/** What a wind-back awards: the penalty itself, or a scrum at the mark. */
+export type AdvantageAward = 'PENALTY' | 'SCRUM';
+
+/**
+ * The referee's advantage memory. The Director owns the instance
+ * (`d.advWatch`) and every write it triggers; this object holds only what
+ * the decision needs, which keeps the sequencing testable with no Director
+ * at all — the headless probe drives `stepAdvantageWatch` with a synthetic
+ * sensor.
+ */
+export interface AdvantageWatch {
+  /** the NON-offending side; the side the advantage is played for. */
+  team: 'A' | 'B';
+  /** the award if the advantage is not taken. */
+  award: AdvantageAward;
+  /** the mark of the infringement — where the wind-back restarts play. */
+  markX: number;
+  markZ: number;
+  /** the carrier's z when the watch opened (or the mark, for a restart). */
+  originZ: number;
+  /** did the beneficiary OWN the ball when the watch opened? A penalty
+   *  advantage starts with possession — losing it is the wind-back trigger.
+   *  A knock-on starts without it — gaining it IS the advantage. */
+  startsOwned: boolean;
+  /** engine-seconds of window budget. */
+  window: number;
+  /** engine-seconds observed so far. */
+  elapsed: number;
+  /** best territory gain measured, metres — exposed for the probe/audit. */
+  maxGain: number;
+}
+
+/** The one-frame snapshot the sequencing reads. Pure data, Director-shaped. */
+export interface AdvantageSensor {
+  possession: 'A' | 'B';
+  /** open-play carrier line, or null when no open play is running. */
+  carrier: { z: number; dir: number } | null;
+  /** the beneficiary's kick: ground it gains along its own axis. */
+  kick: { gained: number } | null;
+}
+
+export type AdvantageOutcome = 'PLAY_ON' | 'OVER' | 'WINDBACK';
+
+/** The option (0 short / 1 normal / 2 long) becomes a window in seconds of
+ *  play. The default is the law's ten; SHORT is half of it, LONG a half
+ *  again more, and the number is already in the referee's own clock — no
+ *  conversion, the referee's seconds never re-tune themselves to the frame
+ *  budget. */
+export function advantageWindowEngineS(option: number | undefined): number {
+  return option === 0 ? 5 : option === 2 ? 15 : ADVANTAGE_WINDOW_S;
+}
+
+/**
+ * Open the watch. Cynical offences — the ones earning a card — never get an
+ * advantage at all: the referee blows FIRST and the sanction is immediate;
+ * callers decide that before they call in here.
+ */
+export function openAdvantageWatch(cfg: {
+  team: 'A' | 'B';
+  award: AdvantageAward;
+  markX: number; markZ: number;
+  originZ: number;
+  startsOwned: boolean;
+  window: number;
+}): AdvantageWatch {
+  return {
+    team: cfg.team, award: cfg.award,
+    markX: cfg.markX, markZ: cfg.markZ, originZ: cfg.originZ,
+    startsOwned: cfg.startsOwned,
+    window: Math.max(0.2, cfg.window), elapsed: 0, maxGain: 0,
+  };
+}
+
+/**
+ * One frame of sequencing. THE RULE, in full:
+ *
+ *   • the beneficiary gains more than ADVANTAGE_TERRITORY_M metres, or kicks
+ *     the ball effectively by the same measure → 'OVER' — "Advantage Over",
+ *     the penalty is gone, play runs;
+ *   • the beneficiary, having started WITH the ball (a penalty advantage),
+ *     loses it → 'WINDBACK' at once; there is nothing to play on for;
+ *   • the window runs out: a penalty advantage that never gained its ten
+ *     metres comes back — 'WINDBACK'; a restart advantage (a knock-on) where
+ *     the non-offending side simply RECOVERED the ball has gained its
+ *     advantage — an offence that cost the offender nothing and handed the
+ *     game to the other side is not brought back for wanting ten metres;
+ *   • otherwise 'PLAY_ON'.
+ *
+ * The wind-back path is where the whistle, the freeze and the restart at the
+ * mark live — on the Director. Nothing here writes the world.
+ */
+export function stepAdvantageWatch(
+  w: AdvantageWatch, sensor: AdvantageSensor, dt: number,
+): AdvantageOutcome {
+  w.elapsed += dt;
+  const owned = sensor.possession === w.team;
+  if (owned) {
+    if (sensor.carrier) {
+      const gain = (sensor.carrier.z - w.originZ) * sensor.carrier.dir;
+      if (gain > w.maxGain) w.maxGain = gain;
+      if (gain > ADVANTAGE_TERRITORY_M) return 'OVER';
+    }
+    if (sensor.kick && sensor.kick.gained > ADVANTAGE_TERRITORY_M) return 'OVER';
+  } else if (w.startsOwned) {
+    /* The team the advantage was played for gave the ball away. The referee
+     * comes back for the penalty the instant the attack ends — Law 7.4. */
+    return 'WINDBACK';
+  }
+  if (w.elapsed >= w.window) {
+    if (!w.startsOwned && owned) return 'OVER';
+    return 'WINDBACK';
+  }
+  return 'PLAY_ON';
+}

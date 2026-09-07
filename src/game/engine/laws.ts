@@ -7,6 +7,7 @@
 
 import { Director } from '../director';
 import { R } from './rng';
+import { advantageWindowEngineS, openAdvantageWatch } from './referee';
 
 export function beginPenalty(d: Director, team: 'A' | 'B', call: string, offenderNum: number, free = false) {
 
@@ -36,7 +37,14 @@ export function beginPenalty(d: Director, team: 'A' | 'B', call: string, offende
    * A high tackle is a card on its own. Anything else escalates when the same
    * shirt offends again within ten match-minutes. Placeholder offender numbers
    * (some call sites pass a rough shirt) make the repeat attribution approximate;
-   * the card itself is what matters. */
+   * the card itself is what matters.
+   *
+   * TARCS — the SAME verdict now also decides the sequencing: a cynical
+   * offence (a high hit, or the repeat that earns the card) is never played
+   * on. Law 7.4 is explicit that the referee must not allow advantage for
+   * foul play; the whistle stays, and the restart comes immediately at the
+   * mark. Only the non-cynical infringements get the advantage window. */
+  let cynical = free;
   if (!free && offenderNum > 0) {
     const now = (d.half - 1) * 40 * 60 + d.clock;
     const key = `${opp}:${offenderNum}`;
@@ -45,14 +53,27 @@ export function beginPenalty(d: Director, team: 'A' | 'B', call: string, offende
     const repeat = last !== undefined && now - last < 600;
     if (highTackle || (repeat && R() < 0.7)) {
       d.card(opp, offenderNum, highTackle ? 'HIGH TACKLE' : 'REPEAT OFFENCE');
+      cynical = true;
     }
     d.offenceLog.set(key, now);
   }
   const f = { x: Number.isFinite(mark.x) ? mark.x : 0, z: Number.isFinite(mark.z) ? mark.z : 0 };
   d.pendingPenalty = { team, x: f.x, z: f.z, free };
-  d.advantage = free ? 0 : [1.2, 2.6, 4.2][d.options.advantage ?? 1];
+  /* TARCS — ten seconds of play for a non-cynical offence, in the referee's
+   * own clock (`engine/referee.ts` owns the number and the sequencing; the
+   * option shortens or lengthens it). A free-kick offence, and a cynical
+   * one, get no window at all. */
+  d.advantage = cynical ? 0 : advantageWindowEngineS(d.options.advantage);
   d.advantageTeam = team;
   if (d.advantage > 0) {
+    /* The referee's memory of WHY play is running: what the award was, where
+     * the mark is, and how far the beneficiary has to carry it to cash the
+     * advantage. The Director's per-frame block steps this watch and owns the
+     * whistle when it comes back. */
+    d.advWatch = openAdvantageWatch({
+      team, award: 'PENALTY', markX: f.x, markZ: f.z,
+      originZ: f.z, startsOwned: true, window: d.advantage,
+    });
     d.say('ADVANTAGE — PLAY ON');
     d.showHint('ADVANTAGE — GAIN GROUND AND PLAY CONTINUES', 2.4);
     d.possession = team;
@@ -66,6 +87,9 @@ export function resolvePenalty(d: Director, ) {
 
   const p = d.pendingPenalty;
   d.pendingPenalty = null;
+  /* TARCS — the advantage book closes with the award, by whatever door. */
+  d.advWatch = null;
+  d.pendingWindback = false;
   if (!p) return;
   /* THE WHISTLE KILLS THE KICK. A penalty can be resolved while a ball is
    * still in the air (advantage expired mid-flight, or a kick taken under

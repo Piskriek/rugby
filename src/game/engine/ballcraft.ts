@@ -29,6 +29,7 @@ import type { Director } from '../director';
 import type { Live } from '../intelligence';
 import { clamp } from './clamp';
 import { R } from './rng';
+import { fwdProfile, isForwardLoss } from './throwforward';
 
 /** Radius around the chest/hands point inside which LMB takes the ball. */
 export const SECURE_M = 0.7;
@@ -428,7 +429,7 @@ export function stepCraft(
         const grip = (secure || ballGrip(d)) ? 0.12 : 1;
         const pStrip = (0.16 + (near.attrs.AGG - p.attrs.SKL) * 0.004) * grip;
         if (R() < pStrip) {
-          knockOn(d, bc, p, 'stripped by ' + shortName(near));
+          knockOn(d, bc, p, 'stripped by ' + shortName(near), near);
           break;
         }
       }
@@ -618,8 +619,19 @@ function ballGrip(d: Director): boolean {
 }
 
 /** A strip or a fumble in the catch. Same outcome, different word, because the
- *  difference is what a commentator is for. */
-function knockOn(d: Director, bc: BallCraft, p: Live, why: string) {
+ *  difference is what a commentator is for.
+ *
+ *  TARCS — THE HAND-CONTACT HOOK. A strip is also the one frame the knock-on
+ *  law can be answered: the instant the ball leaves the hands it has a real
+ *  ground velocity, and `engine/throwforward.ts`'s loss vector compares it
+ *  against the handler's own momentum. A defender who takes the ball off the
+ *  front of a catcher, driving it TOWARD the catcher's own dead-ball line, has
+ *  knocked it on; a ball that jolts loose backwards is only a loose ball —
+ *  there is no backward knock-on in law. When the vector says forward, the
+ *  referee flags it and plays the advantage (`openKnockOnAdvantage`), and the
+ *  loose ball stays live underneath: the defence may make something of it,
+ *  and if they cannot, the whistle brings a scrum back to the spot. */
+function knockOn(d: Director, bc: BallCraft, p: Live, why: string, striker?: Live) {
   const s = d.op!;
   bc.ownsBall = false;
   _free.x = s.ball.x;
@@ -628,8 +640,18 @@ function knockOn(d: Director, bc: BallCraft, p: Live, why: string) {
   _free.vx = p.vx * 0.2;
   _free.vy = 0.2;
   _free.vz = p.vz * 0.2;
+  if (striker) {
+    /* The strip's kick rides on top of the spill: the hand that MADE contact
+     * decides the direction, capped at two metres per second so the ruck-side
+     * scramble physics stay the same game the ball-carrier audit calibrated. */
+    _free.vz += clamp((striker.vz - p.vz) * 0.5, -2.2, 2.2);
+  }
   _free.bounces = 0;
   bc.free = _free;
+  const dir = s.attacking === 'A' ? 1 : -1;
+  if (isForwardLoss({ ballVz: _free.vz, handlerVz: p.vz, dir }, fwdProfile(d.options.fwdPass ?? 1))) {
+    d.openKnockOnAdvantage(p.team, s.ball.x, s.ball.z);
+  }
   d.say('DROPPED IT');
   go(bc, d, 'LOOSE', why);
 }

@@ -183,3 +183,59 @@ export const FWD_STRICTNESS: Record<FwdStrictness, FwdProfile> = {
 export function fwdProfile(mode: number): FwdProfile {
   return mode === 0 ? FWD_STRICTNESS.STRICT : mode === 2 ? FWD_STRICTNESS.OFF : FWD_STRICTNESS.LENIENT;
 }
+
+/* ======================== TARCS — THE KNOCKED-ON VECTOR ========================
+ *
+ * A knock-on is the same measurement as a throw-forward with one input
+ * changed: a pass's release velocity is RECONSTRUCTED (the aim is solved, and
+ * the flight is deterministic at PASS_SPEED), but a knock is OBSERVED — the
+ * ball has a real velocity the instant it leaves the hands, and the hand
+ * contact event is exactly the frame to read it.
+ *
+ *   rel = (v_ball − max(0, v_hand·σ)·σ) · σ
+ *
+ * The handler's forward momentum is discounted for the same reason the
+ * passer's is: a ball that merely keeps up with a running man has not been
+ * knocked forward at all. `rel > tol` toward the opponents' dead-ball line is
+ * the knock-on; a ball that spills sideways or backwards off the hands is a
+ * loose ball, which the ball-carrier rules already handle without a whistle.
+ *
+ * The test lives here rather than in the strip logic so that BOTH hand-contact
+ * events — the pass and the fumble — are answered by ONE law module, reading
+ * ONE vector, under ONE strictness option. `engine/ballcraft.ts` calls in at
+ * the frames where possession actually changes hands.
+ */
+
+export interface HandContactSample {
+  /** ball velocity along z, ground frame, at the instant it leaves the hands */
+  ballVz: number;
+  /** the velocity of the player who lost or struck it */
+  handlerVz: number;
+  /** the handler's team attacking axis: +1 for A, −1 for B */
+  dir: number;
+}
+
+/** m/s the loose ball carries forward RELATIVE TO THE HAND that lost it. */
+export function knockReleaseRel(ballVz: number, handlerVz: number, dir: number): number {
+  /* The same momentum allowance as the pass test: only forward momentum of
+   * the handler is discounted, because only forward momentum explains the
+   * ball's travel without an infringement. */
+  const allowed = Math.max(0, handlerVz * dir) * dir;
+  return (ballVz - allowed) * dir;
+}
+
+/**
+ * THE TEST at a hand-contact event: is this loss of possession a knock-on?
+ * `OFF` mode measures the rate and never calls it, exactly as with the pass —
+ * the referee's temper is one dial for both halves of Law 11.
+ */
+export function isForwardLoss(s: HandContactSample, prof: FwdProfile): boolean {
+  return prof.blows && knockReleaseRel(s.ballVz, s.handlerVz, s.dir) > prof.tol;
+}
+
+/** The same quantity, graded against the strictness option, for ledgers/probes. */
+export function gradeForwardLoss(s: HandContactSample, mode: number): { rel: number; forward: boolean } {
+  const prof = fwdProfile(mode);
+  const rel = knockReleaseRel(s.ballVz, s.handlerVz, s.dir);
+  return { rel, forward: prof.blows && rel > prof.tol };
+}
