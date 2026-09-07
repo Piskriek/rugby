@@ -4,7 +4,7 @@ import {
   WORLD_CUP_POOLS,
 } from './game/data';
 import { CLASSIC_MATCHES } from './game/jlr';
-import { MatchConfig, Slider } from './game/director';
+import { MatchConfig, Slider, quickStartConfig } from './game/director';
 import {
   TitleScreen, ModeScreen, TeamScreen, SquadScreen, TacticsScreen, OptionsScreen, GuideScreen, Mode,
 } from './ui/menus';
@@ -48,24 +48,49 @@ export default function App() {
   const [assists, setAssists] = useState({ pass: 0.7, tackle: 0.7, kick: 0.7, ...(saved?.tactics.assists ?? {}) });
   const [classic, setClassic] = useState<(typeof CLASSIC_MATCHES)[number] | null>(
     (saved?.classicProgress && CLASSIC_MATCHES.find((m) => m.id === saved.classicProgress)) || null);
+  /**
+   * QUICK START (15v15). When set, MatchView launches on the default
+   * factory match config (default 15v15 rosters, kick-off straight away)
+   * instead of the configuration built up by the setup screens. The button
+   * bypasses team customization, kit selection, squad sheet, tactics and the
+   * coin toss — it routes straight into the same match pipeline.
+   */
+  const [quickCfg, setQuickCfg] = useState<MatchConfig | null>(null);
 
-  const cfg: MatchConfig = useMemo(() => ({
-    M_ID: `${home}_v_${away}`,
-    homeId: home, awayId: away, kitA, kitB,
-    difficulty: options.difficulty,
-    halfLength: [2, 5, 10, 20, 40][options.halfLength] ?? 5,
-    options,
-    slidersA: sliders,
-    slidersB: DEFAULT_SLIDERS.map((s) => ({ ...s, v: Math.round(50 + (Math.random() - 0.5) * 10) })),
-    backlineA: form.backline, defenceA: form.defence, lineoutA: form.lineout, scrumA: form.scrum,
-    backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
-    cpuA: false, cpuB: true,
-    kickerA, kickerB: 10,
-    assists,
-    speed: 1,
-    // The default presentation is a broadcast camera. CHASE and TACTICAL remain
-    // available from the pause menu.
-  }), [home, away, kitA, kitB, options, sliders, form, kickerA, assists]);
+  const cfg: MatchConfig = useMemo(() => {
+    if (quickCfg) return quickCfg;
+    return {
+      M_ID: `${home}_v_${away}`,
+      homeId: home, awayId: away, kitA, kitB,
+      difficulty: options.difficulty,
+      halfLength: [2, 5, 10, 20, 40][options.halfLength] ?? 5,
+      options,
+      slidersA: sliders,
+      slidersB: DEFAULT_SLIDERS.map((s) => ({ ...s, v: Math.round(50 + (Math.random() - 0.5) * 10) })),
+      backlineA: form.backline, defenceA: form.defence, lineoutA: form.lineout, scrumA: form.scrum,
+      backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
+      cpuA: false, cpuB: true,
+      kickerA, kickerB: 10,
+      assists,
+      speed: 1,
+      // The default presentation is a broadcast camera. CHASE and TACTICAL remain
+      // available from the pause menu.
+    };
+  }, [quickCfg, home, away, kitA, kitB, options, sliders, form, kickerA, assists]);
+
+  /**
+   * QUICK START — the main-menu primary action. Sets up a friendly with the
+   * default fifteen-a-side rosters and jumps directly to MatchView, skipping
+   * every setup screen in one state batch.
+   */
+  const quickStart = () => {
+    setTutorial(false);
+    setClinic(false);
+    setClassic(null);
+    setMode('FRIENDLY');
+    setQuickCfg(quickStartConfig());
+    setScreen('MATCH');
+  };
 
   /* T-12 — save on any change of the persisted state (which includes every
    * screen transition that carries a menu choice). Best effort only. */
@@ -142,6 +167,7 @@ export default function App() {
     }
     setPendingFixture(null);
     setClinic(false);
+    setQuickCfg(null);
   };
 
   const awardTrophies = () => {
@@ -196,6 +222,7 @@ export default function App() {
       onOptions={() => setScreen('OPTIONS')}
       onGuide={() => setScreen('GUIDE')}
       onAudit={() => setScreen('AUDIT')}
+      onQuickStart={quickStart}
     />,
   );
 
@@ -247,7 +274,7 @@ export default function App() {
           target: classic.target,
           margin: parseInt(classic.target.replace(/[^0-9]/g, ''), 10) || 0,
         } : null}
-        onExit={() => { setClinic(false); setTutorial(false); setScreen('MODE'); }}
+        onExit={() => { setClinic(false); setTutorial(false); setQuickCfg(null); setScreen('MODE'); }}
         onFinish={finishMatch}
       />
     </div>
