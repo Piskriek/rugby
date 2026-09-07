@@ -47,6 +47,19 @@ export function kineticWindowOf(s: BreakdownState): number {
   return s.hitKind === 'RUNNING' ? KINETIC_WINDOW * RUNNING_SLIDE_BONUS : KINETIC_WINDOW;
 }
 
+/**
+ * THE SHARED-VELOCITY CEILING. The impact handover writes the carrier's
+ * pre-contact velocity, dampened by KINETIC_DAMPING, into BOTH men at once.
+ * In a high-density breakdown the carrier can be arriving at full sprint,
+ * and the lattice behind this presentation has a hard integration budget
+ * (the solver's MAX_V). The shared slide is capped here — in the solver's
+ * own units, a touch under it — so the two live actors can never carry a
+ * post-impact speed the constraint world below would have to clamp away
+ * frame by frame. A normal running hit shares ~3.4 m/s; the cap only bites
+ * on a glitched frame, and when it bites the slide stays a slide.
+ */
+export const KINETIC_MAX_SHARE = 4;
+
 /** Is the tackle still sliding? While true, nothing may pin the two men. */
 export function inKineticImpact(s: BreakdownState): boolean {
   return s.stage === 'CONTACT' || s.stage === 'PLACE'
@@ -98,8 +111,18 @@ function stepPlan(d: Director, s: BreakdownState, dt: number) {
         /* A little under the engine's own get-up price, because `clearRuck` will
          * re-impose the full 1.53 s on him if the ruck ends before he is up. */
         tp.recoverT = RECOVER_SECONDS * 0.8;
-        tp.vx = -hit.dx * hit.power * 0.55;
-        tp.vz = -hit.dz * hit.power * 0.55;
+        /* IMPACT CLAMP. The bake prices the shove in m/s, but a dense pile
+         * stacks several clearouts onto one frame; the knocked man's
+         * velocity is capped so the get-up lock (which pins him at zero
+         * every frame after this write) inherits a legal vector, never a
+         * spike the next frame's writers would have to explain. */
+        let kvx = -hit.dx * hit.power * 0.55;
+        let kvz = -hit.dz * hit.power * 0.55;
+        if (!Number.isFinite(kvx) || !Number.isFinite(kvz)) { kvx = 0; kvz = 0; }
+        const km = Math.hypot(kvx, kvz);
+        if (km > 3) { kvx *= 3 / km; kvz *= 3 / km; }
+        tp.vx = kvx;
+        tp.vz = kvz;
         d.shake(0.06);
       }
     }
@@ -143,10 +166,21 @@ function kineticImpact(d: Director, s: BreakdownState, dt: number) {
     if (q.role !== 'CARRIER' && q.role !== 'TACKLER') continue;
     const p = d.L(q.team, q.num);
     if (p.sinbin > 0) continue;
+    /* Non-finite guard first: a NaN velocity here would write a NaN
+     * position through the clamp (clamp passes NaN straight through) and
+     * the watchdog would reset the match. The impact handover is the only
+     * writer of these two men this frame, so a clean zero is the only
+     * honest value a non-finite can become. */
+    if (!Number.isFinite(p.vx) || !Number.isFinite(p.vz)) { p.vx = 0; p.vz = 0; }
     p.vx *= decay;
     p.vz *= decay;
+    /* linear clamp on the high-density impact: never hand the pair a shared
+     * speed the solver below would have to claw back (see KINETIC_MAX_SHARE) */
+    p.vx = clamp(p.vx, -KINETIC_MAX_SHARE, KINETIC_MAX_SHARE);
+    p.vz = clamp(p.vz, -KINETIC_MAX_SHARE, KINETIC_MAX_SHARE);
     p.x = clamp(p.x + p.vx * dt, -34.5, 34.5);
     p.z = clamp(p.z + p.vz * dt, -61, 61);
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) { p.x = s.contactX; p.z = s.contactZ; }
     p.movedBy = 'bound';   // T-02: this branch owns the integration this frame
     q.x = p.x; q.z = p.z;
     if (q.role === 'CARRIER') {
@@ -403,8 +437,16 @@ function tryTackleBind(d: Director, s: BreakdownState): void {
     axes: TACKLE_AXES, breakN: TACKLE_BREAK_N, breakNm: TACKLE_BREAK_NM,
   });
   if (j) {
-    tackler.vx = (dx / dOrig) * 3.4;
-    tackler.vz = (dz / dOrig) * 3.4;
+    /* The hit impulse, along the line from carrier to tackler. A pile can
+     * seat the pair on the same point of the field (a wall-pinned ruck);
+     * the unit direction at d≈0 is 0/0, and a NaN velocity would ride into
+     * the solver and trip its instability reset — a body teleported to the
+     * field centre in the middle of a ruck. No direction, no impulse: the
+     * bind springs do the work from the next frame. */
+    if (dOrig > 1e-3) {
+      tackler.vx = (dx / dOrig) * 3.4;
+      tackler.vz = (dz / dOrig) * 3.4;
+    }
     d.shake(0.06 + 0.08 * clamp(s.power.A / 900, 0, 1));
   }
 }
@@ -611,6 +653,19 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       }
       s.stage = 'RUCK';
       s.ruckFormed = true;
+      /* TACKLE COMPLETE — the DRAG is over, and its constraints are gone by
+       * construction: the open-play latch links were cut at the takedown
+       * (clearLatch in the drag's own end branch) and are cut again at every
+       * stoppage (releaseAll / the top-level leak guard). What survives into
+       * the ruck is the lattice's tackle weld, and it is NOT a kinematic
+       * lock: the pair is down, undriven, and released whole at the whistle
+       * (latches.clear on every teardown). Releasing it here instead would
+       * unseat the pile the ruck forms on — the gate's box is the live
+       * extreme of the contest cluster, and a freed pair stretches it into
+       * the corridor the walk-back routes against (measured: a side-entry
+       * whistle the tree routing had never taken before). The weld stays
+       * until the whistle; the leak audit in matchenduranceprobe asserts it
+       * never outlives the episode. */
       if (s.plan) s.plan.formed = s.t;
       s.ball.placed = true;
       /* T-05. The contest begins. The clearout work done in PLACE is not a

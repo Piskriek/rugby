@@ -488,6 +488,10 @@ export interface LatchMetrics {
 const SUBSTEPS = 2;
 const MAX_V = 12;            // m/s — no body may leave frame in one frame
 const MAX_YAW_V = 6;         // rad/s
+/** Exported so the endurance harness can report the clamp margin it measured
+ *  against, and so a caller can never exceed the solver's own budget. */
+export const LATCH_MAX_V = MAX_V;
+export const LATCH_MAX_YAW_V = MAX_YAW_V;
 const CAP_F = 14000;         // N per channel (a pile impact, not an explosion)
 const K_CONTACT = 42000;     // N/m penetration stiffness (stiff = no clipping)
 const C_CONTACT = 1950;      // N·s/m normal damping (~0.5 critical for 105 kg)
@@ -553,14 +557,34 @@ export class LatchSystem {
     return this.bodies.find((b) => b.kind === kind);
   }
 
+  /** Finite-or-fallback: a spawn must never carry a non-finite number into
+   *  the solver, even for one frame. */
+  private static fin(v: number, fb = 0): number {
+    return Number.isFinite(v) ? v : fb;
+  }
+
   spawn(b: Omit<LatchBody, 'id' | 'bound' | 'seeking' | 'jitter' | 'upright' | 'tx' | 'tz' | 'roll' | 'rollVel'> & { upright?: number }): LatchBody {
+    /* HIGH-DENSITY IMPACT HARDENING (endurance). Every body enters the
+     * lattice through this door — the mount burst, the fend impulse, a
+     * torn-and-rebuilt episode — so the clamps here are the last line
+     * before the solver, and they price the entry in the solver's own
+     * units: linear speed at MAX_V (no arrival may arrive faster than the
+     * solver can integrate it without tunnelling a frame), angular speed
+     * at MAX_YAW_V, and a finite state vector. The per-substep clamps
+     * below stay as the in-flight budget; this is the door. */
+    const sv = Math.hypot(LatchSystem.fin(b.vx), LatchSystem.fin(b.vz));
+    const vScale = sv > MAX_V ? MAX_V / sv : 1;
+    const mass = Math.max(1, LatchSystem.fin(b.mass, 100));
+    const x = LatchSystem.fin(b.x), z = LatchSystem.fin(b.z);
     const body: LatchBody = {
       id: nextId++, kind: b.kind, team: b.team, num: b.num,
-      x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy ?? 0, vz: b.vz,
-      yaw: b.yaw, yawVel: 0, roll: 0, rollVel: 0, mass: b.mass, radius: b.radius,
-      upright: b.upright ?? (b.down ? 0.35 : 1),
-      down: b.down, drive: b.drive, driveDir: b.driveDir,
-      bound: false, seeking: false, tx: b.x, tz: b.z, jitter: 0,
+      x, y: clamp(LatchSystem.fin(b.y), 0, 1.4), z,
+      vx: LatchSystem.fin(b.vx) * vScale, vy: clamp(LatchSystem.fin(b.vy ?? 0), -MAX_V, MAX_V), vz: LatchSystem.fin(b.vz) * vScale,
+      yaw: wrapAngle(LatchSystem.fin(b.yaw)), yawVel: 0, roll: 0, rollVel: 0,
+      mass, radius: Math.max(0.05, LatchSystem.fin(b.radius, 0.5)),
+      upright: clamp(LatchSystem.fin(b.upright ?? (b.down ? 0.35 : 1), b.down ? 0.35 : 1), 0.2, 1),
+      down: b.down, drive: clamp(LatchSystem.fin(b.drive), 0, CAP_F), driveDir: LatchSystem.fin(b.driveDir, 1),
+      bound: false, seeking: false, tx: x, tz: z, jitter: 0,
     };
     this.bodies.push(body);
     return body;

@@ -2212,23 +2212,29 @@ export class Director {
        * the scrum, the maul and the lineout had no offside line at all:
        * nobody ever asked. A whistle tears the phase down, so this runs after
        * the phase updater and before the players are told where to stand. */
+      /* LATCH-AND-DRAG — THE LEAK GUARD. The two link fields live on `Live`,
+       * which outlives the episode: a whistle, a try or a kick tears `op`
+       * down mid-drag and would leave a man permanently at 28% pace with a
+       * phantom defender attached. A latch is only ever legal inside a live
+       * OPEN_PLAY episode that still owns it, so anything else is stale and
+       * is cut here, once, at the top level.
+       *
+       * ENDURANCE — this runs BEFORE the referee's early returns below: a
+       * whistle that tears the phase down returns out of update() on this
+       * very frame, and a guard sitting past that return would skip the
+       * frame its own whistle created. Cutting first costs nothing (the test
+       * is two reads) and makes the backstop unreachable from the stoppages
+       * it exists to clean up. */
+      if (this.phase !== 'OPEN_PLAY' || !this.op?.latch) {
+        for (const p of this.live) if (inLatch(p)) { p.latchedBy = null; p.latchingOnto = null; }
+        if (this.op) clearLatch(this.op, null, null);
+      }
       if (this.enforceOffsideLines(dt)) return;
       /* TARCS — the ruck entry gates. Same slot in the frame for the same
        * reason: the physics/kinematics update has written every position this
        * tick, the formation has not been steered yet, and a whistle here
        * tears the phase down before any mover can chase it. */
       if (this.enforceRuckEntryGates()) return;
-
-      /* LATCH-AND-DRAG — THE LEAK GUARD. The two link fields live on `Live`,
-       * which outlives the episode: a whistle, a try or a kick tears `op`
-       * down mid-drag and would leave a man permanently at 28% pace with a
-       * phantom defender attached. A latch is only ever legal inside a live
-       * OPEN_PLAY episode that still owns it, so anything else is stale and
-       * is cut here, once, at the top level. */
-      if (this.phase !== 'OPEN_PLAY' || !this.op?.latch) {
-        for (const p of this.live) if (inLatch(p)) { p.latchedBy = null; p.latchingOnto = null; }
-        if (this.op) clearLatch(this.op, null, null);
-      }
     } catch (err) {
       this.trip(`${this.phase} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -5790,6 +5796,19 @@ export class Director {
    * jump — must call this or it will leave players frozen where they stood.
    */
   releaseAll() {
+    /* ENDURANCE — the drag links die with the cast. A whistle blown while a
+     * latch is mid-drag (a penalty, a reset, a stoppage restart) used to
+     * leave both men linked until the top-level leak guard got to it on a
+     * LATER frame: a one-to-two-frame kinematic lock where the carrier
+     * still paid the 28% drag tax into the restart formation. Release them
+     * on the whistle frame itself — but only when the drag is actually over:
+     * an advantage play-on keeps a live `op.latch`, and that linked pair is
+     * still the story on the field, so its links stay. */
+    if (!this.op || !this.op.latch) {
+      for (const p of this.live) {
+        if (p.latchedBy || p.latchingOnto) { p.latchedBy = null; p.latchingOnto = null; }
+      }
+    }
     for (const p of this.live) {
       p.down = false;
       p.bound = false;
