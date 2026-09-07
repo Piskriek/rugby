@@ -14,6 +14,20 @@
  * even that is bounded by the intensity slider.
  */
 
+/**
+ * KICK-OFF LAUNCH ANCHOR.
+ *
+ * Law 12: the kick-off is taken from the centre of the halfway line — world
+ * (x 0, z 0) in this engine. The broadcast/cable rig binds to the ball carrier
+ * or ball point on every frame; seeding the rig on this centre spot the
+ * instant a match launches means the first rendered frame is already framed on
+ * the kicker (who IS the carrier until the ball is struck), instead of panning
+ * over from the rig's old rest position. Manual camera toggles (V first/third
+ * person, pause-menu CAMERA, wheel zoom) read the same `d.cam` state and stay
+ * fully responsive — this is a starting seed only, not a lock.
+ */
+export const KICKOFF_CENTER = { x: 0, z: 0 } as const;
+
 export type CamMode = 'CABLE' | 'TACTICAL' | 'SIDELINE' | 'BROADCAST' | 'CHASE' | 'POSTS' | 'SHOULDER';
 export type ZoomSetting = 1 | 2 | 3 | 4 | 'DYNAMIC';
 

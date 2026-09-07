@@ -87,12 +87,34 @@ const MODES: { id: Mode; label: string; note: string }[] = [
   { id: 'REPLAYS', label: 'REPLAY THEATRE', note: 'Five replay variants, varying in speed and dimension.' },
 ];
 
-export function ModeScreen({ onPick, onOptions, onGuide, onAudit, hasReplays }: {
+export function ModeScreen({ onPick, onOptions, onGuide, onAudit, hasReplays, onQuickStart }: {
   onPick: (m: Mode) => void; onOptions: () => void; onGuide: () => void; onAudit: () => void; hasReplays: boolean;
+  /** QUICK START (15v15): skip team/kit/squad/tactics and launch straight into
+   *  the kick-off with default fifteen-a-side rosters. */
+  onQuickStart: () => void;
 }) {
   return (
     <div className="mx-auto max-w-5xl p-5">
       <TitleBar kicker="MAIN MENU" title="SELECT COMPETITION" />
+      {/* QUICK START — the one primary action above the match selection
+          options. One click jumps straight into an active 15v15 kick-off,
+          bypassing team customization, kit selection and the coin toss. */}
+      <button
+        onClick={onQuickStart}
+        className="group mb-3 flex w-full items-center justify-between border-2 border-[#e8cf46] bg-[#2a2412] px-4 py-3 text-left hover:bg-[#3a3216]"
+      >
+        <div>
+          <div className="text-[16px] font-black tracking-[0.16em] text-[#e8cf46] group-hover:text-[#ffe46a]">
+            ▶ QUICK START (15v15)
+          </div>
+          <div className="mt-0.5 text-[10px] leading-snug text-[#b9aa68]">
+            STRAIGHT INTO THE KICK-OFF — DEFAULT SQUADS, SHIRTS 1–15, NO SETUP
+          </div>
+        </div>
+        <span className="shrink-0 border border-[#e8cf46] px-2 py-1 text-[9px] font-black tracking-[0.2em] text-[#e8cf46]">
+          ONE CLICK
+        </span>
+      </button>
       <div className="grid gap-2 sm:grid-cols-2">
         {MODES.map((m) => (
           <button

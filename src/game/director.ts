@@ -17,7 +17,7 @@
 import {
   Camera, FIELD, PitchConditions, pitchConditions,
 } from '../render/retro';
-import { CamMode, ZoomSetting, mapInputToWorld } from './camera';
+import { CamMode, ZoomSetting, mapInputToWorld, KICKOFF_CENTER } from './camera';
 import { TutorialState, newTutorial, stepAt, TUTORIAL } from './tutorial';
 import {
   shapeById, defenceById, DEFENCE_CHANNELS, ARCHETYPE_SHAPE,
@@ -26,7 +26,7 @@ import {
 } from './shapes';
 import {
   Nation, TEAM_BY_ID, KITS, FORMATION_BY_ID, DIFFICULTY_TABLE, AI_ARCHETYPES,
-  POINTS, SquadPlayer, REFEREE_CALLS,
+  POINTS, SquadPlayer, REFEREE_CALLS, DEFAULT_SLIDERS, OPTION_ITEMS,
 } from './data';
 import {
   contractFor, PhaseName, RoleContract,
@@ -592,6 +592,39 @@ const blankStats = (): MatchStats => ({
   tacklesBroke: 0, offloads: 0, jackals: 0,
 });
 
+/**
+ * QUICK START (15v15) — the single config that the main-menu "QUICK START
+ * (15v15)" button launches straight into. No team customization, no kit
+ * selection, no coin toss: two default nations (ENG v NZL) with their full
+ * fifteen shirts, the default tactics board and factory options. The match
+ * opens at the kick-off because the Director constructor itself drives the
+ * Law-12 restart pipeline (squads → positional behaviour trees → restart
+ * kickoff), so this is the exact same initialization path every other entry
+ * point uses — the button just routes past the setup screens.
+ */
+export function quickStartConfig(overrides?: Partial<MatchConfig>): MatchConfig {
+  const options: Record<string, number> = {};
+  for (const i of OPTION_ITEMS) options[i.id] = i.def;
+  const sliders = () => DEFAULT_SLIDERS.map((s) => ({ ...s }));
+  return {
+    M_ID: 'QUICKSTART_15V15_ENG_v_NZL',
+    homeId: 'ENG', awayId: 'NZL', kitA: 0, kitB: 0,
+    /* options.difficulty defaults to 3 (COUNTY) through OPTION_ITEMS; present
+     * it as a real top-level field too so every reader sees the same value. */
+    difficulty: options.difficulty ?? 3,
+    halfLength: 5,
+    options,
+    slidersA: sliders(), slidersB: sliders(),
+    backlineA: 'BL-SPLIT', defenceA: 'DF-UMBRELLA', lineoutA: 'LO-5', scrumA: 'SC-8-3',
+    backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
+    /* The player coaches the home side; the away fifteen is fully CPU. */
+    cpuA: false, cpuB: true, kickerA: 10, kickerB: 10,
+    assists: { pass: 0.7, tackle: 0.7, kick: 0.7 },
+    speed: 1,
+    ...overrides,
+  };
+}
+
 export interface MatchEvent { min: number; team: 'A' | 'B' | '-'; kind: string; text: string }
 
 export interface PlayerRun {
@@ -724,7 +757,8 @@ export class Director {
    *  the middle of a ruck that ended his possession, and only one of those two should
    *  be able to make him hard to strip. */
   bcGrip = false;
-  cam: Camera;
+  /** Assigned in the constructor via seedCameraOnCenter() (launch framing). */
+  cam!: Camera;
   scrumAnchor = { x: 0, z: 0 };
   scrim?: ScrumState;
   lo?: LineoutState;
@@ -903,8 +937,8 @@ export class Director {
       A: this.makeRun(cfg?.homeId ?? 'ENG', cfg?.kitA ?? 0, cfg?.slidersA ?? [], cfg?.backlineA ?? 'BL-SPLIT', cfg?.defenceA ?? 'DF-UMBRELLA', cfg?.lineoutA ?? 'LO-5', cfg?.scrumA ?? 'SC-8-3', cfg?.cpuA ?? false, cfg?.kickerA),
       B: this.makeRun(cfg?.awayId ?? 'NZL', cfg?.kitB ?? 0, cfg?.slidersB ?? [], cfg?.backlineB ?? 'BL-SPLIT', cfg?.defenceB ?? 'DF-UMBRELLA', cfg?.lineoutB ?? 'LO-5', cfg?.scrumB ?? 'SC-8-3', cfg?.cpuB ?? true, cfg?.kickerB),
     };
-    // Start on the cable rig, behind halfway, looking down the pitch.
-    this.cam = { x: 0, z: -18, h: 13, yaw: 0, tilt: 0.55, fov: 0.42, shake: 0, horizon: 0.42, roll: 0 };
+    // Start on the cable rig behind halfway; the actual launch frame is
+    // seeded onto the centre spot in seedCameraOnCenter() below.
     this.camMode = 'CABLE';
 
     for (let i = 0; i < 31; i++) {
@@ -915,10 +949,47 @@ export class Director {
       });
     }
     this.buildLive();
+    /* QUICK START / kick-off launch: seed BOTH the render camera and the
+     * cable rig's eased anchor on the centre spot before the first frame.
+     * The rig binds to the ball carrier/kicker the moment play starts, so
+     * this avoids a pan-in from the cable rest position on a straight
+     * launch (Quick Start); it does not lock anything — V, the pause-menu
+     * camera cycle and the wheel zoom all keep driving the same camera. */
+    this.seedCameraOnCenter();
+    this.beginKickoff();
+  }
+
+  /**
+   * THE MATCH LAUNCH PIPELINE'S FINAL STAGE — open an active match at the
+   * Law-12 kick-off. Called by the constructor for every entry point
+   * (friendlies, competitions, tutorials, Quick Start); it is also public
+   * so a launcher that has constructed a Director in a torn-down state can
+   * force the straight-to-kickoff start explicitly.
+   *
+   * The thirty shirts (positions 1-15 per side) already exist from
+   * buildLive(), and the positional behaviour trees read every frame out of
+   * src/game/behaviour via think() — there is no per-match behaviour
+   * allocation to miss.
+   */
+  beginKickoff() {
+    this.over = false;
+    this.paused = false;
+    this.phase = 'KICK';
     this.commentate('KICKOFF');
     this.showHint('A/D OR ARROWS TO RUN · SPACE TO SPRINT', 6);
     // Law 12: the kick-off is taken from the centre of the halfway line.
-    this.startKick('A', 'RESTART', { x: 0, z: 0 });
+    this.startKick('A', 'RESTART', { x: KICKOFF_CENTER.x, z: KICKOFF_CENTER.z });
+  }
+
+  /** Bind the launch framing to the centre spot (the kicker is the carrier). */
+  private seedCameraOnCenter() {
+    this.cam = { x: KICKOFF_CENTER.x, z: -17, h: 13, yaw: 0, tilt: 0.55, fov: 0.42, shake: 0, horizon: 0.42, roll: 0 };
+    this.cableX = KICKOFF_CENTER.x;
+    this.cableZ = -17;
+    this.cableH = 13;
+    this.cableAX = KICKOFF_CENTER.x;
+    this.cableAZ = KICKOFF_CENTER.z;
+    this.rigZ = KICKOFF_CENTER.z;
   }
 
   /* ---------------- squads ---------------- */
@@ -4409,8 +4480,11 @@ export class Director {
   /* ---- cable cam state ----
    * The rig hangs on notional wires, so it has mass. It does not snap to the
    * ball; it is dragged toward a point behind the ball and swings in behind. */
+  /* Cable-rig rest position. A direct launch (Quick Start) seeds these onto
+   * the kick-off centre spot in seedCameraOnCenter(); these defaults keep
+   * the field definite-assignment safe before the constructor body runs. */
   cableX = 0; /* T-03: engine-internal cable-rig state */
-  cableZ = -18;
+  cableZ = -17;
   cableH = 13;
   cableEase = 0;
   /** eased aim anchor for the cable rig — see cableRig (T-16/NO-WHIP) */
