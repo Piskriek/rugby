@@ -42,6 +42,14 @@ const a10 = mkLines(10, 'attack', [
     'If 15 has called the counter, pass and let him run it.',
     'A two-man backfield; counter by kicking long instead of short.',
     [[-10, 6], [-8.5, 6.5], [-7.5, 7]]],
+  ['Pocket depth control', 'Straight', 'ruck',
+    'The nine releases from the ruck and you are the first receiver',
+    'Run the flat lane slightly openside of the ball; the depth is priced by the ground in front — flat in the red zone, deep in midfield',
+    'sprint',
+    'Be the legal flat option: the pocket is where the 9\'s pass is judged, and a pocket that moves with the tempo is a pass that never goes forward.',
+    'If 12 is first receiver, take the out-the-back depth behind him.',
+    'A blitz on the pocket; counter by taking the ball earlier and flat.',
+    [[-8, 1.6], [-5.5, 2], [-3, 2.4], [-0.5, 2.6]]],
 ]);
 const d10 = mkLines(10, 'defence', [
   ['Channel-2 up-and-in', 'Blitz', 'ruck',
@@ -112,6 +120,14 @@ const a11 = mkLines(11, 'attack', [
     'If 15 is on the cross kick, block for him and take the tap-back.',
     'A defender who turns and runs early; counter by shortening the kick.',
     [[-8, -4], [-5, -2], [-2, -0.5], [0, 0]]],
+  ['Support trail behind the break', 'Support', 'tackle contact',
+    'A line break goes through inside you and the cover is coming across',
+    'Run the trail: inside and a stride behind the carrier, never flat',
+    'max',
+    'The offload target that turns a half-break into a try; the trail cuts back toward the middle, not out to the fence.',
+    'If 15 is the trail, hold your width as the second finisher.',
+    'A cover defender who reads the trail; counter by taking the trail deeper for the pop pass.',
+    [[-4, -20], [-2, -16], [1, -12], [4, -9]]],
 ]);
 const d11 = mkLines(11, 'defence', [
   ['Edge drift and shepherd', 'Drift', 'ruck',
@@ -138,6 +154,14 @@ const d11 = mkLines(11, 'defence', [
     'If 15 has the covering angle, take the inside support runner instead.',
     'An inside pass before the corner; counter by taking the support runner.',
     [[-8, -18], [-2, -24], [4, -29], [10, -32]]],
+  ['Pendulum — the LEFT deep third', 'Backfield', 'kick landing',
+    'Their nine or ten sets his feet and shapes for a kick',
+    'Rotate as the pose appears: own the left deep third, slide with the ball the whole time he aims',
+    'sprint',
+    'The back three are one covering body — a kick into the vacated third is a try, so the triangle rotates on the pose, not on the strike.',
+    'If 15 slides to your third, push up into the front line.',
+    'A short contestable to the seam; counter by talking the seam closed before the ball leaves the hand.',
+    [[6, -10], [0, -12], [-12, -14], [-22, -14.5]]],
 ]);
 
 // ===== 12 INSIDE CENTRE =====
@@ -182,6 +206,14 @@ const a12 = mkLines(12, 'attack', [
     'If 10 is in the window, take the outside line and stay wide.',
     'A tackler who pins the ball arm; counter by supporting deeper for the pop.',
     [[-6, 14], [-2, 18], [2, 22], [6, 26]]],
+  ['Flat line off the nine', 'Straight', 'ruck',
+    'The nine releases and the line is still drifting',
+    'Leave the ruck\'s openside lane on the flat, square to the ball, and finish in front of the gain line',
+    'sprint',
+    'Break the gain line with the first pass: a flat line that finishes behind the gain line is a decoy, and a decoy does not break a drift.',
+    'If the nine has you as the decoy, run the line hard and take no ball.',
+    'A defender who holds the inside shoulder; counter by cutting back inside late.',
+    [[-6, 4.6], [-3.5, 4.8], [-1, 5], [2, 5.2]]],
 ]);
 const d12 = mkLines(12, 'defence', [
   ['Midfield blitz with 13', 'Blitz', 'ruck',
@@ -252,6 +284,14 @@ const a13 = mkLines(13, 'attack', [
     'If the winger is on the chase, take the inside line for the loose ball.',
     'A fullback who covers early; counter by kicking flatter and shorter.',
     [[-18, 6], [-12, 8], [-6, 10], [0, 11]]],
+  ['Flat tip lane off the nine', 'Straight', 'ruck',
+    'The nine releases and the twelve has committed to his inside',
+    'Run the second flat line, wider, in front of the gain line',
+    'sprint',
+    'The tip pass the defence must staff: run it so the 10\'s pass to you breaks the drift on the second pass.',
+    'If the twelve takes the tip, run the seam attack instead.',
+    'A lid who holds the seam; counter by running straight and letting the wing go.',
+    [[-7, 8.6], [-4.5, 8.8], [-2, 9], [1, 9.2]]],
 ]);
 const d13 = mkLines(13, 'defence', [
   ['Outside anchor drift', 'Drift', 'ruck',
@@ -322,6 +362,14 @@ const a14 = mkLines(14, 'attack', [
     'If 15 has the outside line, come back inside for the short ball.',
     'A cover defender who takes you and lets the carrier run; counter by staying square.',
     [[-4, 20], [1, 24], [6, 27], [11, 30]]],
+  ['Support trail behind the break', 'Support', 'tackle contact',
+    'A line break goes through inside you and the cover is coming across',
+    'Run the trail: inside and a stride behind the carrier, never flat',
+    'max',
+    'The offload target that turns a half-break into a try; the trail cuts back toward the middle, not out to the fence.',
+    'If 15 is the trail, hold your width as the second finisher.',
+    'A cover defender who reads the trail; counter by taking the trail deeper for the pop pass.',
+    [[-4, 20], [-2, 16], [1, 12], [4, 9]]],
 ]);
 const d14 = mkLines(14, 'defence', [
   ['Edge drift and touchline squeeze', 'Drift', 'ruck',
@@ -348,6 +396,14 @@ const d14 = mkLines(14, 'defence', [
     'If 15 calls it, block for him and become the first support.',
     'An aggressive chaser contesting; counter by taking it two-handed in front of the face.',
     [[-10, 5], [-6, 3], [-3, 1.5], [0, 0]]],
+  ['Pendulum — the RIGHT deep third', 'Backfield', 'kick landing',
+    'Their nine or ten sets his feet and shapes for a kick',
+    'Rotate as the pose appears: own the right deep third, slide with the ball the whole time he aims',
+    'sprint',
+    'The back three are one covering body — a kick into the vacated third is a try, so the triangle rotates on the pose, not on the strike.',
+    'If 15 slides to your third, push up into the front line.',
+    'A short contestable to the seam; counter by talking the seam closed before the ball leaves the hand.',
+    [[6, 10], [0, 12], [-12, 14], [-22, 14.5]]],
 ]);
 
 // ===== 15 FULLBACK =====
@@ -418,6 +474,14 @@ const d15 = mkLines(15, 'defence', [
     'If a winger is already up, stay deep and cover the kick — never both.',
     'A chip over the top into your vacated space; counter by only inserting inside their 22.',
     [[-20, 18], [-13, 20], [-7, 22], [-2, 24]]],
+  ['Pendulum — the CENTRE deep third', 'Backfield', 'kick landing',
+    'Their nine or ten sets his feet and shapes for a kick',
+    'Rotate as the pose appears: own the centre deep third, the manliest ground, and slide with the ball',
+    'sprint',
+    'A box kick up the middle is the default kick, so the centre post is the most contested third in the triangle — you are it.',
+    'If a winger covers the middle, take the second sweep beside the 10.',
+    'A cross-field kick to the vacated wing third; counter by the whole triangle rotating with the ball, not just you.',
+    [[6, 0], [0, 0], [-12, 0.5], [-22, 1]]],
 ]);
 
 const LINES_BACKS: RunLine[] = [

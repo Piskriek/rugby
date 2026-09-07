@@ -3,6 +3,17 @@ import { expand, PointTuple } from './types';
 // 14 — RIGHT WING (100 points)
 // The finisher. The mirror of 11 (left wing): openside-wide, chase leader,
 // corner defender.
+//
+// The positional contract (engine/backline.ts, wing tree FOURTEEN):
+//   · THE WIDE EDGE — the finishing line that arrives AHEAD of the outside
+//     pass when the ball is in the wing's own half of the field: 29.5 m in,
+//     7 m in front of the ball.
+//   · THE SUPPORT TRAIL — behind a line break, inside and a stride deep,
+//     the offload target, not a second finisher.
+//   · THE PENDULUM — the back three are one covering body: the 14 owns the
+//     RIGHT deep third. When the opposition's 9 or 10 sets his feet and
+//     shapes for a kick, the triangle rotates and slides with the ball, and
+//     the 14's third is the right one. A kick into the vacated third is a try.
 const t: PointTuple[] = [
   // own-scrum-mid
   ['own-scrum-mid', 1, 45, 88, 'Stand on the openside wing, 10m from the right touchline, level with the scrum.', 'If 15 is wide, come in one and hold the 15m channel.'],
@@ -29,14 +40,14 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 46, 88, 'Drop and cover the wide kick space with 15.', 'If 15 fields it, support outside him.'],
   ['def-lineout-mid', 5, 45, 84, 'Reset the right edge for their phase two.', 'If we counter, swing wide immediately.'],
   // att-phase-mid
-  ['att-phase-mid', 1, 48, 78, 'Hold the widest channel, 15m from touch, at pace-ready depth.', 'If 13 comes wide, hold second-wide and wait.'],
-  ['att-phase-mid', 2, 49, 80, 'Time your run off 13\'s hands; never be flat, never be deep.', 'If the ball slows, hold your width and reset.'],
+  ['att-phase-mid', 1, 48, 78, 'Hold the widest channel, 15m from touch, at pace-ready depth. When the ball is in your half of the field and the 12, 13 or 15 carries, the wide edge is your finishing line: arrive in front of the outside pass.', 'If 13 comes wide, hold second-wide and wait.'],
+  ['att-phase-mid', 2, 49, 80, 'Time your run off 13\'s hands; never be flat, never be deep. Through a line break inside you, the trail is behind and infield — the offload, not a second finish.', 'If the ball slows, hold your width and reset.'],
   ['att-phase-mid', 3, 51, 84, 'Take the ball at full pace into the space.', 'If the edge is shut, chip and chase or cut back.'],
   ['att-phase-mid', 4, 53, 87, 'FINISH: beat the last defender, use the corner, ground it in.', 'If the tackle is made, present long and stay alive.'],
   ['att-phase-mid', 5, 53, 80, 'Reload wide; the finisher resets fastest.', 'If the ball comes back, be there again.'],
   // def-line-mid
   ['def-line-mid', 1, 44, 78, 'Hold the wide channel of the line, connected inside to 13.', 'If 13 shoots, slide in and cover his channel.'],
-  ['def-line-mid', 2, 44, 80, 'Watch their deepest runner; the kick behind is your danger.', 'If they run, hold the drift line.'],
+  ['def-line-mid', 2, 44, 80, 'Watch their deepest runner; the kick behind is your danger. When their 9 or 10 sets to kick, you are the pendulum\'s RIGHT third: the triangle rotates and slides with the ball, and the right deep zone is yours.', 'If they run, hold the drift line.'],
   ['def-line-mid', 3, 43, 84, 'Make the tackle in the channel or force them to touch.', 'If they kick over you, turn and chase.'],
   ['def-line-mid', 4, 42, 82, 'Reset the edge fast — the wing is never at the ruck.', 'If we turn it over, swing wide and counter.'],
   ['def-line-mid', 5, 43, 78, 'Fold with the ball, holding the wide shape.', 'If numbers are short, drift to the touchline.'],

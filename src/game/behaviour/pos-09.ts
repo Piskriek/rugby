@@ -1,6 +1,16 @@
 import { expand, PointTuple } from './types';
 
 // 9 — SCRUM-HALF (100 points)
+//
+// The positional contract this dataset encodes (engine/backline.ts, tree NINE):
+//   · THE BASE — behind BOTH the conventional stride and the team's DYNAMIC
+//     HINDMOST FOOT (the line through the rearmost bound foot of the contest).
+//     The base follows the cleanout crew as their feet come over the ball.
+//   · THE EXTRACT — a flat delivery, judged by the ball's velocity against the
+//     9's own forward momentum: the exit step is what makes the pass legal.
+//   · THE DELIVERY VECTOR — flat to the 10's pocket, to the pod, or the
+//     blindside snipe. Decide before the ball is available.
+//   · INSIDE SUPPORT — one pass from the ball when he is not the distributor.
 const t: PointTuple[] = [
   ['own-scrum-mid', 1, 47, 41, 'Stand at the tunnel on the left of the scrum ready to feed.', 'Nobody else takes this role; if injured, 7 or 10 covers the feed.'],
   ['own-scrum-mid', 2, 46, 40, 'Feed straight and quick; then move to the base at the 8\'s feet.', 'If the scrum is unstable, hold at the base and wait.'],
@@ -26,10 +36,10 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 40, 80, 'Sweep behind the defensive line, covering their kick.', 'If we press, hold the pillar and shout the numbers.'],
   ['def-lineout-mid', 5, 44, 78, 'Re-set as pillar or sweeper depending on their shape.', 'If they kick, sprint to the ball as the first receiver.'],
 
-  ['att-phase-mid', 1, 55, 50, 'Stand at the back of the ruck, hands on the ball, head up.', 'This slot is yours alone; if you are in the ruck, 10 or 7 takes it.'],
-  ['att-phase-mid', 2, 55, 50, 'Scan: pod, wide, kick or snipe. Decide before the ball is available.', 'If the ruck is slow, do not pass into pressure — reset the tempo.'],
-  ['att-phase-mid', 3, 55.5, 51, 'Deliver a flat, fast pass to the pod or a long pull-back to 10.', 'If the guard is asleep, snipe the ruck-edge gap yourself.'],
-  ['att-phase-mid', 4, 57, 52, 'Follow the ball; be the link at the next breakdown.', 'If the ball goes wide, sprint the arc to the next ruck.'],
+  ['att-phase-mid', 1, 55, 50, 'At the base, behind the hindmost foot of the contest — the line moves with the cleanout, and so does the base. Hands on the ball, head up.', 'This slot is yours alone; if you are in the ruck, 10 or 7 takes it.'],
+  ['att-phase-mid', 2, 55, 50, 'Scan before the ball is available: pod, pocket, wide or snipe. The decision is made at the base, not in the release.', 'If the ruck is slow, do not pass into pressure — reset the tempo.'],
+  ['att-phase-mid', 3, 55.5, 51, 'Flat, fast delivery: a stride out of the ruck makes the pass to the 10\'s pocket legal — the ball is judged against your own momentum.', 'If the guard is asleep, snipe the ruck-edge gap yourself.'],
+  ['att-phase-mid', 4, 57, 52, 'Follow the ball; be the link at the next breakdown, inside support one pass from the ball.', 'If the ball goes wide, sprint the arc to the next ruck.'],
   ['att-phase-mid', 5, 58, 53, 'Arrive at the next ruck, organise the forwards, restart the cycle.', 'If a forward is at the base, take the first-receiver slot instead.'],
 
   ['def-line-mid', 1, 44, 50, 'Stand as the ruck-side sweeper or the second pillar.', 'If 15 is deep, take the pillar; if pillars are filled, sweep.'],
@@ -50,7 +60,7 @@ const t: PointTuple[] = [
   ['kickoff-chase', 4, 56, 44, 'Pressure their 9 at the exit ruck; deny the quick box kick.', 'If they kick, drop as the sweeper.'],
   ['kickoff-chase', 5, 53, 46, 'Re-set as the ruck-side defender and talk the line into shape.', 'If out of position, sweep behind the line.'],
 
-  ['exit-box-kick', 1, 14, 42, 'Stand at the base of the ruck in your kicking pocket.', 'This is your role: no substitute unless you are in the ruck.'],
+  ['exit-box-kick', 1, 14, 42, 'Stand at the base of the ruck in your kicking pocket, behind the hindmost foot.', 'This is your role: no substitute unless you are in the ruck.'],
   ['exit-box-kick', 2, 13, 41, 'Set the protection: call the L-shape and check the chase is ready.', 'If protection is not set, delay one beat and re-call.'],
   ['exit-box-kick', 3, 13, 40, 'Box kick 30-40m into the 15m channel, hang time over distance.', 'If pressure arrives, pass to 10 for the long touch-finder.'],
   ['exit-box-kick', 4, 18, 44, 'Follow the kick as the sweeper 15m behind the chase line.', 'If we win it back, be the link at the contest.'],
@@ -62,9 +72,9 @@ const t: PointTuple[] = [
   ['counter-deep', 4, 26, 56, 'Play to the space or box kick if the counter is shut down.', 'If we are still in the 22, prefer the kick over the risk.'],
   ['counter-deep', 5, 30, 52, 'Manage the exit sequence; call the shape and tempo.', 'If we kick, sweep behind the chase.'],
 
-  ['red-zone-22', 1, 82, 52, 'At the base of the red-zone ruck, head up, scanning the fringes.', 'If you are in the ruck, 7 or 8 takes the base.'],
+  ['red-zone-22', 1, 82, 52, 'At the base of the red-zone ruck, head up, scanning the fringes. The pocket is flat out here — 3.5-4.5 m, a pick-and-go, not a deep hold.', 'If you are in the ruck, 7 or 8 takes the base.'],
   ['red-zone-22', 2, 82, 52, 'Look for the sleeping guard; the snipe is the highest-yield red-zone play.', 'If they are set, feed the tight pod and keep tempo.'],
-  ['red-zone-22', 3, 83, 53, 'Snipe or pass flat; never a slow, floated pass this close in.', 'If the ruck is slow, wait — do not force a turnover.'],
+  ['red-zone-22', 3, 83, 53, 'Snipe or pass flat; never a slow, floated pass this close in — the delivery is a tap, not a throw.', 'If the ruck is slow, wait — do not force a turnover.'],
   ['red-zone-22', 4, 84, 54, 'Follow the carrier and be at the base within two seconds.', 'If a forward is at the base, take the first-receiver slot.'],
   ['red-zone-22', 5, 85, 52, 'Vary the side; three phases one way, then swing the ball wide.', 'If forwards are gassed, call the wide play early.'],
 
@@ -110,7 +120,7 @@ const t: PointTuple[] = [
   ['drop-out-22', 4, 30, 48, 'Talk the defensive line into shape; call the count.', 'If they kick back, sprint to support the catcher.'],
   ['drop-out-22', 5, 28, 48, 'Sweep behind the line for the box kick and the chip.', 'If we press up, hold the pillar.'],
 
-  ['wide-edge', 1, 60, 80, 'At the base of the edge ruck, ready to swing the ball back infield.', 'If you are in the ruck, 7 takes the base.'],
+  ['wide-edge', 1, 60, 80, 'At the base of the edge ruck, ready to swing the ball back infield. Wide bases sit on the touch-side of the hindmost foot, not past the corridor.', 'If you are in the ruck, 7 takes the base.'],
   ['wide-edge', 2, 60, 80, 'Scan the short side; it is usually understaffed after a wide ruck.', 'If the short side is covered, play back infield to the pods.'],
   ['wide-edge', 3, 61, 78, 'Snipe or pass to the blindside winger arriving on the short side.', 'If the winger is not there, box kick to the space.'],
   ['wide-edge', 4, 62, 74, 'Follow the ball and be the link at the next ruck.', 'If the ball goes to a forward pod, be at the base within 2 seconds.'],

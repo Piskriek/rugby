@@ -72,12 +72,17 @@ import {
   LINEOUT_LINE_THROWING, LINEOUT_LINE_DEFENDING, lineoutRole, ROUTE_FIELD_HALF_M,
   type PackContext, type PackMark,
 } from './engine/forwardPack';
+import {
+  evaluateBacklineTree, kickPoseOf, nineBaseZ, nineBaseX,
+  isBacklineShirt, type BacklineContext,
+} from './engine/backline';
 import { commentate, commentarySequencer } from './engine/commentary';
 import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
 import {
   liveOffsideLines, penetrationOf, offsideVerdict, STRICTNESS, OffsideLedger,
   legalMarkZ, legalZFor, clampPitchZ, CLEAN_MARGIN_METRES,
   insideCorridor, clampOntoLegalSide, scrumhalfReleased, preReleaseWhistle,
+  ruckOffsidePlanes,
   type OffsideLine, type StrictnessProfile,
 } from './engine/offside';
 import { beginPenalty, resolvePenalty, lawCall, card } from './engine/laws';
@@ -88,7 +93,7 @@ import { sampleSlot, planSlotOf } from './engine/breakdownPlan';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
-import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
+import { inEchelon, echelonTargetZ, echelonDepthBehindTen, pendulumMark } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 import { LatchSystem } from './engine/latch';
 
@@ -858,6 +863,22 @@ export class Director {
    * of each tree actually fires in a match.
    */
   packStats = { routed: { A: 0, B: 0 }, treeMarks: 0, nodes: {} as Record<string, number> };
+  /* BACKLINE TELEMETRY — the mirror of packStats for shirts 9-15, plus the
+   * three jobs the backline probe grades: how often the pendulum rotated in
+   * a kicking pose (and which thirds it covered), how often the 9's base
+   * held behind the dynamic hindmost line, and the 10's pocket depth as he
+   * waits on the 9's release. */
+  backlineStats = {
+    routed: { A: 0, B: 0 },
+    treeMarks: 0,
+    nodes: {} as Record<string, number>,
+    pendulumFrames: 0,
+    pendulumThirds: { LEFT: 0, CENTRE: 0, RIGHT: 0 } as Record<string, number>,
+    nineBaseFrames: { A: 0, B: 0 },
+    nineOffsideFrames: { A: 0, B: 0 },
+    pocketFrames: 0,
+    pocketDepthSum: 0,
+  };
   /** the ruck geometry computed by `enforceRuckEntryGates` this frame, for think() */
   private ruckGeoThisFrame: ReturnType<typeof ruckGateGeometry> = null;
   private ruckGeoDrawnAt = -1;
@@ -3434,9 +3455,39 @@ export class Director {
       const dist9 = s.stage !== 'OVER' ? ruckDistributor(this.live, s.attacking, s.contactX, s.contactZ) : null;
       if (dist9 && dist9.sinbin <= 0 && !dist9.down
         && !s.players.some((q) => q.team === s.attacking && q.num === dist9.num)) {
-        const baseX = clamp(s.contactX + (s.contactX > 0 ? -1.8 : 1.8), -32, 32);
-        const baseZ = s.contactZ - fwdA * 1.4;
+        /* BACKLINE — the base against the DYNAMIC hindmost line. The
+         * conventional stride sits 1.4 m behind the contact, but the
+         * cleanout crew's feet routinely end up BEHIND that spot, and a nine
+         * waiting at the old fixed base waits in front of his own team's
+         * line — the offside the pre-release whistle is written for. TWO
+         * planes are in play: the contest's own hindmost BOUND foot (the
+         * gate geometry, live) and the referee's declared hindmost SLOT
+         * (the breakdown's own roster — the line the pre-release whistle
+         * is judged against, and the deeper of the two on a committed
+         * ruck). The base sits behind whichever stands further back, and
+         * inside the corridor's lateral band. The base is the authoritative
+         * nine mark this frame, so the probe's (a) reads it here. */
+        const slotP = ruckOffsidePlanes(s)[s.attacking];
+        const livePlane = this.ruckGeoThisFrame?.gates[s.attacking]?.planeZ ?? null;
+        let plane: number | null = slotP ? slotP.z : null;
+        if (livePlane !== null && (plane === null || (s.contactZ - livePlane) * fwdA > (s.contactZ - plane) * fwdA)) plane = livePlane;
+        const baseX = clamp(nineBaseX(s.contactX, this.ruckGeoThisFrame, s.contactX > 0 ? 1 : -1, s.attacking), -32, 32);
+        const baseZ = nineBaseZ(s.contactZ, plane, fwdA);
+        if (dist9.num === 9) {
+          this.backlineStats.nineBaseFrames[s.attacking]++;
+          if (plane !== null && (baseZ - plane) * fwdA > 0.3) this.backlineStats.nineOffsideFrames[s.attacking]++;
+        }
         const off = Math.hypot(baseX - dist9.x, baseZ - dist9.z);
+        /* THE NINE'S TRANSIT. When the ruck forms the nine is usually in
+         * front of the freshly declared line — he was the last man on the
+         * ball, and the crew's declared slots sit behind him. He crosses it
+         * on his way to the base: the crossing is a fraction of a second at
+         * under a stride of penetration, far under the pre-release
+         * standard (2.0 m sustained for 0.7 s), and a man clearly heading
+         * to onside ground is the transit the referee does not blow. What
+         * IS an offence — a man standing over the line — is impossible,
+         * because the base itself (the only mark he ever settles on) sits
+         * 0.5 m behind whichever line stands further back. */
         /* FORWARD PACK — the base is behind the hindmost foot, but the man
          * sent there (the nine, or the 8 / 2 / 7 standing in for a nine who
          * is in the pile) may be on the wrong side of it. The same gate rule
@@ -3453,6 +3504,10 @@ export class Director {
           dist9.job = 'GET TO THE BASE — YOUR BALL';
           steer(dist9, dt, true);
         } else {
+          /* The mark IS the base — no stale gate waypoint may linger in
+           * front of the line while he waits for the ball. */
+          dist9.tx = clamp(baseX, -ROUTE_FIELD_HALF_M, ROUTE_FIELD_HALF_M);
+          dist9.tz = clamp(baseZ, -59, 59);
           /* D-2 — bounded; this was the last unbounded set-piece place, and it
            * showed up as shirt 9 moving 1.12 m in one frame under the gate
            * harness's bot input (a path NO_INPUT probing never exercised). */
@@ -3660,8 +3715,40 @@ export class Director {
           s.formReady = count ? arrived / count : 1;
           return;
         }
+        /* BACKLINE — THE PENDULUM. An open-play kick from the 9's or the 10's
+         * hands is a coverage problem for the RECEIVING side's back three:
+         * the three of them rotate to OWN the deep thirds of the defended
+         * field — left, centre, right — and hold them as the kicker aims,
+         * so a punt anywhere into the covered zone meets a man who was
+         * already running at it. The triangle slides with the ball's lateral
+         * position every frame; the 10 drops as the second sweeper between
+         * the line and the triangle. The geometry is the pure
+         * `pendulumMark` in behaviour/backline-echelon; the kick phase owns
+         * this choreography because think() has already stood down for the
+         * KICK phase. A restart or drop-out is a FORMATION, not a coverage
+         * problem — the form walk above owns it and returns. */
+        const pose = s.type !== 'RESTART' && s.type !== 'DROP_OUT'
+          && (s.kickerNum === 9 || s.kickerNum === 10);
+        const defTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
+        const ownEdge = defTeam === 'A' ? FIELD.tryZ : FIELD.tryZFar;
         for (const p of this.live) {
           if (p === k || p.sinbin > 0) continue;
+          if (pose && p.team === defTeam && !p.down && !p.bound
+              && (p.num === 10 || p.num === 11 || p.num === 14 || p.num === 15)) {
+            const m = p.num === 10
+              ? { x: s.bx, z: s.bz - s.dir * 14, third: 'CENTRE' as const }
+              : pendulumMark(p.num, { x: s.bx, z: s.bz }, s.dir as 1 | -1, ownEdge);
+            p.tx = clamp(m.x, -33, 33);
+            p.tz = clamp(m.z, -59, 59);
+            p.urgency = 1;
+            p.job = p.num === 10
+              ? 'TEN — SECOND SWEEP, BETWEEN THE LINE AND THE TRIPLE'
+              : `${p.num === 11 ? 'ELEVEN' : p.num === 14 ? 'FOURTEEN' : 'FIFTEEN'} — PENDULUM, ${m.third} THIRD`;
+            this.backlineStats.pendulumFrames++;
+            if (p.num !== 10) this.backlineStats.pendulumThirds[m.third]++;
+            steer(p, dt, true);
+            continue;
+          }
           p.tx = p.x; p.tz = p.z;
           p.urgency = 0.2;
           steer(p, dt, false);
@@ -4054,6 +4141,122 @@ export class Director {
     return owned;
   }
 
+  /**
+   * BACKLINE — the positional behaviour trees for shirts 9-15 (engine/backline).
+   *
+   * The mirror of `applyForwardPack`, called on the SAME frame and AFTER it:
+   * the forward pack has already routed the forwards through the ruck gate,
+   * and the backline is routed through the SAME gate from its own marks —
+   * the referee does not care whose shirt a side entry wears. The 9 is the
+   * one shirt the trees and the breakdown share: while he is the ball-player
+   * (`bound`), the ruck owns him; the frame the ball leaves his hands he is
+   * free again, and his tree takes him into open play.
+   *
+   * The tree's mark stands behind the mark the dataset, shape and echelon
+   * wrote: a null node means the old pipeline owns the man, untouched.
+   *
+   * Returns true when a tree node owned his mark this frame.
+   */
+  private applyBackline(
+    gate: ForwardAttackGateReporter | undefined, p: Live, busy: boolean,
+  ): boolean {
+    if (p.carrier || p.bound || p.down) return false;
+    if (this.isHuman(p.team) && p === this.ctrlPlayer) return false;
+    if (!isBacklineShirt(p.num)) return false;
+    const bd = this.bd;
+    const inRuck = !!bd && (this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY');
+    if (!inRuck && this.phase !== 'OPEN_PLAY') return false;
+    const attacking: 'A' | 'B' = inRuck ? bd!.attacking : (this.op?.attacking ?? this.possession);
+    const dir: 1 | -1 = attacking === 'A' ? 1 : -1;
+    const f = this.focusPoint();
+    /* the gate geometry: the referee's own while his window is open, else
+     * drawn here from the same cluster (applyForwardPack already drew it
+     * this frame for the forwards; reuse it — one geometry, two trees) */
+    const geo = inRuck ? this.ruckGeoThisFrame : null;
+    const inRoster = inRuck && (this.ruckGateRosterCache?.has(`${p.team}:${p.num}`) ?? false);
+    const loose = this.bc.state === 'LOOSE' && this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
+    const op = this.op;
+    /* the carrier: only while the ball is in a hand — a pass in flight has
+     * no carrier, and the marks that read "off the carrier" stand down */
+    const carrier = !inRuck && op && !op.ball.live
+      ? (() => { const c = this.L(op.attacking, op.carrierNum); return { num: c.num, x: c.x, z: c.z, vz: op.vz }; })()
+      : null;
+    const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
+    /* the 9's base obeys the team's own hindmost-foot plane — the DYNAMIC
+     * hindmost line. The plane is measured from the contest the referee is
+     * actually policing (the gate geometry), so the base follows the
+     * cleanout crew as their feet come over the ball. */
+    const ownEdgeZ = p.team === 'A' ? FIELD.tryZ : FIELD.tryZFar;
+    const ctx: BacklineContext = {
+      phase: inRuck ? 'BREAKDOWN' : 'OPEN_PLAY',
+      team: p.team, attacking, dir, sigma: p.team === 'A' ? 1 : -1,
+      p: { x: p.x, z: p.z }, vel: { x: p.vx, z: p.vz },
+      ball: f, mark: { x: p.tx, z: p.tz },
+      geo, stage: inRuck ? bd!.stage : '', ruckFormed: inRuck ? bd!.ruckFormed : false,
+      inRoster, loose, carrier, latched: !!op?.latch, busy, toLine,
+      opT: op ? op.t : 0,
+      tempo: this.slider(p.team, 'tempo') / 100,
+      lineBreak: !!op?.lineBreak,
+      ruckWindow: inRuck ? bd!.window : 0,
+      /* the kicking pose, as the defender's back three see it: the tee
+       * pose (AIM/METER on the KICK phase — where think() stands down and
+       * the SETTING stage owns the rotation) or the run-and-hold charge
+       * still in open play, where THIS tree rotates the men live */
+      kick: (op && !op.ball.live && op.kickCharge > 0.01
+        && (op.carrierNum === 9 || op.carrierNum === 10))
+        ? { team: op.attacking, num: op.carrierNum, x: op.carrierX, z: op.carrierZ }
+        : kickPoseOf(this.kk),
+      ownEdgeZ,
+    };
+    const m = evaluateBacklineTree(p.num, ctx);
+    let mark = m ? { x: m.x, z: m.z } : { x: p.tx, z: p.tz };
+    /* THE GATE RULE — the same rule the forwards obey, over the tree's
+     * mark. A 9 who waits in front of his own team's hindmost foot is
+     * routed around the box exactly like a prop, and his job says so. */
+    const passed = inRuck && this.ruckGateLedger.hasPassed(p.team, p.num);
+    const bias = ((p.num * 37) % 5 - 2) * 0.22;
+    const routed = inRuck
+      ? routeThroughGate(p.team, ctx.p, mark, geo, passed, bias, { x: p.vx, z: p.vz })
+      : { mark, routed: false as const, leg: 'none' as const };
+    if (routed.routed) {
+      this.backlineStats.routed[p.team]++;
+      mark = routed.mark;
+    }
+    if (!m && !routed.routed) return false;
+    if (m) {
+      this.backlineStats.nodes[m.node] = (this.backlineStats.nodes[m.node] ?? 0) + 1;
+      this.backlineStats.treeMarks++;
+      /* the two jobs the probe grades, counted at the source:
+       *  · the 9's base vs the team's own plane — onside or offside
+       *  · the 10's pocket depth off the ball while he waits on the 9 */
+      if (m.node === 'nine-base') {
+        const plane = ctx.geo?.gates[ctx.attacking]?.planeZ ?? null;
+        const pen = plane === null ? 0 : (m.z - plane) * dir;
+        this.backlineStats.nineBaseFrames[p.team]++;
+        if (pen > 0.3) this.backlineStats.nineOffsideFrames[p.team]++;
+      }
+      if (m.node === 'ten-pocket') {
+        this.backlineStats.pocketFrames++;
+        this.backlineStats.pocketDepthSum += Math.abs(m.z - ctx.ball.z);
+      }
+    }
+    const urgency = m ? plantedUrgency(m, ctx.p) : Math.max(p.urgency, 0.95);
+    const job = routed.routed
+      ? `${m ? m.job : p.job} — THROUGH THE GATE`
+      : m!.job;
+    const node = m ? m.node : 'gate-only';
+    const xLim = routed.routed ? ROUTE_FIELD_HALF_M : 33;
+    const bm = this.boundMark(clamp(mark.x, -xLim, xLim), mark.z);
+    this.writeThinkPlayer(gate, `think:backline:${p.team}${p.num}:${node}`, p,
+      ['tx', 'tz', 'job', 'urgency'] as const, () => {
+        p.tx = clamp(bm.x, -xLim, xLim);
+        p.tz = clamp(bm.z, -59, 59);
+        p.urgency = clamp(urgency, 0, 1);
+        p.job = job;
+      });
+    return true;
+  }
+
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
     const s = this.shape();
@@ -4380,6 +4583,11 @@ export class Director {
         if (this.op && this.op.podHold > 0
             && Math.hypot(p.tx - f.x, p.tz - f.z) <= POD_HOLD_ANCHOR_METRES) {
           this.applyForwardPack(gate, p, false);
+          /* BACKLINE — the pocket and the flat lines are priced on exactly
+           * this beat: the first second of the ruck exit, while the pod
+           * holds. The 10's pocket depth and the 12's flat lane are the
+           * release options the 9 is choosing between. */
+          this.applyBackline(gate, p, false);
           steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
@@ -4485,6 +4693,7 @@ export class Director {
                 p.urgency = 0.9;
               });
             this.applyForwardPack(gate, p, false);
+            this.applyBackline(gate, p, false);
             steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
@@ -4790,6 +4999,13 @@ export class Director {
        * chaser is busy: his tree is consulted (the gate rule still binds him)
        * but the open-play nodes that would pull him off the tackle stand down. */
       this.applyForwardPack(gate, p, convergers.has(p.num) || coverChase.has(p.num));
+      /* BACKLINE — the positional trees for 9–15, over the dataset / shape /
+       * echelon marks, through the SAME ruck gate. The 9's base keeps to the
+       * team's dynamic hindmost foot; the 10 prices his pocket; the 12 and
+       * 13 run the flat lines; the wings hold the wide edge and the trail;
+       * the 15 sweeps the central third. The pendulum is not here — it lives
+       * in the kick's SETTING stage, where think() has already stood down. */
+      this.applyBackline(gate, p, convergers.has(p.num) || coverChase.has(p.num));
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.

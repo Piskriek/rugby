@@ -1,6 +1,17 @@
 import { expand, PointTuple } from './types';
 
 // 11 — LEFT WING (100 points)
+//
+// The positional contract (engine/backline.ts, wing tree ELEVEN):
+//   · THE WIDE EDGE — the finishing line that arrives AHEAD of the outside
+//     pass when the ball is in the wing's own half of the field: 29.5 m in,
+//     7 m in front of the ball.
+//   · THE SUPPORT TRAIL — behind a line break, inside and a stride deep,
+//     the offload target, not a second finisher.
+//   · THE PENDULUM — the back three are one covering body: the 11 owns the
+//     LEFT deep third. When the opposition's 9 or 10 sets his feet and
+//     shapes for a kick, the triangle rotates and slides with the ball, and
+//     the 11's third is the left one. A kick into the vacated third is a try.
 const t: PointTuple[] = [
   ['own-scrum-mid', 1, 45, 12, 'Stand on the blindside wing, 10m from touch, level with the scrum.', 'If 15 is on the blindside, drop back as the deep cover instead.'],
   ['own-scrum-mid', 2, 46, 14, 'Be the extra man on the short side if the call is a blindside strike.', 'If the ball goes openside, drop into the backfield as the left sweeper.'],
@@ -26,14 +37,14 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 40, 35, 'Counter-attack down the left, or return the kick to touch.', 'If pressure is on, kick early and re-set.'],
   ['def-lineout-mid', 5, 42, 25, 'Re-set the backfield triangle with 14 and 15.', 'If we win the ball, become the wide finisher on the left edge.'],
 
-  ['att-phase-mid', 1, 52, 20, 'Stand on the left edge, 5-10m from touch, level with the last man.', 'If 15 has the edge, tuck inside him as the second finisher.'],
-  ['att-phase-mid', 2, 53, 22, 'Hold your width; the wing pulls their defence apart by standing wide.', 'If the ball is going right, drop into the backfield as the left sweeper.'],
+  ['att-phase-mid', 1, 52, 20, 'Stand on the left edge, 5-10m from touch, level with the last man. When the ball is in your half of the field and the 12, 13 or 15 carries, the wide edge is your finishing line: arrive in front of the outside pass.', 'If 15 has the edge, tuck inside him as the second finisher.'],
+  ['att-phase-mid', 2, 53, 22, 'Hold your width; the wing pulls their defence apart by standing wide. Through a line break inside you, the trail is behind and infield — the offload, not a second finish.', 'If the ball is going right, drop into the backfield as the left sweeper.'],
   ['att-phase-mid', 3, 55, 22, 'Attack the space outside their last defender at pace.', 'If it is a 1v1, take him on the outside shoulder.'],
   ['att-phase-mid', 4, 58, 18, 'Finish the break down the touchline, or kick and chase yourself.', 'If tackled, present the ball inwards for the support.'],
   ['att-phase-mid', 5, 52, 24, 'Reload: hold width if the ball comes back, or drop into the backfield.', 'If 15 is up in the line, take the deep left cover.'],
 
   ['def-line-mid', 1, 44, 22, 'Stand as the last defender on the left edge, one out from 13.', 'If 15 comes up outside you, drop into the backfield instead.'],
-  ['def-line-mid', 2, 44, 20, 'Drift and shepherd; never bite in and open the outside channel.', 'If they kick, turn and sprint back to cover the left backfield.'],
+  ['def-line-mid', 2, 44, 20, 'Drift and shepherd; never bite in and open the outside channel. When their 9 or 10 sets to kick, you are the pendulum\'s LEFT third: the triangle rotates and slides with the ball, and the left deep zone is yours.', 'If they kick, turn and sprint back to cover the left backfield.'],
   ['def-line-mid', 3, 43, 18, 'Tackle their winger into touch; the touchline is your extra defender.', 'If beaten inside, chase and tackle from behind.'],
   ['def-line-mid', 4, 40, 20, 'Re-set width, do not go to the breakdown; you are needed on the edge.', 'If the ball goes back inside, fold with the line but hold the edge.'],
   ['def-line-mid', 5, 38, 24, 'Drop as one third of the backfield triangle if they build phases.', 'If 15 is deep left, push up into the line.'],

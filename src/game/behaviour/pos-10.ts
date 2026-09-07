@@ -1,6 +1,18 @@
 import { expand, PointTuple } from './types';
 
 // 10 — FLY-HALF (100 points)
+//
+// The positional contract this dataset encodes (engine/backline.ts, tree TEN):
+//   · THE POCKET — first-receiver depth priced by the ground in front of the
+//     ball: flat in the red zone (3.5-4.5 m, a pick-and-go), classic in the
+//     building phase (6.5-8 m), deep in midfield (8-10 m). The pocket sits
+//     slightly OPENSIDE of the ball so the 9's release is a flat angled pass.
+//   · THE DISTRIBUTOR DECISION — pass flat, pass deep, carry, territory kick:
+//     made from the pocket before the ball arrives.
+//   · THE LOOP — around the outside at pace when the 12 carries.
+//   · THE DEFENSIVE DRIFT — track the ball on the 10 channel and shut the
+//     12-13 lane as the line slides; the second sweep between the line and
+//     the back-three triangle when they kick.
 const t: PointTuple[] = [
   ['own-scrum-mid', 1, 40, 47, 'Stand 10-12m behind the scrum on the openside, flat enough to attack.', 'If 12 stands first receiver on a set play, drop deeper as the second option.'],
   ['own-scrum-mid', 2, 41, 50, 'Call the play before the feed: pod, wide, kick or 9-ball.', 'If the scrum is going backwards, call the safe option — kick or 8 pick.'],
@@ -26,17 +38,17 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 44, 70, 'Fold with the ball and re-organise the outside channels by voice.', 'If they kick, become the second backfield receiver.'],
   ['def-lineout-mid', 5, 43, 64, 'Set in the line for their phase 2, calling the drift or blitz.', 'If we win the ball, get to first receiver and exit.'],
 
-  ['att-phase-mid', 1, 48, 56, 'Stand 8-10m behind and outside the ruck as first receiver.', 'If 12 takes first receiver, stand out the back as the second playmaker.'],
-  ['att-phase-mid', 2, 49, 58, 'Call the shape: pod, out-the-back, wide or kick, before the ball arrives.', 'If the ruck is slow, call the safe pod carry and reset.'],
+  ['att-phase-mid', 1, 48, 56, 'In the pocket: 8-10 m behind and outside the ruck in midfield, and the depth is priced by the ground in front — flatter as the line approaches. Slightly openside of the ball so the 9\'s release is flat.', 'If 12 takes first receiver, stand out the back as the second playmaker.'],
+  ['att-phase-mid', 2, 49, 58, 'Call the shape before the ball arrives: pass flat, pass deep, carry or territory kick. The pocket is the decision point, not the delivery point.', 'If the ruck is slow, call the safe pod carry and reset.'],
   ['att-phase-mid', 3, 51, 60, 'Take the ball flat; hold the defender before releasing.', 'If they blitz, play early or kick behind the rushing line.'],
   ['att-phase-mid', 4, 53, 63, 'Distribute, or attack the seam yourself if the guard bites in.', 'If wide is on, hit 13 or the pull-back pass to the back three.'],
-  ['att-phase-mid', 5, 53, 56, 'Reload at depth behind the next ruck, on the opposite side.', 'If 12 has that slot, take the second-receiver depth behind him.'],
+  ['att-phase-mid', 5, 53, 56, 'Reload at depth behind the next ruck, on the opposite side. When the 12 carries, loop around his outside at pace — the extra man.', 'If 12 has that slot, take the second-receiver depth behind him.'],
 
-  ['def-line-mid', 1, 44, 56, 'Defend in the line outside the guard, usually in the 10 channel.', 'If a back-rower fills that channel, drop as the second sweeper.'],
+  ['def-line-mid', 1, 44, 56, 'Defend in the line outside the guard, usually in the 10 channel, drifting with the ball.', 'If a back-rower fills that channel, drop as the second sweeper.'],
   ['def-line-mid', 2, 44, 58, 'Organise the line: call up, drift or hold before the ball moves.', 'If they kick, drop back and become the backfield receiver.'],
   ['def-line-mid', 3, 43, 60, 'Make the tackle in your channel; do not drift and leave a dog-leg.', 'If your outside man shoots, hold his inside shoulder.'],
   ['def-line-mid', 4, 42, 58, 'Re-set; do not go to the breakdown, you are needed in the line.', 'If a jackal needs protection, only help if you are the closest.'],
-  ['def-line-mid', 5, 43, 54, 'Fold with the ball and re-organise the line by voice.', 'If numbers are short wide, call the drift and shepherd to touch.'],
+  ['def-line-mid', 5, 43, 54, 'Fold with the ball and re-organise the line by voice. Your drift is the 12-13 lane: as the ball slides, so does the lane shut.', 'If numbers are short wide, call the drift and shepherd to touch.'],
 
   ['kickoff-receive', 1, 26, 55, 'Stand at 22m depth as the second receiver and exit kicker.', 'If 15 is deeper, stay shallow at 20-25m as the link.'],
   ['kickoff-receive', 2, 25, 53, 'Call the receiving shape and the planned exit before the kick.', 'If the ball comes to you, catch, then kick long to touch.'],
@@ -62,7 +74,7 @@ const t: PointTuple[] = [
   ['counter-deep', 4, 27, 55, 'Reset at depth behind the counter ruck as the playmaker.', 'If we are still in our 22, call the exit kick.'],
   ['counter-deep', 5, 32, 52, 'Manage the exit: get past the 22, then find touch.', 'If we break the line, follow as the trailing support.'],
 
-  ['red-zone-22', 1, 78, 58, 'Stand flat at 6-8m behind the ruck; red-zone depth is shallow.', 'If 12 is first receiver, stand out the back for the wide shift.'],
+  ['red-zone-22', 1, 78, 58, 'In the red zone the pocket goes flat: 3.5-4.5 m behind the ruck, a pick-and-go option the 9 can hit at full speed.', 'If 12 is first receiver, stand out the back for the wide shift.'],
   ['red-zone-22', 2, 79, 60, 'Call the play: tight pod, wrap, cross kick or wide shift.', 'If they are narrow, call the wide play immediately.'],
   ['red-zone-22', 3, 81, 63, 'Take the ball flat, attack the outside shoulder of the guard.', 'If they blitz, tip on early to the trailing runner.'],
   ['red-zone-22', 4, 82, 66, 'Cross kick to the far winger, or grubber into the in-goal.', 'If they hold width, keep it tight with the pods.'],
@@ -116,7 +128,7 @@ const t: PointTuple[] = [
   ['wide-edge', 4, 59, 70, 'Fold back infield to be the playmaker on the short side.', 'If 12 is there, take the second-receiver depth.'],
   ['wide-edge', 5, 60, 60, 'Reset in the middle of the field as the phase organiser.', 'If we swing back, take the first-receiver slot again.'],
 
-  ['broken-field-def', 1, 38, 60, 'Slot into the scramble line as the organiser, infield of the ball.', 'If 9 sweeps shallow, drop deeper behind him.'],
+  ['broken-field-def', 1, 38, 60, 'Slot into the scramble line as the organiser, infield of the ball. When their 9 or 10 sets to kick, you are the second sweep — between the line and the back-three triangle.', 'If 9 sweeps shallow, drop deeper behind him.'],
   ['broken-field-def', 2, 35, 58, 'Call the shepherd and cover the inside cut-back.', 'If a hole appears, fill it and make the tackle.'],
   ['broken-field-def', 3, 32, 56, 'Make the cover tackle or delay them until the line re-forms.', 'If covered, drop back as the sweeper for the kick.'],
   ['broken-field-def', 4, 30, 54, 'Re-organise the line: call the count and the drift.', 'If they set a ruck, take the 10 channel.'],

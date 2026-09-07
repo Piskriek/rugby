@@ -3,6 +3,18 @@ import { expand, PointTuple } from './types';
 // 12 — INSIDE CENTRE (100 points)
 // The crash ball off the ten, the defensive director of the midfield, the
 // second playmaker when the ten is swallowed.
+//
+// The positional contract (engine/backline.ts, tree TWELVE):
+//   · THE FLAT LINE — when the 9 has the ball, the flat run from the ruck's
+//     openside lane; when the 10 carries, the crash UNDERS, inside his
+//     shoulder. Both finish IN FRONT of the gain line: a flat line that
+//     finishes behind the gain line is a decoy, and a decoy does not break
+//     a drift.
+//   · THE DECOY — a hard line across the 10's face that sells the move.
+//   · THE TRAIL — inside and behind the carrier through a broken line.
+//   · THE BLITZ — with the 13, in the first second, when the 10 or the 12
+//     has the ball and the line is still connected: shut the outside
+//     passing lane. Otherwise the DRIFT, holding the seam.
 const t: PointTuple[] = [
   // own-scrum-mid
   ['own-scrum-mid', 1, 40, 55, 'Stand at first-receiver depth outside the ten, 10m behind the scrum.', 'If a set play has you starting wide, hold the call position instead.'],
@@ -12,7 +24,7 @@ const t: PointTuple[] = [
   ['own-scrum-mid', 5, 48, 58, 'Reset at second-receiver depth for phase two.', 'If the ten is flat, stand out the back as the second playmaker.'],
   // def-scrum-22
   ['def-scrum-22', 1, 15, 55, 'Mark their 12 in the line — you are the director of the midfield defence.', 'If their 10 stands very deep, call the rush up on the 12 instead.'],
-  ['def-scrum-22', 2, 15.5, 57, 'Hold the line shape; do not shoot until the ball leaves the nine.', 'If they box kick, drop and cover the midfield kick space.'],
+  ['def-scrum-22', 2, 15.5, 57, 'Hold the line shape; the blitz comes with 13 in the first second when their 10 or 12 has the ball and the line is connected. Until then, drift.', 'If they box kick, drop and cover the midfield kick space.'],
   ['def-scrum-22', 3, 17, 58, 'Tackle their 12 hard and low, stop the offload, kill the momentum.', 'If 13 shoots outside you, cover his inside shoulder.'],
   ['def-scrum-22', 4, 13, 56, 'Reset the midfield line by voice — the shape lives or dies with you.', 'If we win it, swing into first receiver and clear.'],
   ['def-scrum-22', 5, 18, 55, 'Hold the 12 channel, connected to 10 inside and 13 outside.', 'If they go wide fast, drift and hold the outside shoulder.'],
@@ -29,14 +41,14 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 44, 72, 'Reset the line and organise the chase for their clearance kick.', 'If we win it, get to first receiver and exit.'],
   ['def-lineout-mid', 5, 43, 68, 'Hold the 12 channel for their phase two.', 'If they shift wide, drift, never dog-leg.'],
   // att-phase-mid
-  ['att-phase-mid', 1, 48, 58, 'First or second receiver: 8m deep, outside the ten, hands up.', 'If the ten takes it flat, run the hard line off his shoulder.'],
-  ['att-phase-mid', 2, 49, 60, 'Read the guard: bite means pass, hold means crash.', 'If the guard shoots, tip pass behind him to 13.'],
+  ['att-phase-mid', 1, 48, 58, 'First or second receiver: 8m deep, outside the ten, hands up. When the nine has the ball you are the flat line from the openside lane; when the ten carries you are the crash unders, inside his shoulder.', 'If the ten takes it flat, run the hard line off his shoulder.'],
+  ['att-phase-mid', 2, 49, 60, 'Read the guard: bite means pass, hold means crash. The flat line finishes in front of the gain line — behind it, it is only a decoy.', 'If the guard shoots, tip pass behind him to 13.'],
   ['att-phase-mid', 3, 51, 62, 'Crash at the 10-12 seam, or take the ball to the line and release.', 'If the space is outside, give the early ball and keep working.'],
-  ['att-phase-mid', 4, 53, 64, 'After the pass, keep running the support line — the offload comes back inside.', 'If the tackle is made, arrive at the ruck as the cleaner.'],
+  ['att-phase-mid', 4, 53, 64, 'After the pass, keep running the support line — through a broken line the trail is inside and behind the carrier, and the offload comes back.', 'If the tackle is made, arrive at the ruck as the cleaner.'],
   ['att-phase-mid', 5, 53, 58, 'Reload at depth on the opposite side; the midfield never rests.', 'If the ten swings across, fill his spot inside.'],
   // def-line-mid
   ['def-line-mid', 1, 44, 58, 'You own the 12 channel — the director of the outside defence.', 'If their shape splits, mark the wider of the two runners.'],
-  ['def-line-mid', 2, 44, 60, 'Call UP, DRIFT or SHOOT before every ball; the wing obeys you.', 'If they kick, drop and field with the back three.'],
+  ['def-line-mid', 2, 44, 60, 'Call UP, DRIFT or SHOOT before every ball; the wing obeys you. SHOOT means the blitz with 13: first second, 10 or 12 in possession, outside lane shut.', 'If they kick, drop and field with the back three.'],
   ['def-line-mid', 3, 43, 62, 'Make the dominant tackle in your channel; no offload, no metres.', 'If your inside man shoots, cover his shoulder immediately.'],
   ['def-line-mid', 4, 42, 60, 'Reset the line fast — you are never at the ruck, you are the line.', 'If we turn it over, swing to first receiver immediately.'],
   ['def-line-mid', 5, 43, 56, 'Fold with the ball and keep the midfield connected to the ten.', 'If numbers are short, call the drift and use the touchline.'],
@@ -65,7 +77,7 @@ const t: PointTuple[] = [
   ['counter-deep', 4, 30, 60, 'Support the break at the hip; the offload is coming.', 'If the ruck forms, be the cleaner.'],
   ['counter-deep', 5, 36, 58, 'Reset the attack shape in their half — first receiver.', 'If the ten takes it, hold second receiver.'],
   // red-zone-22
-  ['red-zone-22', 1, 80, 56, 'Stand flat outside the pod — the crash option one pass wider.', 'If the forwards drive, hold wide and be patient.'],
+  ['red-zone-22', 1, 80, 56, 'Stand flat outside the pod — the crash option one pass wider, in front of the gain line.', 'If the forwards drive, hold wide and be patient.'],
   ['red-zone-22', 2, 81.5, 58, 'Run the hard line at the guard\'s outside shoulder.', 'If the guard holds, take the tackle and set the ruck.'],
   ['red-zone-22', 3, 83, 60, 'Take the flat ball and drive for the line; offload out of the tackle if it is on.', 'If held, present long towards your posts.'],
   ['red-zone-22', 4, 84, 58, 'Reset flat — the red-zone backline stays narrow and fast.', 'If slow ball, hold depth and reassess.'],
@@ -90,7 +102,7 @@ const t: PointTuple[] = [
   ['turnover-att', 5, 50, 57, 'Reset the attack shape and keep the tempo on.', 'If the defence resets, kick into the space behind.'],
   // turnover-def
   ['turnover-def', 1, 60, 55, 'Turn and sprint — the midfield is the counter\'s first casualty.', 'If their runner is in your channel, make the tackle.'],
-  ['turnover-def', 2, 56, 57, 'Cover the space inside your wing; the cover defence starts here.', 'If the ball moves wide, shuffle out and hold.'],
+  ['turnover-def', 2, 56, 57, 'Cover the space inside your wing; the cover defence starts here. If their 10 or 12 is still the ball-carrier, blitz with 13 — after that the lane is yours to hold.', 'If the ball moves wide, shuffle out and hold.'],
   ['turnover-def', 3, 50, 58, 'Make the covering tackle or force the pass.', 'If they beat you, turn and chase.'],
   ['turnover-def', 4, 44, 56, 'Reset the midfield line and slow their recycle.', 'If the ball is loose, be first to it.'],
   ['turnover-def', 5, 40, 54, 'Organise the line by voice; the scramble ends with order.', 'If we are short, drift and use the touchline.'],

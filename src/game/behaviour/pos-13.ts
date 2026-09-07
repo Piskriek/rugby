@@ -3,6 +3,15 @@ import { expand, PointTuple } from './types';
 // 13 — OUTSIDE CENTRE (100 points)
 // The strike runner of the wide game, the drift captain of the wide defence,
 // the chase leader on every kick.
+//
+// The positional contract (engine/backline.ts, tree THIRTEEN):
+//   · THE FLAT TIP LANE — the second flat line, wider than the 12's,
+//     finishing in front of the gain line when the 9 or the 10 has the ball.
+//   · THE SEAM — the channel between the 12 and the 14, the pass the
+//     defence must staff against.
+//   · THE TRAIL — outside and behind the carrier through a broken line.
+//   · THE JAM — on the strike runner behind the gain line when he is the
+//     ball-carrier; otherwise the EDGE DRIFT that sets the wing's lane.
 const t: PointTuple[] = [
   // own-scrum-mid
   ['own-scrum-mid', 1, 40, 62, 'Stand outside 12 at second-receiver depth, 12m behind the scrum.', 'If a pod call is on, hold wide and stay out of the forwards\' lane.'],
@@ -29,14 +38,14 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 44, 76, 'Reset the wide line for their phase two.', 'If we win it, be the wide counter option.'],
   ['def-lineout-mid', 5, 43, 72, 'Hold the drift or blitz call from 12; the edge obeys the call.', 'If they go narrow, tighten and shoot.'],
   // att-phase-mid
-  ['att-phase-mid', 1, 48, 62, 'Stand at second-receiver depth, outside 12, at the pod\'s edge.', 'If 12 is the playmaker, slide one wider still.'],
-  ['att-phase-mid', 2, 49, 64, 'Read the drift: if it slides, cut back; if it bites, go around.', 'If they blitz, run the unders line back inside.'],
+  ['att-phase-mid', 1, 48, 62, 'Stand at second-receiver depth, outside 12, at the pod\'s edge. When the nine or the ten has the ball you are the flat tip lane: wider than the 12\'s line, in front of the gain line.', 'If 12 is the playmaker, slide one wider still.'],
+  ['att-phase-mid', 2, 49, 64, 'Read the drift: if it slides, cut back; if it bites, go around. Through a broken line the trail is outside and behind the carrier.', 'If they blitz, run the unders line back inside.'],
   ['att-phase-mid', 3, 51, 67, 'Take the ball at pace and attack the 13 channel.', 'If the pass is behind, adjust and still go forward.'],
   ['att-phase-mid', 4, 53, 70, 'Beat the first tackle or give the release to the wing.', 'If the wing is covered, chip and chase.'],
   ['att-phase-mid', 5, 53, 64, 'Reload wide on the other side of the ball.', 'If the attack comes back, be there at second receiver.'],
   // def-line-mid
   ['def-line-mid', 1, 44, 62, 'You own the 13 channel and captain the wide drift.', 'If their shape narrows, tighten one channel inside.'],
-  ['def-line-mid', 2, 44, 64, 'Call the drift line; the wing times his shot off your call.', 'If they kick, turn and cover the corner with 15.'],
+  ['def-line-mid', 2, 44, 64, 'Call the drift line; the wing times his shot off your call. When their 12 or 13 has the ball and it is still the first second, jam the strike runner behind the gain line with 12.', 'If they kick, turn and cover the corner with 15.'],
   ['def-line-mid', 3, 43, 66, 'Make the tackle in your channel; never let the outside man go free.', 'If your inside bites, slide and cover him.'],
   ['def-line-mid', 4, 42, 64, 'Reset the wide line — you are the line, not the ruck.', 'If we turn it over, swing wide immediately.'],
   ['def-line-mid', 5, 43, 60, 'Fold with the ball, connected to 12 and 14.', 'If numbers are short, drift to the touchline.'],

@@ -167,3 +167,164 @@ export function passIntersection(
     z: mark.z + (dz / d) * travel + dir * runnerSpeed * Math.max(0, flightT) * 0.25,
   };
 }
+
+/* ==================== THE BACK THREE — PENDULUM COVERAGE ====================
+ *
+ * The second relationship nothing else in the game expresses.
+ *
+ * The back three (11, 15, 14) are not three men standing at three marks —
+ * they are ONE covering body that splits the defended deep field into
+ * thirds. When the opposition's 9 or 10 sets his feet and shapes for a
+ * kick, the triangle ROTATES: each man owns the deep third his shirt is
+ * assigned to, and the thirds slide laterally with the ball, so a kick
+ * anywhere into the covered zone lands on a man who was already running
+ * at it.
+ *
+ *   11  LEFT   third   the wing, whose channel is the left deep zone
+ *   15  CENTRE third   the sweeper, always between the wings
+ *   14  RIGHT  third   the other wing
+ *
+ * "Pendulum" is the word for the motion: the pivot is the ball's lateral
+ * position, the arm is the three men, and the swing is continuous — a kick
+ * into the vacated third is a try, a static triangle is a dead line.
+ *
+ * Everything here is pure geometry over (ball, axis, field edge). The
+ * Director applies the marks (in the kick's SETTING stage, where the kick
+ * phase owns the choreography); a probe can grade the rotation without a
+ * match.
+ */
+
+/** The back three, from left to right. */
+export const BACK_THREE = [11, 15, 14] as const;
+export type BackThreeShirt = (typeof BACK_THREE)[number];
+
+/** Which deep third each shirt owns. The wings take the edges, the sweeper
+ *  holds the centre — a kick at the seam between two thirds is contested
+ *  by both, which is exactly where a contestable dies. */
+export type PendulumThird = 'LEFT' | 'CENTRE' | 'RIGHT';
+
+export function pendulumSlot(num: number): PendulumThird {
+  switch (num) {
+    case 11: return 'LEFT';
+    case 14: return 'RIGHT';
+    case 15: return 'CENTRE';
+    default: return 'CENTRE';
+  }
+}
+
+export function isBackThree(num: number): boolean {
+  return (BACK_THREE as readonly number[]).includes(num);
+}
+
+/** Width of one covered third, metres. Three thirds at 14 m span the whole
+ *  central 42 m of the field; the wings' thirds ride closer to their own
+ *  touchline, which is where a cross-field kick and the corner kick both
+ *  land. */
+export const PENDULUM_THIRD_WIDTH_M = 14;
+/** The depth the triangle sits behind the kicking mark, when the field
+ *  allows the full depth. A man 26 m behind the ball meets a 40 m punt in
+ *  his stride; the chase meets it in the air. */
+export const PENDULUM_DEPTH_M = 26;
+/** The floor: even against the dead-ball line the triangle keeps a third
+ *  of the way back, or it is just a second defensive line with extra steps. */
+export const PENDULUM_DEPTH_MIN_M = 12;
+/** Margin kept off the dead-ball line so a deep mark never steers into the
+ *  fence. */
+export const PENDULUM_EDGE_MARGIN_M = 4;
+/** The half-width of the covered field a third may use (touch at 35, and a
+ *  man marked at 34 is a man the steering clamps back into the field). */
+export const PENDULUM_FIELD_HALF_M = 33;
+
+export interface PendulumThirds {
+  left: number;
+  centre: number;
+  right: number;
+}
+
+const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
+
+/**
+ * The three covered thirds, centred on the ball. The CENTRE third always
+ * contains the ball's own lateral position — a box kick up the middle is the
+ * default kick, so the middle is the manliest ground — and the wings' thirds
+ * grow out from it. When the ball is close to a touchline the outer third is
+ * clamped back into the field rather than following the ball into the fence:
+ * the corner is covered, the fence is not.
+ */
+export function pendulumThirds(ballX: number): PendulumThirds {
+  const half = PENDULUM_THIRD_WIDTH_M / 2;
+  const centre = clamp(ballX, -PENDULUM_FIELD_HALF_M + half, PENDULUM_FIELD_HALF_M - half);
+  return {
+    left: clamp(centre - PENDULUM_THIRD_WIDTH_M, -PENDULUM_FIELD_HALF_M, PENDULUM_FIELD_HALF_M),
+    centre,
+    right: clamp(centre + PENDULUM_THIRD_WIDTH_M, -PENDULUM_FIELD_HALF_M, PENDULUM_FIELD_HALF_M),
+  };
+}
+
+/**
+ * The depth a third may actually use from this ball: the full 26 m, or less
+ * when the defending team's own dead-ball line stands in the way. `ownEdgeZ`
+ * is that line in world metres. The deep field always lies BEHIND the ball
+ * relative to the kicking axis, so the depth is the room between the ball
+ * and the fence, minus a margin, floored so the triangle never collapses
+ * into a second defensive line.
+ */
+export function pendulumDepthFor(ballZ: number, ownEdgeZ: number): number {
+  const room = Math.abs(ballZ - ownEdgeZ) - PENDULUM_EDGE_MARGIN_M;
+  return clamp(Math.min(PENDULUM_DEPTH_M, room), PENDULUM_DEPTH_MIN_M, PENDULUM_DEPTH_M);
+}
+
+/**
+ * The full rotation mark for one shirt of the back three.
+ *
+ * The kick flies FORWARD along the kicking axis — a punt from the 10 at the
+ * 22 lands 30-40 m in FRONT of the mark — so the deep thirds lie at
+ * `ball + dir*depth`: in front of the ball, between the kicking mark and the
+ * defending team's own try line. The marks sit at the depth a typical
+ * territory punt travels, so the ball comes down on the triangle, not short
+ * of it.
+ *
+ * @param num      11, 15 or 14
+ * @param ball     the kicking mark (world metres)
+ * @param dir      the kicking side's attacking axis
+ * @param ownEdgeZ the defending team's dead-ball line, world metres
+ *
+ * The mark slides with `ball.x` every frame — that slide IS the pendulum.
+ */
+export function pendulumMark(
+  num: number,
+  ball: { x: number; z: number },
+  dir: 1 | -1,
+  ownEdgeZ: number,
+): { x: number; z: number; third: PendulumThird } {
+  const thirds = pendulumThirds(ball.x);
+  const third = pendulumSlot(num);
+  const key = third === 'LEFT' ? 'left' : third === 'RIGHT' ? 'right' : 'centre';
+  const x = clamp(thirds[key], -PENDULUM_FIELD_HALF_M, PENDULUM_FIELD_HALF_M);
+  const depth = pendulumDepthFor(ball.z, ownEdgeZ);
+  return { x, z: ball.z + dir * depth, third };
+}
+
+/**
+ * How well three given marks cover the thirds, 0..1. 1 when every third has
+ * a man inside it; partial credit for a man on the seam between two thirds
+ * (he contests both). A probe grades live football with it; a zero here is
+ * the "kick into the vacuum" the whole system exists to prevent.
+ */
+export function pendulumCoverage(mark: { num: number; x: number }[], ballX: number): number {
+  if (mark.length < 3) return 0;
+  const thirds = pendulumThirds(ballX);
+  const half = PENDULUM_THIRD_WIDTH_M / 2;
+  let covered = 0;
+  for (const side of ['left', 'centre', 'right'] as const) {
+    const c = thirds[side];
+    const inThird = mark.some((m) => Math.abs(m.x - c) <= half);
+    if (inThird) covered += 1;
+    else {
+      /* on the seam: within a quarter-third of the centre counts half */
+      const nearSeam = mark.some((m) => Math.abs(m.x - c) <= half * 0.5);
+      covered += nearSeam ? 0.5 : 0;
+    }
+  }
+  return clamp(covered / 3, 0, 1);
+}

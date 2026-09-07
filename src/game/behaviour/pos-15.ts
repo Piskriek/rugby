@@ -3,6 +3,17 @@ import { expand, PointTuple } from './types';
 // 15 — FULL BACK (100 points)
 // The last line: the high ball is his, the counter-attack starts with him,
 // the backfield is organised by his voice.
+//
+// The positional contract (engine/backline.ts, tree FIFTEEN):
+//   · THE LATE INSERTION — outside the 13 when he or the 12 carries with
+//     ground to finish in: the extra man the line break is looking for.
+//   · THE PULL-BACK LINK — behind the catcher running the counter, infield,
+//     the change-of-point option.
+//   · THE SWEEP — the central third, deep, a step ahead of the kick: deeper
+//     than the line, always a man between the line and the fence.
+//   · THE PENDULUM — the back three are one covering body and the 15 is its
+//     CENTRE post: when the opposition's 9 or 10 sets to kick, the triangle
+//     rotates and slides with the ball, and the middle deep third is his.
 const t: PointTuple[] = [
   // own-scrum-mid
   ['own-scrum-mid', 1, 32, 50, 'Sweep at 22-25m depth behind the whole attack, centred on the ball.', 'If the play goes blind, shade across to that corner.'],
@@ -29,14 +40,14 @@ const t: PointTuple[] = [
   ['def-lineout-mid', 4, 40, 48, 'Counter from deep with the first pass going forward.', 'If the chase is set, kick back long.'],
   ['def-lineout-mid', 5, 42, 50, 'Reset the backfield triangle and call the line up or back.', 'If we win it, join the line.'],
   // att-phase-mid
-  ['att-phase-mid', 1, 38, 56, 'Sweep at 20m behind the line, shaded to the wide side.', 'If the attack goes the other way, cross over behind the ruck.'],
+  ['att-phase-mid', 1, 38, 56, 'Sweep at 20m behind the line, shaded to the wide side. When the 12 or 13 carries with ground in front, the late insertion is outside him — the extra man the line break is looking for.', 'If the attack goes the other way, cross over behind the ruck.'],
   ['att-phase-mid', 2, 40, 58, 'Watch their wings: the interception and the kick are your dangers.', 'If they rush, call KICK to the space.'],
-  ['att-phase-mid', 3, 44, 60, 'Join the line as the extra man when the wide move needs one more.', 'If the move is on without you, trail at the hip.'],
+  ['att-phase-mid', 3, 44, 60, 'Join the line as the extra man when the wide move needs one more. Behind a catcher running the counter, the pull-back link is infield and deep: the change of point.', 'If the move is on without you, trail at the hip.'],
   ['att-phase-mid', 4, 48, 62, 'Support the break; you are the counter\'s second wave.', 'If the tackle is made, arrive and clear.'],
   ['att-phase-mid', 5, 50, 58, 'Reset the sweep behind the new shape.', 'If we kick, cover the landing zone.'],
   // def-line-mid
-  ['def-line-mid', 1, 28, 50, 'THE LAST LINE: hold at 18-20m depth, centred behind the ruck.', 'If their shape tilts, shade across behind it.'],
-  ['def-line-mid', 2, 28, 52, 'Organise the back three; call UP or BACK before every ball.', 'If they chip, turn and sprint to the landing spot.'],
+  ['def-line-mid', 1, 28, 50, 'THE LAST LINE: hold at 18-20m depth, centred behind the ruck — the central third, a step ahead of the kick, always a man between the line and the fence.', 'If their shape tilts, shade across behind it.'],
+  ['def-line-mid', 2, 28, 52, 'Organise the back three; call UP or BACK before every ball. You are the pendulum\'s centre post: when their 9 or 10 sets to kick, the triangle rotates and slides with the ball, and the middle deep third is yours.', 'If they chip, turn and sprint to the landing spot.'],
   ['def-line-mid', 3, 30, 54, 'Field the kick, make the cover tackle, or take the high ball at the peak.', 'If beaten, chase your own miss to the line.'],
   ['def-line-mid', 4, 28, 48, 'Counter from deep — the attack starts with you going forward.', 'If the chase is set, kick long and turn them.'],
   ['def-line-mid', 5, 30, 50, 'Reset the backfield; every phase starts with your organisation.', 'If we turn it over, join the line wide.'],
