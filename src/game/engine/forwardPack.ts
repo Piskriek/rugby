@@ -753,6 +753,17 @@ export function scrumBindProfile(row: number, num: number): ScrumBindProfile {
 }
 
 /**
+ * A forward's body mass from his power attribute — the same 88 + PWR·0.22
+ * model the breakdown bodies use (88-115 kg; the heavier the prop, the
+ * more he pushes by being heavy). The scrum's kinematic shove divides each
+ * pack's drive by its summed mass, so this number is what makes a heavy
+ * pack hard to move, not just hard to pin.
+ */
+export function forwardMass(pwr: number): number {
+  return 88 + pwr * 0.22;
+}
+
+/**
  * The front row's stability, 0..1: how much of the front three are inside
  * their bind tolerance and how low the pack sits. Fed into the collapse
  * risk — a bound, low front row is a stable scrum; a front row still

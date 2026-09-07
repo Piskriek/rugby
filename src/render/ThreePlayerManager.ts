@@ -2671,7 +2671,9 @@ export class ThreePlayerManager {
     } else if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
       const sc = d.scrim!;
       if (sc && sc.ball.state !== 'HELD') {
-        free.x = d.scrumAnchor.x + sc.ball.x; free.y = sc.ball.y + 0.06; free.z = d.scrumAnchor.z + sc.ball.z; free.visible = true;
+        /* The ball travels IN the tunnel: its draw position carries the
+         * tunnel's displacement, the same `netDrive` the packs displace by. */
+        free.x = d.scrumAnchor.x + sc.ball.x; free.y = sc.ball.y + 0.06; free.z = d.scrumAnchor.z + sc.ball.z + sc.netDrive; free.visible = true;
       }
     } else if ((d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') && d.lo && d.lo.ball.state !== 'HELD') {
       free.x = d.lo.ball.x; free.y = d.lo.ball.y + 0.05; free.z = d.lo.ball.z; free.visible = true;

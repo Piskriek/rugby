@@ -10,7 +10,8 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
 import { clamp } from './clamp';
 import { scrumBlock } from '../behaviour/setpiece-overrides';
-import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor } from './forwardPack';
+import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor, forwardMass } from './forwardPack';
+import { judgeLineoutThrow } from './referee';
 import { FIELD } from '../../render/retro';
 import { approach } from './approach';
 import {
@@ -39,6 +40,60 @@ function podLifters<T extends { num: number; team: 'A' | 'B'; x: number; role: s
 /** The calls that exist to be driven — the index set the CPU leans on in
  * the attacking 22, where a five-metre lineout is a try invitation. */
 const LO_DRIVE_CALLS = [1, 3, 1, 2];
+
+/* ==================== PART 1 — THE KINEMATIC SHOVE ==================== */
+
+/** One pack as a single aggregate body in the shove contest. */
+export interface PackShove {
+  /** the summed body mass of the pack's eight forwards, kg. */
+  mass: number;
+  /** the drive vector along the engagement axis, summed over the pack's
+   *  eight (who pushes is PACK_DRIVE_SHARE below). */
+  drive: number;
+  /** 0..1 — how bound and how low the front row is this frame (placeBound
+   *  measures it; engine/forwardPack.ts). */
+  stability: number;
+}
+
+/** The reference pack: eight 88 + 75·0.22 kg forwards. The contest is a
+ *  comparison of SPECIFIC force — drive per kilogram against this mass —
+ *  so a heavy pack is hard to push, not just hard to hold. */
+export const SCRUM_MASS_REF = 8 * forwardMass(75);
+
+/** Who actually pushes. The front row and the locks are the shove: the
+ *  props anchor, the hooker spends his pull on the strike, the flankers
+ *  bind and nudge, the eight holds the base for the ball. The shares sum
+ *  to one, so the summed drive stays comparable to the pack's old
+ *  single-aggregate force. */
+const PACK_DRIVE_SHARE: Record<number, number> = { 1: 0.21, 2: 0.14, 3: 0.21, 4: 0.17, 5: 0.17, 6: 0.05, 7: 0.05, 8: 0.0 };
+
+/** Force transmission through the bind: a bound, low front row passes the
+ *  hips' drive into the tunnel; a front row still shuffling for its seat
+ *  leaks up to 30% of it into slack and noise. */
+export function shoveTransmission(stability: number): number {
+  return 0.7 + 0.3 * clamp(stability, 0, 1);
+}
+
+/**
+ * The contest, in one net number. Each pack's drive vector is priced by
+ * its summed mass (specific force against the reference pack) and by how
+ * well its front row transmits, with the feed side's put-in advantage.
+ * Positive = the A pack is winning the shove. Pure: no Director, no RNG —
+ * the probe drives it with hand-built packs.
+ */
+export function scrumShoveNet(a: PackShove, b: PackShove, feed: 'A' | 'B'): number {
+  const spec = (p: PackShove, bonus: number) => (p.drive * bonus * shoveTransmission(p.stability)) / (p.mass / SCRUM_MASS_REF);
+  const fa = spec(a, feed === 'A' ? 1.06 : 0.94);
+  const fb = spec(b, feed === 'B' ? 1.06 : 0.94);
+  return (fa - fb) / 5200;
+}
+
+/** The tunnel's velocity target (m/s, +z) for a contest net: the rate the
+ *  packs — and the ball, and the base — displace along the engagement axis
+ *  while that net holds. */
+export function scrumTunnelVelocity(net: number): number {
+  return net * 0.42;
+}
 
 export function upScrum(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
@@ -136,27 +191,56 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
       }
       s.packs[dTeam].waggle += dt * (5.5 + diff.reaction * 7.5);
 
-      const F = (t: 'A' | 'B') => {
+      /* PART 1 — THE KINEMATIC SHOVE CONTEST. Each pack is one aggregate
+       * body: the summed mass of its eight, the drive vector summed over
+       * the eight, and the front-row stability placeBound measures every
+       * frame. The net of the two specific forces is the contest; the
+       * tunnel's velocity integrates toward its target and the displacement
+       * is the integral of that — the packs, the ball and the base all move
+       * with the tunnel (placeBound reads `netDrive`). */
+      const mass = { A: 0, B: 0 };
+      for (const slot of s.players) {
+        const p = d.L(slot.team, slot.num);
+        if (p.sinbin <= 0) mass[slot.team] += forwardMass(p.attrs.PWR);
+      }
+      const driveOf = (t: 'A' | 'B') => {
         const base = 4600 + s.packs[t].fitness * 26;
         const w = clamp(s.packs[t].waggle, 0, 60);
         /* FORWARD PACK — the engine room. The locks' power multiplies the
          * pack's transmitted force: a 4 and 5 who drive through the hips of
          * their props are worth up to 6% either way. */
         const eng = engineRoomFactor([d.L(t, 4), d.L(t, 5)].filter((p) => p.sinbin <= 0).map((p) => p.attrs.PWR));
-        return base * (0.72 + (w / 60) * 0.34) * eng;
+        /* the drive vector: the shove summed over the eight, each man at
+         * his share of the work and his own power. */
+        let F = 0;
+        for (const slot of s.players) {
+          if (slot.team !== t) continue;
+          const p = d.L(slot.team, slot.num);
+          if (p.sinbin > 0) continue;
+          F += base * (0.72 + (w / 60) * 0.34) * eng * (PACK_DRIVE_SHARE[slot.num] ?? 0) * (0.9 + 0.2 * p.attrs.PWR / 100);
+        }
+        return F;
       };
-      s.packs.A.forceTransmitted = F('A');
-      s.packs.B.forceTransmitted = F('B');
-      const fa = s.packs.A.forceTransmitted * (feed === 'A' ? 1.06 : 0.94);
-      const fb = s.packs.B.forceTransmitted * (feed === 'B' ? 1.06 : 0.94);
-      const net = (fa - fb) / 5200;
-      s.netDrive += net * dt * 0.42;
+      s.packs.A.forceTransmitted = driveOf('A');
+      s.packs.B.forceTransmitted = driveOf('B');
+      const net = scrumShoveNet(
+        { mass: mass.A, drive: driveOf('A'), stability: s.frontRowStability ?? 0 },
+        { mass: mass.B, drive: driveOf('B'), stability: s.frontRowStability ?? 0 },
+        feed,
+      );
+      s.tunnelV = approach(s.tunnelV, scrumTunnelVelocity(net), 3.5, dt);
+      s.netDrive = clamp(s.netDrive + s.tunnelV * dt, -3.5, 3.5);
       s.yaw = approach(s.yaw, clamp(net * 26 * s.wheelDir, -45, 45), 1.1, dt);
       /* FORWARD PACK — a bound, low front row is a stable scrum. The raw
        * risk is the shove imbalance; the front rows' binding and centre of
        * mass (placeBound writes it) take up to 40% of it away. */
       s.collapseRisk = stabilisedCollapseRisk(clamp(0.04 + Math.abs(net) * 0.42, 0, 1), s.frontRowStability ?? 0);
-      s.ball.z = clamp(s.ball.z - (feed === 'A' ? 1 : -1) * dt * 1.6 + net * dt * 0.8, -1.6, 1.6);
+      /* THE STRIKE — the feed side's hooker (2) punches the ball back
+       * through the front row: his power sets how fast the tunnel opens,
+       * the shove (net) sets which way it opens. */
+      const hooker = d.L(feed, 2);
+      const strike = 0.72 + (hooker.sinbin <= 0 ? hooker.attrs.PWR / 100 : 0.5) * 0.56;
+      s.ball.z = clamp(s.ball.z - (feed === 'A' ? 1 : -1) * dt * 1.6 * strike + net * dt * 0.8, -1.6, 1.6);
 
       if (Math.abs(s.yaw) > 45) {
         d.lawCall('WHEEL_90', 'PENALTY — WHEELED PAST 90°', s.feed === 'A' ? 'B' : 'A');
@@ -195,15 +279,18 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
         const pick = !against && eight.sinbin <= 0
           && eightPicksFromScrum(winner === feed, toLine, ax.x, ax.z)
           && (d.options.firstReceiver ?? 0) !== 1;
+        /* KINEMATIC TUNNEL — the base moved with the packs: every mark the
+         * ball leaves from carries the tunnel's displacement, or the eight
+         * would pick up where the scrum STARTED, not where it ended. */
         if (pick) {
           d.say('EIGHT PICKS FROM THE BASE');
-          d.startOpen(winner, ax.x, ax.z + (winner === 'A' ? -1.94 : 1.94), 8, 1, 0, 0.55);
+          d.startOpen(winner, ax.x, ax.z + (winner === 'A' ? -1.94 : 1.94) + s.netDrive, 8, 1, 0, 0.55);
           break;
         }
         /* PLAYTEST 4: the mark is the nine's own base slot (2.95) — he has
          * stood there through the drive, so the hand-off reads as a pick-up
          * at the back of the scrum, not a teleport to the tunnel. */
-        d.startOpen(winner, ax.x + (winner === 'A' ? -0.3 : 0.3), ax.z + (winner === 'A' ? -2.95 : 2.95), 9, 1, 0, 0.55);
+        d.startOpen(winner, ax.x + (winner === 'A' ? -0.3 : 0.3), ax.z + (winner === 'A' ? -2.95 : 2.95) + s.netDrive, 9, 1, 0, 0.55);
       }
       break;
     default: break;
@@ -297,6 +384,9 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
     s.ball.vy -= 9.81 * dt;
     s.ball.x += s.ball.vx * dt;
     s.ball.y += s.ball.vy * dt;
+    /* A metered throw is not perfectly straight: the longitudinal
+     * component carries the ball off the tunnel line as it flies. */
+    s.ball.z += s.ball.vz * dt;
     s.history.push({ ballX: s.ball.x, ballY: s.ball.y });
     if (s.history.length > 90) s.history.shift();
     s.ball.apexY = Math.max(s.ball.apexY, s.ball.y);
@@ -338,7 +428,10 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
         const pows = lifters.map((w) => d.L(team, w.num).attrs.PWR);
         const liftQ = pows.length ? pows.reduce((a, b) => a + b, 0) / pows.length / 100 : 0;
         const both = Math.min(1, pows.length / 2);
-        const stretch = Math.min(0.5, Math.abs(q.x - s.ball.x) * 0.12);
+        /* The stretch is the full distance in the plane: a ball that lands
+         * wide of the jumper costs reach the same one as a ball that lands
+         * off the tunnel line. */
+        const stretch = Math.min(0.5, Math.hypot(q.x - s.ball.x, q.z - s.ball.z) * 0.12);
         const tech = d.teams[team].nation.att.lineout / 100 * 0.12;
         const timing = team === s.thrower ? 0.25 + s.quality * 0.75 : 0.78;
         return 2.4 + live.attrs.PWR / 100 * 0.1 + liftQ * both * 0.9 * timing + tech - stretch;
@@ -348,10 +441,16 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       const margin = reachOf(s.thrower) - reachOf(dTeam) + (s.quality - 0.5) * 0.3 + (R() - 0.5) * 0.34;
       s.contestMargin = margin;
       const won = margin > 0 || (margin === 0 && R() < 0.6);
-      const bx = s.ball.x, bz = s.markZ, drive = s.driveCall, thrower = s.thrower;
+      /* The ball lands where it lands: a metered throw drifts off the
+       * tunnel line, and the catch, the exits and a rethrow are all marked
+       * at its real position. */
+      const bx = s.ball.x, bz = s.ball.z, drive = s.driveCall, thrower = s.thrower;
 
-      // A badly crooked throw is a free kick regardless of who caught it.
-      if (s.quality < 0.25) {
+      // A crooked throw is a free kick regardless of who caught it. The
+      // referee judged the flight angle at release (engine/referee.ts,
+      // Law 19); a dead-hooker throw fails its own quality test the same
+      // way.
+      if (s.throwCrooked || s.quality < 0.25) {
         d.lawCall('NOT_STRAIGHT', REFEREE_CALLS.NOT_STRAIGHT, thrower);
         d.recordSetPieceOutcome('lineouts', null, thrower);
         d.lo = undefined;
@@ -399,6 +498,12 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
   }
 }
 
+/** A meter off the sweet spot carries the ball this many metres off the
+ * tunnel line per unit of meter error, measured at the catch plane — the
+ * 1.15 s flight. This is the throw's geometry: the same meter that grades
+ * the timing now angles the flight vector. */
+export const LINEOUT_METER_DEV_M = 4.0;
+
 export function releaseThrow(d: Director, ) {
 
   const s = d.lo!;
@@ -411,8 +516,15 @@ export function releaseThrow(d: Director, ) {
   const flight = 1.15;
   s.ball.vx = dx / flight;
   s.ball.vy = (4.4 - 1.6) / flight + 0.5 * 9.81 * flight;
+  /* THE METER HAS GEOMETRY. An early or late release leaves the ball off
+   * the tunnel line — a real longitudinal component, so the throw is
+   * judged on its flight angle as well as its timing. The referee's call
+   * on that angle lives in engine/referee.ts (Law 19). */
+  s.ball.vz = (s.meter - 0.62) * LINEOUT_METER_DEV_M / flight;
+  s.throwAngle = Math.atan2(Math.abs(s.ball.vz), Math.abs(s.ball.vx));
+  s.throwCrooked = judgeLineoutThrow(s.throwAngle);
   s.ball.apexY = 1.6;
-  d.say(`${s.call.label} — THE THROW GOES IN`);
+  d.say(s.throwCrooked ? `${s.call.label} — THE THROW LEAVES THE TUNNEL` : `${s.call.label} — THE THROW GOES IN`);
 }
 
 /* ============================ SPEC_03 — MAUL RE-GATE + EXITS ============================ */

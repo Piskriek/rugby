@@ -159,6 +159,10 @@ export interface ScrumState {
   ball: { x: number; y: number; z: number; state: string };
   packs: { A: Pack; B: Pack };
   yaw: number; netDrive: number; collapseRisk: number;
+  /** KINEMATIC TUNNEL — the tunnel's velocity along the engagement axis
+   *  (m/s, +z). `netDrive` is its integral: the packs, the ball and the
+   *  base exits all displace by it (see upScrum's shove contest). */
+  tunnelV: number;
   strikeClock: number; wheelDir: number; resets: number;
   ready: number; cadence: string;
   /** FORWARD PACK — 0..1, how bound and how low the two front rows are this
@@ -171,11 +175,17 @@ export interface LineoutState {
   stage: 'ASSEMBLE' | 'CALL' | 'THROW' | 'CONTEST' | 'CATCH' | 'OUT' | 'DONE';
   markZ: number; side: number;
   call: { targetX: number; label: string; jumpers: number; kind: string };
-  ball: { x: number; y: number; z: number; vx: number; vy: number; state: string; heldBy: number; apexY: number };
+  /** `vz` is the throw's longitudinal component: a meter off the sweet spot
+   *  carries the ball off the tunnel line, so the flight is judged on its
+   *  real angle, not just its timing. */
+  ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; state: string; heldBy: number; apexY: number };
   players: { id: number; num: number; team: 'A' | 'B'; x: number; z: number; handY: number; role: string }[];
   history: { ballX: number; ballY: number }[];
   winner: boolean; contestMargin: number;
   thrower: 'A' | 'B'; quality: number; callIdx: number; meter: number; meterDir: number; meterOn: boolean;
+  /** radians the released throw made with the tunnel axis, and the
+   *  referee's verdict on it (engine/referee.ts, Law 19). */
+  throwAngle: number; throwCrooked: boolean;
   driveCall: boolean; ready: number;
 }
 
@@ -5922,7 +5932,7 @@ export class Director {
       ],
       ball: { x: 0, y: 0.16, z: 0, state: 'OUT' },
       packs: { A: mk('A'), B: mk('B') },
-      yaw: 0, netDrive: 0, collapseRisk: 0,
+      yaw: 0, netDrive: 0, collapseRisk: 0, tunnelV: 0,
       strikeClock: 0, wheelDir: R() < 0.5 ? -1 : 1, resets: 0,
       ready: 0, cadence: '',
     };
@@ -5984,9 +5994,10 @@ export class Director {
     this.lo = {
       t: 0, stage: 'ASSEMBLE', markZ: zn, side,
       call: { targetX: side * 28.4, label: Director.LO_CALLS[1].label, jumpers: 5, kind: 'MIDDLE' },
-      ball: { x: side * 33.5, y: 1.6, z: zn, vx: 0, vy: 0, state: 'HELD', heldBy: 0, apexY: 0 },
+      ball: { x: side * 33.5, y: 1.6, z: zn, vx: 0, vy: 0, vz: 0, state: 'HELD', heldBy: 0, apexY: 0 },
       players, history: [], winner: false, contestMargin: 0,
       thrower, quality: 0.5, callIdx: 1, meter: 0.5, meterDir: 1, meterOn: false,
+      throwAngle: 0, throwCrooked: false,
       driveCall: true, ready: 0,
     };
     this.clearRuck();

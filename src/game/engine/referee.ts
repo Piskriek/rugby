@@ -141,7 +141,7 @@ export function refBallPoint(d: Director): { x: number; z: number } {
   if (d.bd && (ph === 'BREAKDOWN' || ph === 'BREAKDOWN_REPLAY')) return { x: d.bd.ball.x, z: d.bd.ball.z };
   if (d.ml && (ph === 'MAUL' || ph === 'MAUL_REPLAY')) return { x: d.ml.x, z: d.ml.z };
   if (d.kk && (ph === 'KICK' || ph === 'KICK_REPLAY')) return { x: d.kk.bx, z: d.kk.bz };
-  if (d.lo && (ph === 'LINEOUT' || ph === 'LINEOUT_REPLAY')) return { x: d.lo.ball.x, z: d.lo.markZ };
+  if (d.lo && (ph === 'LINEOUT' || ph === 'LINEOUT_REPLAY')) return { x: d.lo.ball.x, z: d.lo.ball.z };
   if (d.scrim && (ph === 'SCRUM' || ph === 'REPLAY')) {
     return { x: d.scrumAnchor.x + d.scrim.ball.x, z: d.scrumAnchor.z + d.scrim.ball.z };
   }
@@ -546,4 +546,31 @@ export function stepAdvantageWatch(
     return 'WINDBACK';
   }
   return 'PLAY_ON';
+}
+
+/* ================================================================== *
+ * THE LINEOUT THROW — LAW 19, JUDGED BY ANGLE
+ * ================================================================== */
+
+/**
+ * The largest angle, in radians, between the throw's flight vector and the
+ * lateral tunnel axis that the official tolerates. A lineout is a throw
+ * ALONG the tunnel, to the line of jumpers: whatever the meter says, if the
+ * ball leaves the hooker's hands at an angle beyond this it lands wide of
+ * the catch plane, and the law gives the defence a free kick at the throw.
+ *
+ * Angle is the whole test. Timing (the meter) is a separate matter judged
+ * by its own quality test; this one only ever sees the flight vector.
+ */
+export const LINEOUT_THROW_ANGLE_LIMIT = (15 * Math.PI) / 180;
+
+/**
+ * Pure judgement over a throw angle in radians, measured from the lateral
+ * tunnel axis. The engine measures the angle from the throw's own velocity
+ * at the moment of release (`releaseThrow` in engine/setpieces.ts) and
+ * hands it here; the referee compares it with the limit and nothing else.
+ * True = not in straight.
+ */
+export function judgeLineoutThrow(angleRad: number): boolean {
+  return angleRad > LINEOUT_THROW_ANGLE_LIMIT;
 }
