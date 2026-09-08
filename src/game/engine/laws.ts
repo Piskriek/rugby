@@ -224,6 +224,35 @@ export function sanctionOf(call: string): Sanction {
 /** True when a call is one of the offences that costs a penalty, not a restart. */
 export const isPenaltyCall = (call: string) => sanctionOf(call) === 'PENALTY';
 
+/* ================================================================== *
+ * SPEC_08 — THE MAUL LAW INDEX (the maulLaw=2 deprecation, one read site)
+ * ================================================================== *
+ *
+ * NO LIMIT (legacy maulLaw=2) was deprecated by human review 2026-09-03 —
+ * see SPEC_08_MAULLAW2_DECISION.md. Its only honest clock was a ~12 s
+ * wait to the same scrum STOP ONCE awards at the use-it whistle, which is
+ * exactly the ambient countdown that presentation work banned. Every read
+ * of the option comes through this funnel: any value ≥ 1 (an old save, a
+ * stale config, a harness that bypasses the load migration) collapses to
+ * the STOP TWICE ladder, so no code path can resurrect an endless
+ * standstill.
+ */
+export function maulLawIndex(option: number | undefined): 0 | 1 {
+  return (option ?? 0) >= 1 ? 1 : 0;
+}
+
+/**
+ * SPEC_08 — the unplayable-maul award, stated once. A stall whistle or a
+ * legal collapse is a TURNOVER SCRUM to the DEFENDING team at the mark
+ * the maul stopped at (Law 16.11 / Law 17). The engine resolves it
+ * through engine/setpieces.finishMaulExit → startScrum; this predicate
+ * exists so the ledger/audit treats the two UNPLAYABLE texts (`MAUL_STOPPED`
+ * — held to a standstill, `MAUL_UNPLAYABLE` — brought to ground legally)
+ * as the same class of award: a restart turnover, never a penalty.
+ */
+export const isMaulTurnoverCall = (call: string) =>
+  call.startsWith('TURNOVER — MAUL');
+
 export function lawCall(d: Director, key: string, call: string, team: 'A' | 'B') {
 
   d.refSignal = 1.8;

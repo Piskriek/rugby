@@ -570,6 +570,14 @@ export const REFEREE_CALLS: Record<string, string> = {
   NOT_RELEASING: 'PENALTY — NOT RELEASING',
   HANDS_IN: 'PENALTY — HANDS IN THE RUCK',
   MAUL_STOPPED: 'TURNOVER — MAUL STOPPED AND RESTARTED',
+  /* SPEC_08 — Law 16.11 / Law 17: the maul comes to ground legally (the
+   * drive's legs go, no offence): the whistle, unplayable, and the
+   * turnover scrum goes to the DEFENDING team at the mark. */
+  MAUL_UNPLAYABLE: 'TURNOVER — MAUL UNPLAYABLE, BALL NOT EMERGING',
+  /* SPEC_08 — Law 16.5/9.20: a defending player deliberately pulls the
+   * maul down. Immediate penalty against the defence — no use-it
+   * management, no ladder. */
+  MAUL_COLLAPSE: 'PENALTY — COLLAPSING THE MAUL DELIBERATELY',
   IN_AT_SIDE: 'PENALTY — IN AT THE SIDE',
   TRIP: 'PENALTY — TRIPPING',
   /* RC2-3 — Law 9.7(b), wasting time. A kickoff that is never struck used to

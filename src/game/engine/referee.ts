@@ -574,3 +574,163 @@ export const LINEOUT_THROW_ANGLE_LIMIT = (15 * Math.PI) / 180;
 export function judgeLineoutThrow(angleRad: number): boolean {
   return angleRad > LINEOUT_THROW_ANGLE_LIMIT;
 }
+
+/* ================================================================== *
+ * SPEC_08 — THE MAUL STALL LAW: "USE IT" (Law 16.11 / Law 17)
+ * ================================================================== *
+ *
+ * The referee monitors FORWARD PROGRESS, nothing else. When the maul's
+ * rolling speed dies below the movement epsilon the stall clock runs;
+ * when the maul rolls again the clock bleeds back toward zero at half
+ * again the rate it accrued (a twitch is not progress, a real roll is).
+ *
+ *   1. stall longer than MAUL_STALL_WARN_S → the audible/visual
+ *      "USE IT!" warning (a shout, never the whistle — play continues);
+ *   2. from that warning the attacking side has MAUL_USE_IT_WINDOW_S
+ *      seconds to extract the ball;
+ *   3. the window expires while the defence still holds it up → the
+ *      whistle: unplayable maul, TURNOVER SCRUM to the defending team
+ *      (Law 16.11 / Law 17). Under the STOP TWICE ladder the first
+ *      expiry is the management call ("stopped once — use it or lose
+ *      it") and only the SECOND expiry escalates to the penalty.
+ *
+ * Exactly like the advantage watch, the whole sequencing is one pure
+ * function over a plain frame — the engine keeps the clock, the referee
+ * keeps the law, and the probe drives it without a Director.
+ */
+
+/** Forward progress this slow is no progress. The maul's reverse band
+ *  (−0.5 m/s) is well past it, so a maul being shoved BACKWARD still
+ *  counts as motion — it is moving, the referee lets it be moved. */
+export const MAUL_STALL_MOVEMENT_EPS = 0.12;
+
+/** Seconds of no forward progress before the referee calls "USE IT!". */
+export const MAUL_STALL_WARN_S = 3.0;
+
+/** Seconds from the "USE IT!" warning to the whistle. */
+export const MAUL_USE_IT_WINDOW_S = 5.0;
+
+/** Total stall seconds at which the referee must blow. Named once, read
+ *  by the law and by the presentation clock, so the countdown the player
+ *  sees and the whistle the engine blows can never drift apart. */
+export const MAUL_STALL_WHISTLE_S = MAUL_STALL_WARN_S + MAUL_USE_IT_WINDOW_S;
+
+/** The decay rate of the clock while the maul rolls, relative to how it
+ *  accrues while it stalls. */
+export const MAUL_STALL_BLEED = 1.5;
+
+export interface MaulStallFrame {
+  /** signed rolling speed in the attacking frame, m/s. */
+  speed: number;
+  /** seconds below the movement epsilon. */
+  stallClock: number;
+  /** the "USE IT!" warning has been issued. */
+  warned: boolean;
+  /** the maul has already been stopped once (the STOP TWICE ladder). */
+  stoppedOnce: boolean;
+  /** the DEFENCE holds it up. Only then does the stall resolve to the
+   *  whistle — an attack-controlled maul has its own clock (the exits). */
+  defenceHeld: boolean;
+  /** the live maul law: 0 = STOP ONCE, 1 = STOP TWICE. */
+  law: 0 | 1;
+}
+
+export type MaulStallVerdict =
+  /** moving: the stall clock bleeds. */ | 'ROLLING'
+  /** held, clock running, warning not yet due. */ | 'STALLING'
+  /** the 3-second warn fires THIS frame. */ | 'WARN_USE_IT'
+  /** law 1, first expiry: the ladder resets, one more chance. */ | 'STOP_ONCE'
+  /** expiry: unplayable maul, turnover scrum to the defence. */ | 'UNPLAYABLE'
+  /** law 1, second expiry: penalty against the stalled attack. */ | 'PENALTY_STOP';
+
+/**
+ * One frame of the referee's stall watch. Mutates only the clock fields
+ * of the frame (stallClock, warned, stoppedOnce) — the same ownership
+ * split as stepAdvantageWatch: the clock is data, the decision is the
+ * return value, and acting on it (beginMaulExit, beginPenalty) is the
+ * engine's, downstream.
+ */
+export function stepMaulStall(f: MaulStallFrame, dt: number): MaulStallVerdict {
+  if (Math.abs(f.speed) >= MAUL_STALL_MOVEMENT_EPS) {
+    f.stallClock = Math.max(0, f.stallClock - dt * MAUL_STALL_BLEED);
+    return 'ROLLING';
+  }
+  f.stallClock += dt;
+  if (f.stallClock > MAUL_STALL_WARN_S && !f.warned) {
+    f.warned = true;
+    return 'WARN_USE_IT';
+  }
+  if (f.stallClock < MAUL_STALL_WHISTLE_S || !f.defenceHeld) return 'STALLING';
+  if (f.law >= 1 && !f.stoppedOnce) {
+    f.stoppedOnce = true;
+    f.stallClock = 0;
+    f.warned = false;
+    return 'STOP_ONCE';
+  }
+  return f.law >= 1 ? 'PENALTY_STOP' : 'UNPLAYABLE';
+}
+
+/** The seconds of extraction time the countdown may honestly show, from
+ *  the current stall clock. This is THE number the HUD/overlay quote:
+ *  time to the real consequence of the state the maul is in. */
+export function maulUseItRemaining(stallClock: number): number {
+  return Math.max(0, MAUL_STALL_WHISTLE_S - stallClock);
+}
+
+/* ================================================================== *
+ * SPEC_08 — THE COLLAPSE ADJUDICATION
+ * ================================================================== *
+ *
+ * A maul comes to ground one of two ways, and the law's answer is
+ * different for each:
+ *
+ *   LEGAL collapse (the drive tears its own legs away, the pile simply
+ *     falls): the whistle, an UNPLAYABLE maul, turnover scrum to the
+ *     defence — same terminal award as the stall, treated the same.
+ *   DELIBERATE collapse (a defending player pulls the maul down): an
+ *     IMMEDIATE penalty against the defence — no "use it" management,
+ *     no advantage ladder. Law 16.5: a player must not collapse a maul.
+ *
+ * The hazard is a rate pair in per-second, a function of the contest's
+ * shape: a balanced, rolling maul essentially never falls; a maul being
+ * wrenched sideways (imbalance) or held to death (stall) starts to
+ * wobble. The deliberate share is priced separately and only exists at
+ * all while the defence is the side under shove pressure.
+ */
+
+export interface MaulCollapseHazard {
+  /** per-second rate of an accidental (legal) collapse. */
+  legal: number;
+  /** per-second rate of a deliberate defensive pull-down. */
+  deliberate: number;
+}
+
+/** Base hazard at even shove: a rare event across a whole match. */
+export const MAUL_COLLAPSE_BASE_RATE = 0.004;
+/** Extra hazard at full shove imbalance per second. */
+export const MAUL_COLLAPSE_IMBALANCE_RATE = 0.028;
+/** Extra hazard per stalled second per second (the legs die). */
+export const MAUL_COLLAPSE_STALL_RATE = 0.0035;
+/** Of the deliberate share the defence might sink to: under real
+ *  imbalance one pull-down in five collapses in law becomes a penalty. */
+export const MAUL_COLLAPSE_DELIBERATE_SHARE = 0.22;
+
+export function maulCollapseHazard(spec: {
+  /** |net force| relative to the sum of both drives, 0..1. */
+  imbalance: number;
+  /** seconds the maul has been stalled. */
+  stallClock: number;
+}): MaulCollapseHazard {
+  const im = clamp(Number.isFinite(spec.imbalance) ? spec.imbalance : 0, 0, 1);
+  const stall = Math.max(0, Number.isFinite(spec.stallClock) ? spec.stallClock : 0);
+  const legal = MAUL_COLLAPSE_BASE_RATE * (0.2 + im * 2)
+    + MAUL_COLLAPSE_IMBALANCE_RATE * im * im
+    + MAUL_COLLAPSE_STALL_RATE * stall;
+  const deliberate = im > 0.42 ? legal * MAUL_COLLAPSE_DELIBERATE_SHARE * (im - 0.42) / 0.58 * 4 : 0;
+  return { legal, deliberate };
+}
+
+/** The referee's answer to a maul on the floor. Pure. */
+export function judgeMaulCollapse(deliberate: boolean): 'PENALTY' | 'UNPLAYABLE_SCRUM' {
+  return deliberate ? 'PENALTY' : 'UNPLAYABLE_SCRUM';
+}

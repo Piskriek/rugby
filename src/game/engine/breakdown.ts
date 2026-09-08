@@ -21,6 +21,10 @@ import { releaseAll as releaseLatchAll, assertNoLatchLeaks } from './latch';
 import type { LatchVec, LatchAxes, LatchSystem } from './latch';
 import { ruckGateGeometry, ruckClusterOf } from './gates';
 import { FLANK_CLEARANCE_M } from './forwardPack';
+import {
+  heldUpMaulLiftVerdict, heldUpMaulChance,
+  MAUL_BIND_RANGE_M, MAUL_RANKS_PER_SIDE,
+} from '../maulRegate';
 import type { Live } from '../intelligence';
 
 /* PART 2 — MULTI-STAGE TACKLE PHYSICS.
@@ -1332,6 +1336,38 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
     return;
   }
 
+  /* SPEC_03 — THE HELD-UP MAUL (Law 16/17). The carrier is caught on his
+   * FEET: a defender has him (the tackler named above) and a team-mate
+   * binds on before the ground is reached. That is a maul, not a tackle
+   * completed, and the episode hands straight over to the rolling-maul
+   * engine — the carrier never touches the deck.
+   *
+   * Three pure tests before any dice (maulRegate.ts owns them):
+   *   1. a defender holds him (the tackler exists);
+   *   2. a team-mate is inside binding reach (MAUL_BIND_RANGE_M);
+   *   3. the upright side's combined strength beats the tackler's drag
+   *      (heldUpMaulLiftVerdict — carrier PWR + the binder's shove).
+   * A fourth, stochastic governor (heldUpMaulChance, priced off the
+   * nation's maul attribute) keeps the conversion rate match-honest.
+   * Scripted setups (the tutorial's BREAKDOWN step) are exempt: they ask
+   * for a ruck by name. */
+  if (tackler && !d.tut.active) {
+    let binder: { num: number; pwr: number; d: number } | null = null;
+    for (const p of d.live) {
+      if (p.team !== atk || p === car || p.sinbin > 0 || p.down) continue;
+      const dd = Math.hypot(p.x - cx, p.z - cz);
+      if (dd >= MAUL_BIND_RANGE_M) continue;
+      if (!binder || dd < binder.d) binder = { num: p.num, pwr: p.attrs.PWR, d: dd };
+    }
+    if (binder && heldUpMaulLiftVerdict(car.attrs.PWR, tackler.attrs.PWR, binder.pwr)
+      && R() < heldUpMaulChance(d.teams[atk].nation.att.maul)) {
+      d.commentate('BIG_HIT', '— HELD UP, AND THE MAUL IS ON');
+      d.say('HELD UP — TEAM-MATES BIND ON, IT IS A MAUL');
+      d.startMaul(atk, cx, cz, MAUL_RANKS_PER_SIDE, false);
+      return;
+    }
+  }
+
   /* PART 2 — THE KINETIC IMPACT WINDOW.
    *
    * A tackle used to zero both men on the collision frame: fifteen stone of
@@ -1484,4 +1520,38 @@ export function teardownBreakdown(d: Director, reason = 'WHISTLE'): BreakdownTea
     purgedDragLinks: report.dragLinksPurged,
     purgedLatchObjects: report.latchObjectsCleared,
   };
+}
+
+/**
+ * SPEC_03 — THE MAUL EXIT TEARDOWN.
+ *
+ * One funnel for every way out of a maul: a runner exit, the use-it
+ * whistle, a legal collapse, touch, a try. The latch purge and the
+ * residue assertion are exactly the breakdown's own hardened path
+ * (`teardownBreakdown` → latch.releaseAll → assertNoLatchLeaks), so a
+ * held-up maul that formed on top of a live drag link can never carry a
+ * weld or a phantom defender into the next phase; zero leaked joints is
+ * the contract, stated here once.
+ *
+ * On top of the lattice purge this releases the maul's own lock state:
+ * the sixteen `bound` ranks (and any man the exit beat left `down`) go
+ * back to work exactly the way `clearRuck` releases a ruck's cast, and
+ * the maul state itself is handed back — the caller owns the phase
+ * transition that follows.
+ *
+ * Idempotent like its parent: a whistle landing inside the exit beat
+ * purges nothing the first call did not already.
+ */
+export function teardownMaul(d: Director, reason = 'MAUL_EXIT'): BreakdownTeardownResidual {
+  const residual = teardownBreakdown(d, reason);
+  for (const p of d.live) {
+    /* same ownership rule as clearRuck: only a man actually ON THE GROUND
+     * pays the get-up price; the bound ranks were on their feet. */
+    if (p.down) p.recoverT = RECOVER_SECONDS;
+    p.down = false;
+    p.bound = false;
+  }
+  d.ml = undefined;
+  d.lastTeardownResidual = residual;
+  return residual;
 }

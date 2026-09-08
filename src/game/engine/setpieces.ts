@@ -11,15 +11,22 @@ import { R } from './rng';
 import { clamp } from './clamp';
 import { scrumBlock } from '../behaviour/setpiece-overrides';
 import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor, forwardMass } from './forwardPack';
-import { judgeLineoutThrow } from './referee';
+import {
+  judgeLineoutThrow, stepMaulStall, maulUseItRemaining, maulCollapseHazard,
+  type MaulStallFrame,
+} from './referee';
+import { maulLawIndex } from './laws';
+import { teardownMaul } from './breakdown';
 import { FIELD } from '../../render/retro';
 import { approach } from './approach';
 import {
   MAUL_REGATE_WINDOW_COUNT,
   MAUL_REGATE_WINDOW_SECONDS,
+  MAUL_RANKS_PER_SIDE,
   resolveMaulRegate,
+  channelBallRank, maulClusterNet, stepMaulClusterSpeed,
 } from '../maulRegate';
-import type { MaulExitState } from '../maulRegate';
+import type { MaulBind, MaulExitState } from '../maulRegate';
 
 /**
  * FORWARD PACK — the two lifters bound to a jumper: the men immediately in
@@ -471,7 +478,10 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       const jumper = s.players.find((p) => p.team === thrower && p.role === 'JUMPER');
       if (jumper) { s.ball.heldBy = jumper.id; jumper.handY = 2.6; }
       d.lo = undefined;
-      if (drive) { d.startMaul(thrower, bx, bz, 5, true); return; }
+      /* SPEC_03 — the cleanest maul birth in rugby: the jumper lands with
+       * the ball and the pack is ALREADY around him, so the bound forward
+       * drive starts the frame he touches grass. Full eight-rank cluster. */
+      if (drive) { d.startMaul(thrower, bx, bz, MAUL_RANKS_PER_SIDE, true); return; }
       d.startOpen(thrower, bx, bz, 10, 1, 0, 0.45);
       return;
     }
@@ -542,13 +552,14 @@ const MAUL_EXIT_SECONDS: Record<Exclude<MaulExitState, 'NONE'>, number> = {
 };
 const MAUL_CPU_PICK_AT = 4.4;
 const MAUL_AUTO_EXIT_AT = 6.0;
-const MAUL_NO_LIMIT_SAFETY_AT = 15.0;
-/* SPEC_08 (T-65): the use-it law clock thresholds, named once. The law
- * (updateMaulStall) and the presentation (maulUseItClock, used by the HUD and
- * the maul overlay) must quote the same numbers, or the countdown the player
- * sees drifts from the whistle the engine blows. */
-const MAUL_USE_IT_WARN_AT = 3;    // stall seconds before the referee calls USE IT (LAW-91)
-const MAUL_USE_IT_WHISTLE_AT = 5; // laws 0/1: stalled this long under defence control = the award
+/* SPEC_08: the stall ladder now resolves at the 3 s USE-IT warning plus the
+ * 5 s extraction window the referee calls for (engine/referee.ts owns both
+ * numbers): law 0 at ~8 s of stall, law 1 at ~16 s on the second stop. This
+ * backstop is a pure watchdog for ANY law — fixed law-clock exit, never a
+ * force outcome — sized a full ladder and a margin above the longest
+ * lawful resolution. Named SAFETY on purpose: under the live laws it is
+ * unreachable by design, which is exactly what a safety net should be. */
+const MAUL_NO_LIMIT_SAFETY_AT = 20.0;
 const MAUL_PICK_ORDER = [8, 7, 6, 5, 4, 3, 2, 1] as const;
 
 type MaulExit = Exclude<MaulExitState, 'NONE'>;
@@ -599,27 +610,42 @@ function finishMaulExit(d: Director, s: MaulState, atk: 'A' | 'B', def: 'A' | 'B
   const x = runner === null ? s.exitX : d.L(atk, runner).x;
   const z = runner === null ? s.exitZ : d.L(atk, runner).z;
 
+  /* SPEC_03 — every ball-out or whistle route runs ONE teardown funnel:
+   * teardownMaul → teardownBreakdown → latch.releaseAll + the zero-leak
+   * assertion. The contract is the probe's: 0 leaked joints, 0 bound men,
+   * 0 drag links out of every maul, whatever the exit. (TRY and PENALTY
+   * funnel through scoreTry()/beginPenalty()'s own releaseAll, which is
+   * the same hardened path — the ledger lands on d.lastTeardownResidual.) */
   switch (exit) {
     case 'PICK_AND_GO':
     case 'WHEEL_AND_PEEL':
     case 'TRANSFER_TO_9':
-      d.clearRuck();
+      teardownMaul(d, `MAUL_${exit}`);
       d.startOpen(atk, x, z, runner ?? maulPicker(d, atk), 1, 0, 0.6);
       return;
     case 'UNPLAYABLE_SCRUM':
-      d.lawCall('MAUL_STOPPED', REFEREE_CALLS.MAUL_STOPPED, def);
-      d.clearRuck();
+      /* SPEC_08 — Law 16.11 / Law 17: the turnover scrum goes to the
+       * DEFENDING team, at the mark the maul stopped at. A legal collapse
+       * arrives here the same way, under its own call text. */
+      d.lawCall(
+        s.collapsed ? 'MAUL_UNPLAYABLE' : 'MAUL_STOPPED',
+        s.collapsed ? REFEREE_CALLS.MAUL_UNPLAYABLE : REFEREE_CALLS.MAUL_STOPPED,
+        def,
+      );
+      teardownMaul(d, s.collapsed ? 'MAUL_COLLAPSED' : 'MAUL_UNPLAYABLE');
       d.startScrum(def, s.exitX, s.exitZ);
       return;
     case 'TOUCH_LINEOUT':
       d.say('THE MAUL IS DRAGGED INTO TOUCH');
-      d.clearRuck();
+      teardownMaul(d, 'MAUL_TOUCH');
       d.startLineout(def, s.exitZ, (Math.sign(s.exitX) || 1) * 6);
       return;
     case 'PENALTY_AWARDED':
       d.beginPenalty(def, 'PENALTY — MAUL STOPPED TWICE', 8);
       return;
     case 'TRY_AWARDED':
+      /* scoreTry reads this.ml for the grounding spot, then releaseAll()
+       * runs the funnel and writes the same residual ledger. */
       d.clearRuck();
       d.scoreTry();
       return;
@@ -701,44 +727,53 @@ function requestCpuMaulExit(d: Director, s: MaulState, atk: 'A' | 'B') {
   if (s.t >= MAUL_AUTO_EXIT_AT) requestTransferOrPick(d, s, atk);
 }
 
+/**
+ * SPEC_08 — the referee's stall watch, delegated. The sequencing (warn at
+ * 3 s without forward progress, whistle 5 s after the warn, the STOP TWICE
+ * ladder) is the referee's own law and lives with him in
+ * engine/referee.ts; this frame adapts the maul's contest state to his
+ * MaulStallFrame and acts on his verdict. LAW-91 (warn before whistle in
+ * every mode) holds by construction: the only path to the whistle runs
+ * through the warn.
+ */
 function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
-  if (Math.abs(s.speed) >= 0.12) {
-    s.stallClock = Math.max(0, s.stallClock - dt * 1.5);
-    return false;
+  const frame: MaulStallFrame = {
+    speed: s.speed,
+    stallClock: s.stallClock,
+    warned: s.warned,
+    stoppedOnce: s.stoppedOnce,
+    defenceHeld: s.contest === 'DEFENCE_CONTROL',
+    law: maulLawIndex(d.options.maulLaw),
+  };
+  const verdict = stepMaulStall(frame, dt);
+  s.stallClock = frame.stallClock;
+  s.warned = frame.warned;
+  s.stoppedOnce = frame.stoppedOnce;
+  switch (verdict) {
+    case 'WARN_USE_IT':
+      s.useItCalled = true;
+      /* SPEC_08 (T-65): the call PERSISTS — it rides the ruck-countdown
+       * channel (maulUseItClock/maulUseItCall below) every frame until the
+       * maul resolves — and its engagement gets exactly one referee cue.
+       * RC2-4: that cue is a SHOUT, not a whistle — the referee manages the
+       * maul with his voice; the whistle stays sacred to stoppages. */
+      d.audio.shout();
+      d.refSay('USE IT!', 'NARRATIVE', 2.6);
+      d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4);
+      return false;
+    case 'STOP_ONCE':
+      d.audio.shout();
+      d.showHint('STOPPED ONCE — USE IT OR LOSE IT', 2.2);
+      return false;
+    case 'UNPLAYABLE':
+      beginMaulExit(s, 'UNPLAYABLE_SCRUM');
+      return true;
+    case 'PENALTY_STOP':
+      beginMaulExit(s, 'PENALTY_AWARDED');
+      return true;
+    default:
+      return false;
   }
-  s.stallClock += dt;
-  if (s.stallClock > MAUL_USE_IT_WARN_AT && !s.warned) {
-    s.warned = true;
-    s.useItCalled = true;
-    /* SPEC_08 (T-65): the warn used to be a one-shot 2.4 s hint and then the
-     * whistle "looked arbitrary". The call now PERSISTS — it rides the
-     * ruck-countdown channel (maulUseItClock/maulUseItCall below) every frame
-     * until the maul resolves — and its engagement gets exactly one referee
-     * cue, so the stall is unavoidable in vision AND in audio.
-     *
-     * RC2-4 — that cue is now a SHOUT, not a whistle. This is the only whistle
-     * in the game that did not stop play (the other four are a try, a card, a
-     * law call and a TMO confirmation, all genuine stoppages), and a stop
-     * signal used for a keep-playing instruction is what QA reported as
-     * immersion-breaking. The referee manages the maul with his voice. */
-    d.audio.shout();
-    d.showHint('USE IT — THE MAUL HAS STOPPED', 2.4);
-  }
-  if (s.stallClock <= MAUL_USE_IT_WHISTLE_AT || s.contest !== 'DEFENCE_CONTROL') return false;
-
-  /* SPEC_08: NO LIMIT (legacy 2) is deprecated — any value ≥1 collapses to
-   * the STOP TWICE ladder, so no code path (old save, stale config, harness)
-   * can resurrect an endless standstill. */
-  const law = (d.options.maulLaw ?? 0) >= 1 ? 1 : 0;
-  if (law === 1 && !s.stoppedOnce) {
-    s.stoppedOnce = true;
-    s.stallClock = 0;
-    s.warned = false;
-    d.showHint('STOPPED ONCE — USE IT OR LOSE IT', 2.2);
-    return false;
-  }
-  beginMaulExit(s, law === 1 ? 'PENALTY_AWARDED' : 'UNPLAYABLE_SCRUM');
-  return true;
 }
 
 /* ================== SPEC_08 (T-65): THE USE-IT PRESENTATION ==================
@@ -757,7 +792,7 @@ function updateMaulStall(d: Director, s: MaulState, dt: number): boolean {
  * side, which is exactly the ambient countdown Playtest 2 bans.
  */
 export function maulUseItClock(s: MaulState): number {
-  if (s.contest === 'DEFENCE_CONTROL') return Math.max(0, MAUL_USE_IT_WHISTLE_AT - s.stallClock);
+  if (s.contest === 'DEFENCE_CONTROL') return maulUseItRemaining(s.stallClock);
   return Math.max(0, MAUL_AUTO_EXIT_AT - s.t);
 }
 
@@ -769,6 +804,29 @@ export function maulUseItClock(s: MaulState): number {
  */
 export function maulUseItCall(s: MaulState): boolean {
   return s.exit === 'NONE' && s.useItCalled && s.contest !== 'PENDING';
+}
+
+/**
+ * SPEC_03 — BUILD THE BOUND CLUSTER. The two packs lock in as one
+ * aggregate body: rank 1 is the head (the ball at formation), the shirt-8
+ * rank is the tail (the hindmost foot — MAUL_PICK_ORDER peels tail-first
+ * for exactly this reason). Mass comes off the same forwardMass table the
+ * scrum weighs its packs with; the drive vectors are assigned per frame
+ * in upMaul, so the summation in maulRegate always has honest per-man
+ * contributions. Deliberately never distance-ordered: roster order is
+ * the contract, matching the placement ranks the renderer lays down.
+ */
+export function buildMaulBinds(d: Director, attacking: 'A' | 'B', ranks: number): MaulBind[] {
+  const def: 'A' | 'B' = attacking === 'A' ? 'B' : 'A';
+  const n = Math.max(2, Math.min(MAUL_RANKS_PER_SIDE, Math.round(ranks)));
+  const out: MaulBind[] = [];
+  for (const team of [attacking, def] as const) {
+    for (let rank = 1; rank <= n; rank++) {
+      const p = d.L(team, rank);
+      out.push({ team, num: rank, rank, mass: forwardMass(p.attrs.PWR), driveN: 0, driveX: 0 });
+    }
+  }
+  return out;
 }
 
 export function upMaul(d: Director, dt: number, input: Input, pressed: Set<string>) {
@@ -789,9 +847,11 @@ export function upMaul(d: Director, dt: number, input: Input, pressed: Set<strin
 
   if (s.contest === 'PENDING') captureMaulRegateEdge(s, pressed);
 
-  /* Legacy physical drive remains visual/location progression only. Neither
-   * force nor its dependent values can enter resolveMaulRegate(). Human A/D is
-   * intentionally absent here: it is consumed only as a commit-window edge. */
+  /* The aggregate drives (the contest's own tuning — nation maul attribute,
+   * committed men, the lineout shove) remain visual/location progression
+   * only. Neither force nor its dependent values can enter
+   * resolveMaulRegate(). Human A/D is intentionally absent here: it is
+   * consumed only as a commit-window edge. */
   const commit = clamp(1 + Math.round((d.slider(atk, 'setPiece') / 100) * 4), 1, 6);
   s.committed = commit;
   if (!d.isHuman(atk)) {
@@ -801,19 +861,62 @@ export function upMaul(d: Director, dt: number, input: Input, pressed: Set<strin
   s.forceA = approach(s.forceA, 2600 + lineoutDrive + d.teams[atk].nation.att.maul * 26 + commit * 320, 2.2, dt);
   s.forceD = approach(s.forceD, 2400 + d.teams[def].nation.att.maul * 24 + (6 - commit) * 300, 1.6, dt);
 
-  const net = (s.forceA - s.forceD) / 1400;
-  if (s.contest === 'DEFENCE_CONTROL') {
+  /* SPEC_03 — BINDING DRIVE KINEMATICS. The aggregate drives are
+   * distributed across the bound men by mass share (the heavy prop shoves
+   * heavier), and the cluster sums them straight back — mass and drive
+   * vectors summed kinematically, in the ledger as well as in the
+   * integration. The attack drives +dir in its own frame, the defence
+   * drives −dir; a held-up maul (defence control) transmits the attack's
+   * shove into the hold, not into motion. */
+  let massA = 0, massD = 0;
+  for (const b of s.bound) { if (b.team === atk) massA += b.mass; else massD += b.mass; }
+  const held = s.contest === 'DEFENCE_CONTROL';
+  for (const b of s.bound) {
+    if (b.team === atk) {
+      b.driveN = held ? 0 : s.forceA * (b.mass / Math.max(1, massA));
+      b.driveX = held ? 0 : b.driveN * 0.06 * clamp(s.yaw / 12, -1, 1);
+    } else {
+      b.driveN = held ? 0 : -s.forceD * (b.mass / Math.max(1, massD));
+      b.driveX = 0;
+    }
+  }
+  const net = maulClusterNet(s.bound);
+  if (held) {
     // The re-gate may direct presentation into a held-up maul, but force is not
     // consulted to award that control or to reverse it once it is locked.
     s.speed = approach(s.speed, 0, 6, dt);
     s.yaw = approach(s.yaw, 0, 3, dt);
   } else {
-    s.speed = approach(s.speed, clamp(net, -0.5, 1.15), 3, dt);
-    s.yaw = approach(s.yaw, clamp(net * 12, -22, 22), 1.2, dt);
+    /* The no-explosion funnel owns the only velocity the cluster may have:
+     * F_net / Σm, acceleration-capped, speed-band-limited. */
+    s.speed = stepMaulClusterSpeed(s.speed, net.n, s.clusterMass, dt);
+    s.yaw = approach(s.yaw, clamp((s.forceA - s.forceD) / 1400 * 12 + net.x * 0.004, -22, 22), 1.2, dt);
   }
-  s.z += s.speed * dt;
+  /* The direction correction: the speed band is authored in the ATTACK's
+   * frame (positive = toward their try line), so the displacement is
+   * multiplied by `dir`. The scalar model this replaced integrated +z for
+   * both sides — a defending-from-deep maul "drove" upfield by sign
+   * accident; the kinematic cluster cannot. */
+  s.z += s.speed * s.dir * dt;
   s.gained += Math.max(0, s.speed * dt);
   s.x += Math.sin((s.yaw * Math.PI) / 180) * dt * 0.6;
+  if (!Number.isFinite(s.x) || !Number.isFinite(s.z)) { s.x = s.exitX; s.z = s.exitZ; s.speed = 0; }
+
+  /* SPEC_03 — CHANNELLING. Under attack control the ball walks
+   * hand-to-hand down the bound ranks to the TAIL: the carrier's ball
+   * becomes the rearmost bound player's ball, and only from there do the
+   * extraction verdicts (TRANSFER_TO_9 from the hindmost foot, the tail
+   * forward's peel) make physical sense. */
+  if (s.contest === 'ATTACK_CONTROL' && s.ballRank < s.ranks - 1) {
+    const ch = channelBallRank(s.ballRank, s.ranks - 1, s.channelT, dt);
+    if (ch.rank !== s.ballRank) {
+      s.ballRank = ch.rank;
+      if (ch.rank >= s.ranks - 1 && d.isHuman(atk)) {
+        d.showHint('THE BALL IS AT THE TAIL — 9 CAN HAVE IT', 1.6);
+      }
+    }
+    s.channelT = ch.channelT;
+  }
 
   /* Legal physical boundary events are terminal exits, not contest evidence.
    * They have priority over a same-frame re-gate completion or exit request. */
@@ -825,15 +928,47 @@ export function upMaul(d: Director, dt: number, input: Input, pressed: Set<strin
     beginMaulExit(s, 'TOUCH_LINEOUT');
     return;
   }
-  /* SPEC_08: the 15 s hand-off is a pure law-clock backstop for ANY law —
+  /* SPEC_08: the 20 s hand-off is a pure law-clock backstop for ANY law —
    * under the two live modes the stall whistle resolves a defence-held maul
-   * by ~10.5 s, so this is unreachable by design, exactly what a safety net
+   * by ~16 s, so this is unreachable by design, exactly what a safety net
    * should be. It is a fixed law-clock exit, never a force outcome. */
   if (s.contest === 'DEFENCE_CONTROL' && s.t >= MAUL_NO_LIMIT_SAFETY_AT) {
     beginMaulExit(s, 'UNPLAYABLE_SCRUM');
     return;
   }
   if (updateMaulStall(d, s, dt)) return;
+
+  /* SPEC_08 — THE COLLAPSE ADJUDICATION. One roll against the referee's
+   * hazard pair:
+   *   deliberate (a defending bind pulls the maul down) → an IMMEDIATE
+   *     penalty against the defence; no use-it management, no ladder;
+   *   legal (the drive's legs go, nobody offends) → the whistle,
+   *     unplayable maul, turnover scrum to the defence — the same
+   *     terminal award as the stall, by Law 16.11 / 17. */
+  if (s.contest !== 'PENDING') {
+    const sum = Math.max(1, s.forceA + s.forceD);
+    const hz = maulCollapseHazard({
+      imbalance: Math.abs(s.forceA - s.forceD) / sum,
+      stallClock: s.stallClock,
+    });
+    /* The hazards are per-SECOND rates; the draw prices one frame against
+     * them (P = rate × dt). Rolling R()×dt against the rate instead prices
+     * R() < rate/dt — sixty times the hazard, a guaranteed instant collapse
+     * the maulprobe's drive sections caught on their first run. */
+    const roll = R();
+    if (roll < hz.deliberate * dt) {
+      const puller = s.bound.find((b) => b.team === def && b.rank === 1)?.num ?? 7;
+      d.lawCall('MAUL_COLLAPSE', REFEREE_CALLS.MAUL_COLLAPSE, def);
+      d.beginPenalty(atk, REFEREE_CALLS.MAUL_COLLAPSE, puller);
+      return;
+    }
+    if (roll < (hz.deliberate + hz.legal) * dt) {
+      s.collapsed = true;
+      d.say('THE MAUL GOES TO GROUND — NO OFFENCE, IT IS UNPLAYABLE');
+      beginMaulExit(s, 'UNPLAYABLE_SCRUM');
+      return;
+    }
+  }
 
   // The result becomes immutable when window four closes. Requests wait until
   // the following frame, so the final A/D commit cannot double as a peel call.

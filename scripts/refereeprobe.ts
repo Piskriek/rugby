@@ -382,7 +382,13 @@ console.log('(e) LIVE ENGINE — referee ticks inside the real update loop');
   d.possession = 'A';
   d.advWatch!.elapsed = d.advWatch!.window + 0.05;
   d.advantage = 0.01;
-  for (let i = 0; i < 30; i++) d.update(dt, NO_INPUT, new Set());
+  /* The whistle is DEFERRED while a kicked ball is in the air — the
+   * deferred-whistle sweep lands the award the instant the flight ends, by
+   * design. The injection therefore cannot assume a 30-frame window covers
+   * it: run until the wind-back performs (bounded), then judge the marks. */
+  for (let i = 0; i < 6 * 60 && !(d.advantage <= 0 && d.advWatch === null && d.phase === 'SCRUM'); i++) {
+    d.update(dt, NO_INPUT, new Set());
+  }
   ok('expired advantage winds back to a scrum at the mark',
     d.advantage <= 0 && d.advWatch === null && d.phase === 'SCRUM' && d.scrim?.feed === 'B'
     && Math.abs((d.scrumAnchor?.z ?? 999) - markZ) < 1.05,

@@ -46,8 +46,8 @@ import type {
   ForwardAttackGateFailure, ForwardAttackGateReporter, ForwardAttackGateValue,
   ForwardAttackPlayerField,
 } from './forwardAttackGates';
-import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START } from './maulRegate';
-import type { MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
+import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START, MAUL_RANKS_PER_SIDE, maulClusterMass, maulTailMark } from './maulRegate';
+import type { MaulBind, MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
 /* type-only: hands.ts imports this file for BreakdownState, and a runtime cycle
  * between the director and an engine module is the sort of thing a bundler
  * resolves differently to the order you tested in. */
@@ -77,7 +77,7 @@ import {
   isBacklineShirt, type BacklineContext,
 } from './engine/backline';
 import { commentate, commentarySequencer } from './engine/commentary';
-import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall } from './engine/setpieces';
+import { upScrum, scrumSlots, upLineout, releaseThrow, upMaul, maulUseItClock, maulUseItCall, buildMaulBinds } from './engine/setpieces';
 import {
   liveOffsideLines, penetrationOf, offsideVerdict, STRICTNESS, OffsideLedger,
   legalMarkZ, legalZFor, clampPitchZ, CLEAN_MARGIN_METRES,
@@ -344,6 +344,20 @@ export interface MaulState {
   stallClock: number; stoppedOnce: boolean; useItCalled: boolean; warned: boolean;
   tryLineZ: number; attacking: 'A' | 'B';
   committed: number;
+  /* SPEC_03 — THE KINEMATIC CLUSTER. The sixteen bound players as one
+   * aggregate body: each locks into a forward-directed drive vector
+   * (MaulBind.driveN/X), and the mass and drive vectors sum kinematically
+   * every frame — the cluster's rolling speed is the integral of
+   * F_net / Σm, capped by the no-explosion funnel in maulRegate. */
+  bound: MaulBind[];
+  /** Σ body mass of the cluster, kg (maulClusterMass at formation). */
+  clusterMass: number;
+  /** Seconds accrued toward the next whole-rank channel of the ball back
+   *  to the tail (SPEC_03 channelling; maulRegate.channelBallRank). */
+  channelT: number;
+  /** SPEC_08 — a legal collapse has been whistled (drives the law-call
+   *  text at the unplayable-scrum hand-off). */
+  collapsed: boolean;
   /** Exactly one human side enables the four-window pure re-gate. */
   humanTeam: 'A' | 'B' | null;
   contest: MaulContestControl;
@@ -3008,6 +3022,11 @@ export class Director {
   private lastPhaseToken: unknown = null;
   watchdogTrips = 0;
   watchdogLog: string[] = [];
+  /** The residue ledger of the most recent hardened teardown funnel call
+   *  (releaseAll's whistle, or a maul exit through teardownMaul). The
+   *  headless probes assert the zero-leak contract on it; zero is the
+   *  guarantee every stoppage must keep. */
+  lastTeardownResidual: import('./engine/breakdown').BreakdownTeardownResidual | null = null;
 
   /* ======================== SPEC_07 TRY LOCK (T-67 backstop) ========================
    *
@@ -3420,10 +3439,14 @@ export class Director {
       }
       /* The nine has a fixed base behind the maul. It is marked bound by
        * think(), then placed here, so TRANSFER_TO_9 can show existing idle
-       * (nineSquat) followed by passSpin (ninePass) before open play begins. */
+       * (nineSquat) followed by passSpin (ninePass) before open play begins.
+       * SPEC_03: the base is THE HINDMOST FOOT — the tail mark the channel
+       * is measured from (maulTailMark), a half-stride behind the last bound
+       * rank, so the extraction is taken from the lawful pick line itself. */
       const nine = this.L(s.attacking, 9);
+      const tail = maulTailMark(s.dir, s.ranks, s.x, s.z);
       const baseX = clamp(s.x + (s.x > 0 ? -1.6 : 1.6), -32, 32);
-      const baseZ = clamp(s.z - s.dir * 6.6, -58, 58);
+      const baseZ = clamp(tail.z - s.dir * 0.8, -58, 58);
       settle(nine, baseX, baseZ, s.dir >= 0 ? 1 : -1);
       if (s.exit === 'TRANSFER_TO_9') clip(nine, s.exitT < MAUL_TRANSFER_PASS_START ? 'nineSquat' : 'ninePass');
       else clip(nine, 'ready');
@@ -5234,7 +5257,7 @@ export class Director {
       case 'RESTART': this.startKick('A', 'RESTART', { x: 0, z: 0 }); break;
       case 'SCRUM': this.startScrum('A', at.x, at.z); break;
       case 'LINEOUT': this.startLineout('A', at.z, at.x); break;
-      case 'MAUL': this.startMaul('A', at.x, at.z, 5, true); break;
+      case 'MAUL': this.startMaul('A', at.x, at.z, MAUL_RANKS_PER_SIDE, true); break;
       case 'KICK_AT_GOAL': this.startKick('A', 'GOAL', at); break;
       case 'BREAKDOWN':
         this.startOpen('A', at.x, at.z, 12, 1);
@@ -6077,7 +6100,7 @@ export class Director {
      * whistle frame itself. Advantage re-seeds through the ordinary contest
      * entry when play resumes. Idempotent, so frame-adjacent stoppages purge
      * the fresh bind set exactly like the first. */
-    teardownBreakdown(this, 'WHISTLE');
+    this.lastTeardownResidual = teardownBreakdown(this, 'WHISTLE');
     for (const p of this.live) {
       p.down = false;
       p.bound = false;
@@ -6100,12 +6123,32 @@ export class Director {
 
   /* ============================ MAUL ============================ */
 
-  startMaul(team: 'A' | 'B', x: number, z: number, ranks = 5, fromLineout = false) {
+  startMaul(team: 'A' | 'B', x: number, z: number, ranks = MAUL_RANKS_PER_SIDE, fromLineout = false) {
     const dir = team === 'A' ? 1 : -1;
     const def: 'A' | 'B' = team === 'A' ? 'B' : 'A';
     this.possession = team;
+    /* SPEC_03 — a maul can now form directly out of open play (the held-up
+     * trigger in engine/breakdown.ts): the open episode is over in the same
+     * breath. The carrier is a BOUND man from here on, so the episode and
+     * its carrier flag must retire with it — the watchdog's upright-carrier
+     * check owns op's world, never the maul's. */
+    if (this.op) {
+      for (const p of this.live) p.carrier = false;
+      this.op = undefined;
+    }
     this.clearRuck();
+    /* SPEC_03 — the formation teardown funnel. A maul can form straight off
+     * the tackle latch (the held-up trigger in engine/breakdown.ts), and the
+     * drag link it grew out of must die ON the formation frame, exactly like
+     * a whistle — the maul's own bind replaces it in the same breath. */
+    this.lastTeardownResidual = teardownBreakdown(this, 'MAUL_FORM');
     for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(def, i).bound = true; }
+    /* SPEC_03 — THE KINEMATIC CLUSTER. The two packs lock in as one
+     * aggregate body: every bound player's mass and forward-directed drive
+     * vector are summoned here, and from this frame the cluster displaces
+     * kinematically (F_net / Σm through the capped funnel), never by
+     * position writes. */
+    const bound = buildMaulBinds(this, team, ranks);
     /* SPEC_03. The re-gate has exactly one human contender. CPU-v-CPU and a
      * future human-v-human match retain deterministic attacking control rather
      * than borrowing a human result that does not exist. */
@@ -6119,6 +6162,7 @@ export class Director {
       stallClock: 0, stoppedOnce: false, useItCalled: false, warned: false,
       tryLineZ: dir > 0 ? FIELD.tryZFar : FIELD.tryZ, attacking: team,
       committed: 5,
+      bound, clusterMass: maulClusterMass(bound), channelT: 0, collapsed: false,
       humanTeam, contest: humanTeam ? 'PENDING' : 'ATTACK_CONTROL',
       regateWindowT: 0, regateCandidate: null, regateWindows: [],
       humanWinShare: null, humanWon: null,

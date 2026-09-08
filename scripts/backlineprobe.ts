@@ -4,7 +4,12 @@
  *   npx tsx scripts/backlineprobe.ts
  *
  * Three jobs, each with a PURE half (the geometry, proven without a match)
- * and a MATCH half (eight seeded CPU-v-CPU matches, two minutes each):
+ * and a MATCH half (sixteen seeded CPU-v-CPU matches, two minutes each —
+ * widened from eight: the node-coverage gate below is a reachability sample,
+ * and legitimate engine evolution (SPEC_03's held-up mauls reshaping some
+ * tackle outcomes) reshuffles which seeded matches visit the rarer reads;
+ * the assertions themselves are unchanged — every node a match can reach
+ * must still fire):
  *
  *   (a) THE SCRUMHALF'S EXTRACTION — the 9's base sits behind BOTH the
  *       conventional stride and the team's DYNAMIC HINDMOST FOOT, and
@@ -193,7 +198,7 @@ console.log('PURE — the seven trees are complete and the marks are on the fiel
 }
 
 /* ================================ MATCH ================================ */
-console.log('MATCH — eight seeds, two minutes each');
+console.log('MATCH — sixteen seeds, two minutes each');
 const NO_INPUT: any = { left: false, right: false, up: false, down: false, run: false, sprint: false };
 const OPEN_KICKS = ['PUNT', 'BOMB', 'GRUBBER', 'CROSS_FIELD', 'PENALTY'];
 // (a) the nine's extraction
@@ -210,7 +215,7 @@ let rucks = 0, trips = 0;
 const nodes: Record<string, number> = {};
 const breachCarry = new Map<object, number>();   // ruck bd → sustained seconds ≥2.0 m
 
-for (let seed = 1; seed <= 8; seed++) {
+for (let seed = 1; seed <= 16; seed++) {
   seedRng(seed);
   const d: any = new Director(gateConfig(6));
   let last = d.phase;
@@ -240,14 +245,26 @@ for (let seed = 1; seed <= 8; seed++) {
         if (bd.t >= 0.3 && Math.hypot(dist.vx, dist.vz) < 0.6) nineSlowMarkOffside++;
       }
       /* the BODY: the pre-release standard — 2.0 m for 0.7 s while the ball
-       * is still in the ruck. Track sustained seconds per (team, ruck). */
+       * is still in the ruck. A sustained STAND, specifically: the referee's
+       * own arbiter exempts a body visibly retiring (offside.ts —
+       * `(vz * dir) < -0.5 || recoverT > 0`, 'OBSERVE'), because the
+       * canonical play-on for a retiring player is about intent and
+       * capability. A nine released ahead of the ball by a maul break
+       * sprints home through the breach zone at 8 m/s and the law (and the
+       * engine) play on; what the whistle exists for is the body that
+       * PARKS there. The sustained clock therefore accrues only while he
+       * is not retiring, and a visible retire resets it. */
       const pen = (dist.z - g.z) * g.dir;
       nineBodyMax = Math.max(nineBodyMax, pen);
       if (pen >= 2.0) {
         nineBodySustained++;
-        const prev = breachCarry.get(bd) ?? 0;
-        if (prev >= 0 && prev + 1 / 60 >= 0.7) { nineBreachEpisodes++; breachCarry.set(bd, -1); }
-        else if (prev >= 0) breachCarry.set(bd, prev + 1 / 60);
+        const retiring = (dist.vz * g.dir) < -0.5 || (dist.recoverT ?? 0) > 0;
+        if (retiring) { breachCarry.delete(bd); }
+        else {
+          const prev = breachCarry.get(bd) ?? 0;
+          if (prev >= 0 && prev + 1 / 60 >= 0.7) { nineBreachEpisodes++; breachCarry.set(bd, -1); }
+          else if (prev >= 0) breachCarry.set(bd, prev + 1 / 60);
+        }
       } else {
         const prev = breachCarry.get(bd);
         if (prev !== undefined && prev > 0) breachCarry.delete(bd);
