@@ -703,6 +703,11 @@ export class ThreePlayerManager {
 
     // Face materials: hair dark, eyes light — opaque & front-facing.
     for (const f of faces) {
+      /* A skinned face mesh can wander outside its authored bounding sphere as
+       * the head bones move; frustum-cull on the stale sphere would blink the
+       * eyes/hair off at the edge of frame. Disable it, exactly as the body
+       * regions do below. */
+      f.frustumCulled = false;
       const matName = (f.material as THREE.Material)?.name ?? '';
       if (matName === 'MI_Hair_1') {
         f.material = new THREE.MeshStandardMaterial({

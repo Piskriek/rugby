@@ -168,9 +168,14 @@ export class ThreeCanvas {
       powerPreference: 'high-performance',
     });
     this.renderer.setClearColor(FOG_COLOR, ENV_3D ? 1 : 0);
-    /* Shadows are enabled here and turned on per-tier by `applyConditions`;
-     * `autoUpdate` is off so the rig can pay for them every other frame. */
-    this.renderer.shadowMap.enabled = ENV_3D;
+    /* Shadows are DISABLED for now (VISUAL-REGRESSION fix). The lit materials
+     * (pitch, stands, players) render while the unlit sky dome renders, which
+     * means the key light's shadow pass was the one thing standing between the
+     * lit scene and its albedo. A stale or mis-frustumed shadow map leaves the
+     * whole lit world in shade — warm ambient only — which is exactly the
+     * uniform brown frame. `autoUpdate` stays off; correctness before soft
+     * contact shadows. */
+    this.renderer.shadowMap.enabled = false;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
     this.renderer.toneMapping = THREE.NoToneMapping;
@@ -280,7 +285,7 @@ export class ThreeCanvas {
     this.cond = cond;
     this.envStale = true;
     this.renderer.toneMapping = THREE.NoToneMapping;
-    this.renderer.shadowMap.enabled = ENV_3D && cond.shadows;
+    this.renderer.shadowMap.enabled = false;
     this.shadowEvery = cond.quality === 'FULL' ? 2 : 1;
     if (this.matchDay) {
       this.matchDay.applyQuality(cond);
@@ -299,13 +304,32 @@ export class ThreeCanvas {
     this.matchDay.update(cam, v, cond, dt);
     if (this.envStale) {
       this.envStale = false;
-      const env = this.matchDay.refreshEnvironment(this.renderer, cond);
-      this.scene.environment = env;
-      /* One number drives the whole indirect term, and it is the number the
-       * flat fills used to fake: an overcast sky is a softbox, a clear noon is
-       * not, and a black jersey only reads as cloth if something is reflecting
-       * off it. */
-      this.scene.environmentIntensity = env ? cond.iblIntensity : 1;
+      /* VISUAL-REGRESSION FIX — the image-based environment map is DISABLED.
+       *
+       * The sky dome is filtered through a PMREM half-float pass and the result
+       * is handed to the renderer as `scene.environment`. Three.js samples that
+       * environment from EVERY lit material — `MeshStandardMaterial`,
+       * `MeshLambertMaterial` and `MeshPhongMaterial` alike (they share the same
+       * `material.isMeshStandardMaterial || isMeshLambertMaterial || isMeshPhong`
+       * branch in WebGLRenderer). When that pass or the cube-UV envmap shader
+       * fails on a context, the environment poisons all three of them to black:
+       * pitch gone, player bodies gone, stadium gone — while `MeshBasicMaterial`
+       * (the eyes, the number badges, the contact shadows) and the ShaderMaterial
+       * sky dome keep drawing. That is precisely the reported "brown/blue skybox
+       * with only eyeballs, numbers and shadows" frame.
+       *
+       * The previous build shipped `MeshToonMaterial`, which is NOT in that
+       * environment-sampling list — which is why it rendered and this one does
+       * not. Rather than downgrade every material, the environment is left null
+       * so all lit materials fall back to their light-only shader. The
+       * key/hemi/ambient/fill rig in ThreeMatchDay already lights the whole
+       * scene, so the match renders everywhere without the IBL.
+       *
+       * (`refreshEnvironment` is kept in ThreeMatchDay but is not called; it can
+       * be reinstated behind an explicit capability check once the failure mode
+       * is pinned down.) */
+      this.scene.environment = null;
+      this.scene.environmentIntensity = 1;
     }
     /* The lens that matters is the 2D pinhole's own vertical FOV in radians —
      * `this.camera.fov` is a stale 35 DEGREES, because syncCamera overwrites
@@ -452,7 +476,12 @@ export class ThreeCanvas {
     // Off-axis projection that EXACTLY reproduces the 2D pinhole intrinsics
     // (focal length f and the off-centre principal point at (w/2, horizon*h)).
     const near = 0.15 * s;
-    const far = 320 * s;
+    /* The far plane must reach past the sky dome (radius 470) plus the camera's
+     * own offset from the centre, AND past the far diagonal of the 500 m outer
+     * apron (≈583 units). The old 320·s (528) cut both: the dome was clipped by
+     * the far plane into a visible shell that swept across the camera's focus,
+     * and the outer ground's far corners vanished at the pitch perimeter. */
+    const far = 520 * s;
     const focal = v.h * 0.5 / Math.tan(cam.fov * 0.5);
     const left = near * (-v.w * 0.5 - shakeX) / focal;
     const right = near * (v.w * 0.5 - shakeX) / focal;

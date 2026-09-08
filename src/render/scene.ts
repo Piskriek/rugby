@@ -56,6 +56,9 @@ function drawRenderHealth(ctx: CanvasRenderingContext2D, v: View) {
     lines.push('assets/models/rugby_player.glb did not load');
   }
   if (renderHealth.context === 'lost') lines.push('WEBGL CONTEXT LOST — WAITING');
+  /* Surface the swallowed render faults so a broken frame can be read out
+   * without a console. Capped at three, newest first. */
+  for (const f of renderHealth.log.slice(0, 3)) lines.push(f.slice(0, 62));
   if (!lines.length) return;
   const h = 11 + lines.length * 10;
   ctx.save();

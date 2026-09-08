@@ -20,7 +20,11 @@ import { FIELD, RENDER_SCALE } from './retro';
 import { buildTurfMaps, TURF_SIZE } from './turf';
 import type { Conditions } from './conditions';
 
-const OUTER_COLOR = 0x24461f;
+/* Bright grass green for the outer apron. The inner pitch carries its own
+ * textured albedo; this surround must read as the same turf, not as a dark
+ * muddy border — a muddy apron is exactly the "degraded turf" tell the pitch
+ * regression was reported with. */
+const OUTER_COLOR = 0x2e6f40;
 /* Weathered structural concrete, NOT the primer grey a default material
  * ships with. At 0x8a8f96 every terrace, wall and stair in the bowl sat at
  * ~0.63 relative luminance under a noon key — brighter than the pitch — and
@@ -61,6 +65,27 @@ const PAD_HEIGHT = 1.5;
 const POST_RADIUS = 0.06;
 
 export type AdBoardFlash = 'TRY' | 'PENALTY' | 'NORMAL';
+
+/**
+ * The two-stop lighting ramp MeshToonMaterial shades against. Toon is
+ * deliberately the lit material of the whole environment: it does NOT sample
+ * `scene.environment`, so it cannot be poisoned to black by a failing IBL /
+ * PMREM pass, and its shader is a fraction of the PBR program, so it compiles
+ * on contexts (software GL, ANGLE, older drivers) where MeshStandardMaterial's
+ * full physical shader does not. See the VISUAL-REGRESSION notes in
+ * ThreeCanvas.updateMatchDay.
+ */
+function toonGradient(): THREE.DataTexture {
+  const tex = new THREE.DataTexture(
+    new Uint8Array([80, 80, 80, 255, 176, 176, 176, 255, 255, 255, 255, 255]),
+    3, 1, THREE.RGBAFormat,
+  );
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 function merge(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
   const out = mergeGeometries(geos, false);
@@ -105,7 +130,7 @@ export class ThreeEnvironment {
 
   private adCanvas!: HTMLCanvasElement;
   private adTexture!: THREE.CanvasTexture;
-  private adMat!: THREE.MeshStandardMaterial;
+  private adMat!: THREE.MeshToonMaterial;
   private adMode: AdBoardFlash = 'NORMAL';
   private adHold = 0;
 
@@ -124,7 +149,8 @@ export class ThreeEnvironment {
   /** Match-day state owned by the conditions pass (SPEC_24). */
   private turfCanvas!: HTMLCanvasElement;
   private turfCtx!: CanvasRenderingContext2D;
-  private pitchMat!: THREE.MeshStandardMaterial;
+  private pitchMat!: THREE.MeshToonMaterial;
+  private gradient = toonGradient();
   private cond: Conditions | null = null;
   private scarHold = 0;
   private scarCount = 0;
@@ -159,16 +185,14 @@ export class ThreeEnvironment {
   applyConditions(cond: Conditions): void {
     this.cond = cond;
     if (this.pitchMat) {
-      this.pitchMat.roughness = 0.85;
       this.pitchMat.color.setRGB(1, 1, 1);
-      this.pitchMat.envMapIntensity = 0.35;
     }
     /* Fog is authored with the sky, not with the stands, but it is the stands
      * that have to obey it: 500 m of concrete reaching a horizon that is not
      * there is what makes a stadium look pasted in. */
     this.scene.fog = new THREE.FogExp2(new THREE.Color(cond.fogColor).getHex(), cond.fogDensity);
     for (const l of this.floodLights) l.intensity = cond.floodIntensity * 900 * RENDER_SCALE * RENDER_SCALE;
-    const cm = this.crowd?.material as THREE.MeshStandardMaterial | undefined;
+    const cm = this.crowd?.material as THREE.MeshToonMaterial | undefined;
     if (cm) {
       cm.color.setRGB(1, 1, 1);
     }
@@ -287,17 +311,24 @@ export class ThreeEnvironment {
     void n;
   }
 
-  private mat(color: number, map?: THREE.Texture, rough = 0.85, metal = 0): THREE.MeshStandardMaterial {
+  private mat(color: number, map?: THREE.Texture, _rough = 0.85, _metal = 0): THREE.MeshToonMaterial {
     /* `map` is only handed over when there is one: three warns on every
-     * material built with an explicit `map: undefined`. */
-    return new THREE.MeshStandardMaterial(map
-      ? { color, map, roughness: rough, metalness: metal, depthWrite: true }
-      : { color, roughness: rough, metalness: metal, depthWrite: true });
+     * material built with an explicit `map: undefined`. Roughness/metalness
+     * are accepted for call-site compatibility but unused — toon shading has
+     * no PBR terms. */
+    return new THREE.MeshToonMaterial(map
+      ? { color, map, gradientMap: this.gradient, depthWrite: true }
+      : { color, gradientMap: this.gradient, depthWrite: true });
   }
 
   private addMesh(geo: THREE.BufferGeometry, material: THREE.Material, name: string): THREE.Mesh {
     const m = new THREE.Mesh(geo, material);
     m.name = name;
+    /* The camera uses a custom off-axis projection (see ThreeCanvas.syncCamera)
+     * whose asymmetric frustum has bitten this layer before. The stadium is a
+     * dozen meshes and is always in frame, so frustum culling buys nothing here
+     * and is disabled — the same convention the GLB squad already uses. */
+    m.frustumCulled = false;
     this.group.add(m);
     return m;
   }
@@ -339,16 +370,15 @@ export class ThreeEnvironment {
     };
 
     this.pitchTexture = tex(maps.albedo, true);
-    const roughTex = tex(maps.roughness, false);
-    const normTex = tex(maps.normal, false);
 
-    const pitchMat = new THREE.MeshStandardMaterial({
+    /* Toon with the albedo map only. The roughness and normal maps were dropped
+     * in the visual-regression fix: toon shading has no PBR roughness term, and
+     * a tangent-space normal map on a displaced plane is one more shader variant
+     * that can fail to compile on a weak context. The albedo already bakes the
+     * mow stripes, so the surface reads as turf without the extra maps. */
+    const pitchMat = new THREE.MeshToonMaterial({
       map: this.pitchTexture,
-      roughnessMap: roughTex,
-      normalMap: normTex,
-      normalScale: new THREE.Vector2(0.65, 0.65),
-      roughness: 0.85,
-      metalness: 0,
+      gradientMap: this.gradient,
       dithering: false,
     });
 
@@ -446,13 +476,12 @@ export class ThreeEnvironment {
 
     // LED panels are emissive: they must stay bright at night and are the
     // main thing the bloom pass has to bite on.
-    this.adMat = new THREE.MeshStandardMaterial({
+    this.adMat = new THREE.MeshToonMaterial({
       map: this.adTexture,
       emissiveMap: this.adTexture,
       emissive: new THREE.Color(0xffffff),
       emissiveIntensity: 0.85,
-      roughness: 0.42,
-      metalness: 0.0,
+      gradientMap: this.gradient,
     });
 
     const geos: THREE.BufferGeometry[] = [];
@@ -827,6 +856,7 @@ export class ThreeEnvironment {
   dispose(): void {
     this.pitchTexture?.dispose();
     this.adTexture?.dispose();
+    this.gradient?.dispose();
     for (const l of this.floodLights) {
       l.removeFromParent();
       l.dispose();

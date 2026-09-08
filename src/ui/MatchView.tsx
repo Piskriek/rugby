@@ -15,6 +15,7 @@ import {
 } from './tarcsMetrics';
 import { drawCRT, project, type Camera } from '../render/retro';
 import { ENV_3D, ThreeCanvas, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
+import { assessRender, drawHealthOverlay } from '../render/renderHealth';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { conditionsFor, qualityFor, type Conditions } from '../render/conditions';
 import { FxDirector } from '../render/fxDirector';
@@ -65,6 +66,16 @@ const yieldToBrowser = () => new Promise<void>((r) => {
  */
 const RIG_BUDGET_MS = 6000;
 const BOOT_BUDGET_MS = 15000;
+
+/**
+ * On-screen render-health diagnostics (draw calls, triangles, framebuffer,
+ * pixel probe and the resolved conditions). Off by default so the match screen
+ * stays clean; append `?debug` to the URL to bring them back when a regression
+ * is suspected. The small orange fault text in the bottom-left is separate and
+ * only ever appears when something has actually gone wrong.
+ */
+const DEBUG_RENDER = typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('debug');
 
 /** Every verb, one key. Remappable by editing this table. */
 export const KEYMAP: Record<string, string> = {
@@ -771,6 +782,99 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           ctx.globalAlpha = 1; ctx.textAlign = 'left';
         }
         if (d.paused) drawWipe(ctx, view, 0.5);
+        /* RENDER HEALTH — a self-diagnostic overlay driven by the real driver
+         * counters (draw calls, triangles, framebuffer completeness). Gated
+         * behind ?debug (see DEBUG_RENDER) so it never ships on the clean
+         * screen. See render/renderHealth.ts. */
+        if (DEBUG_RENDER) {
+        const rh = threeRef.current;
+        if (rh) {
+          try {
+            const report = assessRender({
+              renderer: rh.renderer,
+              scene: rh.scene,
+              target: null,
+              drawCalls: rh.renderer.info.render.calls,
+              triangles: rh.renderer.info.render.triangles,
+              bufferW: rh.renderer.domElement.width,
+              bufferH: rh.renderer.domElement.height,
+              cssW: rh.renderer.domElement.clientWidth || view.w,
+              cssH: rh.renderer.domElement.clientHeight || view.h,
+              contextLost: rh.contextLost,
+            });
+            drawHealthOverlay(ctx, report, view);
+            /* PIXEL PROBE — read the actual rendered colour at four points so a
+             * dark frame says WHERE it is dark. Screen coords are converted to
+             * GL (bottom-up) coords; readPixels right after the draw, before the
+             * browser composites, so no preserveDrawingBuffer is needed. */
+            const gl = rh.renderer.getContext() as WebGL2RenderingContext | null;
+            if (gl && rh.renderer.domElement.width > 0) {
+              const W = rh.renderer.domElement.width;
+              const H = rh.renderer.domElement.height;
+              const dpr = Math.min(1.75, window.devicePixelRatio || 1);
+              const px = new Uint8Array(4);
+              const sample = (sx: number, sy: number): string => {
+                const gx = Math.round(sx * dpr);
+                const gy = Math.round((1 - sy) * H - 1);
+                if (gx < 0 || gx >= W || gy < 0 || gy >= H) return '----';
+                gl.readPixels(gx, gy, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+                const h = (n: number) => n.toString(16).padStart(2, '0');
+                return `#${h(px[0])}${h(px[1])}${h(px[2])}`;
+              };
+              const rows = [
+                `sky    (0.50,0.10) ${sample(0.5, 0.10)}`,
+                `horizon(0.50,0.42) ${sample(0.5, 0.42)}`,
+                `pitch  (0.50,0.80) ${sample(0.5, 0.80)}`,
+                `pitch  (0.25,0.80) ${sample(0.25, 0.80)}`,
+              ];
+              const c = condRef.current;
+              if (c) {
+                rows.push(
+                  `cond  ${c.weather} / ${c.timeOfDay}  key ${c.keyColor}@${c.keyIntensity} sunEl ${c.sunEl.toFixed(2)}`,
+                  `sky   zen ${c.skyZenith} mid ${c.skyMid} hor ${c.skyHorizon}`,
+                  `fog   ${c.fogColor} dens ${c.fogDensity}  haze ${c.groundHaze}`,
+                );
+              }
+              /* Read the browser-side turf albedo canvas directly. If these are
+               * green (g channel dominant) the texture is generated fine and the
+               * brown is a lighting/upload problem; if they are white/brown the
+               * canvas itself is broken in this browser. */
+              const env = threeRef.current?.environment as unknown as
+                { turfCanvas?: HTMLCanvasElement } | null;
+              const tc = env?.turfCanvas;
+              if (tc && tc.width > 0) {
+                const cx = tc.getContext('2d');
+                if (cx) {
+                  const hx = (n: number) => n.toString(16).padStart(2, '0');
+                  const read = (fx: number, fy: number) => {
+                    const d = cx.getImageData(
+                      Math.floor(tc.width * fx), Math.floor(tc.height * fy), 1, 1).data;
+                    return `#${hx(d[0])}${hx(d[1])}${hx(d[2])}`;
+                  };
+                  rows.push(
+                    `turf  ${tc.width}x${tc.height}  ` +
+                    `${read(0.25, 0.30)} ${read(0.50, 0.50)} ${read(0.75, 0.70)}`,
+                  );
+                }
+              }
+              ctx.save();
+              ctx.font = '700 13px ui-monospace, SFMono-Regular, Menlo, monospace';
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              const y0 = Math.round(view.h * 0.22) + 250;
+              ctx.fillStyle = 'rgba(8,11,18,0.92)';
+              ctx.fillRect(Math.round(view.w / 2) - 230, y0, 460, rows.length * 18 + 12);
+              ctx.strokeStyle = '#6ee7a0';
+              ctx.strokeRect(Math.round(view.w / 2) - 230, y0, 460, rows.length * 18 + 12);
+              rows.forEach((r, i) => {
+                ctx.fillStyle = '#c8d2e0';
+                ctx.fillText(r, Math.round(view.w / 2) - 214, y0 + 12 + i * 18);
+              });
+              ctx.restore();
+            }
+          } catch { /* diagnostics must never take the frame down */ }
+        }
+        }
       }
     };
     /* THE LOOP HAS TO OUTLIVE ITS OWN FRAME. The reschedule used to sit at the
