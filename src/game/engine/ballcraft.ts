@@ -38,8 +38,8 @@ import {
 } from './ballPhysics';
 import { adoptLooseBall, stepLooseBall, gatherLooseBall, eligibleToGather, type LooseBallState } from './looseBall';
 
-/** Radius around the chest/hands point inside which LMB takes the ball. */
-export const SECURE_M = 0.7;
+/** PLAYER CONTROLS — LMB pickup/weld radius around the hands. */
+export const SECURE_M = 1.5;
 /** The window between letting go and the boot: long enough to be human, short
  *  enough that a punt is a decision and not a default. */
 export const PUNT_WINDOW_S = 0.3;
@@ -360,6 +360,18 @@ export function stepCraft(
       solveArm(bc.l, p, shoulderL, _aim, 0.4, l1, l2);
       _aim.x -= 0.2 * size * (lat !== 0 ? Math.sign(lat) : 1);
       solveArm(bc.r, p, shoulderR, _aim, 0.4, l1, l2);
+      /* PLAYER CONTROLS — LMB can pick a loose ball directly. RMB remains a
+       * presentation/readiness pose, but pickup is intentionally one-button
+       * and uses the explicit 1.5 m weld radius. */
+      if (bc.free && (secure || pressed.has('secure'))) {
+        const b = ballPoint(d, bc, p);
+        const gap = Math.hypot(p.x - b.x, p.z - b.z, (0.92 * size) - b.y);
+        if (gap <= SECURE_M && canPlayBall(d, p)) {
+          takeBall(d, bc, p);
+          go(bc, d, 'BALL_SECURED', `LMB pickup welded at ${gap.toFixed(2)} m`);
+          break;
+        }
+      }
       if (handsUp) go(bc, d, 'HANDS_READY', 'RMB down');
       break;
     }
@@ -606,7 +618,7 @@ function takeBall(d: Director, bc: BallCraft, p: Live) {
    * can be hit for a knock-on on the frame he takes it. */
   s.heldT = 0;
   s.protect = Math.max(s.protect, 0.25);
-  d.setCtrl(s.attacking, p.num);
+  d.setCtrl(s.attacking, p.num, false);
   if (!newPossession) d.run(s.attacking, p.num).carries++;
   d.refreshPassOptions();
   d.say('SAFE HANDS');

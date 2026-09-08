@@ -87,7 +87,11 @@ export interface Live {
    * if it expires without him getting hands on anyone he has missed, and he
    * pays for it by landing on the floor. 0/undefined when he is on his feet. */
   diveT?: number;
-  /* The spot a recovering player went down on. While recoverT runs he is
+  /** PLAYER CONTROLS — vertical jump state. X/Z remain the simulation's single
+   * horizontal writer; these values are presentation-safe vertical kinematics. */
+  jumpY?: number;
+  jumpVY?: number;
+  /** The spot a recovering player went down on. While recoverT runs he is
    * restored here every frame, so a direct p.x/p.z write by any other system
    * cannot slide him out from under his own get-up animation. */
   recoverX?: number;
@@ -215,7 +219,8 @@ export function steer(
   const sp = Math.hypot(p.vx, p.vz);
   let clip = p.clip;
   let clipSpeed = 0;
-  if (p.down) clip = 'grounded';
+  if ((p.jumpY ?? 0) > 0.01) clip = 'jump';
+  else if (p.down) clip = 'grounded';
   else if (p.clip === 'dive' && p.clipT < 0.5) {
     /* LATCH-AND-DRAG (Part 3): the committed dive is a one-shot and the gait
      * picker must not stomp it. It used to be overwritten on the very next

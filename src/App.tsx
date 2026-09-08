@@ -88,7 +88,10 @@ export default function App() {
     setClinic(false);
     setClassic(null);
     setMode('FRIENDLY');
-    setQuickCfg(quickStartConfig());
+    /* Quick Start always begins on home shirt 10 / fly-half. The Director
+     * keeps that role lock across kickoff handoffs until Q or a shirt key
+     * deliberately changes it. */
+    setQuickCfg(quickStartConfig({ controlTeam: 'A', controlNum: 10 }));
     setScreen('MATCH');
   };
 

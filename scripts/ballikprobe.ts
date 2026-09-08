@@ -367,7 +367,7 @@ await check('THE MOUSE CANNOT BREAK THE MATCH — soak with random verbs', () =>
 });
 
 await check('THE SPEC SURFACE IS STILL THERE — the numbers are the numbers', () => {
-  assert(SECURE_M === 0.7, 'the secure radius moved');
+  assert(SECURE_M === 1.5, 'the player-controls pickup radius moved');
   assert(Math.abs(PUNT_WINDOW_S - 0.3) < 1e-9, 'the drop window moved off 300 ms');
   assert(M_BALL > 0.4 && M_BALL < 0.47, `a rugby ball is 410-460 g, not ${M_BALL} kg`);
   assert(SWING_S > 0.1 && SWING_S < 0.4, `the boot takes ${SWING_S} s to get there`);

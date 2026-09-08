@@ -14,7 +14,7 @@ import {
   type TarcsSnapshot,
 } from './tarcsMetrics';
 import { drawCRT, project, type Camera } from '../render/retro';
-import { ENV_3D, ThreeCanvas, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
+import { ENV_3D, ThreeCanvas, drawCenterReticle, renderHealth, noteRenderFault } from '../render/ThreeCanvas';
 import { assessRender, drawHealthOverlay } from '../render/renderHealth';
 import { ThreePlayerManager } from '../render/ThreePlayerManager';
 import { conditionsFor, qualityFor, type Conditions } from '../render/conditions';
@@ -91,6 +91,8 @@ export const KEYMAP: Record<string, string> = {
   i: 'contact', f: 'fend', g: 'step',
   x: 'tackleDive', c: 'tackleSmother',
   e: 'dummy', q: 'switchPlayer',
+  /* Shirts 1–12 use the compact number row. Shift+1/2/3 (the !/@/#
+   * key values browsers emit) cover shirts 13–15 without stealing a verb. */
   t: 'distribute',
   r: 'replay', tab: 'stats', escape: 'pause',
   /* SPEC_06 — B toggles the facing/strafe debug overlay (view/gait/lat). */
@@ -110,6 +112,24 @@ export const KEYMAP: Record<string, string> = {
   mouse0: 'secure', mouse2: 'handsUp',
   n: 'handsUp', m: 'secure',
 };
+
+/** Number-row role lock. The three shifted symbols are the only extra physical
+ * keys needed to address shirts 13–15 while keeping 1–9, 0, - and = readable
+ * and available exactly as the on-pitch legend promises. */
+export function roleNumberFromPressed(raw: Set<string>): number | null {
+  const direct: Record<string, number> = {
+    '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9,
+    '0': 10, '-': 11, '=': 12,
+  };
+  for (const [key, num] of Object.entries(direct)) if (raw.has(key)) return num;
+  const shifted: Record<string, number> = {
+    '!': 13, '@': 14, '#': 15,
+    /* US and ISO layouts expose these as convenient unshifted aliases. */
+    '[': 13, ']': 14, '\\': 15, '_': 13, '+': 14,
+  };
+  for (const [key, num] of Object.entries(shifted)) if (raw.has(key)) return num;
+  return null;
+}
 
 export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }: {
   cfg: MatchConfig; onExit: () => void;
@@ -501,6 +521,23 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       const released = new Set<string>();
       for (const raw of prev.current) if (!keys.current.has(raw)) released.add(KEYMAP[raw] ?? raw);
 
+      /* PLAYER CONTROLS — role shortcuts are intentionally not folded into
+       * Input: they are a persistent assignment, never a movement verb. Q
+       * remains a live emergency switch and is handled by the director. */
+      const roleNum = roleNumberFromPressed(rawPressed);
+      if (roleNum !== null) {
+        d.selectRole(roleNum);
+        force((n) => n + 1);
+      }
+      /* OPEN_PLAY resolves Q inside upOpen so one key edge cannot switch twice;
+       * set pieces have no open-play branch, so the UI resolves their emergency
+       * handoff here. */
+      if (pressed.has('switchPlayer') && d.phase !== 'OPEN_PLAY'
+        && d.phase !== 'REPLAY' && !d.phase.endsWith('_REPLAY')) {
+        d.emergencySwitch();
+        force((n) => n + 1);
+      }
+
       /* AAA — the gamepad merges into the same verb stream as the keyboard:
        * held input first, then the rising/falling edges for the kick-meter,
        * waggles, pause and stats. */
@@ -682,6 +719,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         /* Feet markers (rings, range, kick aim) are painted on the 2D layer
          * BEFORE the 3D squad so the GLB players stand on top of them. */
         drawIndicators(ctx, d, view);
+        drawCenterReticle(ctx, w, h, centerReticleState(
+          d, keys.current, rigOnRef.current && rigRef.current.mode === 'FIRST',
+        ));
 
         /* ---- 3D world (pitch + uprights under ENV_3D, plus the GLB squad) ---- */
         const three = threeRef.current;
@@ -693,6 +733,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
           const shake = (d.cam.shake || 0) + fxShakeRef.current;
           fxShakeRef.current = Math.max(0, fxShakeRef.current - dt * 2.4);
           three.syncCamera({ ...d.cam, shake }, view, jx, jy);
+          const local = d.ctrlPlayer;
+          playersRef.current?.setLocalViewMode(
+            local?.team ?? null, local?.num ?? null,
+            rigOnRef.current && rigRef.current.mode === 'FIRST',
+          );
           playersRef.current?.update(d, view, d.cam, dt);
           /* ONE conditions object per frame, resolved from the options the engine
            * already owns, pushed into the sky, the turf, the crowd and the kit.
@@ -1261,6 +1306,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
         <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · <Kbd>C</Kbd> CHAOS SCRIM · WHEEL ZOOM</div>
+        <div className="mt-0.5"><Kbd>1–9 / 0 / - / =</Kbd> ROLE LOCK · <Kbd>SHIFT+1/2/3</Kbd> SHIRTS 13–15 · <Kbd>Q</Kbd> EMERGENCY SWITCH</div>
         {/* SPEC_25 — the catch and the punt, on the one surface a player reads. The
             window is printed because 300 ms is not a number anyone can feel, and a
             control that fails silently reads as a broken game. */}
@@ -1536,6 +1582,32 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       <span className="hidden">{tick}</span>
     </div>
   );
+}
+
+/* ---- centre reticle: aim, focus/sprint sizing, green interaction state ---- */
+export function centerReticleState(d: Director, held: ReadonlySet<string>, playerCamera = false) {
+  const c = d.ctrlPlayer;
+  const speed = c ? Math.hypot(c.vx, c.vz) : 0;
+  const sprinting = held.has('shift') || speed > 6.2;
+  const focused = held.has('mouse2') || held.has('n') || playerCamera && !sprinting;
+  const radius = focused ? 7 : sprinting ? 17 : 11;
+  const aim = d.reticleAimPoint();
+  let green = false;
+  if (c) {
+    if (d.bc.free) {
+      green = Math.hypot(d.bc.free.x - aim.x, d.bc.free.z - aim.z) <= 1.5;
+    }
+    if (d.op) {
+      const carrier = d.L(d.op.attacking, d.op.carrierNum);
+      const toAim = Math.hypot(carrier.x - aim.x, carrier.z - aim.z);
+      const toPlayer = Math.hypot(carrier.x - c.x, carrier.z - c.z);
+      /* Green means the centre ray is over a legal pickup or a defender in
+       * the same 3.5 m dive envelope — not merely that an opponent exists. */
+      green = green || (toAim <= 1.8 && toPlayer <= 3.5 && carrier.team !== c.team);
+      green = green || (toAim <= 1.5 && carrier.team === c.team);
+    }
+  }
+  return { radius, green, focused, sprinting };
 }
 
 /* ---- in-world indicators: pass target, tackle range, kick aim ---- */

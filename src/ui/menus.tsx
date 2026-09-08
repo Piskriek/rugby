@@ -108,7 +108,7 @@ export function ModeScreen({ onPick, onOptions, onGuide, onAudit, hasReplays, on
             ▶ QUICK START (15v15)
           </div>
           <div className="mt-0.5 text-[10px] leading-snug text-[#b9aa68]">
-            STRAIGHT INTO THE KICK-OFF — DEFAULT SQUADS, SHIRTS 1–15, NO SETUP
+            STRAIGHT INTO THE KICK-OFF — SHIRT 10 FLY-HALF · 1–9 / 0 / - / = ROLE LOCKS · SHIFT+1/2/3 SHIRTS 13–15 · Q EMERGENCY SWITCH
           </div>
         </div>
         <span className="shrink-0 border border-[#e8cf46] px-2 py-1 text-[9px] font-black tracking-[0.2em] text-[#e8cf46]">

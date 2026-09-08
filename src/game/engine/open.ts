@@ -46,11 +46,22 @@ const PASS_PACE_CHARGED = 1.5;
  * raking kick. Same strike either way — the charge only sets the power. */
 const TAP_KICK_POWER = 0.3;
 
-export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<string>, released = new Set<string>()) {
+export function upOpen(d: Director, dt: number, input: Input, pressed: Set<string>, released = new Set<string>()) {
 
   if (!d.op) { d.startOpen(d.possession, 0, -10); return; }
   const s = d.op;
   s.t += dt;
+  /* Q is a control operation, not an attacking verb. Resolve it before the
+   * carrier/defender branches so it works while the human is defending too. */
+  if (pressed.has('switchPlayer') && d.ctrlPlayer && d.isHuman(d.ctrlPlayer.team)) {
+    d.emergencySwitch();
+    return;
+  }
+  /* Space is a player action on either side of the ball. Handle the jump before
+   * the attack/defence split so a controlled defender does not fall through to
+   * the CPU tackle branch. A stationary or grounded body simply returns false
+   * and keeps the older attacking context-action behaviour below. */
+  if (pressed.has('action') && d.tryJump()) return;
   const car = d.L(s.attacking, s.carrierNum);
   const human = d.isHuman(s.attacking);
   // A drop/strip is not a carry or a pass. Craft owns its free-body tick and
@@ -147,7 +158,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
         const quick = ['WIDE_SWEEP', 'MISS_PASS', 'TUNNEL_PASS', 'LOOPL_PASS', 'POD_TIP', 'SWITCH'].includes(c);
         s.aiTimer = quick ? 0.15 + R() * 0.22 : 0.3 + R() * 0.5;
       }
-      d.setCtrl(s.attacking, s.carrierNum);
+      d.setCtrl(s.attacking, s.carrierNum, false);
       d.run(s.attacking, s.carrierNum).carries++;
       d.refreshPassOptions();
     } else if (s.passT >= 1.2 || s.ball.bounces > 0 || !eligibleToGather(rec)) {
@@ -450,6 +461,18 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * the hanging man lags a stride behind and the illusion breaks. */
   if (s.latch) {
     const lc = d.L(s.attacking, s.latch.carrierNum);
+    const holdingHuman = d.ctrlPlayer
+      && d.ctrlPlayer.team === s.latch.tacklerTeam
+      && d.ctrlPlayer.num === s.latch.tacklerNum
+      && d.isHuman(d.ctrlPlayer.team);
+    /* PLAYER CONTROLS — LMB is the physical grip. Releasing it breaks a
+     * human-initiated bind immediately; CPU tackles keep the existing drag
+     * timer and momentum rules. */
+    if (holdingHuman && !input.secure) {
+      clearLatch(s, lc, d.L(s.latch.tacklerTeam, s.latch.tacklerNum));
+      d.showHint('TACKLE RELEASED', 0.6);
+      return;
+    }
     const lt = d.L(s.latch.tacklerTeam, s.latch.tacklerNum);
     const brokenLink = !lc || !lt || lc.num !== s.carrierNum
       || lt.sinbin > 0 || lt.beatenT > 0 || s.ball.live;
@@ -503,7 +526,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   /* PLAYTEST 4: Q WORKS ON DEFENCE. It lived only in the attack branch, so
    * the user was told "Q — change player" and it never fired while
    * defending. Route it here first — a switch must not eat a tackle press. */
-  if (human && pressed.has('switchPlayer')) { d.cycleDefender(); return; }
+  if (human && pressed.has('switchPlayer')) { d.emergencySwitch(); return; }
   if (!human) { /* CPU tackles resolve below */ }
   else if ((pressed.has('tackleDive') || pressed.has('tackleSmother')) && s.protect <= 0) {
     const dive = pressed.has('tackleDive');
@@ -516,7 +539,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       const safe = dive ? 0.86 : 0.95;             // smother is safer, no chase value
       const grip = tp.attrs.PWR;
       const chance = clamp((safe + grip / 400 - car.attrs.PWR / 420) * (0.85 + d.assists.tackle * 0.25), 0.4, 0.98);
-      d.setCtrl(dTeam, tacklerNum);
+      d.setCtrl(dTeam, tacklerNum, false);
       if (R() < chance) {
         /* LATCH-AND-DRAG: a successful dive/smother gets HANDS ON, it does
          * not put the man down on the frame it lands. The drag decides
@@ -539,6 +562,30 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * offside line and cannot legally touch him for the first stride. Without
    * this the nearest defender was on the new carrier inside two frames and the
    * match became one endless ruck. */
+  /* PLAYER CONTROLS — held-LMB sprint dive. The controlled defender commits
+   * from the honest 3.5 m reach, travels on his launch velocity, and latches
+   * when the contact radius is reached. There is no position snap here: the
+   * normal latch close and the existing dive recovery own the rest. */
+  const humanTackler = d.ctrlPlayer && d.ctrlPlayer.team === dTeam
+    && d.isHuman(d.ctrlPlayer.team) && !d.ctrlPlayer.down
+    && (d.ctrlPlayer.recoverT ?? 0) <= 0;
+  if (humanTackler && input.secure && input.sprint && !s.latch && s.protect <= 0) {
+    const hp = d.ctrlPlayer!;
+    const hd = Math.hypot(hp.x - car.x, hp.z - car.z);
+    if (hd <= 1.1) {
+      beginLatch(s, car, hp, false, d.live);
+      return;
+    }
+    if (hd <= 3.5 && (hp.diveT ?? 0) <= 0 && hp.clip !== 'dive') {
+      hp.clip = 'dive'; hp.clipT = 0; hp.diveT = DIVE_FLIGHT_SECONDS;
+      const lx = car.x - hp.x, lz = car.z - hp.z;
+      const ld = Math.max(0.4, Math.hypot(lx, lz));
+      hp.vx = lx / ld * 5.2; hp.vz = lz / ld * 5.2;
+      hp.job = 'DIVE TACKLE — HOLD LMB TO LATCH';
+      return;
+    }
+  }
+
   /* PART 3 — THE LEAP. A defender closing hard from just outside the contact
    * radius leaves his feet BEFORE he can reach the man, so that the grab a
    * few frames later lands as the end of a dive rather than as a man walking

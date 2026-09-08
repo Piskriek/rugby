@@ -147,6 +147,11 @@ export interface Actor {
   rx: number; rz: number; rf: number;
   /** A waiting receiver/collector watches the real ball, not a stale run heading. */
   ballLookX?: number; ballLookZ?: number;
+  /** PLAYER CONTROLS — reticle aim is streamed to the procedural arm layer.
+   * Coordinates stay in logical pitch metres; the renderer applies its scale. */
+  aiming?: boolean; aimX?: number; aimY?: number; aimZ?: number;
+  /** Vertical jump offset, logical metres above the turf. */
+  ry?: number;
   renderClip: string; clipT: number; jitter: number;
   ring: number;     // 0 none, 1 controlled, 2 pass target
   size: number;     // T-39 per-player build, 0.92 .. 1.12
@@ -538,6 +543,13 @@ export interface ChaosScrimState {
  */
 export const RECOVER_SECONDS = 1.53;
 
+/** PLAYER CONTROLS — a grounded player cannot jump; an upright runner gets a
+ * short rugby-style hop with real vertical velocity rather than a clip-only
+ * pose. */
+export const JUMP_IMPULSE = 4.8;
+export const JUMP_GRAVITY = 13.5;
+export const JUMP_MIN_SPEED = 2.2;
+
 /** How far a recovering man may be displaced before his anchor follows him.
  *  Below this he is planted; above it something with a real reason to move
  *  him (a retreat, a shove) wins and the anchor re-seats. */
@@ -582,6 +594,10 @@ export interface MatchConfig {
   backlineB: string; defenceB: string; lineoutB: string; scrumB: string;
   cpuA: boolean; cpuB: boolean;
   kickerA?: number; kickerB?: number;
+  /** The shirt the human owns at kick-off. Quick Start deliberately uses 10. */
+  controlNum?: number;
+  /** Human side override for two-player / external match payloads. */
+  controlTeam?: 'A' | 'B';
   assists?: { pass: number; tackle: number; kick: number };
   speed?: number;             // 1.0 normal, 0.75 / 0.5 / 0.35 learning
 }
@@ -704,6 +720,8 @@ export function quickStartConfig(overrides?: Partial<MatchConfig>): MatchConfig 
     backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
     /* The player coaches the home side; the away fifteen is fully CPU. */
     cpuA: false, cpuB: true, kickerA: 10, kickerB: 10,
+    /* QUICK START control lock: the fly-half is the human's first shirt. */
+    controlTeam: 'A', controlNum: 10,
     assists: { pass: 0.7, tackle: 0.7, kick: 0.7 },
     speed: 1,
     ...overrides,
@@ -872,6 +890,14 @@ export class Director {
   /** The thirty. Source of truth for every position in the match. */
   live: Live[] = [];
   ctrl = 0;                      // index into live
+  /** PLAYER CONTROLS — one human stick, one persistent shirt lock. Automatic
+   * phase handoffs never replace this selection; Q and the shirt shortcuts are
+   * the only deliberate exceptions. */
+  roleLockTeam: 'A' | 'B' | null = null;
+  roleLockNum = 10;
+  roleLocked = false;
+  /** Distinguishes an external harness/clinic setup from a live phase handoff. */
+  private inUpdate = false;
   passOpts: PassOption[] = [];
   /* SWITCHING MATRIX — match seconds of the last MANUAL (Q / bumper-tap)
    * defender switch. The auto-switcher refuses to move control inside the
@@ -1098,10 +1124,19 @@ export class Director {
       this.actors.push({
         id: i, team: i < 15 ? 'A' : i < 30 ? 'B' : 'REF',
         num: i < 15 ? i + 1 : i < 30 ? i - 14 : 0,
-        rx: 0, rz: 0, rf: 1, renderClip: 'idle', clipT: R() * 3, jitter: R() * 1.7, ring: 0, size: 1, turnT: 0,
+        rx: 0, rz: 0, ry: 0, rf: 1, renderClip: 'idle', clipT: R() * 3, jitter: R() * 1.7, ring: 0, size: 1, turnT: 0,
       });
     }
     this.buildLive();
+    /* PLAYER CONTROLS — Quick Start owns a real shirt from the first frame,
+     * rather than inheriting the kickoff kicker's transient handoff. Custom
+     * payloads may choose the human side and shirt; otherwise the first
+     * non-CPU side and fly-half 10 are the safe defaults. */
+    const humanTeam = cfg.controlTeam
+      ?? (!this.teams.A.cpu ? 'A' : !this.teams.B.cpu ? 'B' : 'A');
+    this.roleLockTeam = this.isHuman(humanTeam) ? humanTeam : null;
+    this.roleLockNum = clamp(Math.round(cfg.controlNum ?? 10), 1, 15);
+    this.roleLocked = !!this.roleLockTeam;
     /* QUICK START / kick-off launch: seed BOTH the render camera and the
      * cable rig's eased anchor on the centre spot before the first frame.
      * The rig binds to the ball carrier/kicker the moment play starts, so
@@ -1132,6 +1167,9 @@ export class Director {
     this.showHint('A/D OR ARROWS TO RUN · SPACE TO SPRINT', 6);
     // Law 12: the kick-off is taken from the centre of the halfway line.
     this.startKick('A', 'RESTART', { x: KICKOFF_CENTER.x, z: KICKOFF_CENTER.z });
+    /* startKick selects the kicker for its own ritual; the human stick still
+     * belongs to the requested shirt. */
+    if (this.roleLocked && this.roleLockTeam) this.lockRole(this.roleLockTeam, this.roleLockNum);
   }
 
   /** Bind the launch framing to the centre spot (the kicker is the carrier). */
@@ -1181,6 +1219,7 @@ export class Director {
           assignment: 'OPEN_PLAY', job: '',
           tx: 0, tz: 0, urgency: 0.5, bound: false, down: false, carrier: false,
           passRank: 0, eta: 9, controlled: false, sinbin: 0, beatenT: 0,
+          jumpY: 0, jumpVY: 0,
           attrs: {
             SPD: sp.stats.SPD, PWR: sp.stats.PWR, SKL: sp.stats.SKL,
             AGG: Math.round((sp.stats.PWR + sp.stats.SPD) / 2),
@@ -1323,7 +1362,7 @@ export class Director {
             .sort((a, b) => Math.hypot(a.x - car.x, a.z - car.z) - Math.hypot(b.x - car.x, b.z - car.z))[0];
           if (near) {
             const d = Math.hypot(near.x - car.x, near.z - car.z);
-            if (d < 3.5) { this.setCtrl(this.defending(), near.num); this.startBreakdown(near.num); }
+            if (d < 3.5) { this.setCtrl(this.defending(), near.num, false); this.startBreakdown(near.num); }
             else this.showHint(`OUT OF RANGE — HE IS ${d.toFixed(1)} m AWAY`, 1.6);
           }
         }
@@ -1603,6 +1642,22 @@ export class Director {
     }
     const f = this.focusPoint();
     return { x: f.x, y: 1, z: f.z };
+  }
+
+  /**
+   * Ground point under the viewport centre ray. The same point drives the HUD
+   * reticle's loose-ball/tackle state and the local avatar's arm reach, so the
+   * hand cannot aim at a different ball than the player sees.
+   */
+  reticleAimPoint(): { x: number; y: number; z: number } {
+    const c = this.cam;
+    const down = Math.max(0.08, c.tilt);
+    const range = clamp((c.h - 0.45) / Math.tan(down), 2.5, 24);
+    return {
+      x: clamp(c.x + Math.sin(c.yaw) * range, -34, 34),
+      y: 0.9,
+      z: clamp(c.z + Math.cos(c.yaw) * range, -60, 60),
+    };
   }
 
   /** Public read on the focus point, so tests and the HUD agree on the subject. */
@@ -2174,6 +2229,9 @@ export class Director {
   }
 
   update(dtReal: number, input: Input, pressed: Set<string>, released = new Set<string>()) {
+    /* A synchronous flag lets startOpen() know whether it is being used by a
+     * live phase transition or as a deliberate headless setup call. */
+    this.inUpdate = false;
     /* Unattended hold timer (T-18): counts down even while paused, so a
      * CPU-v-CPU half time resumes on its own. */
     if (this.holdTimer > 0) {
@@ -2181,6 +2239,7 @@ export class Director {
       if (this.holdTimer <= 0 && this.paused && !this.over) this.resumeSecondHalf();
     }
     if (this.paused || this.over) return;
+    this.inUpdate = true;
     const dt = Math.min(dtReal, 1 / 25) * this.gameSpeed;
 
     /* T-43 — THE INSTANT REPLAY IS A FREEZE. R re-routed the phase to
@@ -2195,6 +2254,7 @@ export class Director {
     if (this.phase === 'REPLAY' && this.replayOf) {
       this.replayTimer -= dt;
       if (this.replayTimer <= 0) this.exitReplay();
+      this.inUpdate = false;
       return;
     }
 
@@ -2203,8 +2263,8 @@ export class Director {
     const deadBall = this.kk?.stage === 'FANFARE' || this.kk?.stage === 'WALKUP';
     if (!deadBall) this.clock += dt * this.clockScale;
     if (this.clock >= this.halfLength + this.addedTime) {
-      if (this.half === 1) { this.endHalf(); return; }
-      this.endMatch(); return;
+      if (this.half === 1) { this.endHalf(); this.inUpdate = false; return; }
+      this.endMatch(); this.inUpdate = false; return;
     }
 
     for (const p of this.live) {
@@ -2229,6 +2289,7 @@ export class Director {
       this.updateCamera(dt);
       this.syncActors();
       this.t += dt;
+      this.inUpdate = false;
       return;
     }
 
@@ -2337,12 +2398,12 @@ export class Director {
         for (const p of this.live) if (inLatch(p)) { p.latchedBy = null; p.latchingOnto = null; }
         if (this.op) clearLatch(this.op, null, null);
       }
-      if (this.enforceOffsideLines(dt)) return;
+      if (this.enforceOffsideLines(dt)) { this.inUpdate = false; return; }
       /* TARCS — the ruck entry gates. Same slot in the frame for the same
        * reason: the physics/kinematics update has written every position this
        * tick, the formation has not been steered yet, and a whistle here
        * tears the phase down before any mover can chase it. */
-      if (this.enforceRuckEntryGates()) return;
+      if (this.enforceRuckEntryGates()) { this.inUpdate = false; return; }
     } catch (err) {
       this.trip(`${this.phase} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -2353,6 +2414,7 @@ export class Director {
      * placeBound so no phase writer can drag him either. */
     this.tickDive(dt);
     this.tickRecovery(dt);
+    this.tickJump(dt);
     this.think(dt, input);
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
      * capture target-slot drift before a phase-bound writer can take control. */
@@ -2360,6 +2422,14 @@ export class Director {
     this.placeBound(dt);
     // Movement is now final: a sprinting hand socket must not lag a frame.
     this.syncBallSocket();
+    /* PLAYER CONTROLS — restore the persistent shirt after all phase writers
+     * have had their turn. This is deliberately late: a direct headless
+     * startOpen() still gets one honest setup frame, while a live pass, catch,
+     * or kick can never leave the human stick on its temporary carrier. */
+    if (this.roleLocked && this.roleLockTeam) {
+      this.setCtrl(this.roleLockTeam, this.roleLockNum, false);
+      for (const p of this.live) p.controlled = p.team === this.roleLockTeam && p.num === this.roleLockNum;
+    }
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
      * audio all read the same frameEvents. */
@@ -2405,6 +2475,7 @@ export class Director {
     }
     // Judge the last CPU call so the escalation ladder can respond to it.
     if (this.op) this.judgeLastCall(this.op.gained);
+    this.inUpdate = false;
   }
 
   private lastHandoffPhase: Phase | null = null;
@@ -4602,7 +4673,8 @@ export class Director {
          * churn on the very next frame and a held player looked like he was
          * running free — while moving at a quarter of the pace, which is the
          * worst of both. */
-        if (!inLatch(ctrlHuman) && !(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
+        if (!inLatch(ctrlHuman) && (ctrlHuman.jumpY ?? 0) <= 0.01
+          && !(ctrlHuman.clip === 'dive' && ctrlHuman.clipT < 0.5)) {
           ctrlHuman.clip = sp2 > 7.4 ? (ctrlHuman.carrier ? 'carry' : 'sprint')
             : sp2 > 3.4 ? (ctrlHuman.carrier ? 'carry' : 'jog')
               : sp2 > 0.7 ? 'jog' : 'ready';
@@ -5430,7 +5502,7 @@ export class Director {
     this.over = false;
     this.replayOf = null;
     if (this.tut.active) this.tut.active = false;
-    this.setCtrl('A', playerNum);
+    this.setCtrl('A', playerNum, false);
 
     this.chaos = {
       t: 0,
@@ -5539,6 +5611,7 @@ export class Director {
   }
 
   startOpen(team: 'A' | 'B', x: number, z: number, num = 9, phase = 1, gained = 0, protect = 0, preservePose = false) {
+    const externalSetup = !this.inUpdate;
     this.releaseBallControl();
     // A direct gather/reset must not leave think() frozen in an old kick ritual.
     this.kk = undefined;
@@ -5624,7 +5697,10 @@ export class Director {
     };    this.bd = undefined; this.ml = undefined;
     this.phase = 'OPEN_PLAY';
     this.syncBallSocket();
-    this.setCtrl(team, num);
+    this.setCtrl(team, num, false);
+    /* A caller explicitly staging an open-play drill owns its first control
+     * shirt. Live phase transitions keep the Quick Start lock instead. */
+    if (externalSetup && this.isHuman(team)) this.lockRole(team, num);
     this.refreshPassOptions();
     if (!this.isHuman(team)) this.cpuCallPlay();
   }
@@ -5637,18 +5713,101 @@ export class Director {
     }
   }
 
+  /**
+   * Set the live control index. Internal phase/ball writers pass false so their
+   * temporary handoffs do not rewrite the persistent role; the two-argument
+   * form remains the historical deliberate-control API and locks that shirt.
+   */
+  setCtrl(team: 'A' | 'B', num: number, lockSelection = true) {
+    const p = this.live.findIndex((q) => q.team === team && q.num === num);
+    if (p >= 0) this.ctrl = p;
+    /* Two-argument calls are the historical manual-control API. Internal
+     * phase writers pass false so a pass/kick/ruck cannot silently rewrite
+     * the user's persistent role. CPU-side test calls remain direct control
+     * without inventing a human lock. */
+    if (p >= 0 && lockSelection && this.isHuman(team)) {
+      this.roleLockTeam = team;
+      this.roleLockNum = Math.round(num);
+      this.roleLocked = true;
+    }
+  }
+
+  /** The side the human is coaching, or null for a CPU-vs-CPU payload. */
+  humanTeam(): 'A' | 'B' | null {
+    if (this.roleLockTeam && this.isHuman(this.roleLockTeam)) return this.roleLockTeam;
+    if (this.isHuman('A')) return 'A';
+    if (this.isHuman('B')) return 'B';
+    return null;
+  }
+
+  /**
+   * Make a shirt the persistent human role. This is the only operation that
+   * changes the role lock, so automatic carrier/kicker handoffs cannot steal
+   * the stick. Q also uses this deliberately: an emergency switch is a new
+   * useful role, not a one-frame camera cut.
+   */
+  lockRole(team: 'A' | 'B', num: number): boolean {
+    if (!this.isHuman(team) || !Number.isFinite(num)) return false;
+    const n = Math.round(num);
+    if (n < 1 || n > 15 || !this.live.some((p) => p.team === team && p.num === n)) return false;
+    this.roleLockTeam = team;
+    this.roleLockNum = n;
+    this.roleLocked = true;
+    this.setCtrl(team, n, false);
+    for (const p of this.live) p.controlled = p.team === team && p.num === n;
+    return true;
+  }
+
+  /** Shirt shortcuts deliberately work in live play as well as stoppages: a
+   * number key is a persistent assignment, not the carrier auto-switch. */
+  selectRole(num: number): boolean {
+    const team = this.humanTeam();
+    if (!team || num < 1 || num > 15 || this.phase.includes('REPLAY')) return false;
+    const ok = this.lockRole(team, num);
+    if (ok) this.showHint(`ROLE LOCKED — ${team} SHIRT ${num}`, 1.6);
+    return ok;
+  }
+
+  /**
+   * Q's context switch: take the human teammate carrying the ball; otherwise
+   * take the ranked nearest goal-side defender to the live carrier/ball.
+   */
+  emergencySwitch(): boolean {
+    const team = this.humanTeam();
+    if (!team) return false;
+    let target: Live | null = null;
+    if (this.op && !this.op.ball.live && !this.bc.free && this.op.attacking === team) {
+      target = this.L(team, this.op.carrierNum);
+    } else {
+      const point = this.bc.free
+        ? { x: this.bc.free.x, z: this.bc.free.z }
+        : this.tacticalPoint();
+      const ranked = this.rankInterceptors(team, point.x, point.z);
+      target = ranked[0] ?? null;
+      /* If the human side has the ball but it is airborne, a receiver is more
+       * useful than a defender ranking. */
+      if (!target && this.op && this.op.attacking === team) {
+        target = this.live
+          .filter((p) => p.team === team && eligibleToGather(p))
+          .sort((a, b) => Math.hypot(a.x - point.x, a.z - point.z) - Math.hypot(b.x - point.x, b.z - point.z))[0] ?? null;
+      }
+    }
+    if (!target) return false;
+    const ok = this.lockRole(target.team, target.num);
+    if (ok) {
+      this.lastManualSwitch = this.t;
+      this.bestInterceptor = this.live.findIndex((p) => p === target);
+      this.showHint(`Q SWITCH — CONTROLLING SHIRT ${target.num}`, 1.5);
+    }
+    return ok;
+  }
+
   /** Idempotent teardown, also used by whistles and direct phase transitions. */
   releaseBallControl() {
     clearBallBehaviour(this.ballBehaviour);
     for (const a of this.actors) { a.ballLookX = undefined; a.ballLookZ = undefined; }
     if (this.op) this.op.ball.socket = null;
     clearCraft(this.bc);
-  }
-
-  /** Control always lands on the man with the ball, or the nearest defender. */
-  setCtrl(team: 'A' | 'B', num: number) {
-    const p = this.live.findIndex((q) => q.team === team && q.num === num);
-    if (p >= 0) this.ctrl = p;
   }
 
   /**
@@ -5658,6 +5817,13 @@ export class Director {
    * never touches a key the match still plays out as a game of rugby.
    */
   handoffControl() {
+    /* Persistent role lock beats the old carrier-driven handoff. The AI still
+     * thinks and moves all other 29 players; only the input stick remains on
+     * this shirt until Q or a role shortcut changes it. */
+    if (this.roleLocked && this.roleLockTeam) {
+      this.setCtrl(this.roleLockTeam, this.roleLockNum, false);
+      return;
+    }
     if (this.bc.free) {
       // No carrier exists to hand back to. Keep a valid manual selection;
       // otherwise choose an eligible human chaser, never the former owner.
@@ -5669,24 +5835,24 @@ export class Director {
         const gap = Math.hypot(p.x - this.bc.free.x, p.z - this.bc.free.z);
         if (gap < distance) { best = p; distance = gap; }
       }
-      if (best) this.setCtrl(best.team, best.num);
+      if (best) this.setCtrl(best.team, best.num, false);
       return;
     }
     if (!this.isHuman(this.possession)) return;
     const f = this.focusPoint();
-    if (this.op) { this.setCtrl(this.op.attacking, this.op.carrierNum); return; }
-    if (this.ml) { this.setCtrl(this.ml.attacking, 8); return; }
-    if (this.bd) { this.setCtrl(this.bd.attacking, 9); return; }
-    if (this.lo) { this.setCtrl(this.lo.thrower, 2); return; }
-    if (this.scrim) { this.setCtrl(this.scrim.feed, 9); return; }
+    if (this.op) { this.setCtrl(this.op.attacking, this.op.carrierNum, false); return; }
+    if (this.ml) { this.setCtrl(this.ml.attacking, 8, false); return; }
+    if (this.bd) { this.setCtrl(this.bd.attacking, 9, false); return; }
+    if (this.lo) { this.setCtrl(this.lo.thrower, 2, false); return; }
+    if (this.scrim) { this.setCtrl(this.scrim.feed, 9, false); return; }
     if (this.kk) {
       // Once the kick is away the interesting player is a chaser, not the man
       // who has just struck it. Handing control back to the kicker is what made
       // the controlled player appear to fly along with the ball.
       if (this.kk.stage === 'AIM' || this.kk.stage === 'METER') {
-        this.setCtrl(this.kk.kicker, this.kk.kickerNum);
+        this.setCtrl(this.kk.kicker, this.kk.kickerNum, false);
       } else if (this.isHuman(this.kk.kicker)) {
-        this.setCtrl(this.kk.kicker, this.kk.chasers[0]?.num ?? this.kk.kickerNum);
+        this.setCtrl(this.kk.kicker, this.kk.chasers[0]?.num ?? this.kk.kickerNum, false);
       } else {
         /* Playtest P1.4: control must never land on the opposition. If the
          * CPU kicked, the human receives and takes the fielder. If the
@@ -5697,7 +5863,7 @@ export class Director {
           const lp = this.landingPrediction();
           const t = lp ?? { x: this.kk.bx, z: this.kk.bz };
           const rec = assignReceiver(this.live, this.receivingSide(), t.x, t.z);
-          if (rec) this.setCtrl(this.receivingSide(), rec.num);
+          if (rec) this.setCtrl(this.receivingSide(), rec.num, false);
         }
       }
       return;
@@ -5706,7 +5872,7 @@ export class Director {
     const best = this.live
       .filter((p) => p.team === def && p.sinbin <= 0 && !p.down)
       .sort((a, b) => Math.hypot(a.x - f.x, a.z - f.z) - Math.hypot(b.x - f.x, b.z - f.z))[0];
-    if (best) this.setCtrl(def, best.num);
+    if (best) this.setCtrl(def, best.num, false);
   }
 
   /* ================== SWITCHING MATRIX ==================
@@ -6044,6 +6210,43 @@ export class Director {
    * Runs before think() for the same reason tickRecovery does — so a man who
    * has just landed is already locked when the AI is asked where he should go.
    */
+  /** Request the Space jump for the currently controlled upright runner. */
+  tryJump(): boolean {
+    if (this.phase !== 'OPEN_PLAY') return false;
+    const p = this.ctrlPlayer;
+    if (!p || !this.isHuman(p.team) || p.down || p.bound || p.sinbin > 0
+      || (p.recoverT ?? 0) > 0 || (p.diveT ?? 0) > 0 || p.latchedBy || p.latchingOnto
+      || (p.jumpY ?? 0) > 0.01) return false;
+    if (Math.hypot(p.vx, p.vz) < JUMP_MIN_SPEED) return false;
+    p.jumpY = 0.001;
+    p.jumpVY = JUMP_IMPULSE;
+    p.clip = 'jump';
+    p.clipT = 0;
+    return true;
+  }
+
+  /** Integrate jump height after horizontal movement has been resolved. */
+  tickJump(dt: number) {
+    for (const p of this.live) {
+      const y = p.jumpY ?? 0;
+      if (y <= 0 && !(p.jumpVY && p.jumpVY > 0)) {
+        p.jumpY = 0;
+        p.jumpVY = 0;
+        continue;
+      }
+      p.jumpVY = (p.jumpVY ?? 0) - JUMP_GRAVITY * dt;
+      p.jumpY = y + (p.jumpVY ?? 0) * dt;
+      if ((p.jumpY ?? 0) <= 0) {
+        p.jumpY = 0;
+        p.jumpVY = 0;
+        if (p.clip === 'jump') { p.clip = 'ready'; p.clipT = 0; }
+      } else {
+        p.clip = 'jump';
+        p.clipT += dt;
+      }
+    }
+  }
+
   tickDive(dt: number) {
     /* A dive only exists inside open play. Once a breakdown, a set piece or a
      * whistle has taken over, the phase owns the player — `latch` and `bound`
@@ -6170,7 +6373,8 @@ export class Director {
        * recovering man being steered before this was added. */
       p.recoverT = 0;
       p.recoverX = undefined; p.recoverZ = undefined;
-      if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
+      p.jumpY = 0; p.jumpVY = 0;
+      if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup' || p.clip === 'jump') { p.clip = 'ready'; p.clipT = 0; }
     }
     this.bd = undefined;
     this.ml = undefined;
@@ -6229,7 +6433,7 @@ export class Director {
     };
     this.phase = 'MAUL';
     if (fromLineout) this.say('CAUGHT, AND THE MAUL IS FORMED');
-    this.setCtrl(humanTeam ?? team, humanTeam === def ? 7 : 8);
+    this.setCtrl(humanTeam ?? team, humanTeam === def ? 7 : 8, false);
     if (humanTeam) this.showHint('A/D ALTERNATE — FOUR BEATS TO WIN THE MAUL', 3);
   }
 
@@ -6301,7 +6505,7 @@ export class Director {
     this.phase = 'SCRUM';
     this.say(`SCRUM TO ${this.teams[feed].nation.short}`);
     if (this.isHuman(feed)) this.showHint('PLAYERS ARE FORMING — POUND A/D WHEN THE REF CALLS ENGAGE', 3);
-    this.setCtrl(feed, 9);
+    this.setCtrl(feed, 9, false);
   }
 
   private avgStamina(t: 'A' | 'B') {
@@ -6366,7 +6570,7 @@ export class Director {
     this.phase = 'LINEOUT';
     this.say(`LINEOUT TO ${this.teams[thrower].nation.short}`);
     if (this.isHuman(thrower)) this.showHint('A/D CHOOSE THE CALL · SPACE TO THROW · STOP THE BAR IN THE BAND', 3.4);
-    this.setCtrl(thrower, 10);
+    this.setCtrl(thrower, 10, false);
   }
 
   upLineout(dt: number, input: Input, pressed: Set<string>) { /* T-03: engine/setpieces */ return upLineout(this, dt, input, pressed); }
@@ -6438,7 +6642,7 @@ export class Director {
     this.teams[team].stats.kicks++;
     this.run(team, num).kicks++;
     if (type === 'RESTART' || type === 'DROP_OUT') this.kickoffFormation(team, z);
-    this.setCtrl(team, num);
+    this.setCtrl(team, num, false);
     this.L(team, num).job = 'STRIKE IT LONG AND GET THE CHASE ON';
     if (this.isHuman(team)) this.showHint('A/D AIM · SPACE SETS POWER · SPACE AGAIN SETS ACCURACY', 3.4);
   }
@@ -6806,7 +7010,17 @@ export class Director {
     for (let i = 0; i < 30; i++) {
       const p = this.live[i];
       const a = this.actors[i];
-      a.rx = p.x; a.rz = p.z; a.rf = p.face;
+      a.rx = p.x; a.rz = p.z; a.ry = p.jumpY ?? 0; a.rf = p.face;
+      const isLocal = this.ctrlPlayer === p && this.isHuman(p.team);
+      const reticle = this.reticleAimPoint();
+      /* A held LMB over a loose ball should pull the rendered hands to the
+       * actual ball body, not to the ray's ground intercept. Once possession
+       * exists the reticle becomes the aim again for passes and tackles. */
+      const aim = isLocal && this.bcGrip && this.bc.free
+        ? { x: this.bc.free.x, y: this.bc.free.y, z: this.bc.free.z }
+        : reticle;
+      a.aiming = isLocal && this.bcGrip;
+      a.aimX = aim.x; a.aimY = aim.y; a.aimZ = aim.z;
       const task = this.ballBehaviour.tasks.get(`${p.team}:${p.num}`);
       const reading = this.ballBehaviour.read;
       const watching = eligibleToGather(p) && !p.carrier && reading

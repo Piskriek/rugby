@@ -69,6 +69,42 @@ export const ENV_3D: boolean = true;
  */
 export const DEBUG_RENDER_SKELETON: boolean = false;
 
+/** Viewport-centre reticle shared by the HUD and the WebGL camera. The WebGL
+ * canvas itself is transparent, so MatchView paints this on the aligned 2D
+ * surface using the same centre in either render path. */
+export interface CenterReticleState {
+  radius: number;
+  green: boolean;
+  focused: boolean;
+  sprinting: boolean;
+}
+
+export function drawCenterReticle(
+  ctx: CanvasRenderingContext2D, width: number, height: number, state: CenterReticleState,
+): void {
+  const x = width * 0.5, y = height * 0.5;
+  const r = Math.max(5, state.radius);
+  ctx.save();
+  ctx.globalAlpha = 0.92;
+  ctx.strokeStyle = state.green ? '#6ee7a0' : 'rgba(244,239,226,0.88)';
+  ctx.lineWidth = state.focused ? 2.2 : 1.7;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 0.78;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x - r - 5, y); ctx.lineTo(x - r + 1, y);
+  ctx.moveTo(x + r - 1, y); ctx.lineTo(x + r + 5, y);
+  ctx.moveTo(x, y - r - 5); ctx.lineTo(x, y - r + 1);
+  ctx.moveTo(x, y + r - 1); ctx.lineTo(x, y + r + 5);
+  ctx.stroke();
+  if (state.green) {
+    ctx.fillStyle = '#6ee7a0';
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
 const FOG_COLOR = 0x1a2634;
 
 /* ---------------------------------------------------------------- health --- */

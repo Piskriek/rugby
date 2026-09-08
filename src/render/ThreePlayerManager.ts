@@ -171,6 +171,7 @@ interface ProceduralRig {
   pelvis: THREE.Bone | null;
   spine: (THREE.Bone | null)[];
   neck: THREE.Bone | null;
+  head: THREE.Bone | null;
   upperArms: (THREE.Bone | null)[];
   foreArms: (THREE.Bone | null)[];
 }
@@ -185,6 +186,7 @@ const BONE_NAMES = {
     ['spine_03', 'Spine2', 'mixamorigSpine2'],
   ],
   neck: ['neck_01', 'Neck', 'mixamorigNeck'],
+  head: ['Head', 'head', 'mixamorigHead'],
   upperArms: [
     ['upperarm_r', 'RightArm', 'mixamorigRightArm'],
     ['upperarm_l', 'LeftArm', 'mixamorigLeftArm'],
@@ -246,6 +248,15 @@ const _ballAim = new THREE.Vector3();
 /** how hard the solved elbow is written onto the forearm. Not 1: the clip's own
  *  elbow curve is still the animation, and an override that replaces it makes a
  *  reaching man look like a stop-motion puppet for as long as he holds the button. */
+/** PLAYER CAMERA — render scales used by the local-avatar clipping guard. */
+export const LOCAL_HEAD_SCALE = 0.001;
+export const LOCAL_NECK_SCALE = 0.001;
+export function localHeadNeckScale(firstPerson: boolean): { head: number; neck: number } {
+  return firstPerson
+    ? { head: LOCAL_HEAD_SCALE, neck: LOCAL_NECK_SCALE }
+    : { head: 1, neck: 1 };
+}
+
 const CRAFT_ELBOW_WEIGHT = 0.62;
 /** how far a man with hands on the ball pitches his chest over it, radians.
  *  Deliberately near the diving tackler's own tilt: the jackal's whole skill is
@@ -321,6 +332,9 @@ interface PlayerInstance {
      *  and allocating six fields a frame in the hot path is how a GC pause gets made. */
     craftL: BallCraftArm | null;
     craftR: BallCraftArm | null;
+    /** PLAYER CONTROLS — LMB reticle reach, streamed from Director. */
+    pointerW: number;
+    pointerX: number; pointerY: number; pointerZ: number;
     /** free-running phase for the wobble, so two men never wobble in sync */
     phase: number;
     /** 0..1 how much of this man's pose the fall solver owns */
@@ -844,6 +858,23 @@ export class ThreePlayerManager {
     this.shadowMat.opacity = 0.05 + k * 0.3;
   }
 
+  /**
+   * PLAYER CAMERA — hide only the local avatar's head/neck in FIRST PERSON.
+   * Scaling instead of removing the bones preserves the animation hierarchy and
+   * keeps the arms visible at the eye line. Every other player's rig is restored
+   * to a unit scale immediately, so a role switch cannot leave a teammate
+   * headless. Missing bones are harmless for stand-ins and future GLB exports.
+   */
+  setLocalViewMode(team: 'A' | 'B' | null, num: number | null, firstPerson: boolean): void {
+    for (const inst of this.pool.values()) {
+      const local = !!team && num !== null && inst.team === team && inst.num === num;
+      const scales = localHeadNeckScale(local && firstPerson);
+      const rig = this.resolveRig(inst);
+      if (rig.head) rig.head.scale.setScalar(scales.head);
+      if (rig.neck) rig.neck.scale.setScalar(scales.neck);
+    }
+  }
+
   private applySoil(inst: PlayerInstance) {
     const soil = Math.min(1, inst.soil);
     if (Math.abs(soil - inst.soilShown) < 0.012 && inst.soilShown >= 0) return;
@@ -1003,7 +1034,20 @@ export class ThreePlayerManager {
       if (inst.st.hand !== 0) inst.st.hand = 0;
       if (inst.st.strip !== 0) inst.st.strip = 0;
       if (inst.proc.craftW !== 0) inst.proc.craftW = 0;
+      inst.proc.pointerW = 0;
       inst.proc.pickup = false;
+    }
+    /* PLAYER CONTROLS — the reticle is an actual arm target while LMB is held.
+     * It is streamed on Actor rather than recomputed here, keeping the engine's
+     * camera ray and the rendered hands on one source of truth. */
+    for (const a of d.actors) {
+      if (!a.aiming || a.aimX === undefined || a.aimY === undefined || a.aimZ === undefined) continue;
+      const inst = this.pool.get(this.key(a.team as KitTeam, a.num));
+      if (!inst) continue;
+      inst.proc.pointerW = 1;
+      inst.proc.pointerX = a.aimX;
+      inst.proc.pointerY = a.aimY;
+      inst.proc.pointerZ = a.aimZ;
     }
     // Ordinary CPU/human carries target the SAME torso socket as explicit
     // secured grips. The hands follow the ball; a swinging wrist never drags
@@ -1272,7 +1316,7 @@ export class ThreePlayerManager {
         st.face = a.rf > 0 ? 0 : Math.PI;
       }
       const grounded = ThreePlayerManager.STANDIN_GROUND.has(a.renderClip);
-      g.position.set(a.rx * s, this.groundY(a.rx), -a.rz * s);
+      g.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
       g.rotation.set(0, Math.PI - st.face, 0);
       if (grounded) {
         /* A man on the deck is not a man lying flat: he is on his side, half up
@@ -1416,6 +1460,7 @@ export class ThreePlayerManager {
       proc: {
         tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0, stagA: 0,
         craftW: 0, pickup: false, craftL: null, craftR: null,
+        pointerW: 0, pointerX: 0, pointerY: 0.9, pointerZ: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -1860,6 +1905,7 @@ export class ThreePlayerManager {
       pelvis: find(BONE_NAMES.pelvis),
       spine: BONE_NAMES.spine.map(find),
       neck: find(BONE_NAMES.neck),
+      head: find(BONE_NAMES.head),
       upperArms: BONE_NAMES.upperArms.map(find),
       foreArms: BONE_NAMES.foreArms.map(find),
     };
@@ -1898,7 +1944,7 @@ export class ThreePlayerManager {
        * never otherwise written (only rotation.y is, every frame). */
       p.tilt = 0;
       inst.root.rotation.x = 0;
-      inst.root.position.y = this.groundY(inst.actor.rx);
+      inst.root.position.y = this.groundY(inst.actor.rx) + (inst.actor.ry ?? 0) * RENDER_SCALE;
       if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
       return;
     }
@@ -1916,7 +1962,7 @@ export class ThreePlayerManager {
      * only while the man is still on his feet leaning in, where the pivot is
      * genuinely at the feet and the chest would otherwise sink. */
     const rise = lift ? Math.sin(p.tilt) * 0.62 : 0;
-    inst.root.position.y = rise * RENDER_SCALE + this.groundY(inst.actor.rx);
+    inst.root.position.y = rise * RENDER_SCALE + this.groundY(inst.actor.rx) + (inst.actor.ry ?? 0) * RENDER_SCALE;
     if (inst.shadow) {
       /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
        * on the turf under the man. */
@@ -2181,6 +2227,17 @@ export class ThreePlayerManager {
          * looking like a man bending only at the shoulders. */
         this.applyTorsoDip(inst, w, step);
       }
+    } else if (inst.proc.pointerW > 0.01) {
+      /* RETICLE AIM — hands follow the viewport centre while LMB is held.
+       * Logical pitch Z maps to renderer -Z, exactly like the ball socket. */
+      _target.set(
+        inst.proc.pointerX * RENDER_SCALE,
+        inst.proc.pointerY * RENDER_SCALE + this.groundY(inst.proc.pointerX),
+        -inst.proc.pointerZ * RENDER_SCALE,
+      );
+      const w = 0.25 + 0.55 * Math.min(1, inst.proc.pointerW);
+      this.applyArmReach(inst, _target, w, step);
+      this.applyTorsoDip(inst, w * 0.45, step);
     } else if (inst.st.hand > HAND_MIN) {
       /* THE BALL, NOT THE MAN. At a ruck the most interesting pair of hands belongs
        * to nobody's tackler: it is the jackal's, the guard's, the cleared man's as he
@@ -2367,7 +2424,7 @@ export class ThreePlayerManager {
         st.tackleRole = null; st.tackleT = -1;
         st.ragFired = false;   // arm the next hit, or a man ragdolls only once
         inst.proc.state = desired;
-        inst.root.position.set(a.rx * s, this.groundY(a.rx), -a.rz * s);
+        inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
         /* remember where the tackle clip actually got to, so the next stage
@@ -2486,7 +2543,7 @@ export class ThreePlayerManager {
           : wantStage === 1
             ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
             : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
-        inst.root.position.set(a.rx * s, this.groundY(a.rx), -a.rz * s);
+        inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
         pending.push(inst);
@@ -2569,7 +2626,7 @@ export class ThreePlayerManager {
 
       // ---- transform: logical pitch -> scaled 3D world ----
       inst.proc.state = desired;
-      inst.root.position.set(a.rx * s, this.groundY(a.rx), -a.rz * s);
+      inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 

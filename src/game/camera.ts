@@ -215,3 +215,47 @@ export function blendSubjectToBall(
 
 export const CAMERA_DATA_POINTS =
   CAM_MODES.length * 9 + Object.keys(ZOOM_STEPS).length * 6 + 8;
+
+/* PLAYER CAMERA PUBLIC SURFACE ------------------------------------------------
+ * The broadcast camera above remains the director's configuration API. The
+ * player rig lives in render/camera.ts because it is a pure presentation
+ * transform, but it is re-exported here as the game-facing module so callers
+ * do not have to know which side of the engine/render boundary owns the maths.
+ * This also gives headless harnesses one stable import for both camera modes. */
+export {
+  DEFAULT_TUNING,
+  angleDelta,
+  ballLookBias,
+  clamp,
+  createRigState,
+  dampAngle,
+  smoothFactor,
+  stepLocomotion,
+  sweepBoom,
+  STADIUM_COLLIDERS,
+  toggleViewMode,
+  updateRig,
+} from '../render/camera';
+export type {
+  RigInput,
+  RigOutput,
+  RigState,
+  RigTuning,
+  RigWorld,
+  ViewMode,
+} from '../render/camera';
+
+/** Small object wrapper useful to UI code that wants a named player rig. */
+export class PlayerCameraRig {
+  readonly state: import('../render/camera').RigState;
+  constructor(mode: import('../render/camera').ViewMode = 'THIRD') {
+    this.state = createPlayerRigState(mode);
+  }
+  toggle(): import('../render/camera').ViewMode {
+    return togglePlayerView(this.state);
+  }
+}
+
+/* Kept as local aliases so the wrapper stays allocation-free after construction
+ * and does not introduce a second implementation of the camera maths. */
+import { createRigState as createPlayerRigState, toggleViewMode as togglePlayerView } from '../render/camera';

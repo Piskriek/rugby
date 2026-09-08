@@ -1463,7 +1463,7 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
    * seeking its slot mark. The ball body is the contested mass. */
   latchMount(d, d.bd!, dir);
   if (d.isHuman(atk)) d.showHint('A/D POUND TO CLEAR OUT — OR WAIT FOR THE NINE', 2.6);
-  d.setCtrl(atk, 9);
+  d.setCtrl(atk, 9, false);
 }
 
 /* ================== BREAKDOWN WHISTLE TEARDOWN ==================
