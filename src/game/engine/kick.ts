@@ -14,6 +14,7 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { CHASE_ORDER, CHASE_LANES } from '../shapes';
 import { clamp } from './clamp';
 import { GOAL_CROSSBAR_M, GOAL_UPRIGHT_HALF_SPAN_M } from './laws';
+import { judgeTouchKick, isMarkCall } from './referee';
 
 /** RC2-3 — seconds a side may take over a restart before it is a free kick.
  *  Generous enough that a human aiming and charging (charge alone is 1.6 s)
@@ -397,9 +398,25 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
         || (eligibleToGather(p) && canPlayBall(d, p) && b.vy <= 1.2 && b.y <= 2.15 * p.size + 0.1
           && Math.hypot(p.x - b.x, p.z - b.z) <= 0.9 * p.size
           && Math.hypot(b.vx - p.vx, b.vz - p.vz) <= 18),
-      p => { s.lastTouch = { team: p.team, num: p.num }; });
+      p => {
+        s.lastTouch = { team: p.team, num: p.num };
+        /* TACTICAL KICKING — a touch by the DEFENDING side kills the 50:22
+         * (Law 18.6: the ball must be untouched by the opposition). Latched
+         * here at the contact, never reconstructed from `lastTouch` at the
+         * line — a chaser of the kicking side touching it afterwards would
+         * otherwise erase the defensive deflection. */
+        if (p.team !== s.kicker) s.defTouched = true;
+      });
     s.bx = b.x; s.by = b.y; s.bz = b.z;
-    s.vx = b.vx; s.vy = b.vy; s.vz = b.vz; s.bounces = b.bounces;
+    s.vx = b.vx; s.vy = b.vy; s.vz = b.vz;
+    /* TACTICAL KICKING — bounces IN THE FIELD OF PLAY, which is the number
+     * Law 18.6/18.9 actually asks about. The body's own counter keeps
+     * counting on the far side of the touchline, and a kick that lands out
+     * and bounces once in the crowd is still a kick "on the full". */
+    if (b.bounces > s.bounces && Math.abs(s.bx) <= 34.6) {
+      s.groundBounces = (s.groundBounces ?? 0) + (b.bounces - s.bounces);
+    }
+    s.bounces = b.bounces;
     s.hangTime += dt;
     s.apex = Math.max(s.apex, s.by);
     s.history.push({ x: s.bx, y: s.by, z: s.bz });
@@ -448,7 +465,29 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       const catcher = d.live.find(p => eligibleToGather(p) && canPlayBall(d, p)
         && Math.hypot(p.x - b.x, p.z - b.z) <= 0.9 * p.size
         && b.y <= 2.15 * p.size + 0.1 && Math.hypot(b.vx - p.vx, b.vz - p.vz) <= 18);
-      if (catcher) { continueLooseKick(d, s); return; }
+      if (catcher) {
+        /* TACTICAL KICKING — LAW 18.11, THE MARK.
+         *
+         * A defender who takes an opponent's kick CLEANLY, ON THE FULL,
+         * inside his own 22 or in-goal may call the mark: the whistle goes,
+         * play freezes, and he restarts with an unpressured free kick at the
+         * spot. It is checked here, at the catch, because the catch is the
+         * only frame that knows the ball never touched the ground and that
+         * this man is the one who took it out of the air. */
+        const cdir: 1 | -1 = catcher.team === 'A' ? 1 : -1;
+        if (isMarkCall({
+          dir: cdir,
+          catchZ: catcher.z,
+          catchY: b.y,
+          opponentKick: catcher.team !== s.kicker,
+          bounces: s.groundBounces ?? 0,
+          clean: true,
+        })) {
+          d.markCalled(catcher.team, catcher.num, catcher.x, catcher.z);
+          return;
+        }
+        continueLooseKick(d, s); return;
+      }
     }
 
     // dead once it has stopped moving or run out of road
@@ -474,18 +513,49 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
        * travelling ten metres is the same infringement — scrum at the
        * centre. Once the ten has been crossed, touch is ordinary touch. */
       if (s.type === 'RESTART' && !s.tenCrossed) { d.restartInfringed(s.kicker); return; }
-      // 50:22 gives the throw to the side that kicked it
-      const fromOwn = Math.abs(s.bz - s.dir * 50) > 50;
-      if (s.type === 'FIFTY_22' && fromOwn && (!s.lastTouch || s.lastTouch.team === s.kicker)) {
-        d.say('50:22 — THE THROW IS YOURS');
-        d.kk = undefined;
-        d.startLineout(s.kicker, s.bz, Math.sign(s.bx) * 6);
+      /* TACTICAL KICKING — LAW 18.6 AND 18.9, JUDGED IN ONE PLACE.
+       *
+       * The old code did two things wrong. It gated the 50:22 on the kick's
+       * TYPE, so an ordinary punt that actually was a 50:22 (which is how
+       * every real one is struck — you do not announce it) was thrown back
+       * to the defence; and its `fromOwn` test was arithmetic on the wrong
+       * axis, so a kick from the opposition 22 read as one from your own
+       * half. Worse, it never asked whether the ball had BOUNCED: a kick
+       * straight into touch inside the 22 was rewarded as a 50:22, which is
+       * exactly the kick the law refuses to reward.
+       *
+       * Both laws now come from `judgeTouchKick` in engine/referee.ts, which
+       * is a pure function over the flight facts this loop latched:
+       *   - from inside your own half, bounced in the field of play, into
+       *     touch inside their 22, untouched by the defence → the throw is
+       *     the KICKER'S at the touch mark (Law 18.6);
+       *   - straight out on the full from outside your own 22 → the throw is
+       *     the opposition's BACK AT THE MARK, no gain of ground (18.9);
+       *   - anything else → the opposition's, where it crossed. */
+      const touchZ = clamp(s.bz, FIELD.tryZ, FIELD.tryZFar);
+      const award = judgeTouchKick({
+        dir: s.dir > 0 ? 1 : -1,
+        markZ: s.markZ,
+        touchZ,
+        bounces: s.groundBounces ?? 0,
+        defenceTouched: !!s.defTouched,
+        fromOwn22: !!s.fromOwn22,
+      });
+      const sideX = Math.sign(s.bx) * 6 || 6;
+      d.kk = undefined;
+      if (award.throwTo === 'KICKER') {
+        d.say('50:22 — THEY KICKED IT OUT AND THEY THROW IT IN');
+        d.banner_('50:22');
+        d.startLineout(s.kicker, award.markZ, sideX);
         return;
       }
-      d.say('INTO TOUCH — GOOD TERRITORY');
-      d.kk = undefined;
+      /* A deflection off a defender's hands makes it HIS touch: the throw
+       * goes to the other side of whoever last played it, exactly as before. */
       const lastTeam = s.lastTouch?.team ?? s.kicker;
-      d.startLineout(lastTeam === 'A' ? 'B' : 'A', s.bz, Math.sign(s.bx) * 6);
+      d.say(award.broughtBack
+        ? 'DIRECTLY INTO TOUCH — THE LINEOUT COMES BACK'
+        : 'INTO TOUCH — GOOD TERRITORY');
+      d.startLineout(lastTeam === 'A' ? 'B' : 'A', award.markZ, sideX);
       return;
     }
     if (s.bz > FIELD.deadZFar - 1 || s.bz < FIELD.deadZ + 1) {

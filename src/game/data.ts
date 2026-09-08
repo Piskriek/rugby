@@ -589,6 +589,14 @@ export const REFEREE_CALLS: Record<string, string> = {
    * receiving half (or is kicked directly into touch before reaching it) is
    * an infringement; the referee awards a scrum at the centre spot. */
   RESTART_NOT_TEN: 'SCRUM — RESTART DID NOT TRAVEL TEN METRES',
+  /* TACTICAL KICKING — Law 18.11. A clean catch on the full inside your own
+   * 22 (or in-goal) off an opponent's kick: the catcher calls the mark and
+   * takes an unpressured free kick at the spot. */
+  MARK: 'FREE KICK — MARK',
+  /* TACTICAL KICKING — Law 9.17. Tackling, charging or grasping an opponent
+   * whose feet are off the ground. Foul play: penalty and a yellow card, no
+   * advantage window (Law 7.4). */
+  AERIAL_TACKLE: 'PENALTY — TACKLING THE MAN IN THE AIR',
 };
 
 /* ============================ 9. COMPETITIONS ============================ */

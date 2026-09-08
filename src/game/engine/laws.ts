@@ -7,7 +7,7 @@
 
 import { Director } from '../director';
 import { R } from './rng';
-import { advantageWindowEngineS, openAdvantageWatch } from './referee';
+import { advantageWindowEngineS, openAdvantageWatch, SIN_BIN_SECONDS } from './referee';
 import { FIELD } from '../../render/retro';
 
 /* ====================== SPEC_07 — SCORING GEOMETRY ======================
@@ -141,9 +141,16 @@ export function beginPenalty(d: Director, team: 'A' | 'B', call: string, offende
     const key = `${opp}:${offenderNum}`;
     const last = d.offenceLog.get(key);
     const highTackle = call.includes('HIGH');
+    /* TACTICAL KICKING — Law 9.17. A challenge on a man in the air is foul
+     * play in its own right: World Rugby's sanction framework starts it at
+     * yellow, and Law 7.4 forbids playing advantage over foul play. It is
+     * carded on the FIRST offence, exactly like a high tackle, and the
+     * whistle is immediate — no window, no ladder. */
+    const aerial = call.includes('MAN IN THE AIR');
     const repeat = last !== undefined && now - last < 600;
-    if (highTackle || (repeat && R() < 0.7)) {
-      d.card(opp, offenderNum, highTackle ? 'HIGH TACKLE' : 'REPEAT OFFENCE');
+    if (highTackle || aerial || (repeat && R() < 0.7)) {
+      d.card(opp, offenderNum,
+        aerial ? 'TACKLING THE MAN IN THE AIR' : highTackle ? 'HIGH TACKLE' : 'REPEAT OFFENCE');
       cynical = true;
     }
     d.offenceLog.set(key, now);
@@ -276,8 +283,14 @@ export function card(d: Director, team: 'A' | 'B', num: number, reason: string) 
 
   const p = d.L(team, num);
   if (!p || p.sinbin > 0) return;
-  p.sinbin = 600;
+  /* TACTICAL KICKING — the ten minutes is stated once, by the referee
+   * module, so the law, the engine and the probe cannot drift apart. */
+  p.sinbin = SIN_BIN_SECONDS;
   d.emitEv({ t: d.t, type: 'CARD', x: p.x, z: p.z });
+  /* A card is a body LEAVING THE FIELD, not a flag on a player: he is
+   * walked to the touchline and stripped of every phase link he was
+   * holding, so no ruck, scrum or lineout can count him again. */
+  d.ejectToSinBin(team, num);
   const name = d.teams[team].players[num - 1]?.name ?? `SHIRT ${num}`;
   d.banner_(`YELLOW CARD — ${num} ${name}`);
   d.say(`YELLOW CARD — ${num} ${name} — ${reason}`);

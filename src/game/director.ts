@@ -60,6 +60,8 @@ import { makeBall, weldBall, BALL_MAJOR, type BallBody } from './engine/ballPhys
 import {
   RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
   stepAdvantageWatch, openAdvantageWatch, advantageWindowEngineS,
+  insideOwnTwentyTwo, ownTwentyTwoLineZ, judgeAerialTackle, tickSinBin, sinBinMark,
+  sinBinMayReturn, shouldContestAerial, AERIAL_JUMP_IMPULSE, AERIAL_CONTEST_MIN_BALL_Y,
   type AdvantageWatch, type AdvantageSensor,
 } from './engine/referee';
 import {
@@ -96,7 +98,8 @@ import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact, teardownBreakdown } from './engine/breakdown';
 import { sampleSlot, planSlotOf } from './engine/breakdownPlan';
 import type { LatchState } from './engine/latch';
-import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
+import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY, findAerialChallenge } from './engine/latch';
+import { aerialLandingMark, isAirborne, AERIAL_STANDING_REACH_M } from './engine/approach';
 import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen, pendulumMark } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, doPassToNum as throwPassToNum, cpuCarrier } from './engine/open';
@@ -258,6 +261,19 @@ export interface KickState {
    * six-chaser commitment was incomplete at the strike — the log-once flag for
    * a structural invariant that must never fire. */
   thawHeld?: boolean;
+  /* TACTICAL KICKING — the three facts Law 18.6 / 18.9 / 18.11 are judged
+   * from, latched by the flight loop as they happen rather than reconstructed
+   * from a landing snapshot:
+   *   `groundBounces` — bounces IN THE FIELD OF PLAY (the ball body's own
+   *      counter keeps counting after it has crossed the line, which would
+   *      turn a kick straight out into an indirect one);
+   *   `defTouched`    — a DEFENDER got a hand or a boot on it, which kills
+   *      the 50:22 dead;
+   *   `markEligible`  — the kick was taken from inside the kicker's own 22,
+   *      the band that keeps the gain of ground on a kick straight to touch. */
+  groundBounces?: number;
+  defTouched?: boolean;
+  fromOwn22?: boolean;
 }
 
 /** T-08 — one broadcast event: what happened, where, when. Presentation only. */
@@ -2268,7 +2284,13 @@ export class Director {
     }
 
     for (const p of this.live) {
-      if (p.sinbin > 0) p.sinbin = Math.max(0, p.sinbin - dt * this.clockScale);
+      /* TACTICAL KICKING / SIN BIN — the bin clock is the referee's, stated
+       * once in engine/referee.ts so the probe and the match agree on what a
+       * ten-minute card costs. A man whose time is up does NOT walk straight
+       * back into a live phase: `restoreSinBinned` returns him at the next
+       * stoppage, which is what the law requires and what keeps the phase
+       * rosters (rucks, scrums, lineouts) from gaining a body mid-contest. */
+      if (p.sinbin > 0) p.sinbin = tickSinBin(p.sinbin, dt, this.clockScale);
       p.controlled = false;
       p.carrier = false;
       p.passRank = 0;
@@ -2404,6 +2426,13 @@ export class Director {
        * tick, the formation has not been steered yet, and a whistle here
        * tears the phase down before any mover can chase it. */
       if (this.enforceRuckEntryGates()) { this.inUpdate = false; return; }
+      /* TACTICAL KICKING — Law 9.17, the man in the air. Same slot in the
+       * frame as the offside lines and the ruck gates, and for the same
+       * reason: every body has been written this tick, nothing has been
+       * steered yet, and the whistle tears the phase down before any mover
+       * can chase it. Like them it moves nobody — the only write is the
+       * penalty. */
+      if (this.enforceAerialProtection()) { this.inUpdate = false; return; }
     } catch (err) {
       this.trip(`${this.phase} threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -2414,8 +2443,16 @@ export class Director {
      * placeBound so no phase writer can drag him either. */
     this.tickDive(dt);
     this.tickRecovery(dt);
+    /* TACTICAL KICKING — the leap is armed BEFORE the jump integrator runs,
+     * so a man who commits this frame is already airborne when think() is
+     * asked where everyone should go and when the renderer reads his pose. */
+    this.tickAerialContest(dt);
     this.tickJump(dt);
     this.think(dt, input);
+    /* TACTICAL KICKING — the bin runs AFTER think() and before placeBound:
+     * think() skips a binned man entirely (he has no urgency and no mark),
+     * so this is his only writer and the ownership contract stays honest. */
+    this.tickSinBin(dt);
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
      * capture target-slot drift before a phase-bound writer can take control. */
     this.samplePendingTargetSlots();
@@ -2943,6 +2980,115 @@ export class Director {
     this.sideEntryStats.whistled[team]++;
     const opp: 'A' | 'B' = team === 'A' ? 'B' : 'A';
     this.beginPenalty(opp, SIDE_ENTRY_CALL, hit.player.num);
+    return true;
+  }
+
+  /* ============ TACTICAL KICKING — AERIAL CONTESTS AND LAW 9.17 ============
+   *
+   * A high ball is a CONTEST. Two men converge on the spot it is coming
+   * down at, and the one who times his leap best takes it in the air. Until
+   * this existed a bomb was gathered by whoever happened to be standing
+   * inside the reach radius, flat-footed, and Law 9.17 could not be broken
+   * because nobody was ever in the air to be tackled.
+   *
+   * `tickAerialContest` owns the KINEMATICS — who jumps, when, and how high.
+   * `enforceAerialProtection` owns the LAW. Neither owns the verdicts: the
+   * jump trigger is `shouldContestAerial` and the offence is
+   * `judgeAerialTackle`, both pure, both in engine/referee.ts, both driven
+   * directly by the probe without a Director.
+   */
+
+  /** The live descending ball, if there is one worth contesting. Either a
+   *  kick still in flight or a loose ball that has been put up. */
+  private aerialBall(): { x: number; y: number; z: number; vx: number; vy: number; vz: number } | null {
+    const k = this.kk;
+    if (k && k.stage === 'FLIGHT' && !k.profile.atGoal) {
+      return { x: k.bx, y: k.by, z: k.bz, vx: k.vx, vy: k.vy, vz: k.vz };
+    }
+    const free = this.bc.free;
+    if (free && !free.socket && !free.grounded) {
+      return { x: free.x, y: free.y, z: free.z, vx: free.vx, vy: free.vy, vz: free.vz };
+    }
+    return null;
+  }
+
+  /** Seconds of aerial-contest activity this match — telemetry for the probe
+   *  and the audit, never a gameplay input. */
+  aerialContests = 0;
+  aerialTackles = 0;
+
+  /**
+   * Put the converging men in the air under a descending high ball. Runs in
+   * the same slot as the jump integrator (before think()), and writes only
+   * the vertical channel: `x`/`z` remain the horizontal simulation's, so no
+   * ownership contract is touched and a jumper still runs his own approach.
+   */
+  tickAerialContest(dt: number) {
+    const ball = this.aerialBall();
+    if (!ball) return;
+    if (ball.y < AERIAL_CONTEST_MIN_BALL_Y || ball.vy >= 0) return;
+    /* The mark: where the ball will be at a jumper's catching height, not
+     * where it is now. A man who runs at where a bomb IS arrives late. */
+    const mark = aerialLandingMark(ball, AERIAL_STANDING_REACH_M);
+    for (const p of this.live) {
+      if (p.sinbin > 0 || p.down || p.bound || (p.recoverT ?? 0) > 0) continue;
+      if (p.latchedBy || p.latchingOnto) continue;
+      const distanceToMark = Math.hypot(p.x - mark.x, p.z - mark.z);
+      if (!shouldContestAerial({
+        ballY: ball.y,
+        ballVY: ball.vy,
+        distanceToMark,
+        eta: mark.eta,
+        airborne: isAirborne(p.jumpY),
+        eligible: (p.diveT ?? 0) <= 0 && canPlayBall(this, p),
+      })) continue;
+      /* UP HE GOES. The leap is the referee module's impulse so a contest
+       * and the law that protects it are calibrated against the same number,
+       * and `tickJump` already owns the integration and the landing. */
+      p.jumpY = 0.001;
+      p.jumpVY = AERIAL_JUMP_IMPULSE;
+      p.clip = 'jump';
+      p.clipT = 0;
+      p.job = 'CONTEST IT IN THE AIR';
+      this.aerialContests++;
+    }
+    void dt;
+  }
+
+  /**
+   * LAW 9.17 — the whistle for a challenge on a man in the air.
+   *
+   * Returns true when it blew, so the frame can return exactly the way the
+   * offside and ruck-gate enforcers do. The sanction is not negotiable and
+   * is never played on: `beginPenalty` sees the AERIAL_TACKLE call, reads it
+   * as foul play (engine/laws.ts), refuses the advantage window under Law
+   * 7.4, and shows the yellow — ten minutes, `sinbin = 600`, off the field.
+   */
+  enforceAerialProtection(): boolean {
+    /* The referee-OFF dial silences this exactly as it silences the lines
+     * and the gates: the contest still happens, the whistle does not. */
+    if ((this.options.offside ?? 1) === 2) return false;
+    const challenge = findAerialChallenge(this.live);
+    if (!challenge) return false;
+    if (judgeAerialTackle({
+      victimAirborne: isAirborne(challenge.victim.jumpY),
+      offenderAirborne: isAirborne(challenge.offender.jumpY),
+      contact: true,
+      opponents: challenge.offender.team !== challenge.victim.team,
+    }) !== 'PENALTY_YELLOW') return false;
+    const offender = challenge.offender;
+    const victim = challenge.victim;
+    this.aerialTackles++;
+    this.teams[offender.team].stats.penaltiesConceded++;
+    this.say(`DANGEROUS — ${offender.num} TOOK HIM OUT IN THE AIR`);
+    /* The man who was taken out comes back to earth on the spot rather than
+     * completing a jump he is no longer making; the whistle's releaseAll
+     * (inside beginPenalty) clears the rest of the world. */
+    victim.jumpY = 0; victim.jumpVY = 0;
+    offender.diveT = 0;
+    /* The penalty is the VICTIM'S side, against the offender's shirt — the
+     * card falls out of the call text in engine/laws.ts. */
+    this.beginPenalty(victim.team, REFEREE_CALLS.AERIAL_TACKLE, offender.num);
     return true;
   }
 
@@ -3514,11 +3660,17 @@ export class Director {
       const attackDriving = s.stage === 'ATTACK_CONTROL'
         || s.exit === 'WHEEL_AND_PEEL' || s.exit === 'TOUCH_LINEOUT' || s.exit === 'TRY_AWARDED';
       const attackClip = attackDriving ? 'maulDrive' : 'maulBind';
+      /* SIN BIN — the ranks are shirts 1-8 MINUS anyone serving a card. A
+       * binned man has his own owner (tickSinBin walks him to the touchline
+       * and holds him there); steering him into a maul rank from here made
+       * two writers fight over one body, and the man in the bin drifted
+       * back onto the field inside the drive. */
       for (let i = 1; i <= 8; i++) {
         const rank = i % 3, col = Math.floor(i / 3);
         const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
         const lz = -s.dir * (i * 0.72);
         const a = this.L(s.attacking, i);
+        if (a.sinbin <= 0) {
         settle(a,
           s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
           s.z + lz,
@@ -3528,12 +3680,14 @@ export class Director {
         a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
           ? 'KEEP THE LEGS GOING, STAY BOUND'
           : 'BIND TIGHT AND HOLD THE MAUL';
+        }
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
          * team. */
         const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
         const d = this.L(dTeam, i);
+        if (d.sinbin > 0) continue;
         const dlx = 1.4 - (i % 2) * 2.2;
         settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
         clip(d, 'maulBind');
@@ -3546,6 +3700,7 @@ export class Director {
        * is measured from (maulTailMark), a half-stride behind the last bound
        * rank, so the extraction is taken from the lawful pick line itself. */
       const nine = this.L(s.attacking, 9);
+      if (nine.sinbin > 0) return;
       const tail = maulTailMark(s.dir, s.ranks, s.x, s.z);
       const baseX = clamp(s.x + (s.x > 0 ? -1.6 : 1.6), -32, 32);
       const baseZ = clamp(tail.z - s.dir * 0.8, -58, 58);
@@ -6404,7 +6559,14 @@ export class Director {
      * drag link it grew out of must die ON the formation frame, exactly like
      * a whistle — the maul's own bind replaces it in the same breath. */
     this.lastTeardownResidual = teardownBreakdown(this, 'MAUL_FORM');
-    for (let i = 1; i <= 8; i++) { this.L(team, i).bound = true; this.L(def, i).bound = true; }
+    /* SIN BIN — a carded man never binds into a maul. The loop used to bind
+     * shirts 1-8 of both sides unconditionally, which handed a man who is
+     * standing on the touchline serving ten minutes a rank in the drive and
+     * a `bound` flag that no teardown would clear until the maul ended. */
+    for (let i = 1; i <= 8; i++) {
+      const a = this.L(team, i); if (a.sinbin <= 0) a.bound = true;
+      const b = this.L(def, i); if (b.sinbin <= 0) b.bound = true;
+    }
     /* SPEC_03 — THE KINEMATIC CLUSTER. The two packs lock in as one
      * aggregate body: every bound player's mass and forward-directed drive
      * vector are summoned here, and from this frame the cluster displaces
@@ -6543,7 +6705,12 @@ export class Director {
     const players: LineoutState['players'] = [];
     let id = 1;
     for (const t of ['A', 'B'] as const) {
-      const nums = t === thrower ? Director.LINE_A : Director.LINE_B;
+      /* TACTICAL KICKING / SIN BIN — a carded man is OFF THE FIELD, so he
+       * never takes a place in the line. Filtering the roster here (rather
+       * than skipping him downstream) means a 14-man side genuinely fields a
+       * shorter lineout instead of leaving a gap where a body should be. */
+      const nums = (t === thrower ? Director.LINE_A : Director.LINE_B)
+        .filter((n) => this.L(t, n).sinbin <= 0);
       for (let i = 0; i < nums.length; i++) {
         players.push({
           id: id++, num: nums[i], team: t,
@@ -6554,8 +6721,17 @@ export class Director {
         });
       }
     }
-    players.push({ id: id++, num: 2, team: thrower, x: side * 33.5, z: zn, handY: 1.6, role: 'THROWER' });
-    players.push({ id: id++, num: 9, team: thrower, x: side * 20, z: zn + (thrower === 'A' ? -6 : 6), handY: 0, role: 'SCRUMMY' });
+    /* SIN BIN — if the hooker or the nine is in the bin somebody else does
+     * the job, exactly as a real side reshuffles. A lineout with no thrower
+     * would hang the phase, which is the freeze class the watchdog exists to
+     * catch and the roster should never create. */
+    const fit = (want: number, alts: number[]) =>
+      this.L(thrower, want).sinbin <= 0 ? want
+        : (alts.find((n) => this.L(thrower, n).sinbin <= 0) ?? want);
+    const throwerNum = fit(2, [1, 3, 7, 6, 9]);
+    const nineNum = fit(9, [10, 12, 15]);
+    players.push({ id: id++, num: throwerNum, team: thrower, x: side * 33.5, z: zn, handY: 1.6, role: 'THROWER' });
+    players.push({ id: id++, num: nineNum, team: thrower, x: side * 20, z: zn + (thrower === 'A' ? -6 : 6), handY: 0, role: 'SCRUMMY' });
     this.lo = {
       t: 0, stage: 'ASSEMBLE', markZ: zn, side,
       call: { targetX: side * 28.4, label: Director.LO_CALLS[1].label, jumpers: 5, kind: 'MIDDLE' },
@@ -6633,6 +6809,10 @@ export class Director {
       bounces: 0, result: '', chasers: [], form: undefined, formReady: 0,
       fromPenalty: this.penaltyTouchKick,
       markX: x, markZ: z, tenCrossed: false,
+      /* TACTICAL KICKING — the touch/mark law bookkeeping starts clean on
+       * every strike; the FLIGHT loop latches into it. */
+      groundBounces: 0, defTouched: false,
+      fromOwn22: insideOwnTwentyTwo(dir > 0 ? 1 : -1, z),
     };
     this.penaltyTouchKick = false;
     this.phase = 'KICK';
@@ -6903,6 +7083,58 @@ export class Director {
     this.startScrum(receiver, 0, 0);
   }
 
+  /**
+   * TACTICAL KICKING — LAW 18.11, THE MARK.
+   *
+   * "MARK!" The catcher has taken an opponent's kick cleanly on the full
+   * inside his own 22 (or in-goal). The whistle goes, play FREEZES, and he
+   * gets an unpressured free kick at the spot of the catch.
+   *
+   * The freeze is the existing `releaseAll` teardown every whistle uses —
+   * a mark that only stopped the ball but left fifteen chasers running at
+   * the catcher would be no protection at all — and the restart itself is
+   * the ordinary free-kick path (`penaltyChoices(..., free = true)`), so a
+   * mark inherits the tap, the kick to touch and the human's choice without
+   * a second restart state machine.
+   */
+  markCalled(team: 'A' | 'B', num: number, x: number, z: number) {
+    const dir = team === 'A' ? 1 : -1;
+    const catcher = this.L(team, num);
+    const mx = clamp(Number.isFinite(x) ? x : (catcher?.x ?? 0), -32, 32);
+    /* A mark taken IN GOAL is brought out to the 22-metre line: a free kick
+     * cannot be taken from in-goal (Law 18.11). */
+    const inGoal = (z - dir * FIELD.tryZFar) * dir >= 0;
+    const mz = clamp(inGoal ? ownTwentyTwoLineZ(dir) : z, -45, 45);
+    this.lawCall('MARK', REFEREE_CALLS.MARK, team === 'A' ? 'B' : 'A');
+    this.banner_('MARK');
+    this.say(`MARK — ${this.teams[team].nation.short} TAKE THE FREE KICK`);
+    this.kk = undefined;
+    /* THE FREEZE. Every man is released from his phase and the episode is
+     * torn down before the restart is staged, exactly as beginPenalty does:
+     * a mark with a live ruck or a live chase behind it is not a mark. */
+    this.releaseAll();
+    this.possession = team;
+    this.advantage = 0;
+    this.advWatch = null;
+    this.pendingPenalty = null;
+    this.pendingWindback = false;
+    this.markAward = { team, num, x: mx, z: mz, at: this.t };
+    /* THE RESTART IS THE CATCHER'S. A free kick belongs to the man who made
+     * the mark (Law 18.11), not to the nine, so this does not go through
+     * `penaltyChoices` — it stages the ball with HIM, and the `protect`
+     * window is the "unpressured" half of the award: the defence may not
+     * touch him for the beat it takes to play it, which is exactly the
+     * post-ruck protection window the engine already models. */
+    this.quickTap = true;
+    this.startOpen(team, mx, mz, catcher && catcher.sinbin <= 0 ? num : 9, 1, 0, 1.2);
+    if (this.isHuman(team)) {
+      this.showHint('MARK — FREE KICK. TAP AND GO, OR PUT IT DOWN THE FIELD', 3.2);
+    }
+  }
+
+  /** The last mark awarded — read by the probe and the broadcast layer. */
+  markAward: { team: 'A' | 'B'; num: number; x: number; z: number; at: number } | null = null;
+
   /** Law 12 — a drop-out is taken from anywhere on the 22-metre line. */
   private dropOut(team: 'A' | 'B') {
     this.startKick(team, 'DROP_OUT', { x: 0, z: team === 'A' ? -28 : 28 });
@@ -6930,6 +7162,138 @@ export class Director {
   /** Advantage is played wherever possible. Rage knew: penalties are not fun. */
   /** T-07 — when a card is shown. A player is off the field for ten match-minutes. */
   card(team: 'A' | 'B', num: number, reason: string) { /* T-03: engine module */ return card(this, team, num, reason); }
+
+  /* ==================== TACTICAL KICKING — THE SIN BIN ====================
+   *
+   * A yellow card is not a flag on a player, it is a body LEAVING THE FIELD.
+   * Before this the binned man kept standing wherever the whistle caught him:
+   * every loop that filters on `sinbin <= 0` skipped him correctly, but the
+   * separation pass, the camera framing and the renderer all still saw a
+   * sixteenth body loitering in the defensive line. He is walked to the
+   * touchline instead, held there for the duration, and brought back only at
+   * a stoppage.
+   */
+
+  /** Eject a carded man to the touchline and strip every phase state he
+   *  might have been holding. Called from `card()` on the whistle frame. */
+  ejectToSinBin(team: 'A' | 'B', num: number) {
+    const p = this.L(team, num);
+    if (!p || p.team !== team || p.num !== num) return;
+    const mark = sinBinMark(team, num, p);
+    /* Every phase link he could be carrying dies with the card — a bound
+     * scrum body, a latch, a dive, a get-up lock. Leaving any of them alive
+     * would leave a ghost in a contest he is no longer part of. */
+    p.bound = false;
+    p.down = false;
+    p.carrier = false;
+    p.passRank = 0;
+    p.beatenT = 0;
+    p.diveT = 0;
+    p.recoverT = 0;
+    p.recoverX = undefined;
+    p.recoverZ = undefined;
+    p.latchedBy = null;
+    p.latchingOnto = null;
+    p.latchDrag = undefined;
+    p.jumpY = 0;
+    p.jumpVY = 0;
+    p.vx = 0; p.vz = 0;
+    p.urgency = 0;
+    p.tx = mark.x; p.tz = mark.z;
+    /* The mark is captured ONCE, at the card. Recomputing it every frame
+     * from his live position would let the target chase him as he walked
+     * (the mark is derived from where he left the field), which is a
+     * feedback loop, not a walk to the touchline. */
+    this.sinBinMarks.set(`${team}:${num}`, mark);
+    p.job = 'SIN BIN — TEN MINUTES';
+    p.clip = 'ready'; p.clipT = 0;
+    if (this.op?.latch) {
+      const l = this.op.latch;
+      if ((l.carrierTeam === team && l.carrierNum === num)
+        || (l.tacklerTeam === team && l.tacklerNum === num)) {
+        clearLatch(this.op, this.L(l.carrierTeam, l.carrierNum), this.L(l.tacklerTeam, l.tacklerNum));
+      }
+    }
+    /* If the stick was on him it goes to a team-mate who is actually on the
+     * field — a human left steering a binned player is a dead controller. */
+    if (this.ctrlPlayer === p) {
+      const mate = this.live.find((q) => q.team === team && q.sinbin <= 0 && !q.down);
+      if (mate) this.setCtrl(team, mate.num, false);
+      if (this.roleLocked && this.roleLockTeam === team && this.roleLockNum === num && mate) {
+        this.roleLockNum = mate.num;
+      }
+    }
+  }
+
+  /** Hold every binned man on the touchline, and bring back the ones whose
+   *  ten minutes are up as soon as the ball is dead. Runs once per frame
+   *  from placeBound's slot in the pipeline, so it is the sole writer of a
+   *  binned body (think() already skips them). */
+  /** The touchline spot each binned man was sent to, captured at the card. */
+  private sinBinMarks = new Map<string, { x: number; z: number }>();
+
+  private tickSinBin(dt: number) {
+    for (const p of this.live) {
+      if (p.sinbin > 0) {
+        const key = `${p.team}:${p.num}`;
+        let mark = this.sinBinMarks.get(key);
+        if (!mark) {
+          /* A bin set directly (a harness, a save reload) still gets a mark. */
+          mark = sinBinMark(p.team, p.num, p);
+          this.sinBinMarks.set(key, mark);
+        }
+        /* NO-TELEPORT: he WALKS off. The bin mark is a target like any
+         * other; the step is bounded to a jog so a man carded in midfield
+         * takes the seconds a walk to the line actually costs. */
+        const gap = Math.hypot(mark.x - p.x, mark.z - p.z);
+        if (gap > 0.25) {
+          const step = Math.min(gap, 5.2 * dt);
+          this.place(p, p.x + (mark.x - p.x) / gap * step, p.z + (mark.z - p.z) / gap * step, 'bound');
+          p.clip = 'jog';
+          p.clipT += dt;
+        } else {
+          p.vx = 0; p.vz = 0;
+          if (p.clip !== 'ready') { p.clip = 'ready'; p.clipT = 0; }
+          p.clipT += dt;
+        }
+        p.vx = 0; p.vz = 0;
+        p.urgency = 0;
+        p.job = `SIN BIN — ${Math.ceil(p.sinbin / 60)} MIN LEFT`;
+        p.movedBy = 'bound';
+        continue;
+      }
+      /* His time is served. The RETURN is a law event, not a timer event:
+       * he comes back on at the next stoppage (Law 9.28), which the referee
+       * module names once so the engine and the probe cannot disagree. */
+      if (p.job.startsWith('SIN BIN')) {
+        if (!sinBinMayReturn(p.sinbin, this.phase)) {
+          p.job = 'SIN BIN — WAITING ON THE TOUCH JUDGE';
+          p.vx = 0; p.vz = 0;
+          p.urgency = 0;
+          p.movedBy = 'bound';
+          continue;
+        }
+        p.job = '';
+        p.urgency = 0.6;
+        /* He comes back ON. Leaving his target where he stood parked him on
+         * the touchline until some later phase happened to give him a mark;
+         * point him at the field so the run-on is visible and immediate.
+         * think() takes him off this mark on its very next pass. */
+        p.tx = clamp(p.x, -28, 28); p.tz = clamp(p.z, -58, 58);
+        this.sinBinMarks.delete(`${p.team}:${p.num}`);
+        this.say(`${this.teams[p.team].nation.short} ARE BACK TO FIFTEEN — ${p.num} RETURNS`);
+        this.showHint(`BACK TO FIFTEEN — SHIRT ${p.num} RETURNS`, 2.4);
+      }
+    }
+  }
+
+  /** Shirts a side actually has on the field. 15 normally, 14 with a man in
+   *  the bin — the number every phase roster, the HUD and the probe read. */
+  activeCount(team: 'A' | 'B'): number {
+    let n = 0;
+    for (const p of this.live) if (p.team === team && p.sinbin <= 0) n++;
+    return n;
+  }
 
 
   /** Repeat-offence memory, keyed by side and shirt, stored in match seconds. */

@@ -387,6 +387,120 @@ export function shouldDive(
   return closing >= LATCH_DIVE_CLOSING_SPEED;
 }
 
+/* ================= LAW 9.17 — THE CHALLENGE IN THE AIR ================= *
+ *
+ * Every bind in this module — the latch, the dive, the ruck lattice — is a
+ * man putting hands on another man. Law 9.17 says one of those contacts is
+ * never legal: a challenge on an opponent whose feet are off the ground.
+ *
+ * The DETECTION belongs here because this is where contact is decided; the
+ * VERDICT belongs to `engine/referee.ts` (`judgeAerialTackle`), and acting
+ * on it — the whistle, the penalty, the card — belongs to the Director. This
+ * function is the geometric half: are these two men actually in contact, and
+ * whose feet are where.
+ */
+
+/** How close two bodies must be for a challenge to be a contact, metres.
+ *  A shade wider than the ordinary 1.1 m tackle radius: a man in the air is
+ *  reached by an arm, a shoulder or a shove, not just a wrap. This is the
+ *  reach of a COMMITTED act — a dive, a latch, a pull. */
+export const AERIAL_CHALLENGE_RADIUS_M = 1.5;
+
+/** A charge is only a challenge at genuine contact range: the ordinary
+ *  tackle radius, not arm's reach. Two men converging on the same bomb at
+ *  a metre and a half apart are having a contest, not committing a foul. */
+export const AERIAL_CHARGE_RADIUS_M = 1.1;
+
+/** How fast the OFFENDER must be travelling into the jumper for a run-in to
+ *  count as a challenge, m/s. Measured on his own velocity, not the closing
+ *  rate: a jumper flying horizontally into a stationary defender is the
+ *  jumper's doing, and penalising the defender for it is exactly backwards. */
+export const AERIAL_CHARGE_SPEED_MS = 2.4;
+
+/** How far off the turf a man must be before the protection bites, metres.
+ *  Larger than the airborne epsilon: a man in the first centimetres of his
+ *  take-off can still take a legal hit — Law 9.17 protects the man whose
+ *  feet are CLEARLY off the ground and who has nothing to land on. */
+export const AERIAL_PROTECTED_HEIGHT_M = 0.3;
+
+/** A man is "off the ground" past this jump height — the same epsilon the
+ *  contest kinematics use, restated here so the bind layer never disagrees
+ *  with the contest layer about who is in the air. */
+export const AERIAL_OFF_GROUND_M = 0.05;
+
+export interface AerialChallenge {
+  /** the airborne man being challenged. */
+  victim: Live;
+  /** the man on his feet who challenged him. */
+  offender: Live;
+  /** how far apart they were at the contact, metres. */
+  distance: number;
+}
+
+/**
+ * Find the illegal challenge in this frame, if there is one.
+ *
+ * Deliberately conservative: it fires only on a man who is genuinely
+ * AIRBORNE (jumpY past the epsilon), only for an OPPONENT who is genuinely
+ * GROUNDED (two men up for the same ball is the legal contest the law
+ * protects), and only inside the challenge radius. A jumper who is
+ * challenged by another jumper, or who has landed, produces nothing — which
+ * is what makes an honest aerial contest playable rather than a penalty
+ * lottery.
+ */
+export function findAerialChallenge(live: Live[]): AerialChallenge | null {
+  for (const victim of live) {
+    /* CLEARLY off the ground. The epsilon says "not standing"; the offence
+     * needs a man who is genuinely up there, past the first centimetres of
+     * a take-off, with no feet to land on. */
+    if ((victim.jumpY ?? 0) < AERIAL_PROTECTED_HEIGHT_M) continue;
+    if (victim.sinbin > 0 || victim.down) continue;
+    /* THE BALL CARRIER IS NOT PROTECTED. Law 9.17 protects the man who has
+     * jumped to CONTEST A BALL IN THE AIR. A carrier who leaves the ground —
+     * hurdling a tackler, reaching for the line — has chosen to jump while
+     * in possession, and the defender who meets him is making a tackle, not
+     * committing foul play. Without this clause every hurdle in the match
+     * was a yellow card, which is how the offence went from rare to routine. */
+    if (victim.carrier) continue;
+    for (const offender of live) {
+      if (offender === victim || offender.team === victim.team) continue;
+      if (offender.sinbin > 0 || offender.down) continue;
+      /* Both in the air = a legal contest, whoever wins it. */
+      if ((offender.jumpY ?? 0) > AERIAL_OFF_GROUND_M) continue;
+      const distance = Math.hypot(offender.x - victim.x, offender.z - victim.z);
+      if (distance > AERIAL_CHALLENGE_RADIUS_M) continue;
+      /* A man standing still under a jumper has not challenged him, and
+       * neither has one who happens to be running past him: the offence is
+       * an ACT AIMED AT HIM. Two ways to qualify, and both are deliberate.
+       *
+       *  1. A COMMITTED BIND — a dive already launched or a live latch. That
+       *     is a man who has chosen his target; arm's reach is enough.
+       *
+       *  2. A CHARGE — the offender under his own steam, at contact range,
+       *     running INTO the jumper. Judged on the offender's own velocity
+       *     (a jumper drifting sideways into a stationary defender is the
+       *     jumper's doing) and on his heading, so a man sprinting past on
+       *     a covering line is not carded for being nearby. */
+      const dx = victim.x - offender.x, dz = victim.z - offender.z;
+      const gap = Math.max(0.01, distance);
+      const bound = (offender.diveT ?? 0) > 0 || !!offender.latchingOnto
+        || offender.clip === 'dive';
+      let charged = false;
+      if (!bound && distance <= AERIAL_CHARGE_RADIUS_M) {
+        const speed = Math.hypot(offender.vx, offender.vz);
+        const intoHim = speed > 0.01
+          ? (offender.vx * dx + offender.vz * dz) / (speed * gap)
+          : 0;
+        /* cos > 0.5 — inside a 60° cone of the man in the air. */
+        charged = speed >= AERIAL_CHARGE_SPEED_MS && intoHim > 0.5;
+      }
+      if (!bound && !charged) continue;
+      return { victim, offender, distance };
+    }
+  }
+  return null;
+}
+
 /**
  * LATCHES — multi-body 6DOF compliant spring constraints for tackles and rucks.
  *

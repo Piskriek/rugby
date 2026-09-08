@@ -734,3 +734,309 @@ export function maulCollapseHazard(spec: {
 export function judgeMaulCollapse(deliberate: boolean): 'PENALTY' | 'UNPLAYABLE_SCRUM' {
   return deliberate ? 'PENALTY' : 'UNPLAYABLE_SCRUM';
 }
+
+/* ================================================================== *
+ * TACTICAL KICKING — LAW 18.6 (50:22), LAW 18.9 (TOUCH), LAW 18.11
+ * (THE MARK) AND LAW 9.17 (THE MAN IN THE AIR)
+ * ================================================================== *
+ *
+ * All four are stated here as PURE FUNCTIONS over plain frames, exactly
+ * like the advantage watch and the maul stall above: the engine keeps the
+ * clock and the coordinates, the referee keeps the law, and the probe
+ * drives every branch without a Director. `engine/kick.ts` and
+ * `game/director.ts` do nothing but read a verdict and act on it.
+ */
+
+/** The halfway line. A kick is "from inside your own half" when the mark
+ *  sits behind it in the kicker's own direction of attack. */
+export const HALFWAY_Z_M = 0;
+
+/** Law 1 — the 22-metre line, measured from the goal line at ±50 m. The
+ *  opponent's 22 for a side attacking +z is the band z ∈ [28, 50]. */
+export const TWENTY_TWO_FROM_GOAL_M = 22;
+
+/** The touchline the ball has to cross for any of this to be touch. The
+ *  engine's playing surface is ±34.6 m (touch-in-goal included). */
+export const TOUCH_X_M = 34.6;
+
+/** The goal line at the end a side attacking `dir` is running at. */
+export const attackGoalZ = (dir: 1 | -1): number => dir > 0 ? 50 : -50;
+
+/** The near edge of the opposition 22 for a side attacking `dir`: 28 for
+ *  +z, −28 for −z. Signed, in world z. */
+export function oppTwentyTwoLineZ(dir: 1 | -1): number {
+  return attackGoalZ(dir) - dir * TWENTY_TWO_FROM_GOAL_M;
+}
+
+/** The near edge of a side's OWN 22 (the band they defend). */
+export function ownTwentyTwoLineZ(dir: 1 | -1): number {
+  return -attackGoalZ(dir) + dir * TWENTY_TWO_FROM_GOAL_M;
+}
+
+/** True when (x, z) is inside the 22 a side attacking `dir` is kicking AT
+ *  — the band between the opposition 22-metre line and their goal line,
+ *  including the in-goal beyond it (a 50:22 may cross touch-in-goal). */
+export function insideOppTwentyTwo(dir: 1 | -1, z: number): boolean {
+  return (z - oppTwentyTwoLineZ(dir)) * dir >= 0;
+}
+
+/** True when (x, z) is inside a side's OWN 22 or their own in-goal — the
+ *  band the Mark (Law 18.11) may be called in. */
+export function insideOwnTwentyTwo(dir: 1 | -1, z: number): boolean {
+  return (z - ownTwentyTwoLineZ(dir)) * dir <= 0;
+}
+
+/** True when a kick's mark is behind the halfway line in the kicker's own
+ *  frame — the "from inside your own half" half of Law 18.6. */
+export function fromOwnHalf(dir: 1 | -1, markZ: number): boolean {
+  return markZ * dir < HALFWAY_Z_M;
+}
+
+/**
+ * LAW 18.6 — THE 50:22. One frame of the kick, judged whole.
+ *
+ * The four conditions, all of which must hold:
+ *   1. the kick was taken from inside the kicking team's own half;
+ *   2. the ball BOUNCED in the field of play (indirect — a kick straight
+ *      into touch on the full is an ordinary touch kick, whoever it
+ *      favours);
+ *   3. it went into touch inside the opposition 22;
+ *   4. no player of the DEFENDING side touched it in between (a defensive
+ *      touch kills the 50:22 dead — the deflection makes it their ball).
+ *
+ * The reward is the lineout THROW to the kicking side at the touch mark.
+ */
+export interface FiftyTwentyTwoFrame {
+  /** the kicking side's direction of attack. */
+  dir: 1 | -1;
+  /** the z of the mark the kick was struck from. */
+  markZ: number;
+  /** where the ball crossed the touchline. */
+  touchZ: number;
+  /** bounces in the field of play before it crossed. */
+  bounces: number;
+  /** true when a DEFENDER touched the ball between boot and touch. */
+  defenceTouched: boolean;
+}
+
+export function isFiftyTwentyTwo(f: FiftyTwentyTwoFrame): boolean {
+  if (f.defenceTouched) return false;
+  if (f.bounces < 1) return false;
+  if (!fromOwnHalf(f.dir, f.markZ)) return false;
+  return insideOppTwentyTwo(f.dir, f.touchZ);
+}
+
+/**
+ * LAW 18 — WHO THROWS IN. One decision for every ball that crosses the
+ * touchline off a kick:
+ *
+ *   'KICKER'    — the 50:22 (and its mirror, the 22:50, from a side's own
+ *                 22 into the opposition half; not modelled separately
+ *                 here because the engine's kick marks carry the same
+ *                 frame and the reward is identical);
+ *   'OPPOSITION'— every ordinary touch kick. A kick straight into touch
+ *                 on the full from outside the 22 gains no ground in law:
+ *                 the lineout comes BACK to the kicking mark. Otherwise
+ *                 the lineout is where it crossed.
+ */
+export type TouchThrow = 'KICKER' | 'OPPOSITION';
+
+export interface TouchKickFrame extends FiftyTwentyTwoFrame {
+  /** true when the kick was taken from inside the kicker's own 22 — the
+   *  band that keeps the gain of ground on a kick straight out. */
+  fromOwn22: boolean;
+}
+
+export interface TouchKickAward {
+  /** which side throws in. */
+  throwTo: TouchThrow;
+  /** the z of the lineout mark. */
+  markZ: number;
+  /** true when this was a 50:22 (presentation reads it for the call). */
+  fifty22: boolean;
+  /** true when the mark was pulled back to the kick because the ball
+   *  found touch on the full from outside the 22 (Law 18.9). */
+  broughtBack: boolean;
+}
+
+export function judgeTouchKick(f: TouchKickFrame): TouchKickAward {
+  if (isFiftyTwentyTwo(f)) {
+    return { throwTo: 'KICKER', markZ: f.touchZ, fifty22: true, broughtBack: false };
+  }
+  /* Law 18.9 — direct to touch (no bounce) from outside the kicker's own
+   * 22 gains no ground: the throw is the opposition's, back at the kick. */
+  const direct = f.bounces < 1;
+  const broughtBack = direct && !f.fromOwn22;
+  return {
+    throwTo: 'OPPOSITION',
+    markZ: broughtBack ? f.markZ : f.touchZ,
+    fifty22: false,
+    broughtBack,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * LAW 18.11 — THE MARK
+ * ------------------------------------------------------------------ */
+
+/** How high the catch must be taken for it to be a mark: a ball plucked
+ *  out of the air, not scooped off the boot. Metres. */
+export const MARK_MIN_CATCH_HEIGHT_M = 1.0;
+
+/** The ball must have come off an OPPONENT'S boot on the full. */
+export interface MarkFrame {
+  /** the catching side's direction of attack. */
+  dir: 1 | -1;
+  /** the catcher's z. */
+  catchZ: number;
+  /** the height the ball was taken at. */
+  catchY: number;
+  /** true when the catcher is on the DEFENDING side of the kick. */
+  opponentKick: boolean;
+  /** bounces before the catch — a mark is a catch ON THE FULL. */
+  bounces: number;
+  /** the catch was clean (two hands, held). */
+  clean: boolean;
+}
+
+/** Law 18.11 — "MARK!" A clean catch on the full, inside your own 22 or
+ *  in-goal, off an opponent's kick. The award is an unpressured free kick
+ *  at the spot of the catch. */
+export function isMarkCall(f: MarkFrame): boolean {
+  if (!f.clean || !f.opponentKick) return false;
+  if (f.bounces > 0) return false;
+  if (f.catchY < MARK_MIN_CATCH_HEIGHT_M) return false;
+  return insideOwnTwentyTwo(f.dir, f.catchZ);
+}
+
+/* ------------------------------------------------------------------ *
+ * AERIAL CONTESTS AND LAW 9.17 — THE MAN IN THE AIR
+ * ------------------------------------------------------------------ */
+
+/** A contesting jump: the vertical impulse a player leaves the ground
+ *  with when he goes up for a high ball. Metres per second. Higher than
+ *  the ordinary running jump — he is going up, not forward. */
+export const AERIAL_JUMP_IMPULSE = 5.4;
+
+/** The gravity the aerial jump falls back under. Matches the engine's own
+ *  jump integrator so a contest and a hurdle read the same. */
+export const AERIAL_JUMP_GRAVITY = 13.5;
+
+/** How far from the ball's predicted landing point a player may be and
+ *  still commit to the jump. Metres. */
+export const AERIAL_CONTEST_RADIUS_M = 1.6;
+
+/** How high the ball must be descending through for the contest to be an
+ *  aerial one at all — below this it is a routine catch. Metres. */
+export const AERIAL_CONTEST_MIN_BALL_Y = 2.6;
+
+/** The window, in seconds of ball flight remaining, in which a converging
+ *  player times his leap. */
+export const AERIAL_JUMP_WINDOW_S = 0.42;
+
+export interface AerialContestFrame {
+  /** the ball's height right now. */
+  ballY: number;
+  /** the ball's vertical velocity (negative = descending). */
+  ballVY: number;
+  /** the contesting player's distance from the ball's landing mark. */
+  distanceToMark: number;
+  /** seconds until the ball is at catching height. */
+  eta: number;
+  /** the player is already airborne. */
+  airborne: boolean;
+  /** the player is available to contest at all (fit, not bound, not
+   *  binned, not on the floor). */
+  eligible: boolean;
+}
+
+/** Should this man leave the ground NOW to contest the high ball? */
+export function shouldContestAerial(f: AerialContestFrame): boolean {
+  if (!f.eligible || f.airborne) return false;
+  if (f.ballVY >= 0) return false;                      // still going up
+  if (f.ballY < AERIAL_CONTEST_MIN_BALL_Y) return false;
+  if (f.distanceToMark > AERIAL_CONTEST_RADIUS_M) return false;
+  return f.eta <= AERIAL_JUMP_WINDOW_S;
+}
+
+/**
+ * LAW 9.17 — a player must not tackle, charge, pull, push or grasp an
+ * opponent whose feet are off the ground.
+ *
+ * The offence is judged on the VICTIM'S feet, not the offender's: two men
+ * both in the air contesting the same ball is a legal aerial contest, and
+ * a man who lands and is then tackled is an ordinary tackle. The sanction
+ * is not negotiable and is not played on: penalty, and the offender is
+ * carded (Law 9.17 is in the foul-play chapter, and World Rugby's
+ * sanction framework starts a challenge in the air at yellow).
+ */
+export const AERIAL_TACKLE_CALL = 'PENALTY — TACKLING THE MAN IN THE AIR';
+
+/** Ten match-minutes in the engine's sin-bin units. */
+export const SIN_BIN_SECONDS = 600;
+
+export interface AerialTackleFrame {
+  /** the man being challenged has both feet off the ground. */
+  victimAirborne: boolean;
+  /** the challenger's own feet are off the ground (a legal contest). */
+  offenderAirborne: boolean;
+  /** they are close enough for the challenge to be a contact. */
+  contact: boolean;
+  /** the challenger and the victim are on opposite sides. */
+  opponents: boolean;
+}
+
+export type AerialTackleVerdict = 'LEGAL' | 'PENALTY_YELLOW';
+
+export function judgeAerialTackle(f: AerialTackleFrame): AerialTackleVerdict {
+  if (!f.contact || !f.opponents) return 'LEGAL';
+  if (!f.victimAirborne) return 'LEGAL';
+  /* Two men in the air for the same ball is the contest the law protects,
+   * not the offence it punishes. */
+  if (f.offenderAirborne) return 'LEGAL';
+  return 'PENALTY_YELLOW';
+}
+
+/* ------------------------------------------------------------------ *
+ * THE SIN BIN — 14 v 15
+ * ------------------------------------------------------------------ */
+
+/** Where a binned player stands: OUTSIDE the field of play, over the
+ *  touchline, out of every phase. Past the 34.6 m touch-in-goal bound so
+ *  that "is he on the pitch" is a coordinate test, not a flag test, and no
+ *  formation, ruck, scrum or lineout can ever place a body on top of him. */
+export const SIN_BIN_TOUCH_X_M = 37;
+
+/**
+ * The bin mark for a carded man. He walks to the NEAREST touchline — a
+ * player sent off does not cross the field to a designated corner — so the
+ * walk is the few seconds it actually costs, and two men in the bin at once
+ * are spread along the line rather than stacked on one spot.
+ */
+export function sinBinMark(
+  team: 'A' | 'B', num: number, from?: { x: number; z: number },
+): { x: number; z: number } {
+  const side = from && Number.isFinite(from.x) && from.x < 0 ? -1 : 1;
+  const dir = team === 'A' ? 1 : -1;
+  const z0 = from && Number.isFinite(from.z) ? from.z : -dir * 16;
+  /* Held near where he left the field, nudged apart by shirt so two carded
+   * men never occupy the same metre of touchline, and clamped in-stadium. */
+  const z = z0 + (num % 5) * 1.4 - 2.8;
+  return { x: side * SIN_BIN_TOUCH_X_M, z: z < -56 ? -56 : z > 56 ? 56 : z };
+}
+
+/** One tick of a player's bin timer, in match seconds. Pure: returns the
+ *  new value, so the caller owns the write. */
+export function tickSinBin(sinbin: number, dt: number, clockScale: number): number {
+  if (!(sinbin > 0)) return 0;
+  const next = sinbin - dt * clockScale;
+  return next > 0 ? next : 0;
+}
+
+/** A binned man may only come back at a STOPPAGE — the ball being dead is
+ *  what makes the re-entry lawful (Law 9.28 / the touch judge's flag). */
+export const SIN_BIN_RETURN_PHASES = ['KICK', 'SCRUM', 'LINEOUT', 'REPLAY'] as const;
+
+export function sinBinMayReturn(sinbin: number, phase: string): boolean {
+  return sinbin <= 0 && (SIN_BIN_RETURN_PHASES as readonly string[]).includes(phase);
+}

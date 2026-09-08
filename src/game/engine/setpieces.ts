@@ -306,7 +306,7 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
   void input;
 }
 
-export function scrumSlots(_d: Director, feed: 'A' | 'B', ax: number, az: number): ScrumSlot[] {
+export function scrumSlots(d: Director, feed: 'A' | 'B', ax: number, az: number): ScrumSlot[] {
   /* T-11 void audit: frozen-interface param — the slots are symmetric and the
    * feed side is the caller's knowledge (startScrum places and drives). */
   /* PART 3 — THE 3-4-1 BLOCK, AND THE ENGAGEMENT AXIS.
@@ -319,9 +319,16 @@ export function scrumSlots(_d: Director, feed: 'A' | 'B', ax: number, az: number
    * heading so the renderer and the engine cannot disagree about which way
    * the packs are pointing. Rows stack along z (down the pitch), never
    * across it: A packs from −z, B from +z, and they meet head-on. */
-  const out: ScrumSlot[] = scrumBlock(ax, az).map((b) => ({
-    num: b.num, team: b.team, row: b.row, down: false, x: b.x, z: b.z,
-  }));
+  /* TACTICAL KICKING / SIN BIN — a carded man is OFF THE FIELD and cannot
+   * pack down. The slot is simply not created for him: a 14-man side packs
+   * seven, which is what a real side does, and every downstream reader (the
+   * mass sum, the bind lattice, placeBound's pin) sees a roster that matches
+   * the bodies actually on the pitch instead of one with a hole in it. */
+  const out: ScrumSlot[] = scrumBlock(ax, az)
+    .filter((b) => d.L(b.team, b.num).sinbin <= 0)
+    .map((b) => ({
+      num: b.num, team: b.team, row: b.row, down: false, x: b.x, z: b.z,
+    }));
   /* T-11 void audit: frozen-interface param — the slots are symmetric and
    * the feed side is the caller's knowledge (startScrum places and drives). */
   void feed;
@@ -833,6 +840,10 @@ export function buildMaulBinds(d: Director, attacking: 'A' | 'B', ranks: number)
   for (const team of [attacking, def] as const) {
     for (let rank = 1; rank <= n; rank++) {
       const p = d.L(team, rank);
+      /* SIN BIN — a carded man is off the field, so his mass is not in the
+       * drive. Leaving him in gave a 14-man side the shove of a 15-man one,
+       * which is exactly the advantage a card is supposed to cost. */
+      if (p.sinbin > 0) continue;
       out.push({ team, num: rank, rank, mass: forwardMass(p.attrs.PWR), driveN: 0, driveX: 0 });
     }
   }
