@@ -50,6 +50,25 @@ interface DebugRagdoll {
 /** Feature flag: 3D dual-plane pitch, fog and uprights. */
 export const ENV_3D: boolean = true;
 
+/**
+ * DEBUG RENDER SKELETON — the master switch for the dev-only Rapier wireframe
+ * playground.
+ *
+ * When true, `bootstrapRapierDebug` loads Rapier's WASM and mounts a live
+ * `RapierDebugRenderer` into the match scene: two TABS ragdolls are spawned at
+ * the kickoff spot and their collider outlines are drawn as untextured,
+ * vertex-coloured line segments (`LineSegments`, `depthTest: false`) that
+ * overlay everything else in the frame. On a broadcast view that is a neon
+ * wireframe skeleton with joint capsules flailing at the kickoff — the exact
+ * "rogue debug rig" regression this flag exists to prevent.
+ *
+ * It is deliberately a compile-time constant, not a runtime toggle: a debug
+ * skeleton must never be one stray keypress or one forgotten dev build away
+ * from the production scene graph. Leave this `false`; flip it only while
+ * working on the Rapier contact solver, and never in a shipped build.
+ */
+export const DEBUG_RENDER_SKELETON: boolean = false;
+
 const FOG_COLOR = 0x1a2634;
 
 /* ---------------------------------------------------------------- health --- */
@@ -243,9 +262,12 @@ export class ThreeCanvas {
     renderHealth.pipeline = 'direct';
     renderHealth.world = this.environment ? 'live' : 'dead';
 
-    /* Rapier debug playground — dev builds only. It loads Rapier's WASM as a
-     * side effect, so it stays out of the production bundle path. */
-    if (import.meta.env.DEV) this.bootstrapRapierDebug();
+    /* Rapier debug playground — gated behind DEBUG_RENDER_SKELETON (see the
+     * flag's own doc block). It loads Rapier's WASM as a side effect and draws
+     * neon wireframe colliders over the match, so it must NEVER run in a
+     * production scene graph; the flag is false by default and this is the
+     * only call site. */
+    if (import.meta.env.DEV && DEBUG_RENDER_SKELETON) this.bootstrapRapierDebug();
   }
 
   /**
@@ -304,6 +326,10 @@ export class ThreeCanvas {
    * pitch, GLB players and ball.
    */
   private async bootstrapRapierDebug(): Promise<void> {
+    /* Defense in depth: even a stray call site must not mount the wireframe
+     * rig into the production scene. The strict gate is the one check that
+     * cannot be bypassed by forgetting a call-site condition. */
+    if (!DEBUG_RENDER_SKELETON) return;
     try {
       /* Dynamic import keeps the ~rapier3d-compat WASM bundle out of the main
        * app chunk: production never calls this, and dev pops it in behind a

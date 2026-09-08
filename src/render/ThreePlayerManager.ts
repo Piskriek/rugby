@@ -36,7 +36,13 @@ import type { RagBones, RestDirs } from './ragdollRig';
 import { renderHealth, noteRenderFault } from './ThreeCanvas';
 import { turfRiseM } from './ThreeEnvironment';
 
-const MODEL_URL = 'assets/models/rugby_player.glb';
+/* Absolute path from the origin root. `public/assets/models/` is served by
+ * Vite at `/assets/models/`, which is also the URL the preload link in
+ * index.html warms, so the loader's own fetch reuses that cached response.
+ * A root-relative URL (rather than a document-relative one) means the fetch
+ * cannot resolve against a client-side route path and 404 — which is what
+ * silently degraded a live match to shadow-and-number-only stand-in bodies. */
+const MODEL_URL = '/assets/models/rugby_player.glb';
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
  * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
 /**
@@ -54,7 +60,7 @@ const MODEL_URL = 'assets/models/rugby_player.glb';
  */
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
  * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
-const TACKLE_PAIR_URL = 'assets/models/tackle_pair.glb';
+const TACKLE_PAIR_URL = '/assets/models/tackle_pair.glb';
 
 function cached(url: string): () => Promise<ArrayBuffer> {
   let p: Promise<ArrayBuffer> | null = null;
