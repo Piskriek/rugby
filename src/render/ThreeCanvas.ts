@@ -373,7 +373,7 @@ export class ThreeCanvas {
         world.addTabsPlayer({ x: 0, y: 0, z: -4, vx: 0, vz: 6 }),
         world.addTabsPlayer({ x: 0, y: 0, z: 4, vx: 0, vz: -6 }),
       ];
-      const ball = world.addBall({ radius: 0.15, x: 0, y: 0.7, z: -2 });
+      const ball = world.addBall({ x: 0, y: 0.7, z: -2 });
       ball.setLinvel({ x: 0, y: 0.8, z: 0 }, true);
 
       this.rapierWorld = world;

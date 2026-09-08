@@ -4,13 +4,14 @@
  * No behaviour change; a Director reference in.
  */
 
+import { stepBall, stepBallWithPlayers, detachBall, BALL_MASS } from './ballPhysics';
+import { adoptLooseBall, eligibleToGather } from './looseBall';
+import { beginKickChase, canPlayBall } from './ballAwareness';
 import { Director, KickState, Input } from '../director';
-import type { Live } from '../intelligence';
 import { FIELD } from '../../render/retro';
 import { R } from './rng';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { CHASE_ORDER, CHASE_LANES } from '../shapes';
-import { assignReceiver } from '../intelligence';
 import { clamp } from './clamp';
 import { GOAL_CROSSBAR_M, GOAL_UPRIGHT_HALF_SPAN_M } from './laws';
 
@@ -384,33 +385,21 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
      * frame-snapshot that under-reads the height by up to 0.2 m on the
      * way down (which flipped borderline corner conversions into misses). */
     const px = s.bx, py = s.by, pz = s.bz;
-    s.vy -= 9.81 * dt;
-    s.bx += s.vx * dt;
-    s.bz += s.vz * dt;
-    s.by += s.vy * dt;
-    /* A rugby ball bounces. It does not vanish into a phase change. Restitution
-     * on the vertical, friction on the horizontal, and an unpredictable sideways
-     * kick off the point of the ball. */
-    if (s.by < 0.12 && s.vy < 0) {
-      s.by = 0.12;
-      s.bounces++;
-      const rest = s.type === 'GRUBBER' ? 0.46 : 0.52;
-      s.vy = Math.abs(s.vy) * rest;
-      /* T-31b — the roll belongs to the TRAJECTORY. A hang-time kick lands
-       * steeply and sits up near its mark; a flat punt skids on. The old
-       * flat retention (0.78/0.82) rolled every kick the same 12-15 m,
-       * which carried deep restarts and corner bombs over the dead-ball
-       * line. Steepness = impact vertical speed over horizontal speed. */
-      const steep = Math.abs(s.vy) / Math.max(4, Math.hypot(s.vx, s.vz));
-      const keep = clamp(0.75 - 0.35 * steep, 0.24, 0.75);
-      s.vx *= keep; s.vz *= keep;
-      if (s.vy > 1.2) s.vx += (R() - 0.5) * 2.4;
-      if (s.vy < 0.55) { s.vy = 0; s.by = 0.12; }
-    }
-    /* T-18. Wet-turf friction: a kicked ball's roll dies inside a couple
-     * of seconds. The gentle 0.988 decay let balls wander for 4+ engine
-     * seconds — a quarter of the kicking game's entire time budget. */
-    if (s.by <= 0.12 && s.vy === 0 && Math.hypot(s.vx, s.vz) > 0.05) { s.vx *= 0.958; s.vz *= 0.958; }
+    // bx/by/bz remain the laws/replay API. All contact and rotation lives
+    // on the same 28 x 19 cm body used by open-play drops and strips.
+    const b = s.body;
+    b.x = s.bx; b.y = s.by; b.z = s.bz;
+    b.vx = s.vx; b.vy = s.vy; b.vz = s.vz;
+    if (s.profile.atGoal) stepBall(b, dt);
+    else stepBallWithPlayers(b, dt, d.live,
+      p => (s.type === 'RESTART' && !s.tenCrossed)
+        || (p.team === s.kicker && p.num === s.kickerNum && s.hangTime < 0.25)
+        || (eligibleToGather(p) && canPlayBall(d, p) && b.vy <= 1.2 && b.y <= 2.15 * p.size + 0.1
+          && Math.hypot(p.x - b.x, p.z - b.z) <= 0.9 * p.size
+          && Math.hypot(b.vx - p.vx, b.vz - p.vz) <= 18),
+      p => { s.lastTouch = { team: p.team, num: p.num }; });
+    s.bx = b.x; s.by = b.y; s.bz = b.z;
+    s.vx = b.vx; s.vy = b.vy; s.vz = b.vz; s.bounces = b.bounces;
     s.hangTime += dt;
     s.apex = Math.max(s.apex, s.by);
     s.history.push({ x: s.bx, y: s.by, z: s.bz });
@@ -450,57 +439,25 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
         d.kickScored(s); return;
       }
     }
-    /* CONTEST — while the ball is in the air or on the bounce, any player close
-     * enough can catch it. This is what makes the chase worth doing. (Law 12.9:
-     * a restart short of the ten-metre line may not be contested — the referee
-     * owns that ball.) */
-    /* T-18. A ball within ~2 m of touch is LET OUT — nobody fields it, the
-     * lineout is the better outcome. Contesting touch-bound balls was why
-     * a whole kicking game produced zero lineouts. */
-    /* T-18. A kick can only be fielded once it is on the way DOWN
-     * (s.vy < 0) — the old check was just "below 2.55 m", which is true on
-     * the first two frames of flight, so the ball was being "caught in the
-     * air" at the kicker's feet by whoever stood next to him. Every touch
-     * hunt died that way; there were no lineouts. */
-    if (!s.profile.atGoal && (s.type !== 'RESTART' || s.tenCrossed) && s.bounces <= 2 && Math.abs(s.bx) < 32.5 && s.vy < 0) {
-      /* NO-TELEPORT: the catch radius matches startOpen's close-place guard
-       * (SPEC_05: 1.0 m). Catching at 1.5 m meant the catcher was then PLACED
-       * on the ball — a 1.3-1.5 m single-frame jump the audit rightly flags.
-       * The radius is now bounded to the same close-place write so a catch can
-       * never result in a placement over the 1.15 m tighten line. */
-      /* PLAYTEST 4 / T-69: CLOSEST PLAYER WINS. The old find() took the
-       * first player in shirt order inside the radius, which handed the
-       * tie (and the kick) to one side systematically. Now every candidate
-       * is measured and the nearest to the ball takes the roll — the
-       * receiver the rig has been steering at the landing mark for 2.9 s
-       * finally plays his contest. */
-      let catcher: Live | null = null;
-      let cd = 1.0;
-      for (const p of d.live) {
-        if (p.sinbin > 0 || p.down) continue;
-        const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
-        if (dd < cd && s.by < 2.55) { cd = dd; catcher = p; }
-      }
-      if (catcher && R() < (catcher.team === s.kicker ? 0.55 + (d.slider(s.kicker, 'chase') / 100) * 0.2 : 0.9)) {
-        d.say(catcher.team === s.kicker ? 'REGATHERED BY THE CHASE!' : 'TAKEN CLEANLY IN THE AIR');
-        const num = catcher.num, bx = s.bx, bz = s.bz, tm = catcher.team;
-        d.kk = undefined;
-        /* A fielder is still in the act of landing — a quarter-second beat
-         * before he may be touched, else the contest catch resolves into an
-         * instant tackle every time and nobody ever runs a kick back. */
-        d.receipt = { team: tm, at: d.t };
-        d.startOpen(tm, bx, bz, num, 1, 0, 0.25);
-        return;
-      }
+    /* Keep the restart ten-metre gate and let touch-bound kicks run out.
+     * There is no bounce-count cutoff: the third bounce is still a live ball.
+     * An actual reachable catch hands the SAME body to the ordinary gather
+     * interval, rather than moving a player to it or rolling for a remote owner. */
+    if (!s.profile.atGoal && (s.type !== 'RESTART' || s.tenCrossed)
+      && Math.abs(s.bx) < 32.5 && (s.vy < 0 || b.grounded)) {
+      const catcher = d.live.find(p => eligibleToGather(p) && canPlayBall(d, p)
+        && Math.hypot(p.x - b.x, p.z - b.z) <= 0.9 * p.size
+        && b.y <= 2.15 * p.size + 0.1 && Math.hypot(b.vx - p.vx, b.vz - p.vz) <= 18);
+      if (catcher) { continueLooseKick(d, s); return; }
     }
 
     // dead once it has stopped moving or run out of road
-    const stopped = s.by <= 0.12 && s.vy === 0 && Math.hypot(s.vx, s.vz) < 1.0;
+    const stopped = s.body.sleeping;
     /* T-18. The time cap applies to the ROLL — a ball still in the air at
      * 3 s (a bomb's hang is 3.4 s) must be allowed to come down, or the
      * phase ends mid-flight and the audit rightly flags a ball that never
      * bounced. */
-    if (stopped || s.bounces > 6 || (s.t > 3.0 && s.by <= 0.12 && s.vy === 0)) {
+    if (stopped || (s.t > 8 && s.body.grounded)) {
       /* SPEC_07 — Law 12.9: a restart that dies short of the ten-metre line
        * is an infringement — referee's scrum at the centre spot, never a
        * contest for a ball that was never legally live. */
@@ -519,7 +476,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       if (s.type === 'RESTART' && !s.tenCrossed) { d.restartInfringed(s.kicker); return; }
       // 50:22 gives the throw to the side that kicked it
       const fromOwn = Math.abs(s.bz - s.dir * 50) > 50;
-      if (s.type === 'FIFTY_22' && fromOwn) {
+      if (s.type === 'FIFTY_22' && fromOwn && (!s.lastTouch || s.lastTouch.team === s.kicker)) {
         d.say('50:22 — THE THROW IS YOURS');
         d.kk = undefined;
         d.startLineout(s.kicker, s.bz, Math.sign(s.bx) * 6);
@@ -527,7 +484,8 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
       }
       d.say('INTO TOUCH — GOOD TERRITORY');
       d.kk = undefined;
-      d.startLineout(d.defending(), s.bz, Math.sign(s.bx) * 6);
+      const lastTeam = s.lastTouch?.team ?? s.kicker;
+      d.startLineout(lastTeam === 'A' ? 'B' : 'A', s.bz, Math.sign(s.bx) * 6);
       return;
     }
     if (s.bz > FIELD.deadZFar - 1 || s.bz < FIELD.deadZ + 1) {
@@ -573,8 +531,25 @@ export function launch(d: Director, power: number, accuracy: number, _wind = 0) 
   const vz = Math.cos(angRad) * speed * s.dir;
   const vx = Math.sin(angRad) * speed;
   const vy = 0.5 * 9.81 * hang;
-  s.vx = vx; s.vz = vz; s.vy = vy;
+  const b = s.body;
+  b.socket = null; b.sleeping = false; b.grounded = false; b.quietTime = 0; b.bounces = 0;
+  if (s.fromHand) {
+    // From-hand kicks carry the runner's CURRENT momentum plus the boot impulse.
+    detachBall(b, d.L(s.kicker, s.kickerNum), {
+      x: vx * BALL_MASS, y: vy * BALL_MASS, z: vz * BALL_MASS,
+    });
+  } else {
+    b.x = s.bx; b.y = s.by; b.z = s.bz;
+    b.vx = vx; b.vy = vy; b.vz = vz;
+  }
+  // A deterministic end-over-end strike. No eccentricity until a contact;
+  // conversions and penalty shots never borrow a runner's walk-up velocity.
+  b.omega.x = vz / speed * 8; b.omega.y = 0; b.omega.z = -vx / speed * 8;
+  b.flightGuard = s.type === 'GOAL' || !!s.fromPenalty;
+  s.bx = b.x; s.by = b.y; s.bz = b.z;
+  s.vx = b.vx; s.vy = b.vy; s.vz = b.vz;
   s.stage = 'FLIGHT'; s.t = 0;
+  s.chaseLaw = beginKickChase(d, { team: s.kicker, num: s.kickerNum }, b.z);
   /* SPEC_09 INVARIANT A1 — ATOMIC STRIKE. The liveness flip above and the
    * T-69 six-chaser commitment below are ONE synchronous block with no
    * interleaved placement write: no observer in the rest of this tick (think,
@@ -591,52 +566,20 @@ export function launch(d: Director, power: number, accuracy: number, _wind = 0) 
   d.shake(0.15);
 }
 
-export function kickLanded(d: Director, s: KickState) {
+/** End the kick choreography, not the ball's physical lifetime. The old
+ * fallback awarded the nearest fielder from up to the other end of the pitch.
+ * A settled/fieldable kick now remains free until somebody really collects it.
+ */
+function continueLooseKick(d: Director, s: KickState) {
+  const k = d.L(s.kicker, s.kickerNum);
+  const b = s.body;
+  d.startOpen(s.kicker, k.x, k.z, k.num, 1, 0, 0, true);
+  adoptLooseBall(d, b, 'KICK', { team: s.kicker, num: s.kickerNum }, true);
+  d.bc.loose!.kickLaw = s.chaseLaw;
+  if (s.lastTouch) d.bc.loose!.lastTouch = s.lastTouch;
+}
 
+export function kickLanded(d: Director, s: KickState) {
   s.stage = 'RESULT'; s.result = 'LANDED';
-  const rec = assignReceiver(d.live, d.defending(), s.bx, s.bz);
-  d.kk = undefined;
-  /* PLAYTEST 4 / T-69 — THE SETTLED BALL IS WON, NOT ROLLED FOR. The old
-   * `R() < 0.22 + chase*0.4` gifted the kicking side possession wherever
-   * the ball died — one of the two RNGs behind "my opponents just watch
-   * my kickoff". Now the ball belongs to whoever actually reached it:
-   * a chaser inside 2.5 m regathers, otherwise the fielder takes it (a
-   * contested gather may still spill — that is a knock-on and a scrum). */
-  let nearestKicker: { p: Live; d: number } | null = null;
-  for (const p of d.live) {
-    if (p.team !== s.kicker || p.sinbin > 0 || p.down) continue;
-    const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
-    if (!nearestKicker || dd < nearestKicker.d) nearestKicker = { p, d: dd };
-  }
-  if (nearestKicker && nearestKicker.d < 3.5) {
-    d.commentate('GENERAL', '— REGATHERED BY THE CHASE');
-    d.startOpen(s.kicker, s.bx, s.bz, nearestKicker.p.num, 1);
-    return;
-  }
-  const dTeam: 'A' | 'B' = s.kicker === 'A' ? 'B' : 'A';
-  /* PLAYTEST 4 / T-69 — THE AWARD GOES TO A MAN WHO IS THERE. The old call
-   * handed possession to assignReceiver's pick (the fullback, often 25-30 m
-   * from a ball that rolled) and startOpen snapped the ball to the mark
-   * with nobody in reach — the "suddenly has it" teleport family. The
-   * carrier is the nearest RECEIVER to the settled ball; the fullback jogs
-   * in and takes the distribution if he wants it. */
-  let fielder: { p: Live; d: number } | null = null;
-  for (const p of d.live) {
-    if (p.team !== dTeam || p.sinbin > 0 || p.down) continue;
-    const dd = Math.hypot(p.x - s.bx, p.z - s.bz);
-    if (!fielder || dd < fielder.d) fielder = { p, d: dd };
-  }
-  const carrier = fielder && fielder.d < 6.0 ? fielder.p : rec;
-  /* T-18. YOU CATCH A KICK, YOU RUN IT BACK. Half of all fielded kicks used
-   * to become a scrum for the catching side — a law that does not exist and
-   * a phase that produces no pass and no tackle. The fielder counters (with
-   * the chase arriving, which is where kick-chase tackles come from); a
-   * knock in the fielding is the honest minority that does give the scrum.
-   * Scrums stay green off the lineout/maul error stream alone. */
-  if (nearestKicker && nearestKicker.d < 4.5 && R() < 0.15) {
-    d.say('KNOCKED ON FIELDING THE KICK');
-    d.startScrum(dTeam, s.bx, s.bz);
-  } else {
-    d.startOpen(dTeam, s.bx, s.bz, carrier.num, 1, 0, 0.9);
-  }
+  continueLooseKick(d, s);
 }

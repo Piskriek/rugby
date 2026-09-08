@@ -174,13 +174,17 @@ const step = (d: Director, n: number) => {
   // the human path: T releases the nine down the echelon through the verb stream
   const d3 = new Director(quickStartConfig());
   d3.startOpen('A', 0, -10);
+  // Distribution is offered while the nine HOLDS the ball, not after he
+  // has thrown it. A second pass must not remain advertised during flight.
+  const bar = d3.actionBar.find((a) => a.key === 'T');
   d3.update(dt, blank(), new Set(['distribute']), new Set());
   if (d3.op?.ball.live && d3.op.pendingReceiver === 10) {
     pass('T key distributes 9 → 10 through the human verb stream');
   } else fail(`T key: live=${d3.op?.ball.live} pending=${d3.op?.pendingReceiver} phase=${d3.phase}`);
-  const bar = d3.actionBar.find((a) => a.key === 'T');
   if (bar && /DISTRIBUTE/.test(bar.label)) pass(`action bar names it (${bar.label})`);
-  else fail('action bar shows no DISTRIBUTE entry for the nine');
+  else fail('action bar shows no DISTRIBUTE entry for the nine before release');
+  if (!d3.actionBar.some((a) => a.key === 'T')) pass('distribution option clears while the pass is in flight');
+  else fail('action bar still offers a second pass while the ball is away');
 }
 
 /* ================= 4. KICK / PASS CHARGE ================= */

@@ -27,6 +27,7 @@
  *     builds a contact manifold for intra-player limbs, so the only contacts
  *     left to resolve are player-vs-player, player-vs-ball and body-vs-pitch.
  */
+import { BALL_MAJOR, BALL_MINOR, BALL_MASS } from './ballShape';
 import RAPIER from '@dimforge/rapier3d-compat';
 
 /** Named collision groups. Each group is one bit so it can be OR-ed. The
@@ -162,7 +163,8 @@ export interface PlayerSpec {
 }
 
 export interface BallSpec {
-  radius: number;
+  /** Minor radius; defaults to the regulation 9.5 cm. */
+  radius?: number;
   x: number;
   y: number;
   z: number;
@@ -261,9 +263,9 @@ export interface BallCarrier {
   readonly state: BallCarrierState;
   /** true while the ball is still welded to the chest. */
   readonly held: boolean;
-  /** Manually break the weld and spill the ball (also used by the physics
-   *  break path). Returns true if the ball was still held. */
-  release(reason?: string): boolean;
+  /** Break the weld with current socket momentum and an optional N·s release
+   *  impulse. Returns true once; repeats cannot reapply the impulse. */
+  release(reason?: string, impulse?: { x: number; y: number; z: number }): boolean;
 }
 
 /** Default break impulse (N·s): a committed low tackle on a 32 kg chest at
@@ -278,6 +280,8 @@ interface ActiveCarrier {
   ballCollider: RAPIER.Collider;
   ballHandle: number;
   savedGroups: number;
+  savedEvents: number;
+  savedForceThreshold: number;
   breakImpulse: number;
   isOpponent: (other: RAPIER.Collider, carrier: TabsPlayer) => boolean;
   onBreak?: AttachBallOptions['onBreak'];
@@ -469,15 +473,26 @@ export class RapierWorld {
     const chest = carrier.chest;
     const chestPos = chest.translation();
     const offset = opts.carryOffset ?? { x: 0, y: 0, z: 0 };
-    const target = { x: chestPos.x + offset.x, y: chestPos.y + offset.y, z: chestPos.z + offset.z };
+    // carryOffset is CHEST-local, not world-local. Rotate it before seating
+    // the ball, otherwise a turning carrier gets a correcting joint impulse.
+    const q = chest.rotation();
+    const tx = 2 * (q.y * offset.z - q.z * offset.y);
+    const ty = 2 * (q.z * offset.x - q.x * offset.z);
+    const tz = 2 * (q.x * offset.y - q.y * offset.x);
+    const target = {
+      x: chestPos.x + offset.x + q.w * tx + q.y * tz - q.z * ty,
+      y: chestPos.y + offset.y + q.w * ty + q.z * tx - q.x * tz,
+      z: chestPos.z + offset.z + q.w * tz + q.x * ty - q.y * tx,
+    };
 
-    /* 1. Match velocity AND angular velocity so the first solver pass does not
-     * see a ball trying to fly one way out of a chest going another. */
-    const lin = chest.linvel();
+    /* Match the SOCKET velocity, including omega x r, and the orientation.
+     * A fixed joint must start satisfied, even on a rotated/spinning chest. */
+    const lin = chest.velocityAtPoint(target);
     const ang = chest.angvel();
     ball.setLinvel({ x: lin.x, y: lin.y, z: lin.z }, true);
     ball.setAngvel({ x: ang.x, y: ang.y, z: ang.z }, true);
     ball.setTranslation({ x: target.x, y: target.y, z: target.z }, true);
+    ball.setRotation(q, true);
 
     /* 2. Cull the ball against this ONE carrier for as long as it is welded.
      * Keep membership; strip only the carrier's bit out of the filter. */
@@ -490,8 +505,8 @@ export class RapierWorld {
      * freedom between the ball and the chest. The joint's first anchor is the
      * carry offset in chest-local space, so a ball carried in front of the
      * chest stays exactly there (offset (0,0,0) rides the chest centre). Both
-     * frames are identity — correct at weld time because the ball was just
-     * re-seated from the (un-rotated) spawn pose; the fixed joint then keeps
+     * frames are identity — correct because the ball now matches the chest's
+     * world orientation; the fixed joint then keeps
      * the offset rigid in the chest's own frame for the life of the weld. */
     const joint = this.world.createImpulseJoint(
       RAPIER.JointData.fixed(
@@ -503,7 +518,9 @@ export class RapierWorld {
 
     /* Contact-force events are opt-in per collider; the ball's collider turns
      * them on with a zero threshold so even the first touch reports. */
-    ballCollider.setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS);
+    const savedEvents = ballCollider.activeEvents();
+    const savedForceThreshold = ballCollider.contactForceEventThreshold();
+    ballCollider.setActiveEvents(savedEvents | RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS);
     ballCollider.setContactForceEventThreshold(0);
 
     const active: ActiveCarrier = {
@@ -512,7 +529,7 @@ export class RapierWorld {
       ball,
       ballCollider,
       ballHandle: ballCollider.handle,
-      savedGroups: saved,
+      savedGroups: saved, savedEvents, savedForceThreshold,
       breakImpulse: opts.breakImpulse,
       isOpponent: opts.isOpponent ?? ((other: RAPIER.Collider) => this.defaultOpponent(other, carrier.bit)),
       onBreak: opts.onBreak,
@@ -553,7 +570,14 @@ export class RapierWorld {
       get joint() { return active.broken ? null : active.joint; },
       get state(): BallCarrierState { return active.broken ? 'DROP_BALL' : 'BALL_SECURED'; },
       get held() { return !active.broken; },
-      release(reason) { return self.releaseCarrier(active, reason); },
+      release(reason, impulse) {
+        if (active.broken) return false;
+        // Manual pass/kick: inherit the current carrier socket velocity, not
+        // the previous solver tick's velocity, then apply the release impulse.
+        active.ball.setLinvel(active.carrier.chest.velocityAtPoint(active.ball.translation()), true);
+        active.ball.setAngvel(active.carrier.chest.angvel(), true);
+        return self.releaseCarrier(active, reason, impulse);
+      },
     };
     return handle;
   }
@@ -573,12 +597,15 @@ export class RapierWorld {
   /** Tear a weld down. Removes the joint, restores the ball's collision groups
    *  so it is a free object again (the spill), flags the record broken and
    *  unregisters it. Returns true if a live weld was released. */
-  private releaseCarrier(active: ActiveCarrier, by?: { impulse?: number; by?: RAPIER.Collider | null } | string): boolean {
+  private releaseCarrier(active: ActiveCarrier, by?: { impulse?: number; by?: RAPIER.Collider | null } | string, releaseImpulse?: { x: number; y: number; z: number }): boolean {
     if (active.broken) return false;
     active.broken = true;
     this.carriers.delete(active.ballHandle);
     this.world.removeImpulseJoint(active.joint, true);
     active.ballCollider.setCollisionGroups(active.savedGroups);
+    active.ballCollider.setActiveEvents(active.savedEvents);
+    active.ballCollider.setContactForceEventThreshold(active.savedForceThreshold);
+    if (releaseImpulse) active.ball.applyImpulse(releaseImpulse, true);
     const impulse = typeof by === 'object' && by ? by.impulse : undefined;
     const collider = typeof by === 'object' && by ? by.by ?? null : null;
     active.onBreak?.({ state: 'DROP_BALL', impulse: impulse ?? 0, by: collider });
@@ -846,21 +873,32 @@ export class RapierWorld {
     };
   }
 
-  /** Add a dynamic ball. The default unit-density collider is only ~14 g at
-   *  r=0.15 m; a real rugby ball is ~0.43 kg. Without that mass a TABS chest
-   *  (32 kg) can push the tiny ball a quarter-radius into its own hull on the
-   *  first solver pass, so give it a realistic density (≈30 kg/m³). */
+  /** Rugby-ball collider, not a sphere hiding behind an ellipsoid mesh.
+   * Rapier has no analytic ellipsoid primitive; this convex support hull
+   * shares the match solver's axes and mass. CCD prevents fast tips tunnelling.
+   */
   addBall(spec: BallSpec): RAPIER.RigidBody {
+    const radius = spec.radius ?? BALL_MINOR;
+    const length = radius * BALL_MAJOR / BALL_MINOR;
+    const points: number[] = [];
+    for (let i = 0; i <= 16; i++) {
+      const theta = Math.PI * i / 16;
+      for (let j = 0; j < 24; j++) {
+        const phi = 2 * Math.PI * j / 24;
+        points.push(length * Math.cos(theta), radius * Math.sin(theta) * Math.cos(phi), radius * Math.sin(theta) * Math.sin(phi));
+      }
+    }
+    const hull = RAPIER.ColliderDesc.convexHull(new Float32Array(points));
+    if (!hull) throw new Error('Could not construct rugby-ball convex hull');
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(spec.x, spec.y, spec.z)
         .setCcdEnabled(true),
     );
     this.world.createCollider(
-      RAPIER.ColliderDesc.ball(spec.radius)
-        .setDensity(30)
-        .setFriction(spec.friction ?? 0.4)
-        .setRestitution(spec.restitution ?? 0.65)
+      hull.setMass(BALL_MASS)
+        .setFriction(spec.friction ?? 0.58)
+        .setRestitution(spec.restitution ?? 0.60)
         .setCollisionGroups(groups(BIT_BALL, 0xffff)),
       body,
     );

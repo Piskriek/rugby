@@ -19,6 +19,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { FIELD, RENDER_SCALE } from './retro';
 import { buildTurfMaps, TURF_SIZE } from './turf';
 import type { Conditions } from './conditions';
+import { BALL_MAJOR, BALL_MINOR } from '../game/engine/ballPhysics';
 
 /* Bright grass green for the outer apron. The inner pitch carries its own
  * textured albedo; this surround must read as the same turf, not as a dark
@@ -85,6 +86,52 @@ function toonGradient(): THREE.DataTexture {
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
   return tex;
+}
+
+/** Permanent world ball, in unscaled metres. The sphere's UV poles are
+ * rotated onto local X before stretching so FOUR panel seams run tip-to-tip.
+ * A DataTexture keeps the same mesh/material available headlessly and before
+ * any model or image downloads (never a sprite, marker, or HUD substitute).
+ */
+export function buildRugbyBallMesh(): THREE.Mesh<THREE.SphereGeometry, THREE.MeshToonMaterial> {
+  const geometry = new THREE.SphereGeometry(BALL_MINOR, 40, 28);
+  geometry.rotateZ(-Math.PI / 2);
+  geometry.scale(BALL_MAJOR / BALL_MINOR, 1, 1);
+  const width = 512, height = 256;
+  const pixels = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const v = (y + 0.5) / height;
+    for (let x = 0; x < width; x++) {
+      const panel = (x / width * 4) % 1;
+      const seam = panel < 0.014 || panel > 0.986;
+      const curve = Math.sin(panel * Math.PI) * 0.055;
+      const navy = v < 0.07 || v > 0.93
+        || Math.abs(v - 0.23 - curve) < 0.024 || Math.abs(v - 0.77 + curve) < 0.024;
+      const red = Math.abs(v - 0.30 - curve) < 0.010 || Math.abs(v - 0.70 + curve) < 0.010;
+      const dimple = x % 6 === 0 && y % 6 === 0 ? 15 : 0;
+      const color = seam ? [22, 25, 30] : navy ? [20, 37, 64] : red ? [183, 38, 39]
+        : [246 - dimple, 241 - dimple, 224 - dimple];
+      const i = (y * width + x) * 4;
+      pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2]; pixels[i + 3] = 255;
+    }
+  }
+  const texture = new THREE.DataTexture(pixels, width, height, THREE.RGBAFormat);
+  texture.name = 'RugbyBall_four_panel_seams';
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.needsUpdate = true;
+  const material = new THREE.MeshToonMaterial({
+    color: 0xffffff, map: texture, gradientMap: toonGradient(),
+    transparent: false, depthWrite: true,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = 'RugbyBallMesh';
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
 }
 
 function merge(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {

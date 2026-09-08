@@ -20,16 +20,23 @@
  * hand). They are exposed on `state` because hiding them would mean the rig drawing a
  * pose the engine is not in, which is the class of bug this repo calls a lie.
  *
- * LAYERING. This module owns the ball and the arm *targets*. It never writes a player's
- * position: HANDS_READY is a posture, not a movement, so `movedBy` stays untouched and
+ * LAYERING. This module owns hand controls and arm *targets*. LooseBall owns
+ * free gravity, player contacts and gathers independently of those controls.
+ * Neither solver writes a player's position: HANDS_READY is a posture, not a movement, so `movedBy` stays untouched and
  * the single-writer rule (T-02: two position claims in one frame is a teleport) cannot
  * fire here. The renderer reads `ik` and nothing else.
  */
 import type { Director } from '../director';
 import type { Live } from '../intelligence';
+import { beginKickChase, canPlayBall } from './ballAwareness';
 import { clamp } from './clamp';
 import { R } from './rng';
 import { fwdProfile, isForwardLoss } from './throwforward';
+import {
+  makeBall, weldBall, detachBall, touchBall,
+  BALL_MAJOR, BALL_MASS, BALL_GRAVITY, type BallBody,
+} from './ballPhysics';
+import { adoptLooseBall, stepLooseBall, gatherLooseBall, eligibleToGather, type LooseBallState } from './looseBall';
 
 /** Radius around the chest/hands point inside which LMB takes the ball. */
 export const SECURE_M = 0.7;
@@ -37,17 +44,17 @@ export const SECURE_M = 0.7;
  *  enough that a punt is a decision and not a default. */
 export const PUNT_WINDOW_S = 0.3;
 /** A rugby ball is 410-460 g; 430 g is the middle of the range the laws allow. */
-export const M_BALL = 0.43;
+export const M_BALL = BALL_MASS;
 /** Boot speed at the ball for a full committed punt, m/s. A human punt strike is
  *  18-25 m/s of boot speed; this is the top of a first-time drop punt, and the
  *  player's own SKL and the swing timing scale it down from there. */
 export const V_KICK = 21.5;
 /** Ball radius — the collider the boot has to reach. */
-export const BALL_R = 0.14;
+export const BALL_R = BALL_MAJOR; // boot reach uses the bounding radius, not ground support
 /** How long the leg takes from the back lift to contact. */
 export const SWING_S = 0.2;
 /** Gravity, the same constant the line-out lift and the kick flight use. */
-export const G = 9.81;
+export const G = BALL_GRAVITY;
 
 export type CraftState = 'IDLE' | 'HANDS_READY' | 'BALL_SECURED' | 'DROP_BALL' | 'PUNT_KICK' | 'FLIGHT' | 'LOOSE';
 
@@ -80,10 +87,16 @@ export interface BallCraft {
   shoulderR: { x: number; y: number; z: number };
   /** the kicking foot, only meaningful in PUNT_KICK */
   foot: { x: number; y: number; z: number } | null;
+  /** Fixed, leg-reachable horizontal target at swing commitment, relative to the hip. */
+  kickOffset: { x: number; z: number };
   /** seconds left of the punt window; 0 outside DROP_BALL */
   window: number;
   /** the free ball while DROP_BALL / PUNT_KICK / FLIGHT / LOOSE */
-  free: { x: number; y: number; z: number; vx: number; vy: number; vz: number; bounces: number } | null;
+  free: BallBody | null;
+  /** Physical lifetime / chase / gather, independent of the mouse posture. */
+  loose: LooseBallState | null;
+  /** Reusable per-MATCH body: never share a dropped ball across Directors. */
+  looseBody: BallBody;
   /** true while the ball is slaved to the chest and gravity is not applied to it */
   ownsBall: boolean;
   /** the impulse the boot gave the ball, kept for the HUD, the probe and the replay */
@@ -118,11 +131,24 @@ export function makeCraft(): BallCraft {
   });
   return {
     state: 'IDLE', t: 0, team: 'A', num: 0,
-    chest: { x: 0, y: 0, z: 0 }, l: zero(), r: zero(), foot: null,
+    chest: { x: 0, y: 0, z: 0 }, l: zero(), r: zero(), foot: null, kickOffset: { x: 0, z: 0 },
     shoulderL: { x: 0, y: 0, z: 0 }, shoulderR: { x: 0, y: 0, z: 0 },
-    window: 0, free: null, ownsBall: false, lastImpulse: 0, lastDistance: 0, log: [],
+    window: 0, free: null, loose: null, looseBody: makeBall(), ownsBall: false, lastImpulse: 0, lastDistance: 0, log: [],
     lastRefusal: -9,
   };
+}
+
+/** Tear down every grip flag atomically on a pass, kick, catch or whistle. */
+export function clearCraft(bc: BallCraft): void {
+  if (bc.free) bc.free.socket = null;
+  bc.free = null;
+  bc.loose = null;
+  bc.ownsBall = false;
+  bc.foot = null;
+  bc.window = 0;
+  bc.state = 'IDLE';
+  bc.t = 0;
+  bc.l.reach = bc.r.reach = 0;
 }
 
 /**
@@ -213,20 +239,12 @@ function go(bc: BallCraft, d: Director, state: CraftState, why: string) {
  *  and not to the ball. The lead is one arm's worth of reaction, not a prediction
  *  engine's: `dtLead` scales with the ball's speed and is capped so a grubber is not
  *  met three metres out. */
-/**
- * WHERE THE BALL IS, as the engine owns it. Three cases and no fourth: the craft's
- * own free ball (a drop, a punt, a knock-on), the pass in flight, or a ball that is
- * being carried — and a carried ball has no independent position in open play at all,
- * which is why the third case returns the carrier's own hands. Reading `s.ball.x`
- * while nobody is flying it is a trap: the field is only written when a pass is
- * launched, so a stale coordinate would have a man reaching at a patch of grass forty
- * metres behind him, which is precisely the bug this function replaced.
- */
+/** Where the hands aim: free body, in-flight pass, or the carrier's socket.
+ * Open play now publishes a current socket pose even without an explicit grip. */
 const _pt = { x: 0, y: 0, z: 0, loose: false };
 const _pole = { x: 0, y: 0, z: 0 };
 const _aim = { x: 0, y: 0, z: 0 };
-const _secBall = { x: 0, y: 0, z: 0 };
-const _free = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, bounces: 0 };
+
 export function ballPoint(d: Director, bc: BallCraft, p: Live) {
   const s = d.op!;
   const pt = _pt;
@@ -240,9 +258,9 @@ export function ballPoint(d: Director, bc: BallCraft, p: Live) {
     pt.z = s.ball.z + p.vz * dtLead * 0.25; pt.loose = true;
     return pt;
   }
-  const side = p.face >= 0 ? 1 : -1;
-  pt.x = p.x + 0.12 * p.size * side; pt.y = 1.05 * p.size;
-  pt.z = p.z + 0.16 * p.size * side; pt.loose = false;
+  // All carriers (not just an explicit LMB grip) use the same authored socket.
+  weldBall(s.ball, d.L(s.attacking, s.carrierNum));
+  pt.x = s.ball.x; pt.y = s.ball.y; pt.z = s.ball.z; pt.loose = false;
   return pt;
 }
 
@@ -280,32 +298,34 @@ export function stepCraft(
   const s = d.op;
   bc.t += dt;
 
-  /* Only open play, only a human side, only a player who is standing. A ruck, a maul
-   * or a set piece owns the ball and the body with it, and a grabbed-off-the-deck
-   * ball is a different law than the one being implemented here. */
-  const usable = !!s && d.phase === 'OPEN_PLAY' && d.isHuman(s.attacking);
-  /* WHOSE HANDS. The carrier's, while his own side holds the ball; the controlled
-   * player's when the ball is in the air or loose, because that is the man the mouse
-   * belongs to and the one who has to run to it. Falling back to the carrier when no
-   * control exists keeps a CPU-driven frame from posing nobody. */
-  const mine = usable ? d.L(s!.attacking, s!.carrierNum) : null;
-  const ctl = usable && d.ctrlPlayer?.team === s!.attacking
-    ? d.L(s!.attacking, d.ctrlPlayer!.num) : null;
-  const ballInFlight = !!s && (s.ball.live || !!(d.bc?.free));
-  const p = usable ? (ballInFlight ? (ctl ?? mine) : (mine ?? ctl)) : null;
-  if (!usable || !p || p.down) {
-    if (bc.state !== 'IDLE') {
-      /* The phase moved on under the mechanic — a tackle during the drop, a whistle.
-       * The free ball is handed back rather than left hovering at 0.6 m with nobody
-       * owning it, which is the failure mode a state machine this shallow invites. */
-      if (bc.free && s) {
-        s.ball.x = bc.free.x; s.ball.z = bc.free.z; s.ball.y = Math.max(0.05, bc.free.y);
-      }
-      if (bc.ownsBall && s) s.carrierNum = bc.num;
-      bc.free = null; bc.ownsBall = false; bc.foot = null; bc.window = 0;
-      go(bc, d, 'IDLE', 'phase left open play');
-    }
-    bc.l.reach = 0; bc.r.reach = 0;
+  // A phase owns its ball, but hand controls do NOT own free-ball lifetime.
+  // Always simulate first: a CPU carrier, a fallen player or a control switch
+  // used to erase/freeze this body before gravity ever ran.
+  if (!s || d.phase !== 'OPEN_PLAY') {
+    clearCraft(bc);
+    return;
+  }
+  if (bc.free) {
+    stepLooseBall(d, dt);
+    if (!bc.free || d.op !== s || d.phase !== 'OPEN_PLAY') return;
+  }
+  const mine = d.isHuman(s.attacking) ? d.L(s.attacking, s.carrierNum) : null;
+  const ctl = d.ctrlPlayer && d.isHuman(d.ctrlPlayer.team) ? d.ctrlPlayer : null;
+  const ballInFlight = s.ball.live || !!bc.free;
+  const p = ballInFlight ? (ctl ?? mine) : mine;
+  if (!p || !eligibleToGather(p)) {
+    bc.l.reach = bc.r.reach = 0;
+    bc.ownsBall = false;
+    bc.foot = null; bc.window = 0;
+    if (bc.free) {
+      if (bc.state === 'DROP_BALL' || bc.state === 'PUNT_KICK') go(bc, d, 'LOOSE', 'kicker no longer available');
+    } else clearCraft(bc);
+    return;
+  }
+
+  if (s.ball.live && p.team === s.attacking && p.num === s.carrierNum) {
+    // The pass owns the ball now, even if secure is still held on the release.
+    clearCraft(bc);
     return;
   }
 
@@ -366,8 +386,9 @@ export function stepCraft(
         Math.hypot(bc.r.hand.x - b.x, bc.r.hand.y - b.y, bc.r.hand.z - b.z),
       );
       if (pressed.has('secure') || secure) {
-        if (handGap <= SECURE_M) {
-          takeBall(d, bc, p, b);
+        const onside = canPlayBall(d, p);
+        if (handGap <= SECURE_M && onside) {
+          takeBall(d, bc, p);
           go(bc, d, 'BALL_SECURED', `secured at ${handGap.toFixed(2)} m of the hands`);
           break;
         }
@@ -382,7 +403,8 @@ export function stepCraft(
            * budget is zero. */
           if (d.t - bc.lastRefusal > 0.5) {
             bc.lastRefusal = d.t;
-            const why = `refused — ball ${handGap.toFixed(2)} m from the hands, need ${SECURE_M}`;
+            const why = onside ? `refused — ball ${handGap.toFixed(2)} m from the hands, need ${SECURE_M}`
+              : 'OFFSIDE AT THE KICK — GET BACK BEFORE PLAYING THE BALL';
             /* The ledger is unconditional and deduplicated by content: a refused grab is
              * an engine fact, and the last of them is what a probe or a bug report needs.
              * The HUD hint keeps its 0.25 s gate, because that slot is shared with the
@@ -391,7 +413,7 @@ export function stepCraft(
               bc.log.push({ state: bc.state, t: d.t, why });
               if (bc.log.length > 40) bc.log.shift();
             }
-            if (bc.t > 0.25) d.showHint(`NO BALL IN REACH — ${handGap.toFixed(1)} m AWAY (NEED ${SECURE_M})`, 1.1);
+            if (bc.t > 0.25) d.showHint(onside ? `NO BALL IN REACH — ${handGap.toFixed(1)} m AWAY (NEED ${SECURE_M})` : why, 1.1);
           }
         }
       }
@@ -406,10 +428,8 @@ export function stepCraft(
        * what "secured" means physically, and it is why `ownsBall` gates the ball
        * write in `upOpen` rather than this module reaching into the phase. */
       bc.ownsBall = true;
-      _secBall.x = p.x + 0.10 * size * side;
-      _secBall.y = chestY - 0.16;
-      _secBall.z = p.z + 0.14 * size * side;
-      const b = _secBall;
+      weldBall(s!.ball, p);
+      const b = s!.ball;
       _aim.x = b.x - 0.1; _aim.y = b.y + 0.06; _aim.z = b.z;
       solveArm(bc.l, p, shoulderL, _aim, 0.5, l1, l2);
       _aim.x = b.x + 0.1; _aim.y = b.y - 0.04;
@@ -434,7 +454,10 @@ export function stepCraft(
         }
       }
       if (secure || pressed.has('secure')) bc.ownsBall = true;
-      if (released.has('secure')) { go(bc, d, 'DROP_BALL', 'LMB released'); dropBall(bc, p, side, size); break; }
+      if (released.has('secure')) {
+        s!.ball.socket = null;
+        go(bc, d, 'DROP_BALL', 'LMB released'); dropBall(d, bc, p); break;
+      }
       if (!handsUp && bc.t > 0.2) { /* holding LMB alone keeps the ball: the catch is not un-done by the RMB */ }
       break;
     }
@@ -442,7 +465,6 @@ export function stepCraft(
     /* ------------------------------------------------------------ DROP_BALL */
     case 'DROP_BALL': {
       bc.ownsBall = false;
-      integrate(bc, dt);
       bc.window = Math.max(0, PUNT_WINDOW_S - bc.t);
       /* The hands stay where they let go for the whole window, then fall away. A man
        * about to punt has just released the ball at thigh height and is looking at it;
@@ -453,7 +475,17 @@ export function stepCraft(
       _aim.x = b.x + 0.12;
       solveArm(bc.r, p, shoulderR, _aim, 0.8, l1, l2);
       if (bc.l.reach > 0.4 || bc.r.reach > 0.4) { bc.l.reach = 1; bc.r.reach = 1; }
-      if (pressed.has('punt') || punt) { go(bc, d, 'PUNT_KICK', 'Space inside the window'); bc.t = 0; break; }
+      if ((pressed.has('punt') || punt) && bc.t <= PUNT_WINDOW_S + 1e-9) {
+        // Commit the leg to a reachable interception in the runner's frame.
+        // Do not chase a ball that is subsequently knocked out of the swing.
+        const lead = SWING_S * 0.62;
+        const dx = b.x - p.x + (b.vx - p.vx) * lead;
+        const dz = b.z - p.z + (b.vz - p.vz) * lead;
+        const reach = Math.min(1, 0.85 * size / Math.max(0.001, Math.hypot(dx, dz)));
+        bc.kickOffset.x = dx * reach; bc.kickOffset.z = dz * reach;
+        go(bc, d, 'PUNT_KICK', 'Space inside the window');
+        break;
+      }
       if (bc.t >= PUNT_WINDOW_S) {
         /* No kick. The ball is simply loose, which is a real rugby event and a real
          * penalty risk, not a failed input. */
@@ -464,7 +496,6 @@ export function stepCraft(
 
     /* ------------------------------------------------------------ PUNT_KICK */
     case 'PUNT_KICK': {
-      integrate(bc, dt);
       const u = lookVector(d);
       const k = p.attrs.SKL / 78;                  // 0.75 .. 1.15 across the squad sheet
       const swing = clamp(bc.t / SWING_S, 0, 1);
@@ -482,17 +513,18 @@ export function stepCraft(
        * coincidence: the first version of this hit nothing at 283 ms, correctly, and
        * that was a bug in the leg and not in the timing.
        *
-       * Only the VERTICAL anchor moves. The lateral arc still belongs to the leg, so a
-       * drop that went sideways out of the swing is still a miss. */
+       * The horizontal target was committed at Space, in the carrier frame.
+       * This honours inherited sprint momentum without homing the foot after
+       * a stripped/deflected ball; it can still miss. */
       const drop = bc.free!;
-      const tToContact = Math.max(0, SWING_S * 0.62);
+      const tToContact = Math.max(0, SWING_S * 0.62 - bc.t);
       const predictY = Math.max(BALL_R, drop.y + drop.vy * tToContact - 0.5 * G * tToContact * tToContact);
       const anchorY = clamp(predictY, 0.18, 1.25) + 0.62 * size * 0.94;
       if (!bc.foot) bc.foot = { x: 0, y: 0, z: 0 };
       const foot = bc.foot;
-      foot.x = p.x + u.x * (0.34 * size + back * 0.5);
+      foot.x = p.x + bc.kickOffset.x * swing + u.x * back * (1 - swing) * 0.25;
       foot.y = anchorY + down + back * 0.42;
-      foot.z = p.z + u.z * (0.34 * size + back * 0.5);
+      foot.z = p.z + bc.kickOffset.z * swing + u.z * back * (1 - swing) * 0.25;
       const b = bc.free!;
       const touch = Math.hypot(b.x - foot.x, b.y - foot.y, b.z - foot.z);
       if (touch <= BALL_R + 0.16) {
@@ -503,12 +535,21 @@ export function stepCraft(
         const vKick = V_KICK * (0.72 + 0.38 * k) * (0.55 + 0.45 * swing);
         const J = M_BALL * vKick;
         bc.lastImpulse = J;
-        b.vx = u.x * (J / M_BALL);
-        b.vz = u.z * (J / M_BALL);
+        // A boot adds an impulse to the released body's instantaneous momentum.
+        b.vx += u.x * (J / M_BALL);
+        b.vz += u.z * (J / M_BALL);
+        touchBall(b);
+        b.omega.x = u.z * 8; b.omega.y = 0; b.omega.z = -u.x * 8;
         /* A punt is not a line drive into the deck. The lift floor is what makes the
          * ball hang long enough to be chased, and it is the only place this kick
          * borrows judgement rather than geometry. */
-        b.vy = Math.max(6.4, u.y * (J / M_BALL) + 5.2 * (0.6 + 0.4 * k));
+        b.vy += Math.max(6.4, u.y * (J / M_BALL) + 5.2 * (0.6 + 0.4 * k));
+        if (bc.loose) {
+          bc.loose.source = 'PUNT'; bc.loose.age = 0; bc.loose.ignoreFor = 0.22;
+          bc.loose.releasedBy = { team: p.team, num: p.num };
+          bc.loose.lastTouch = { team: p.team, num: p.num };
+          bc.loose.kickLaw = beginKickChase(d, p, b.z);
+        }
         d.say('PUNTED AWAY');
         go(bc, d, 'FLIGHT', `struck at ${swing.toFixed(2)} of the swing, J = ${J.toFixed(2)} N·s`);
       } else if (bc.t > SWING_S * 2.4) {
@@ -519,38 +560,10 @@ export function stepCraft(
       break;
     }
 
-    /* --------------------------------------------------------------- FLIGHT */
-    case 'FLIGHT': {
-      const b = bc.free!;
-      integrate(bc, dt);
-      bc.lastDistance = Math.hypot(b.x - p.x, b.z - p.z);
-      /* A kicked ball in this engine belongs to the phase rules, so the flight ends
-       * the moment it is gatherable: on the deck and rolling, or touched by anyone.
-       * The handoff is one call — `startOpen` — because inventing a second
-       * "after a kick" state is how a ball ends up owned by two systems. */
-      const catcher = nearestTo(d, b.x, b.z, 1.35);
-      if (b.y <= BALL_R + 0.02 && Math.abs(b.vy) < 1.2) {
-        resolveLoose(d, bc, catcher, 'the ball came to earth');
-      } else if (catcher && Math.hypot(catcher.x - b.x, catcher.z - b.z) < 0.9 && b.y < 1.9) {
-        const team = catcher.team === bc.team ? bc.team : (bc.team === 'A' ? 'B' : 'A');
-        resolveLoose(d, bc, catcher, `fielded by ${shortName(catcher)}`, team);
-      }
-      break;
-    }
-
-    /* ---------------------------------------------------------------- LOOSE */
+    /* Flight and loose are presentation states only. stepLooseBall already
+     * applied gravity/contacts and checked real gathers BEFORE the human gate. */
+    case 'FLIGHT':
     case 'LOOSE': {
-      integrate(bc, dt);
-      const b = bc.free!;
-      const catcher = nearestTo(d, b.x, b.z, 1.2);
-      /* Anyone within reach picks it up; if it stops moving, whoever is nearest takes
-       * it. There is no scramble state here on purpose — the phase's own breakdown
-       * rules take over the instant the ball has an owner again. */
-      if (catcher && Math.hypot(catcher.x - b.x, catcher.z - b.z) < 0.8) {
-        resolveLoose(d, bc, catcher, 'picked up off the deck');
-      } else if (bc.t > 2.2) {
-        resolveLoose(d, bc, catcher ?? null, 'nothing but a ball on the ground', bc.team === 'A' ? 'B' : 'A');
-      }
       bc.l.reach = Math.max(0, bc.l.reach - dt * 4);
       bc.r.reach = Math.max(0, bc.r.reach - dt * 4);
       break;
@@ -572,9 +585,12 @@ export function stepCraft(
 /* ------------------------------------------------------------------ verbs -- */
 
 /** LMB in reach. The ball leaves the phase's hands and comes to the chest. */
-function takeBall(d: Director, bc: BallCraft, p: Live, b: { x: number; y: number; z: number }) {
+function takeBall(d: Director, bc: BallCraft, p: Live) {
+  const newPossession = !!bc.free || d.op!.attacking !== p.team;
+  if (newPossession) gatherLooseBall(d, p);
   const s = d.op!;
   bc.free = null;
+  bc.loose = null;
   bc.ownsBall = true;
   bc.window = 0;
   /* `ball.live` is the PASS-flight flag and nothing else; stealing it for a loose
@@ -582,31 +598,27 @@ function takeBall(d: Director, bc: BallCraft, p: Live, b: { x: number; y: number
    * would fly to a man who was never thrown at. The free ball lives on `bc.free`,
    * which the renderer is told to prefer. */
   s.ball.live = false;
-  s.ball.x = b.x; s.ball.y = b.y; s.ball.z = b.z;
+  touchBall(s.ball);
+  weldBall(s.ball, p);
   s.carrierNum = p.num;
+  s.carrierX = p.x; s.carrierZ = p.z;
   /* T-18's catch grace, the same as a pass: a man gathering a bomb is not a man who
    * can be hit for a knock-on on the frame he takes it. */
   s.heldT = 0;
   s.protect = Math.max(s.protect, 0.25);
   d.setCtrl(s.attacking, p.num);
-  d.run(s.attacking, p.num).carries++;
+  if (!newPossession) d.run(s.attacking, p.num).carries++;
   d.refreshPassOptions();
   d.say('SAFE HANDS');
 }
 
-/** Releasing LMB: the ball leaves the hands at thigh height with almost no velocity.
- *  A drop punt is a release, not a throw, so the vertical start speed is small and
- *  the whole of the distance comes from the boot. */
-function dropBall(bc: BallCraft, p: Live, side: number, size: number) {
+/** A release, not a throw: preserve the full sprint velocity, plus a small
+ * upward separation impulse. The body starts at exactly the held socket. */
+function dropBall(d: Director, bc: BallCraft, p: Live) {
   bc.ownsBall = false;
-  _free.x = p.x + 0.1 * size * side;
-  _free.y = 1.02 * size;
-  _free.z = p.z + 0.18 * size * side;
-  _free.vx = p.vx * 0.35;
-  _free.vy = 0.55;
-  _free.vz = p.vz * 0.35;
-  _free.bounces = 0;
-  bc.free = _free;
+  const b = bc.looseBody;
+  detachBall(b, p, { x: 0, y: M_BALL * 0.4, z: 0 });
+  adoptLooseBall(d, b, 'DROP', p, false, PUNT_WINDOW_S + SWING_S + 0.16);
   bc.window = PUNT_WINDOW_S;
   bc.t = 0;
 }
@@ -634,67 +646,19 @@ function ballGrip(d: Director): boolean {
 function knockOn(d: Director, bc: BallCraft, p: Live, why: string, striker?: Live) {
   const s = d.op!;
   bc.ownsBall = false;
-  _free.x = s.ball.x;
-  _free.y = s.ball.y;
-  _free.z = s.ball.z;
-  _free.vx = p.vx * 0.2;
-  _free.vy = 0.2;
-  _free.vz = p.vz * 0.2;
-  if (striker) {
-    /* The strip's kick rides on top of the spill: the hand that MADE contact
-     * decides the direction, capped at two metres per second so the ruck-side
-     * scramble physics stay the same game the ball-carrier audit calibrated. */
-    _free.vz += clamp((striker.vz - p.vz) * 0.5, -2.2, 2.2);
-  }
-  _free.bounces = 0;
-  bc.free = _free;
+  const b = bc.looseBody;
+  const stripX = striker ? clamp((striker.vx - p.vx) * 0.5, -2.2, 2.2) : 0;
+  const stripZ = striker ? clamp((striker.vz - p.vz) * 0.5, -2.2, 2.2) : 0;
+  detachBall(b, p, { x: M_BALL * stripX, y: M_BALL * 0.2, z: M_BALL * stripZ });
+  touchBall(b);
+  s.ball.socket = null;
+  adoptLooseBall(d, b, 'STRIP', p, false, 0.28);
   const dir = s.attacking === 'A' ? 1 : -1;
-  if (isForwardLoss({ ballVz: _free.vz, handlerVz: p.vz, dir }, fwdProfile(d.options.fwdPass ?? 1))) {
-    d.openKnockOnAdvantage(p.team, s.ball.x, s.ball.z);
+  if (isForwardLoss({ ballVz: b.vz, handlerVz: p.vz, dir }, fwdProfile(d.options.fwdPass ?? 1))) {
+    d.openKnockOnAdvantage(p.team, b.x, b.z);
   }
   d.say('DROPPED IT');
   go(bc, d, 'LOOSE', why);
-}
-
-/** One integration step for the free ball: gravity, one unit of air drag, and a
- *  restitution that is measured off a ball rather than chosen for feel — a rugby
- *  ball on dry grass keeps about 40% of its drop height, and it is dead flat after
- *  the third contact. */
-function integrate(bc: BallCraft, dt: number) {
-  const b = bc.free;
-  if (!b) return;
-  b.vy -= G * dt;
-  const drag = 1 - 0.06 * dt;
-  b.vx *= drag; b.vz *= drag;
-  b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
-  if (b.y <= BALL_R) {
-    b.y = BALL_R;
-    if (b.vy < -0.4) {
-      b.vy = -b.vy * 0.42;
-      b.vx *= 0.72; b.vz *= 0.72;
-      b.bounces++;
-    } else {
-      b.vy = 0;
-      b.vx *= 1 - 2.6 * dt; b.vz *= 1 - 2.6 * dt;
-    }
-  }
-}
-
-/** Hand the ball back to the phase and let its own rules decide what a loose ball
- *  means: a gather by the other side is a turnover, and both go through `startOpen`. */
-function resolveLoose(d: Director, bc: BallCraft, who: Live | null, why: string, team?: 'A' | 'B') {
-  const b = bc.free;
-  const t = team ?? who?.team ?? bc.team;
-  const atX = b ? b.x : (d.op?.carrierX ?? 0);
-  const atZ = b ? b.z : (d.op?.carrierZ ?? 0);
-  bc.free = null;
-  bc.ownsBall = false;
-  bc.foot = null;
-  bc.window = 0;
-  if (who) d.setCtrl(t, who.num);
-  d.startOpen(t, clamp(atX, -33, 33), clamp(atZ, -58, 58));
-  if (t !== bc.team) d.say('TURNOVER — KICK CHASE WON');
-  go(bc, d, 'IDLE', why);
 }
 
 function nearestDefender(d: Director, p: Live): Live | null {
@@ -705,16 +669,6 @@ function nearestDefender(d: Director, p: Live): Live | null {
     if (dd < bd) { bd = dd; best = q; }
   }
   return bd < 4 ? best : null;
-}
-
-function nearestTo(d: Director, x: number, z: number, within: number): Live | null {
-  let best: Live | null = null, bd = within;
-  for (const q of d.live) {
-    if (q.sinbin > 0 || q.down) continue;
-    const dd = Math.hypot(q.x - x, q.z - z);
-    if (dd < bd) { bd = dd; best = q; }
-  }
-  return best;
 }
 
 /* `Live` deliberately carries no name — the squad sheet owns names and the live body

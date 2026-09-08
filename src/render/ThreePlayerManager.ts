@@ -25,6 +25,7 @@ import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
 import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
+import { ballReach } from '../game/engine/ballAwareness';
 import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
@@ -34,7 +35,8 @@ import { RagdollPlayback, pickClip } from './ragdollClips';
 import { resolveRagBones, captureRestDirs, seedFromPose, driveRig } from './ragdollRig';
 import type { RagBones, RestDirs } from './ragdollRig';
 import { renderHealth, noteRenderFault } from './ThreeCanvas';
-import { turfRiseM } from './ThreeEnvironment';
+import { turfRiseM, buildRugbyBallMesh } from './ThreeEnvironment';
+import { BALL_MINOR, ballContact, type BallQuaternion } from '../game/engine/ballPhysics';
 
 /* Absolute path from the origin root. `public/assets/models/` is served by
  * Vite at `/assets/models/`, which is also the URL the preload link in
@@ -312,6 +314,8 @@ interface PlayerInstance {
      *  weight from `reach` because the latch and the catch aim at different things and
      *  a latch must not be able to cancel a catch mid-air. */
     craftW: number;
+    /** A live loose-ball scoop bends with feet planted, not a diving root lift. */
+    pickup: boolean;
     /** the solved elbow/hand pairs, in pitch metres, for the forearm pass. Plain
      *  numbers rather than THREE.Vector3s: this is written every frame for one player
      *  and allocating six fields a frame in the hot path is how a GC pause gets made. */
@@ -444,7 +448,7 @@ export class ThreePlayerManager {
   /* --- match day (SPEC_24): soiling and wetness, driven from conditions --- */
   private soilRate = 0;
   private wetLevel = 0;
-  private ballMat: THREE.MeshStandardMaterial | null = null;
+  private ballMat: THREE.MeshToonMaterial | null = null;
   private static readonly MUD = new THREE.Color('#5a4227');
   private static readonly SOAK = new THREE.Color('#0e1620');
   private badgeTextures = new Map<string, THREE.Texture>();
@@ -977,12 +981,6 @@ export class ThreePlayerManager {
    * retires the same way: the solver self-settles inside MAX_SIM_TIME, `ragW`
    * fades it, and the get-up clip has him by then.
    */
-  /** how hard the ball is being fought over this frame, 0..1 (engine/hands.ts). */
-  private ruckTug = 0;
-  /** free-running phase for the contested-ball wobble — the manager has no clock,
-   *  and a second THREE.Clock in a render layer that already has one per rig would
-   *  be a second idea of what time it is. */
-  private ballWobble = 0;
 
   /**
    * WHICH MEN ARE REACHING FOR THE BALL — a relay of one number per man, nothing more.
@@ -1005,6 +1003,18 @@ export class ThreePlayerManager {
       if (inst.st.hand !== 0) inst.st.hand = 0;
       if (inst.st.strip !== 0) inst.st.strip = 0;
       if (inst.proc.craftW !== 0) inst.proc.craftW = 0;
+      inst.proc.pickup = false;
+    }
+    // Ordinary CPU/human carries target the SAME torso socket as explicit
+    // secured grips. The hands follow the ball; a swinging wrist never drags
+    // the simulation's release point a metre away from what is rendered.
+    if (d.phase === 'OPEN_PLAY' && d.op && !d.op.ball.live && !d.bc.free) {
+      const inst = this.pool.get(this.key(d.op.attacking, d.op.carrierNum));
+      if (inst) {
+        const b = d.op.ball, s = RENDER_SCALE;
+        _ballAim.set(b.x * s, (b.y + turfRiseM(b.x)) * s, -b.z * s);
+        inst.st.hand = 0.7;
+      }
     }
     /* SPEC_25 — THE CATCH. Two-bone IK lives in the engine (`engine/ballcraft.ts`)
      * because it decides where the hands and the ball are; what the rig needs is the
@@ -1014,16 +1024,16 @@ export class ThreePlayerManager {
      * it — the strain is the mechanic, and a hand that snaps onto an unreachable ball
      * would delete the whole reason to hold the button early. */
     const bc = d.bc;
-    if (bc && bc.state !== 'IDLE') {
+    if (bc.state === 'HANDS_READY' || bc.state === 'DROP_BALL' || bc.state === 'BALL_SECURED' || bc.state === 'PUNT_KICK') {
       const inst = this.pool.get(this.key(bc.team as KitTeam, bc.num));
       if (inst) {
-        const b = bc.free ?? bc.chest;
+        const b = bc.free ?? d.op?.ball ?? bc.chest;
         const s = RENDER_SCALE;
         _ballAim.set(b.x * s, b.y * s + this.groundY(b.x), -b.z * s);
         inst.st.hand = bc.state === 'BALL_SECURED'
           ? 0.5
           : Math.max(0.2, (bc.l.reach + bc.r.reach) * 0.5);
-        inst.proc.craftW = bc.state === 'HANDS_READY' || bc.state === 'DROP_BALL' ? 1 : 0;
+        inst.proc.craftW = bc.state === 'HANDS_READY' || bc.state === 'DROP_BALL' || bc.state === 'BALL_SECURED' ? 1 : 0;
         /* The elbow is the half of a two-bone chain that a single aim-at-a-point
          * cannot express, so it is passed through as data and applied to the forearm
          * after the reach has done its work. */
@@ -1033,9 +1043,20 @@ export class ThreePlayerManager {
           hx: bc.r.hand.x, hy: bc.r.hand.y, hz: bc.r.hand.z };
       }
     }
+    const reading = d.ballBehaviour.read;
+    if (reading?.body && (reading.kind === 'PASS' || reading.kind === 'KICK' || reading.kind === 'LOOSE')) {
+      const b = reading.body, s = RENDER_SCALE;
+      _ballAim.set(b.x * s, b.y * s + this.groundY(b.x), -b.z * s);
+      for (const p of d.live) {
+        const inst = this.pool.get(this.key(p.team, p.num));
+        if (!inst) continue;
+        const reach = ballReach(d, p);
+        inst.st.hand = Math.max(inst.st.hand, reach);
+        inst.proc.pickup = reach > 0 && b.y < 0.55;
+      }
+    }
     const bd = d.bd;
-    if (!bd || (d.phase !== 'BREAKDOWN' && d.phase !== 'BREAKDOWN_REPLAY')) { this.ruckTug = 0; return; }
-    this.ruckTug = bd.hands?.tug ?? 0;
+    if (!bd || (d.phase !== 'BREAKDOWN' && d.phase !== 'BREAKDOWN_REPLAY')) return;
     for (const p of bd.players) {
       const inst = this.pool.get(this.key(p.team as KitTeam, p.num));
       if (!inst) continue;
@@ -1098,27 +1119,12 @@ export class ThreePlayerManager {
   private buildBall(): THREE.Group {
     const g = new THREE.Group();
     g.name = 'Ball3D';
-    const geo = new THREE.SphereGeometry(0.16, 18, 12);
-    geo.scale(1.0, 0.78, 1.65);
-    const ballSkin = new THREE.MeshStandardMaterial({
-      // Waxed leather: tight specular, no metal.
-      color: 0xb8562f, roughness: 0.45, metalness: 0.0,
-      transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
-    });
-    this.ballMat = ballSkin;
-    const ballMesh = new THREE.Mesh(geo, ballSkin);
-    ballMesh.castShadow = true;
-    ballMesh.receiveShadow = true;
-    g.add(ballMesh);
-    const seam = new THREE.Mesh(
-      new THREE.TorusGeometry(0.13, 0.007, 6, 20),
-      new THREE.MeshBasicMaterial({
-        color: 0x24201c, transparent: false, opacity: 1, depthWrite: true, side: THREE.FrontSide,
-      }),
-    );
-    seam.rotation.y = Math.PI / 2;
-    g.add(seam);
-    g.visible = false;
+    const mesh = buildRugbyBallMesh();
+    this.ballMat = mesh.material;
+    g.add(mesh);
+    g.scale.setScalar(RENDER_SCALE);
+    g.position.y = (BALL_MINOR + turfRiseM(0)) * RENDER_SCALE;
+    // Visible from construction, even if the squad rig fails to load.
     return g;
   }
 
@@ -1255,8 +1261,10 @@ export class ThreePlayerManager {
        * going, a slow man holds his last facing. `rf` is the engine's own facing
        * and wins when he is standing still, so a scrum-half waiting on the ball
        * is not spinning on the spot. */
-      if (spd > 2.2) {
-        let dy = Math.atan2(vx, vz) - st.face;
+      const watch = spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
+      if (spd > 2.2 || watch) {
+        const heading = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
+        let dy = heading - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
         st.face += dy * (1 - Math.exp(-step * 10));
@@ -1407,7 +1415,7 @@ export class ThreePlayerManager {
       ragPlay: null, ragBlend: 0, ragRate: 1,
       proc: {
         tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0, stagA: 0,
-        craftW: 0, craftL: null, craftR: null,
+        craftW: 0, pickup: false, craftL: null, craftR: null,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -2188,12 +2196,16 @@ export class ThreePlayerManager {
        * looks to the camera, and the rig would have had him grabbing at air. */
       const w = REACH_MIN + (1 - REACH_MIN) * Math.min(1, inst.st.hand + inst.st.strip * 0.35);
       this.applyArmReach(inst, _ballAim, w, step);
-      this.applyTorsoDip(inst, w, step);
+      // A deck-level scoop bends at the hips; an overhead catch (or ordinary
+      // carry) must not get the jackal's head-down-over-the-grass pose.
+      const low = Math.max(0, Math.min(1,
+        (0.95 - (_ballAim.y - this.groundY(inst.actor.rx)) / RENDER_SCALE) / 0.75));
+      this.applyTorsoDip(inst, w * low, step);
       /* pitch his chest over it. This is the jackal's pose and the one shape a
        * breakdown cannot be drawn without: hands under the ball, weight in front of
        * the defence. It shares `applyBodyTilt` with the diving tackler, so it
        * counter-rotates the shadow and lifts the pivot on the same rules. */
-      this.applyBodyTilt(inst, Math.max(wantTilt, HAND_OVER_BALL_TILT * w), step, true);
+      this.applyBodyTilt(inst, Math.max(wantTilt, HAND_OVER_BALL_TILT * w * low), step, !inst.proc.pickup);
     } else if (inst.proc.craftW > 0.01) {
       /* A CATCH IS NOT A LATCH. The reach above aims a bone at a point; a two-bone
        * chain also needs the elbow in the right plane, or the forearm cuts across the
@@ -2275,8 +2287,9 @@ export class ThreePlayerManager {
 
       // heading: a moving man walks where he is going (smoothed); a slow man
       // holds his last facing.
-      if (st.spd > 2.2) {
-        const target = Math.atan2(vx, vz);
+      const watch = st.spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
+      if (st.spd > 2.2 || watch) {
+        const target = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
         let dy = target - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
@@ -2671,111 +2684,67 @@ export class ThreePlayerManager {
     this.updateBall(d, step);
   }
 
-  private updateBall(d: Director, dt: number) {
+  private updateBall(d: Director, _dt: number) {
     const s = RENDER_SCALE;
-    const free = { x: 0, y: 0, z: 0, visible: false };
-    let carrier: PlayerInstance | null = null;
-
-    if (d.phase === 'CHAOS_SCRIM' && d.chaos && d.chaos.ballSecured) {
-      /* BALL SECURED — the ball is welded to the human carrier's hand socket. */
-      carrier = this.pool.get(this.key(d.chaos.player.team as KitTeam, d.chaos.player.num)) ?? null;
-    } else if (d.phase === 'SCRUM' || d.phase === 'REPLAY') {
-      const sc = d.scrim!;
-      if (sc && sc.ball.state !== 'HELD') {
-        /* The ball travels IN the tunnel: its draw position carries the
-         * tunnel's displacement, the same `netDrive` the packs displace by. */
-        free.x = d.scrumAnchor.x + sc.ball.x; free.y = sc.ball.y + 0.06; free.z = d.scrumAnchor.z + sc.ball.z + sc.netDrive; free.visible = true;
-      }
-    } else if ((d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') && d.lo && d.lo.ball.state !== 'HELD') {
-      free.x = d.lo.ball.x; free.y = d.lo.ball.y + 0.05; free.z = d.lo.ball.z; free.visible = true;
-    } else if ((d.phase === 'KICK' || d.phase === 'KICK_REPLAY') && d.kk) {
-      const k = d.kk;
-      if (k.stage !== 'SETUP') { free.x = k.bx; free.y = k.by + 0.12; free.z = k.bz; free.visible = true; }
-    } else if (d.phase === 'OPEN_PLAY' && d.op) {
-      const o = d.op;
-      /* SPEC_25 — a ball that has been dropped or punted is a loose ball on screen
-       * even though the phase still counts the catcher as its owner (that is how the
-       * laws and the watchdogs stay satisfied through a 0.3 s drop). `ball.live` is
-       * the PASS flag and cannot be reused for it, so the craft's own free body is
-       * what the ball is drawn from. */
-      if (d.bc?.free) {
-        const f = d.bc.free;
-        free.x = f.x; free.y = f.y; free.z = f.z; free.visible = true;
-      } else if (o.ball.live) { free.x = o.ball.x; free.y = o.ball.y; free.z = o.ball.z; free.visible = true; }
-      else carrier = this.pool.get(this.key(o.attacking === 'A' ? 'A' : 'B', o.carrierNum)) ?? null;
-    } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
-      const m = d.ml;
-      const yawRad = (m.yaw * Math.PI) / 180;
-      const lz = -m.dir * m.ballRank * 0.78;
-      free.x = m.x - lz * Math.sin(yawRad); free.y = 1.02;
-      free.z = m.z + lz * Math.cos(yawRad); free.visible = true;
-    } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
-      const b = d.bd;
-      const cr = b.players.find((p) => p.role === 'CARRIER');
-      if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
-        free.x = b.ball.x; free.y = 0.16; free.z = b.ball.z; free.visible = true;
-      } else if (cr) {
-        free.x = cr.x + 0.28; free.y = cr.down ? 0.3 : 1.05; free.z = cr.z; free.visible = true;
-      }
-    }
-
-    /* A wet ball is a darker ball, and it is the one piece of kit that is
-     * genuinely soaked through all match. The engine already widened handling
-     * error by `wetnessOf()`; this is that number, seen. */
-    if (this.ballMat) {
-      const w = this.wetLevel;
-      this.ballMat.color.setHex(0xb8562f).multiplyScalar(1 - w * 0.26);
-      this.ballMat.roughness = 0.45 - w * 0.12;
-      this.ballMat.emissive.copy(ThreePlayerManager.SOAK).multiplyScalar(0.03 + w * 0.12);
-    }
-
-    this.ball.visible = free.visible || !!carrier;
-    if (carrier) {
-      /* PART 2 (BALL SOCKETING). The ball used to be synced to the 2D
-       * simulation's ground coordinates even while a man was carrying it, so
-       * it slid along the floor beside him. A carried ball is not a simulated
-       * body: its world matrix is OVERRIDDEN by the carrying hand's. Parent
-       * it to the hand bone (Quaternius rig: hand_r, with the forearm and the
-       * left hand as fallbacks) and let the skeleton drive it; the parent
-       * root already carries RENDER_SCALE, so the socket offsets below are in
-       * model metres. */
-      const hand = this.carryBone(carrier);
+    let point: { x: number; y: number; z: number } | null = null;
+    let q: BallQuaternion | null = null;
+    if (d.phase === 'CHAOS_SCRIM' && d.chaos?.physics) {
+      // The physical scrimmage owns its welded AND spilled world body.
+      point = d.chaos.physics.ball.translation(); q = d.chaos.physics.ball.rotation();
+    } else if (d.phase === 'CHAOS_SCRIM' && d.chaos?.ballSecured) {
+      const carrier = this.pool.get(this.key(d.chaos.player.team as KitTeam, d.chaos.player.num));
+      const hand = carrier ? this.carryBone(carrier) : null;
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
         this.ball.position.set(0, 0.05, 0.03);
         this.ball.rotation.set(0.2, 0, Math.PI / 2.4);
         this.ball.scale.setScalar(1);
+        this.ball.visible = true;
+        return;
       }
-    } else if (free.visible) {
-      if (this.ball.parent !== this.scene) {
-        this.ball.parent?.remove(this.ball);
-        this.scene.add(this.ball);
-      }
-      /* THE BALL IS BEING FOUGHT OVER. The engine's contest publishes the direction
-       * the hands are dragging in and how hard (`pullX/pullZ`, `tug`), and before
-       * this the number went nowhere: the ball at a ruck sat welded to the turf like
-       * a traffic cone while eight men shoved at it, which is the single detail that
-       * most told the player the pile was decoration. Half a metre of lean, a few
-       * centimetres off the deck as the grip is wrenched, and a roll that speeds up
-       * under the tug — all of it presentation, none of it moving the ball's engine
-       * position, because a ball the rig moved would be two owners of one position. */
-      const bd = d.bd;
-      const tug = this.ruckTug;
-      const px = bd?.hands?.pullX ?? 0, pz = bd?.hands?.pullZ ?? 0;
-      if (tug > 0.02) this.ballWobble += dt * 26;
-      const wob = tug > 0.02 ? Math.sin(this.ballWobble) * 0.045 * tug : 0;
-      this.ball.position.set(
-        (free.x + px + wob) * s,
-        free.y * s + this.groundY(free.x) + tug * 0.035 * s,
-        (-free.z + pz + wob * 0.6) * s,
-      );
-      this.ball.rotation.z += dt * (6 + tug * 9);
-      this.ball.rotation.x += dt * (3 + tug * 5);
-      this.ball.scale.setScalar(s);
-    } else if (this.ball.parent !== this.scene) {
-      this.ball.parent?.remove(this.ball);
-      this.scene.add(this.ball);
     }
+    // Replay freezes the pose already on screen. It must not select a stale
+    // scrum ball when the frozen phase was a kick, lineout, or open play.
+    if (d.phase === 'REPLAY' && d.replayOf) return;
+    if (d.phase === 'OPEN_PLAY' && d.op) {
+      const body = d.bc.free ?? d.op.ball;
+      point = body; q = body.q;
+    } else if ((d.phase === 'KICK' || d.phase === 'KICK_REPLAY') && d.kk) {
+      point = { x: d.kk.bx, y: d.kk.by, z: d.kk.bz }; q = d.kk.body.q;
+    } else if ((d.phase === 'LINEOUT' || d.phase === 'LINEOUT_REPLAY') && d.lo) {
+      // Includes the hooker's HELD throw, not only airborne lineouts.
+      point = d.lo.ball; q = d.lo.ball.q;
+    } else if ((d.phase === 'SCRUM' || d.phase === 'REPLAY') && d.scrim) {
+      const sc = d.scrim;
+      point = { x: d.scrumAnchor.x + sc.ball.x, y: Math.max(BALL_MINOR, sc.ball.y),
+        z: d.scrumAnchor.z + sc.ball.z + sc.netDrive };
+    } else if ((d.phase === 'MAUL' || d.phase === 'MAUL_REPLAY') && d.ml) {
+      const m = d.ml, yaw = m.yaw * Math.PI / 180, lz = -m.dir * m.ballRank * 0.78;
+      point = { x: m.x - lz * Math.sin(yaw), y: 1.02, z: m.z + lz * Math.cos(yaw) };
+      q = { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) };
+    } else if ((d.phase === 'BREAKDOWN' || d.phase === 'BREAKDOWN_REPLAY') && d.bd) {
+      const b = d.bd, cr = b.players.find((p) => p.role === 'CARRIER');
+      if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') {
+        point = { x: b.ball.x, y: b.ball.y ?? BALL_MINOR, z: b.ball.z };
+      } else if (cr) {
+        point = { x: cr.x + 0.28, y: cr.down ? 0.3 : 1.05, z: cr.z };
+      }
+    }
+    if (this.ballMat) {
+      this.ballMat.color.setHex(0xffffff).multiplyScalar(1 - this.wetLevel * 0.18);
+    }
+    // One permanent mesh, including dead-ball rituals and missing-rig fallbacks.
+    this.ball.visible = true;
+    if (this.ball.parent !== this.scene) this.scene.attach(this.ball);
+    this.ball.scale.setScalar(s);
+    if (!point) return; // no new phase pose: keep the last valid world transform
+    this.ball.position.set(point.x * s,
+      (Math.max(q ? ballContact(q).height : BALL_MINOR, point.y) + turfRiseM(point.x)) * s,
+      -point.z * s);
+    // Reflection of the simulation's +z into THREE's -z: M R(q) M.
+    // No render-time spin or wobble: a sleeping body must be visually still.
+    if (q) this.ball.quaternion.set(-q.x, -q.y, q.z, q.w);
+    else this.ball.quaternion.identity();
   }
 
   /**

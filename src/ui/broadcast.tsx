@@ -166,7 +166,7 @@ export function ScoreBug({ d, objective, density }: {
             );
           })}
           {density !== 'MINIMAL' && (
-            <span className="text-[#6f7f96]">{d.op && d.op.phase > 0 ? `PHASE ${d.op.phase}` : ''} · {d.possession === 'A' ? d.A.nation.short : d.B.nation.short} HAVE IT</span>
+            <span className="text-[#6f7f96]">{d.op && d.op.phase > 0 ? `PHASE ${d.op.phase}` : ''} · {d.bc.free ? 'LOOSE BALL' : d.op?.ball.live || d.kk?.stage === 'FLIGHT' ? 'BALL IN FLIGHT' : `${d.possession === 'A' ? d.A.nation.short : d.B.nation.short} HAVE IT`}</span>
           )}
         </div>
       </div>

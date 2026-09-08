@@ -92,15 +92,15 @@ console.log('PURE — (b) the ten\'s pocket depth');
     kick: null, ownEdgeZ: -62,
   };
   const m = evaluateBacklineTree(10, base)!;
-  const depth = (m.z - base.ball.z) * base.dir;
+  const depth = (base.ball.z - m.z) * base.dir;
   check(m.node === 'ten-pocket', 'with a carrying 9 the ten runs the pocket');
   check(depth >= 3.5 && depth <= 10.5, `the pocket depth is inside the band (${depth.toFixed(2)} m)`);
   check(m.x < base.ball.x, 'the pocket sits openside of the ball (the 9\'s release is a flat angled pass)');
-  // the 12 and 13: the flat lines, in front of the gain line
+  // the 12 and 13: receiving lines behind and outside the ten, not forward-pass targets
   const m12 = evaluateBacklineTree(12, base)!;
   const m13 = evaluateBacklineTree(13, base)!;
   check(m12.node === 'twelve-flat' && m13.node === 'thirteen-flat', 'the 12 and 13 run the flat lines off the 9');
-  check((m12.z - base.ball.z) > 0 && (m13.z - base.ball.z) > 0, 'both flat lines finish in front of the gain line');
+  check(m12.z < m.z && m13.z < m12.z, 'the ten, twelve and thirteen form a legal backwards receiving echelon');
   check(Math.abs(m12.x - base.ball.x) < Math.abs(m13.x - base.ball.x), 'the 12 is the inside flat, the 13 the tip lane');
 }
 
@@ -273,8 +273,9 @@ for (let seed = 1; seed <= 16; seed++) {
 
     /* (b) the pocket: while the 9 carries, the 10's MARK sits in the band
      * (the contract the tree prices) and his POSITION arrives by the
-     * second — the mark is the contract, the position is physics */
-    if (d.phase === 'OPEN_PLAY' && d.op && d.op.carrierNum === 9 && !d.op.ball.live) {
+     * second — the mark is the contract, the position is physics. A free
+     * ball still retains the previous carrierNum; that is NOT a carry. */
+    if (d.phase === 'OPEN_PLAY' && d.op && d.op.carrierNum === 9 && !d.op.ball.live && !d.bc.free) {
       const atk = d.op.attacking;
       const ten = d.live.find((p: any) => p.team === atk && p.num === 10);
       const nine = d.live.find((p: any) => p.team === atk && p.num === 9);
@@ -282,11 +283,11 @@ for (let seed = 1; seed <= 16; seed++) {
       const dir = atk === 'A' ? 1 : -1;
       const ballZ = nine.z; // the 9 carries the ball
       pocketLiveFrames++;
-      const markDepth = (ten.tz - ballZ) * dir;
+      const markDepth = (ballZ - ten.tz) * dir;
       pocketLiveSum += markDepth;
       if (markDepth < 1.5 || markDepth > 13) pocketLiveBad++;
       if (d.op.t < 1.0) {
-        const posDepth = (ten.z - ballZ) * dir;
+        const posDepth = (ballZ - ten.z) * dir;
         pocketPosFrames++;
         pocketPosSum += posDepth;
         if (posDepth < -2.5) pocketPosBad++;
@@ -330,7 +331,7 @@ console.log(`  rucks=${rucks} watchdogTrips=${trips}`);
 console.log(`  (a) nine ruck frames=${nineRuckFrames} markOffside(transit)=${nineMarkOffside} markOffside(standing)=${nineSlowMarkOffside} bodySustained≥2m frames=${nineBodySustained} (max ${nineBodyMax.toFixed(2)} m) breachEpisodes=${nineBreachEpisodes}`);
 console.log(`      authoritative base marks: ${nineBaseTotal} written, ${nineOffsideTotal} in front of the plane`);
 console.log(`  (b) pocket marks: ${pocketLiveFrames} frames, meanDepth=${pocketLiveFrames ? (pocketLiveSum / pocketLiveFrames).toFixed(2) : '-'} m, outOfBand=${pocketLiveBad}`);
-console.log(`      pocket positions, first 1.0 s: ${pocketPosFrames} frames, meanDepth=${pocketPosFrames ? (pocketPosSum / pocketPosFrames).toFixed(2) : '-'} m, leftBehind(<-2.5 m)=${pocketPosBad}`);
+console.log(`      pocket positions, first 1.0 s: ${pocketPosFrames} frames, meanDepth=${pocketPosFrames ? (pocketPosSum / pocketPosFrames).toFixed(2) : '-'} m, ranAhead(>2.5 m)=${pocketPosBad}`);
 console.log(`      tree pocketFrames=${pocketStatFrames} meanDepth=${pocketStatFrames ? (pocketStatSum / pocketStatFrames).toFixed(2) : '-'} m`);
 console.log(`  (c) pose frames=${poseFrames} marks fully correct=${poseMarksOk}; pendulumFrames=${pendulumTotal} thirds=${JSON.stringify(pendThirdSeen)}`);
 
@@ -347,7 +348,7 @@ if (pocketLiveFrames > 100) {
   check(mean >= 3 && mean <= 12, `the pocket mark depth (${mean.toFixed(2)} m) is inside the 3–12 m band`);
   check(pocketLiveBad <= 0.08 * pocketLiveFrames, `the pocket mark is inside the hittable band on ${100 * (1 - pocketLiveBad / pocketLiveFrames).toFixed(1)}% of frames`);
   check(pocketPosFrames > 50 && pocketPosBad <= 0.35 * pocketPosFrames,
-    `in the first second the ten arrives: ${100 * (1 - pocketPosBad / Math.max(1, pocketPosFrames)).toFixed(0)}% of the time he is within 2.5 m behind the ball`);
+    `in the first second the ten arrives: ${100 * (1 - pocketPosBad / Math.max(1, pocketPosFrames)).toFixed(0)}% of the time he has not overrun the ball by more than 2.5 m`);
 }
 check(pocketStatFrames > 50, `the pocket node priced ${pocketStatFrames} marks`);
 check(pocketStatFrames > 0 && pocketStatSum / pocketStatFrames >= 3.5 && pocketStatSum / pocketStatFrames <= 10.5,

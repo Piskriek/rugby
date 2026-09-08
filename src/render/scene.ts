@@ -14,17 +14,18 @@
  * humanoids rendered by ThreePlayerManager / ThreeCanvas. This module no
  * longer draws any character, limb or ball ink.
  *
- * BALL OWNERSHIP (Part 1 — hand socketing). The 3D ball is a single mesh
- * owned by ThreePlayerManager. It has exactly two states and this module
- * paints neither of them:
- *   HELD    parented to the ball-carrier's `hand_r` socket bone, so its
- *           world matrix is the hand's — the 2D simulation's ball
- *           coordinates are OVERRIDDEN for as long as a man is carrying it.
- *   IN FLIGHT / LOOSE  re-parented to the scene and synced every frame to
- *           the 2D simulation's ballistic trajectory (op.ball, kk, lo, bd).
- * The hand-off between the two happens in ThreePlayerManager.updateBall the
- * frame the engine flips `op.ball.live`, which is the same frame the passer's
- * one-shot Pass clip releases. Anything drawn here is telemetry only.
+ * BALL OWNERSHIP. ThreeEnvironment.buildRugbyBallMesh constructs the single
+ * 28 x 19 cm egg-shaped prolate mesh (SphereGeometry, local-X longitudinal
+ * axis, four-panel seam texture, MeshToonMaterial). ThreePlayerManager keeps
+ * it in the world from construction, through held play, releases and rituals,
+ * even when the player GLB is unavailable. This canvas never replaces it with
+ * a flat marker or HUD dot.
+ *
+ * The simulation's torso/hand socket owns a held ball's position AND q; the
+ * hands' IK reaches that socket. At release the same pose becomes the free
+ * body, carrying v_carrier + J/m. Rendering only maps (x,y,z,q) into THREE's
+ * z-reflected world and adds the pitch crown. It never invents spin or bounce.
+
  */
 import { Director } from '../game/director';
 import {

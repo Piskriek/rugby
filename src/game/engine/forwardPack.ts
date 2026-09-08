@@ -99,6 +99,7 @@ export interface PackContext {
   dir: 1 | -1;
   /** this man's own attacking axis */
   sigma: 1 | -1;
+  openSide?: 1 | -1;
   /** where he is */
   p: Pt;
   /** the ball / contact point the formation is anchored on */
@@ -250,7 +251,7 @@ export function gateEntry(g: RuckGate, v: BreakdownVolume, p: Pt, lateralBias = 
  *   - he has already passed through the gate this ruck → the mark stands;
  *   - he is already inside his corridor → the mark stands (he is passing now);
  *   - he is INSIDE the box without having come through the gate → EXIT: the
- *     nearest in-field side edge, purely lateral;
+ *     nearest in-field side edge, retiring toward his own side;
  *   - the mark is outside the box and neither his run to it nor his next
  *     LOOKAHEAD_S of momentum crosses the (grown) box → the mark stands;
  *   - otherwise he is planned AROUND the box to the gate entry point, via
@@ -284,10 +285,14 @@ export function routeThroughGate(
   const okR = flankR + LEG_OVERSHOOT_M * 0.5 < ROUTE_FIELD_HALF_M;
 
   if (insideVolume(v, gp)) {
-    /* a resident who is not through the gate: the shortest lawful exit is
-     * sideways, to whichever flank is in the field */
+    /* A resident exits OUT and BACK toward his own side. A purely sideways
+     * waypoint left a distributor running parallel to the offside line for
+     * over 0.7 s without retiring, even though his job said "get to the base".
+     * This is an exit from an occupied volume, not an entry through its side;
+     * after leaving it the normal flank/back/gate route still applies. */
     const side: 1 | -1 = !okL ? 1 : !okR ? -1 : p.x >= cx ? 1 : -1;
-    return { mark: { x: side > 0 ? flankR : flankL, z: p.z }, routed: true, leg: 'exit' };
+    const x = side > 0 ? flankR : flankL;
+    return { mark: { x, z: p.z - g.dir * Math.min(1.5, Math.abs(x - p.x)) }, routed: true, leg: 'exit' };
   }
 
   const test = grow(v, CROSS_MARGIN_M);
@@ -640,7 +645,7 @@ const EIGHT: PackNode[] = [
     name: 'NUMBER 8: link with a carrying 9',
     when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && !!c.carrier && c.carrier.num === 9 && !c.busy,
     act: (c) => {
-      const blind = blindSign(c.carrier!.x);
+      const blind = c.openSide ? -c.openSide : blindSign(c.carrier!.x);
       return {
         x: c.carrier!.x + blind * EIGHT_LINK_LATERAL_M,
         z: c.carrier!.z - c.dir * EIGHT_LINK_DEPTH_M,

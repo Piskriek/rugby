@@ -39,16 +39,16 @@
  *
  *   12 INSIDE CENTRE / 13 OUTSIDE CENTRE
  *        attack  → the FLAT LINES: the 12 crashes the inside shoulder, the
- *                    13 runs the flat tip lane — both in front of the gain
- *                    line when the 9/10 has the ball, so the move breaks the
- *                    gain line instead of orbiting it. A broken line → the
+ *                    13 runs the tip lane — both stage behind the handler
+ *                    and run forward onto a legal backwards pass before
+ *                    attacking the gain line. A broken line → the
  *                    TRAIL, inside and behind the carrier.
  *        defence → the BLITZ / JAM when the first two receivers have the
  *                    ball and the line is still connected; otherwise the
  *                    DRIFT that slides the outside passing lane shut.
  *
  *   11 LEFT WING / 14 RIGHT WING
- *        attack  → the WIDE EDGE: the finishing line that arrives ahead of
+ *        attack  → the WIDE EDGE: the finishing line that runs onto
  *                    the outside pass when the ball is in the winger's half
  *                    of the field. A line break inside → the SUPPORT TRAIL.
  *        defence → the PENDULUM (the back three): when the opposition's 9
@@ -75,7 +75,7 @@
 
 import { RuckGateGeometry } from './gates';
 import {
-  pendulumMark, pendulumSlot, isBackThree, PENDULUM_DEPTH_M,
+  pendulumMark, pendulumSlot, isBackThree, PENDULUM_DEPTH_M, ECHELON_STEP_METRES,
   type PendulumThird,
 } from '../behaviour/backline-echelon';
 
@@ -108,6 +108,8 @@ export interface BacklineContext {
   dir: 1 | -1;
   /** this man's own attacking axis */
   sigma: 1 | -1;
+  /** Stable live open-side choice; omitted by independent geometry fixtures. */
+  openSide?: 1 | -1;
   /** where he is */
   p: Pt;
   /** his velocity (the gate routing reads momentum, not position) */
@@ -174,17 +176,15 @@ export const POCKET_MAX_DEPTH_M = 10.5;
 export const TWELVE_LANE_M = 4.6;
 /** The 13's flat tip lane. */
 export const THIRTEEN_LANE_M = 8.6;
-/** Both flat lines finish this far AHEAD of the gain line — a flat line that
- *  finishes behind the gain line is a decoy, and a decoy does not break a
- *  drift. */
-export const FLAT_GAIN_LINE_LEAD_M = 1.6;
+/** Receiving lanes stage BEHIND the handler; they attack the gain line
+ * after the catch, not by demanding a forward pass while he still holds it. */
 /** The midfield pair's blitz window: seconds of open play in which a shoot
  *  still beats the receiver to the ball. */
 export const BLITZ_WINDOW_S = 0.7;
 export const BLITZ_RANGE_M = 15;
 
-/** The winger's finishing line: this far in front of the ball, on the edge. */
-export const WING_FINISH_LEAD_M = 7;
+/** The winger stays wide and behind the ball, ready to run onto the outside pass. */
+export const WING_RECEIVE_DEPTH_M = 4;
 export const WING_FINISH_X_M = 29.5;
 /** The ball must be in the winger's own half of the field for the edge line
  *  to be his — deeper in midfield the 13 and 15 own the wide channels. */
@@ -195,7 +195,7 @@ export const TRAIL_DEPTH_M = 4;
 
 /** The 15's late insertion, metres outside the 13's line. */
 export const FIFTEEN_INSERT_LATERAL_M = 10;
-export const FIFTEEN_INSERT_LEAD_M = 6;
+export const FIFTEEN_INSERT_DEPTH_M = 6;
 /** The 15 only inserts with ground to finish in. */
 export const FIFTEEN_INSERT_TO_LINE_M = 34;
 /** The pull-back link behind a catcher running the counter. */
@@ -215,6 +215,8 @@ export function blindSign(ballX: number): 1 | -1 {
 export function openSign(ballX: number): 1 | -1 {
   return blindSign(ballX) === 1 ? -1 : 1;
 }
+
+const attackingSide = (c: BacklineContext): 1 | -1 => c.openSide ?? openSign(c.ball.x);
 
 /**
  * THE 9'S BASE, AGAINST THE DYNAMIC HINDMOST LINE.
@@ -250,7 +252,7 @@ export function nineBaseX(
 }
 
 /**
- * THE 10'S POCKET DEPTH, METRES AHEAD OF THE BALL, IN THE ATTACKING DIRECTION.
+ * THE 10'S POCKET DEPTH, METRES BEHIND THE BALL, AWAY FROM THE ATTACKED LINE.
  *
  * Flat in the red zone (the pocket is a pick-and-go option, 3.5-4.5 m), the
  * classic depth in the building phase (6.5-8 m), deep in midfield (8-10 m).
@@ -305,7 +307,7 @@ const NINE: BacklineNode[] = [
       /* on the ball's own line, a stride to the openside of the release —
        * the delivery is judged against his own forward motion, so the exit
        * step is what makes the flat pass legal */
-      x: c.ball.x + openSign(c.ball.x) * 0.8,
+      x: c.ball.x + attackingSide(c) * 0.8,
       z: c.ball.z - c.dir * 0.4,
       urgency: 1,
       job: 'NINE — EXTRACT: FLAT BALL TO THE POCKET OR THE POD',
@@ -334,8 +336,8 @@ const TEN: BacklineNode[] = [
     act: (c) => {
       const depth = pocketDepthFor(c.toLine, c.tempo);
       return {
-        x: c.ball.x + openSign(c.ball.x) * POCKET_LATERAL_M,
-        z: c.ball.z + c.dir * depth,
+        x: c.ball.x + attackingSide(c) * POCKET_LATERAL_M,
+        z: c.ball.z - c.dir * depth,
         urgency: 0.98,
         job: `TEN — THE POCKET, ${depth.toFixed(1)} m DEPTH, FLAT LANE OFF THE 9`,
         node: 'ten-pocket',
@@ -346,7 +348,7 @@ const TEN: BacklineNode[] = [
     name: 'TEN: loop outside 12',
     when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && !!c.carrier && c.carrier.num === 12 && !c.busy,
     act: (c) => ({
-      x: c.carrier!.x + openSign(c.carrier!.x) * 6.5,
+      x: c.carrier!.x + attackingSide(c) * 6.5,
       z: c.carrier!.z - c.dir * 2.2,
       urgency: 1,
       job: 'TEN — LOOP AROUND THE OUTSIDE, THE EXTRA MAN',
@@ -357,8 +359,8 @@ const TEN: BacklineNode[] = [
     name: 'TEN: drift the line, shut the 12-13 lane',
     when: (c) => isDef(c) && c.phase === 'OPEN_PLAY' && !!c.carrier && !c.busy,
     act: (c) => ({
-      x: c.ball.x + (8.0 + (c.carrier!.x - c.ball.x) * 0.55),
-      z: c.ball.z - c.dir * 3.2,
+      x: c.ball.x + attackingSide(c) * 8.0,
+      z: c.ball.z + c.dir * 3.2,
       urgency: 0.9,
       job: 'TEN — DRIFT WITH THE BALL, SHUT THE INSIDE LANE',
       node: 'ten-drift-def',
@@ -375,17 +377,17 @@ const TWELVE: BacklineNode[] = [
       && (c.carrier.num === 9 || c.carrier.num === 10) && !c.busy,
     act: (c) => {
       const car = c.carrier!;
-      /* off the 9: the flat run from the ruck's openside lane; off the 10:
-       * the crash unders, inside the 10's shoulder, ahead of the gain line */
+      /* The 12 waits behind and outside the 10. The run can break the
+       * gain line AFTER the catch; the waiting mark must be passable. */
       const x = c.carrier!.num === 9
-        ? c.ball.x + openSign(c.ball.x) * TWELVE_LANE_M
-        : car.x + openSign(car.x) * (TWELVE_LANE_M - 0.4);
+        ? c.ball.x + attackingSide(c) * TWELVE_LANE_M
+        : car.x + attackingSide(c) * (TWELVE_LANE_M - 0.4);
       const z = c.carrier!.num === 9
-        ? c.ball.z + c.dir * FLAT_GAIN_LINE_LEAD_M
-        : car.z + c.dir * (FLAT_GAIN_LINE_LEAD_M - 0.4);
+        ? c.ball.z - c.dir * (pocketDepthFor(c.toLine, c.tempo) + ECHELON_STEP_METRES)
+        : car.z - c.dir * ECHELON_STEP_METRES;
       return {
         x, z, urgency: 0.97,
-        job: 'TWELVE — FLAT LINE, IN FRONT OF THE GAIN LINE',
+        job: 'TWELVE — BEHIND THE TEN, RUN ONTO THE PASS',
         node: 'twelve-flat',
       };
     },
@@ -395,7 +397,7 @@ const TWELVE: BacklineNode[] = [
     when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && c.lineBreak && !!c.carrier
       && c.carrier.num !== 12 && !c.busy,
     act: (c) => ({
-      x: c.ball.x + openSign(c.ball.x) * TRAIL_LATERAL_M,
+      x: c.ball.x + attackingSide(c) * TRAIL_LATERAL_M,
       z: c.ball.z - c.dir * TRAIL_DEPTH_M,
       urgency: 1,
       job: 'TWELVE — TRAIL THE BREAK, INSIDE OFFLOAD',
@@ -410,7 +412,7 @@ const TWELVE: BacklineNode[] = [
       && Math.hypot(c.carrier.x - c.p.x, c.carrier.z - c.p.z) < BLITZ_RANGE_M,
     act: (c) => ({
       x: c.carrier!.x,
-      z: c.carrier!.z - c.dir * 1.0,
+      z: c.carrier!.z + c.dir * 1.0,
       urgency: 1,
       job: 'TWELVE — BLITZ WITH 13, SHUT THE OUTSIDE LANE',
       node: 'twelve-blitz',
@@ -420,8 +422,8 @@ const TWELVE: BacklineNode[] = [
     name: 'TWELVE: drift, hold the seam',
     when: (c) => isDef(c) && c.phase === 'OPEN_PLAY' && !!c.carrier && !c.busy,
     act: (c) => ({
-      x: c.ball.x + (12.4 + (c.carrier!.x - c.ball.x) * 0.6),
-      z: c.ball.z - c.dir * 3.6,
+      x: c.ball.x + attackingSide(c) * 12.4,
+      z: c.ball.z + c.dir * 3.6,
       urgency: 0.9,
       job: 'TWELVE — DRIFT, HOLD THE SEAM BEHIND THE BLITZ',
       node: 'twelve-drift-def',
@@ -437,10 +439,10 @@ const THIRTEEN: BacklineNode[] = [
     when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && !!c.carrier
       && (c.carrier.num === 9 || c.carrier.num === 10) && !c.busy,
     act: (c) => ({
-      x: c.ball.x + openSign(c.ball.x) * THIRTEEN_LANE_M,
-      z: c.ball.z + c.dir * (FLAT_GAIN_LINE_LEAD_M - 0.3),
+      x: c.ball.x + attackingSide(c) * THIRTEEN_LANE_M,
+      z: c.ball.z - c.dir * ((c.carrier!.num === 9 ? pocketDepthFor(c.toLine, c.tempo) : 0) + ECHELON_STEP_METRES * 2),
       urgency: 0.97,
-      job: 'THIRTEEN — FLAT TIP LANE, IN FRONT OF THE GAIN LINE',
+      job: 'THIRTEEN — OUTSIDE AND BEHIND TWELVE, TIP OPTION',
       node: 'thirteen-flat',
     }),
   },
@@ -449,7 +451,7 @@ const THIRTEEN: BacklineNode[] = [
     when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && c.lineBreak && !!c.carrier
       && c.carrier.num !== 13 && !c.busy,
     act: (c) => ({
-      x: c.ball.x + openSign(c.ball.x) * (TRAIL_LATERAL_M + 2.5),
+      x: c.ball.x + attackingSide(c) * (TRAIL_LATERAL_M + 2.5),
       z: c.ball.z - c.dir * (TRAIL_DEPTH_M + 0.8),
       urgency: 1,
       job: 'THIRTEEN — TRAIL THE BREAK, OUTSIDE OFFLOAD',
@@ -464,9 +466,9 @@ const THIRTEEN: BacklineNode[] = [
       && Math.hypot(c.carrier.x - c.p.x, c.carrier.z - c.p.z) < BLITZ_RANGE_M + 1,
     act: (c) => ({
       x: c.carrier!.x,
-      z: c.carrier!.z - c.dir * 0.6,
+      z: c.carrier!.z + c.dir * 0.6,
       urgency: 1,
-      job: 'THIRTEEN — JAM THE STRIKE RUNNER BEHIND THE GAIN LINE',
+      job: 'THIRTEEN — MEET THE STRIKE RUNNER ON THE GOAL SIDE',
       node: 'thirteen-jam',
     }),
   },
@@ -474,8 +476,8 @@ const THIRTEEN: BacklineNode[] = [
     name: 'THIRTEEN: the edge drift',
     when: (c) => isDef(c) && c.phase === 'OPEN_PLAY' && !!c.carrier && !c.busy,
     act: (c) => ({
-      x: c.ball.x + (16.4 + (c.carrier!.x - c.ball.x) * 0.6),
-      z: c.ball.z - c.dir * 4.0,
+      x: c.ball.x + attackingSide(c) * 16.4,
+      z: c.ball.z + c.dir * 4.0,
       urgency: 0.9,
       job: 'THIRTEEN — EDGE DRIFT, SET THE WING LANE',
       node: 'thirteen-drift-def',
@@ -507,12 +509,12 @@ function wingTree(num: 11 | 14): BacklineNode[] {
       name: `${name}: the wide edge — arrive on the outside pass`,
       when: (c) => isAtk(c) && c.phase === 'OPEN_PLAY' && !!c.carrier
         && c.ball.x * side < -WING_EDGE_FROM_X_M
-        && (c.carrier.num === 12 || c.carrier.num === 13 || c.carrier.num === 15) && !c.busy,
+        && (c.carrier.num === 12 || c.carrier.num === 13 || c.carrier.num === 15) && !c.lineBreak && !c.busy,
       act: (c) => ({
         x: side * WING_FINISH_X_M,
-        z: c.ball.z + c.dir * WING_FINISH_LEAD_M,
+        z: c.ball.z - c.dir * WING_RECEIVE_DEPTH_M,
         urgency: 1,
-        job: `${name} — WIDE EDGE, AHEAD OF THE OUTSIDE PASS`,
+        job: `${name} — WIDE EDGE, STAY BEHIND THE OUTSIDE PASS`,
         node: `${num === 11 ? 'eleven' : 'fourteen'}-edge`,
       }),
     },
@@ -542,8 +544,8 @@ const FIFTEEN: BacklineNode[] = [
       && (c.carrier.num === 12 || c.carrier.num === 13)
       && c.toLine < FIFTEEN_INSERT_TO_LINE_M && !c.busy,
     act: (c) => ({
-      x: c.ball.x + openSign(c.ball.x) * FIFTEEN_INSERT_LATERAL_M,
-      z: c.ball.z + c.dir * FIFTEEN_INSERT_LEAD_M,
+      x: c.ball.x + attackingSide(c) * FIFTEEN_INSERT_LATERAL_M,
+      z: c.ball.z - c.dir * FIFTEEN_INSERT_DEPTH_M,
       urgency: 1,
       job: 'FIFTEEN — LATE INSERTION, THE EXTRA MAN OUTSIDE 13',
       node: 'fifteen-insert',
@@ -580,7 +582,7 @@ const FIFTEEN: BacklineNode[] = [
     when: (c) => isDef(c) && c.phase === 'OPEN_PLAY' && !c.busy,
     act: (c) => ({
       x: c.ball.x * 0.92,
-      z: c.ball.z - c.dir * FIFTEEN_SWEEP_DEPTH_M,
+      z: c.ball.z + c.dir * FIFTEEN_SWEEP_DEPTH_M,
       urgency: 0.85,
       job: 'FIFTEEN — THE SWEEP, CENTRAL THIRD, AHEAD OF THE KICK',
       node: 'fifteen-sweep',

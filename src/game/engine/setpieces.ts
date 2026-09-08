@@ -5,6 +5,7 @@
  * function takes a Director reference.
  */
 
+import { stepBall, touchBall } from './ballPhysics';
 import { Director, ScrumSlot, Input, MaulState } from '../director';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
@@ -388,16 +389,19 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       if (s.t > 0.3) d.releaseThrow();
     }
   } else if (s.stage === 'CONTEST') {
-    s.ball.vy -= 9.81 * dt;
-    s.ball.x += s.ball.vx * dt;
-    s.ball.y += s.ball.vy * dt;
-    /* A metered throw is not perfectly straight: the longitudinal
-     * component carries the ball off the tunnel line as it flies. */
-    s.ball.z += s.ball.vz * dt;
+    // A clean throw has only its measured release velocity and gravity.
+    // The shared solver cannot add eccentricity before turf/player contact.
+    stepBall(s.ball, dt);
     s.history.push({ ballX: s.ball.x, ballY: s.ball.y });
     if (s.history.length > 90) s.history.shift();
     s.ball.apexY = Math.max(s.ball.apexY, s.ball.y);
-    if (s.ball.y <= 2.4 && s.ball.vy < 0) { s.stage = 'CATCH'; s.t = 0; }
+    if (s.ball.y <= 2.4 && s.ball.vy < 0) {
+      // First player contact: the catch contest owns the ball, not free flight.
+      touchBall(s.ball);
+      s.ball.vx = s.ball.vy = s.ball.vz = 0;
+      s.ball.omega.x = s.ball.omega.y = s.ball.omega.z = 0;
+      s.stage = 'CATCH'; s.t = 0;
+    }
   } else if (s.stage === 'CATCH') {
     if (s.t > 0.4) {
       /* T-16 FREEZE. Two bugs lived here.
@@ -474,6 +478,7 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       }
 
       d.recordSetPieceOutcome('lineouts', thrower);
+      touchBall(s.ball);
       s.ball.state = 'HELD';
       const jumper = s.players.find((p) => p.team === thrower && p.role === 'JUMPER');
       if (jumper) { s.ball.heldBy = jumper.id; jumper.handY = 2.6; }
@@ -520,6 +525,11 @@ export function releaseThrow(d: Director, ) {
   s.quality = clamp(1 - Math.abs(s.meter - 0.62) * 2.1, 0, 1);
   s.meterOn = false;
   s.ball.state = 'FLIGHT';
+  s.ball.socket = null;
+  s.ball.flightGuard = true;
+  s.ball.sleeping = false; s.ball.grounded = false; s.ball.bounces = 0; s.ball.quietTime = 0;
+  s.ball.q.x = s.ball.q.y = s.ball.q.z = 0; s.ball.q.w = 1;
+  s.ball.omega.x = -s.side * 12; s.ball.omega.y = s.ball.omega.z = 0;
   s.stage = 'CONTEST'; s.t = 0;
   const from = s.players.find((p) => p.role === 'THROWER')!;
   const dx = s.call.targetX - from.x;

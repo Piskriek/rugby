@@ -20,14 +20,15 @@ import { PlayCall } from '../shapes';
 import { REFEREE_CALLS } from '../data';
 import { solvePassAim, passReleaseRel, fwdProfile, forwardMetres, clampAimLegal, PASS_SPEED } from './throwforward';
 import { approach } from './approach';
+import { weldBall, detachBall, stepBallWithPlayers, BALL_MASS, BALL_GRAVITY } from './ballPhysics';
+import { adoptLooseBall, eligibleToGather } from './looseBall';
+import { readBall } from './ballAwareness';
+import { clearCraft } from './ballcraft';
 import { clamp } from './clamp';
 import {
   beginLatch, clearLatch, tickLatch, shouldDive,
   DIVE_FLIGHT_SECONDS, DIVE_REACH_BONUS,
 } from './latch';
-import {
-  anticipates, passIntersection, runOnVelocity, RUN_ON_SPEED_FRACTION,
-} from '../behaviour/backline-echelon';
 import {
   forwardAttackPassDispatchFailures, forwardAttackPlayerWriteFailures,
   forwardAttackStateWriteFailures, snapshotForwardAttackPlayer,
@@ -52,12 +53,21 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
   s.t += dt;
   const car = d.L(s.attacking, s.carrierNum);
   const human = d.isHuman(s.attacking);
+  // A drop/strip is not a carry or a pass. Craft owns its free-body tick and
+  // gather; the old carrier must not score, tackle, or launch another pass.
+  if (d.bc.free) {
+    car.carrier = false;
+    if (pressed.has('switchPlayer')) d.smartSwitch();
+    return;
+  }
+  if (!s.ball.live) weldBall(s.ball, car);
 
   /* T-35. The ball is in flight from passer to receiver. Carry it across with a
    * visible arc, then hand possession over on arrival. No input is processed
    * while it flies — the pass is a commitment. */
   if (s.ball.live) {
     const rec = d.L(s.attacking, s.pendingReceiver);
+    const meet = readBall(d).target;
     /* Playtest 3: a throw flies at ~13 m/s OVER ITS OWN LENGTH — a 6 m pop
      * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
      * made every pass feel like a teleport. */
@@ -76,30 +86,34 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * a straight line, so the release vector, the average flight velocity and
      * the landing point are all the same fact — which is what lets one law be
      * written once and tested at any of the three. */
-    rec.tx = clamp(s.passTargetX, -33, 33);
-    rec.tz = clamp(s.passTargetZ, -58, 58);
-    rec.urgency = 1;
-    rec.job = 'TAKE THE PASS';
-    steer(rec, dt, true);
+    if (eligibleToGather(rec) && !(d.isHuman(rec.team) && d.ctrlPlayer === rec)) {
+      rec.tx = clamp(meet.x, -33, 33);
+      rec.tz = clamp(meet.z, -58, 58);
+      rec.urgency = 1;
+      rec.job = 'TAKE THE PASS';
+      steer(rec, dt, true);
+    }
 
-    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at its TRUE 13 m/s
-     * ground speed over its own length — a 6 m pop takes 0.46 s, a 20 m
-     * cut-out 1.5 s. The difference is WHAT it flies at: a fixed point
-     * solved at release, not a man who is being pushed forward to meet it. */
-    const dx = s.passTargetX - s.ball.x, dz = s.passTargetZ - s.ball.z;
-    const dd = Math.max(0.01, Math.hypot(dx, dz));
-    const step = Math.min(dd, PASS_SPEED * s.passPace * dt);
-    s.ball.x += (dx / dd) * step;
-    s.ball.z += (dz / dd) * step;
-    s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
+    // Fixed release velocity, no homing. The release solves the impulse in
+    // the carrier frame; gravity and angular velocity carry the real body.
+    let deflected = false, lastTeam = car.team, lastNum = car.num;
+    const age = s.passT * s.passDist / (13 * s.passPace);
+    stepBallWithPlayers(s.ball, dt, d.live,
+      p => (p === car && age < 0.2) || (p === rec && eligibleToGather(p)),
+      p => { if (p !== rec) { deflected = true; lastTeam = p.team; lastNum = p.num; } });
+    if (deflected) {
+      adoptLooseBall(d, s.ball, 'PASS', car, true, 0.2);
+      d.bc.loose!.lastTouch = { team: lastTeam, num: lastNum };
+      return;
+    }
     /* SPEC_13: the catch is PROXIMITY TO THE RECEIVER, not arrival at the
      * target. Flying to a fixed point means the ball can reach the aim with
      * the receiver two metres away, and snapping it to him there is the
      * teleport T-40 was written to prevent — and it turned a legal throw into
      * a ball that jumped forward at the moment of the catch. */
     const toRec = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
-    const arrived = dd <= step;
-    if (toRec <= Math.max(0.55, PASS_SPEED * s.passPace * dt * 1.05) || arrived || s.passT >= 1.35) {
+    if (eligibleToGather(rec) && s.ball.y >= 0.55 && s.ball.y <= 2.15 * rec.size + 0.1
+      && toRec <= Math.max(0.70 * rec.size, PASS_SPEED * s.passPace * dt * 1.05)) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
       /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
@@ -112,7 +126,7 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       s.carrierX = rec.x; s.carrierZ = rec.z;
       rec.carrier = true;
       // catch where the receiver actually is — no snap.
-      s.ball.x = rec.x; s.ball.z = rec.z;
+      weldBall(s.ball, rec);
       s.originZ = rec.z; s.originX = rec.x; s.gained = 0;
       /* T-18. A receiver of a pass is fair game — but not in the act of
        * catching. A fifth of a second of catch grace is what lets a passing
@@ -136,6 +150,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       d.setCtrl(s.attacking, s.carrierNum);
       d.run(s.attacking, s.carrierNum).carries++;
       d.refreshPassOptions();
+    } else if (s.passT >= 1.2 || s.ball.bounces > 0 || !eligibleToGather(rec)) {
+      // Missing the recipient does not give him the ball by timer. Keep the
+      // same ballistic body, and let both sides chase the loose pass.
+      adoptLooseBall(d, s.ball, 'PASS', car, true, 0.2);
     }
     return;
   }
@@ -746,7 +764,8 @@ export function doDummy(d: Director, ) {
 
 export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
 
-  const s = d.op!;
+  const s = d.op;
+  if (!s || d.phase !== 'OPEN_PLAY' || s.ball.live || d.bc.free) return;
   const gate = d.forwardAttackGateReporter();
   const car = d.L(s.attacking, s.carrierNum);
   /* The CPU's actual pass execution receives the same reviewed context as its
@@ -775,7 +794,7 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
  */
 export function doPassToNum(d: Director, num: number, cutOut: boolean): boolean {
   const s = d.op;
-  if (!s || d.phase !== 'OPEN_PLAY' || s.ball.live || num === s.carrierNum) return false;
+  if (!s || d.phase !== 'OPEN_PLAY' || s.ball.live || d.bc.free || num === s.carrierNum) return false;
   const gate = d.forwardAttackGateReporter();
   const car = d.L(s.attacking, s.carrierNum);
   const forwardContext = !d.isHuman(s.attacking) ? {
@@ -863,8 +882,9 @@ export function throwPass(
    * flight, so the release vector, the average flight velocity and the
    * landing point are all the same fact. */
   const dir = s.dir >= 0 ? 1 : -1;
-  const solvedAim = solvePassAim(car, opt.player);
-  const rel = passReleaseRel(car, solvedAim, car.vz, dir);
+  weldBall(s.ball, car);
+  const solvedAim = solvePassAim(s.ball, opt.player);
+  const rel = passReleaseRel(s.ball, solvedAim, car.vz, dir);
   const fwdProf = fwdProfile(d.options.fwdPass ?? 1);
   const blown = rel > fwdProf.tol;
   /* A CPU pass can still read forward at release even though the selection
@@ -875,7 +895,7 @@ export function throwPass(
    * referee is for, and the correction is counted so it cannot quietly
    * become the way the CPU passes. */
   const clamped = blown && !d.isHuman(s.attacking)
-    ? clampAimLegal(car, solvedAim, car.vz, dir, fwdProf.tol)
+    ? clampAimLegal(s.ball, solvedAim, car.vz, dir, fwdProf.tol)
     : null;
   if (clamped) d.notePassClamped();
   const aim = clamped ?? solvedAim;
@@ -895,12 +915,15 @@ export function throwPass(
   // T-35. The receiver is already moving; the ball flies to him instead of
   // teleporting. Launch the flight — upOpen carries it to the target.
   const receiverBefore = gate ? snapshotForwardAttackPlayer(opt.player) : undefined;
-  opt.player.vz = s.dir * maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
-  opt.player.face = s.dir >= 0 ? 1 : -1;
+  // Intent, not an instantaneous velocity kick. A runner accelerates through
+  // the same steer as every other player, and a human keeps his own stick.
+  if (!(d.isHuman(opt.player.team) && d.ctrlPlayer === opt.player)) {
+    opt.player.tx = aim.x; opt.player.tz = aim.z; opt.player.urgency = 1;
+  }
   if (gate && receiverBefore) {
     for (const failure of forwardAttackPlayerWriteFailures(
       `open:pass-launch-receiver:${opt.player.team}${opt.player.num}`, receiverBefore,
-      snapshotForwardAttackPlayer(opt.player), ['vz', 'face'] as const,
+      snapshotForwardAttackPlayer(opt.player), ['tx', 'tz', 'urgency'] as const,
     )) gate(failure);
   }
 
@@ -917,10 +940,24 @@ export function throwPass(
     passPace: s.passPace,
     carrierNum: s.carrierNum,
   } : undefined;
+  // Clear the LMB weld BEFORE publishing the pass. Otherwise stepCraft's
+  // BALL_SECURED branch can silently cancel this release later in the tick.
+  clearCraft(d.bc);
+  const flight = Math.max(3.5, aim.dist) / (PASS_SPEED * pace);
+  const vx = (aim.x - s.ball.x) / flight;
+  const vz = (aim.z - s.ball.z) / flight;
+  const vy = (1.05 * opt.player.size - s.ball.y) / flight + 0.5 * BALL_GRAVITY * flight;
+  // Aim is in the world frame: subtract the carrier to solve the hand impulse,
+  // then detachBall adds his instantaneous velocity back exactly once.
+  detachBall(s.ball, car, {
+    x: BALL_MASS * (vx - car.vx), y: BALL_MASS * vy, z: BALL_MASS * (vz - car.vz),
+  });
+  const q = s.ball.q;
+  s.ball.omega.x = 16 * (1 - 2 * (q.y * q.y + q.z * q.z));
+  s.ball.omega.y = 32 * (q.x * q.y + q.w * q.z);
+  s.ball.omega.z = 32 * (q.x * q.z - q.w * q.y);
+  car.carrier = false;
   s.ball.live = true;
-  s.ball.x = car.x;
-  s.ball.z = car.z;
-  s.ball.y = 1.05;
   s.pendingReceiver = opt.player.num;
   s.passT = 0;
   s.passTargetX = aim.x;
@@ -947,38 +984,8 @@ export function throwPass(
       `open:pass-flight:${s.attacking}${car.num}`, flightBefore, flightAfter, opt.player.num,
     )) gate(failure);
   }
-  /* PART 4 — ANTICIPATORY ACCELERATION: RUNNING ONTO THE BALL.
-   *
-   * The receiver was given a forward velocity above; everyone outside him
-   * waited on his mark for a ball that was still two passes away, so the
-   * whole backline took the ball from a standing start and was tackled on
-   * the catch. A real backline leaves WITH the pass: the moment the ball
-   * is out of the nine's hands, the 10, 12 and 13 are already running.
-   *
-   * The velocity is injected once, here, at release — not steered towards
-   * every frame — so the men are genuinely moving when the ball arrives
-   * rather than being dragged along by their marks. Each is aimed at the
-   * point where he will MEET the pass (solved from the same fixed aim the
-   * ball flies at, so nobody is chasing anybody), at RUN_ON_SPEED_FRACTION
-   * of his own maximum sprint — comfortably over the 60% the line needs to
-   * cross the gain line rather than reach for it. */
-  const flightT = Math.max(0.01, s.passDist / (PASS_SPEED * pace));
-  for (const runner of d.live) {
-    if (runner.team !== s.attacking || runner.sinbin > 0 || runner.down) continue;
-    if (runner.num === car.num || runner.num === opt.player.num) continue;
-    if (!anticipates(runner.num, car.num, opt.player.num)) continue;
-    const sprint = maxSpeed(runner, false, true, runner.stamina);
-    const meet = passIntersection(
-      { x: runner.tx, z: runner.tz }, { x: aim.x, z: aim.z },
-      flightT, sprint * RUN_ON_SPEED_FRACTION, dir,
-    );
-    const v = runOnVelocity(runner, meet, sprint, dir);
-    runner.vx = v.vx;
-    runner.vz = v.vz;
-    runner.urgency = 1;
-    runner.face = dir;
-    runner.job = 'RUN ONTO IT — DO NOT WAIT FOR THE BALL';
-  }
+  // coordinateBall now gives the receiver and his support their run-on marks.
+  // No second system injects a contradictory forward velocity into those men.
 
   if (cutOut) d.say(`CUT-OUT PASS TO ${d.L(s.attacking, opt.player.num).num}`);
 }

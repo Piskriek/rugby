@@ -6,8 +6,9 @@
  *  2. The Director constructed from it boots in phase KICK at the centre
  *     spot (the Law-12 kick-off), with thirty live shirts numbered 1-15
  *     per side (positional behaviour trees live).
- *  3. Play actually advances: the kick is struck, open play arrives, and
- *     no watchdog trips over a full simulated minute.
+ *  3. Play actually advances: the ORIGINAL kick is struck and open play
+ *     arrives without a launch watchdog. The minute continues through later
+ *     human minigames, which intentionally receive no input in this smoke.
  *  4. The camera is bound to the kick-off subject at launch (centre spot)
  *     and follows the ball once play moves.
  */
@@ -53,22 +54,26 @@ if (!Number.isFinite(d.cam.x) || !Number.isFinite(d.cam.z) || !Number.isFinite(d
 //    restart must be struck and play advance — all without a watchdog trip.
 const logBefore = d.watchdogLog.length;
 const phases = new Set<string>([d.phase]);
-let struck = d.kk.stage === 'FLIGHT';
+const kickoff = d.kk;
+let struck = kickoff.stage === 'FLIGHT';
+let launchEndLog: number | undefined;
 let charging = false;
 for (let i = 0; i < 60 * 60; i++) {
   // Strike like a real player: start holding once the receiving side is back
   // ten and the formation is set (the same gapOk gate the engine enforces),
-  // then keep holding until the kick leaves the boot.
-  if (!struck && d.kk && d.kk.stage !== 'FLIGHT') {
-    let nearest = -99;
+  // then RELEASE at 55% power. Holding forever never strikes: it earns a
+  // delayed-restart infringement, and the old probe mistook a later CPU
+  // free kick for the original human kickoff.
+  if (!struck && d.kk === kickoff && kickoff.stage !== 'FLIGHT') {
+    let nearest = 99;
     for (const p of d.live) {
       if (p.team === d.kk.kicker || p.sinbin > 0) continue;
-      nearest = Math.max(nearest, (p.z - d.kk.bz) * d.kk.dir);
+      nearest = Math.min(nearest, (p.z - d.kk.bz) * d.kk.dir);
     }
     const ready = nearest >= 10.6 && (d.kk.formReady ?? 1) > 0.9 && d.kk.t > 1.2;
     if (ready && !charging && d.kk.t > 2) charging = true;
   }
-  const charge = charging && !struck;
+  const charge = charging && !struck && d.kk === kickoff && kickoff.meter < 0.55;
   d.update(dt, {
     left: false, right: false, up: false, down: false, run: charge, sprint: charge,
     passL: false, passR: false, cutL: false, cutR: false, kick: false, grubber: false,
@@ -77,19 +82,21 @@ for (let i = 0; i < 60 * 60; i++) {
     handsUp: false, secure: false, punt: false,
   }, new Set(), new Set());
   phases.add(d.phase);
-  if (d.kk?.stage === 'FLIGHT') struck = true;
+  if (d.kk === kickoff && kickoff.stage === 'FLIGHT') struck = true;
+  if (launchEndLog === undefined && d.phase === 'OPEN_PLAY') launchEndLog = d.watchdogLog.length;
 }
-/* The kick-off LAUNCH must be watchdog-clean. Later set pieces (lineout,
- * scrum) legitimately wait on human input in this headless harness, so a
- * no-input sim trips their own ritual clocks beyond this point — those are
- * the existing minigames, not the Quick Start launch path under test. */
-const launchTrips = d.watchdogLog.slice(logBefore).filter((l) => l.includes('KICK'));
+/* The kick-off LAUNCH must be watchdog-clean. Later set pieces (including
+ * a second human kick) legitimately wait on input this smoke does not give.
+ * Filtering the entire minute for "KICK" mislabelled a later unattended
+ * restart as a broken launch. Bound the audit to the original kick's handoff;
+ * the identity check above also prevents a later strike hiding a failed one. */
+const launchTrips = d.watchdogLog.slice(logBefore, launchEndLog).filter((l) => l.includes('KICK'));
 if (launchTrips.length) fail(`kick-off launch watchdog tripped: ${launchTrips[0]}`);
 if (!struck) fail('the kick-off was never struck in 60 s');
 if (!phases.has('OPEN_PLAY')) fail('open play never arrived after the restart kick');
 if (d.over) fail('match ended within the first simulated minute');
 
 console.log(`quick-start: boot phase KICK · kick type RESTART · shirts ${d.live.length}/30 · camera seeded (${d.cam.x.toFixed(1)}, ${d.cam.z.toFixed(1)}) h ${d.cam.h.toFixed(1)}`);
-console.log(`60 s sim: phases seen [${[...phases].join(', ')}] · watchdog trips ${d.watchdogLog.length - logBefore} · over=${d.over}`);
+console.log(`60 s sim: phases seen [${[...phases].join(', ')}] · watchdog trips ${d.watchdogLog.length - logBefore} (launch ${launchTrips.length}) · over=${d.over}`);
 console.log(failures === 0 ? 'QUICK START (15v15) SMOKE PASSES' : `QUICK START SMOKE: ${failures} FAILURES`);
 if (failures) process.exit(1);

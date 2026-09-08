@@ -21,7 +21,7 @@ import { CamMode, ZoomSetting, mapInputToWorld, KICKOFF_CENTER, blendSubjectToBa
 import { TutorialState, newTutorial, stepAt, TUTORIAL } from './tutorial';
 import {
   shapeById, defenceById, DEFENCE_CHANNELS, ARCHETYPE_SHAPE,
-  callPlay, zoneOf, PlayCall, RESTART_RECEIVE, RESTART_KICK, CHASE_LANES,
+  callPlay, zoneOf, PlayCall, RESTART_RECEIVE, RESTART_KICK,
   AttackShape, DefenceSystem, forwardAttackDepth,
 } from './shapes';
 import {
@@ -54,7 +54,9 @@ import type { MaulBind, MaulCommit, MaulContestControl, MaulExitState } from './
 import type { HandsState } from './engine/hands';
 import { MatchAudio } from './audio';
 import { updateCamera } from './engine/camera';
-import { makeCraft, stepCraft, type BallCraft } from './engine/ballcraft';
+import { makeCraft, stepCraft, clearCraft, type BallCraft } from './engine/ballcraft';
+import { eligibleToGather, canPlayBall, coordinateBall, readBall, makeBallBehaviour, clearBallBehaviour, type BallBehaviour, type KickChaseLaw } from './engine/ballAwareness';
+import { makeBall, weldBall, BALL_MAJOR, type BallBody } from './engine/ballPhysics';
 import {
   RefState, RefBubble, BubbleKind, BUBBLE_PRIORITY, newReferee, stepReferee,
   stepAdvantageWatch, openAdvantageWatch, advantageWindowEngineS,
@@ -143,6 +145,8 @@ export type Phase =
 export interface Actor {
   id: number; team: 'A' | 'B' | 'REF'; num: number;
   rx: number; rz: number; rf: number;
+  /** A waiting receiver/collector watches the real ball, not a stale run heading. */
+  ballLookX?: number; ballLookZ?: number;
   renderClip: string; clipT: number; jitter: number;
   ring: number;     // 0 none, 1 controlled, 2 pass target
   size: number;     // T-39 per-player build, 0.92 .. 1.12
@@ -184,7 +188,7 @@ export interface LineoutState {
   /** `vz` is the throw's longitudinal component: a meter off the sweet spot
    *  carries the ball off the tunnel line, so the flight is judged on its
    *  real angle, not just its timing. */
-  ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; state: string; heldBy: number; apexY: number };
+  ball: BallBody & { state: string; heldBy: number; apexY: number };
   players: { id: number; num: number; team: 'A' | 'B'; x: number; z: number; handY: number; role: string }[];
   history: { ballX: number; ballY: number }[];
   winner: boolean; contestMargin: number;
@@ -198,6 +202,9 @@ export interface LineoutState {
 export type KickType = 'PUNT' | 'GRUBBER' | 'DROP_GOAL' | 'GOAL' | 'RESTART' | 'DROP_OUT' | 'BOMB' | 'FIFTY_22';
 
 export interface KickState {
+  chaseLaw?: KickChaseLaw;
+  /** Last real body/boot contact, for touch awards after a deflection. */
+  lastTouch?: { team: 'A' | 'B'; num: number };
   t: number;
   /** RC2-3 — restart shot clock. Accrues only while the kicker is free to
    *  strike (opposition back ten, formation set), so a lawful wait is never
@@ -207,6 +214,9 @@ export interface KickState {
   type: KickType;
   bx: number; by: number; bz: number;
   vx: number; vy: number; vz: number;
+  /** Shared spheroid solver; scalar coordinates above are the laws/replay API. */
+  body: BallBody;
+  fromHand: boolean;
   dir: number; kicker: 'A' | 'B'; kickerNum: number; kickerName: string;
   history: { x: number; y: number; z: number }[];
   profile: { label: string; atGoal: boolean };
@@ -319,7 +329,7 @@ export interface OpenPlayState {
    *  rucks and metres were all near zero: the CPU decided on the frame the ball
    *  arrived. Decisions now respect a carry commitment window. */
   heldT: number;
-  ball: { x: number; y: number; z: number; vx: number; vz: number; live: boolean; t: number };
+  ball: BallBody & { live: boolean; t: number };
   /** T-35 pass flight: who the ball is travelling to, and the arc progress 0..1 */
   pendingReceiver: number;
   /* SPEC_13: where the throw was AIMED, solved once at release. The ball flies
@@ -835,6 +845,7 @@ export class Director {
   /** SPEC_25 — the interactive catch / security / drop-punt machine. Owned by the
    *  engine because it decides where the ball is; the rig only reads `bc`. */
   bc: BallCraft = makeCraft();
+  ballBehaviour: BallBehaviour = makeBallBehaviour();
   /** SPEC_25 — LMB is held this frame. Separate from `bc.state` because the grip is
    *  an input fact and the state is a rules fact: a man can be securing the ball in
    *  the middle of a ruck that ended his possession, and only one of those two should
@@ -1201,6 +1212,8 @@ export class Director {
    * this, the automated audit reads this, so the two can never disagree.
    */
   get prompt(): string {
+    if (this.bc.free) return this.bc.window > 0 ? 'SPACE PUNTS THE DROP — THE WINDOW IS OPEN'
+      : 'CHASE THE LOOSE BALL · Q CHOOSE A COLLECTOR · GET IN REACH TO GATHER';
     if (this.chaos) return 'A/D/W/S CARRY · SPACE SPRINT · C RESTART CHAOS · BALL SECURED';
     if (this.hint) return this.hint;
     if (this.kk) {
@@ -1241,6 +1254,8 @@ export class Director {
    * player can override the choice in the options.
    */
   get contextVerb(): { key: string; label: string; act: string } {
+    if (this.bc.free) return { key: 'SPACE', label: this.bc.window > 0 ? 'PUNT THE DROP' : 'CHASE THE BALL', act: 'run' };
+    if (this.op?.ball.live) return { key: 'SPACE', label: 'SUPPORT THE PASS', act: 'run' };
     const mode = ['AUTO', 'PASS', 'KICK', 'CONTACT', 'TACKLE', 'CARRY'][this.options.spaceAction ?? 0];
     if (this.kk) {
       if (this.kk.stage === 'AIM' || this.kk.stage === 'METER') return { key: 'SPACE', label: 'SET THE KICK', act: 'action' };
@@ -1322,6 +1337,10 @@ export class Director {
     const cv = this.contextVerb;
     const out: { key: string; label: string; primary: boolean }[] = [];
     const add = (key: string, label: string) => out.push({ key, label, primary: key === cv.key });
+    if (this.bc.free || this.op?.ball.live) {
+      add('A / D', 'RUN'); add('SPACE', cv.label); add('Q', 'CHOOSE A COLLECTOR');
+      return out;
+    }
     if (this.op) {
       const attacking = this.ctrlPlayer.team === this.op.attacking;
       add('A / D', 'RUN');
@@ -1374,6 +1393,14 @@ export class Director {
    * each, updated every frame.
    */
   get narrative(): { now: string; next: string; clock: number; danger: boolean } {
+    if (this.bc.free) return {
+      now: 'LOOSE BALL — NEITHER SIDE HAS SECURED IT',
+      next: 'Chase or cover the bounce; Q selects a collector. Gather when in reach.', clock: 0, danger: true,
+    };
+    if (this.op?.ball.live) return {
+      now: `PASS IN FLIGHT TO ${this.op.pendingReceiver}`,
+      next: 'Meet the pass; support behind the receiver and cover the next channel.', clock: 0, danger: false,
+    };
     if (this.chaos) {
       const c = this.chaos;
       const latch = c.latch ? ` · ${c.latch.rival.num} IS ON YOU` : '';
@@ -1564,10 +1591,8 @@ export class Director {
       return { x: this.kk.bx, y: this.kk.by + 0.12, z: this.kk.bz };
     }
     if (this.phase === 'OPEN_PLAY' && this.op) {
-      const o = this.op;
-      if (o.ball.live) return { x: o.ball.x, y: o.ball.y, z: o.ball.z };
-      const c = this.L(o.attacking, o.carrierNum);
-      return { x: c.x, y: 1.14, z: c.z };            // held at the chest
+      const b = this.bc.free ?? this.op.ball;
+      return { x: b.x, y: b.y, z: b.z }; // the same physical body/socket the rig draws
     }
     if ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && this.ml) return { x: this.ml.x, y: 1.02, z: this.ml.z };
     if ((this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY') && this.bd) {
@@ -2190,7 +2215,7 @@ export class Director {
       p.movedBy = undefined;   // T-02: the ownership tag resets each frame
     }
     // exactly one player owns the ball at any moment — asserted every frame
-    if (this.op) {
+    if (this.op && !this.op.ball.live && !this.bc.free) {
       const c = this.live.find((p) => p.team === this.op!.attacking && p.num === this.op!.carrierNum);
       if (c) c.carrier = true;
     }
@@ -2333,6 +2358,8 @@ export class Director {
      * capture target-slot drift before a phase-bound writer can take control. */
     this.samplePendingTargetSlots();
     this.placeBound(dt);
+    // Movement is now final: a sprinting hand socket must not lag a frame.
+    this.syncBallSocket();
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
      * audio all read the same frameEvents. */
@@ -3162,7 +3189,10 @@ export class Director {
 
     // A. The phase has outlived any legal duration.
     const limit = Director.PHASE_LIMIT[this.phase] ?? 30;
-    if (this.phaseAge > limit) {
+    const looseLive = this.phase === 'OPEN_PLAY' && !!this.bc.free;
+    // No law awards a loose ball after a time limit. In particular, a human
+    // who has not run to it yet must not be given it by the recovery watchdog.
+    if (this.phaseAge > limit && !looseLive) {
       this.trip(`${this.phase} ran for ${this.phaseAge.toFixed(1)}s (limit ${limit}s)`);
       return;
     }
@@ -3179,8 +3209,9 @@ export class Director {
       (this.phase === 'OPEN_PLAY' && !this.op);
     if (orphan) { this.trip(`${this.phase} had no state object`); return; }
 
-    // C. In open play, the carrier must exist, be upright and be on the field.
-    if (this.op) {
+    // C. A HELD ball needs an upright carrier. A free ball/pass has no owner;
+    // its former handler can be on the ground without resetting the match.
+    if (this.op && !this.bc.free && !this.op.ball.live) {
       const car = this.live.find((p) => p.team === this.op!.attacking && p.num === this.op!.carrierNum);
       if (!car) { this.trip('the ball carrier does not exist'); return; }
       if (car.down || car.bound) { this.trip(`carrier ${car.num} was left grounded or bound`); return; }
@@ -3189,7 +3220,7 @@ export class Director {
     }
 
     // D. Nobody has moved for two full seconds while the ball is live.
-    if (this.phase === 'OPEN_PLAY') {
+    if (this.phase === 'OPEN_PLAY' && !looseLive) {
       const movers = this.live.filter((p) => Math.hypot(p.vx, p.vz) > 0.6).length;
       if (movers < 3) { this.stillFor += dt; } else this.stillFor = 0;
       if (this.stillFor > 2) { this.trip('play stopped moving with the ball live'); return; }
@@ -3892,48 +3923,14 @@ export class Director {
         }
         return;   // the freeze holds; upKick's FLIGHT clock and kickLanded still resolve the episode
       }
-      const lp = s.bounces === 0 ? this.landingPrediction() : null;
-      const tgt = lp ?? { x: s.bx, z: s.bz };
-
-      // The kicker has just struck the ball. He follows up a couple of metres at
-      // a jog, but he is NOT a chaser — the three chasers own the landing zone.
-      // Steering him at the landing point made him appear to fly with the ball
-      // across the pitch.
-      k.tx = clamp(k.x + s.dir * 1.0, -33, 33);
-      k.tz = clamp(k.z + s.dir * 4.0, -58, 58);
-      k.urgency = 0.35;
-      k.job = 'FOLLOW YOUR KICK';
-      steer(k, dt, false);
-
-      s.chasers.forEach((c, ci) => {
-        const p = this.L(s.kicker, c.num);
-        const lane = CHASE_LANES[ci % CHASE_LANES.length];
-        const lead = lp ? lane.lat : lane.lat * 0.5;
-        p.tx = clamp(tgt.x + lead, -33, 33);
-        p.tz = clamp(tgt.z, -58, 58);
-        p.urgency = 1;
-        p.job = lane.label;
-        steer(p, dt, true);
-      });
-
-      // The receiving side: the designated fielder goes to the ball, the rest
-      // come across to support him rather than standing where they started.
-      const rec = assignReceiver(this.live, this.receivingSide(), tgt.x, tgt.z);
-      if (rec) {
-        rec.tx = clamp(tgt.x, -33, 33);
-        rec.tz = clamp(tgt.z, -58, 58);
-        rec.urgency = 1;
-        rec.job = 'FIELD THE BALL — CALL FOR IT LOUD';
-        steer(rec, dt, true);
-      }
+      // Flight/bounce plans are shared with ordinary loose balls. A prop can
+      // field ahead of a distant fullback; the remaining players cover lanes.
       for (const p of this.live) {
-        if (p.team !== this.receivingSide() || p === rec || p.sinbin > 0) continue;
-        if (s.chasers.some((c) => c.num === p.num && s.kicker === p.team)) continue;
-        p.tx = clamp(tgt.x + (p.x > tgt.x ? 5 : -5), -33, 33);
-        p.tz = clamp(tgt.z - s.dir * 8, -58, 58);
-        p.urgency = 0.75;
-        p.job = 'COME ACROSS AND SUPPORT THE FIELDER';
-        steer(p, dt, false);
+        if (!eligibleToGather(p) || p.controlled || p.movedBy === 'input') continue;
+        const task = this.ballBehaviour.tasks.get(`${p.team}:${p.num}`);
+        if (!task) continue;
+        p.tx = task.x; p.tz = task.z; p.urgency = task.urgency; p.job = task.job;
+        steer(p, dt, task.sprint);
       }
       return;
     }
@@ -3943,9 +3940,16 @@ export class Director {
 
   /* ============================ THINK: targets for all thirty ============================ */
 
+  /** Tactical focus is the live carrier or the incoming ball, not the camera's
+   * historical carrier anchor. No phase/physics state is mutated by this read. */
+  tacticalPoint(): { x: number; z: number } {
+    const ball = readBall(this);
+    return ball.kind === 'SET_PIECE' ? this.focusPoint() : ball.target;
+  }
+
   shape( /* T-03: engine-internal */): ShapeInput {
     const atk = this.possession;
-    const f = this.focusPoint();
+    const f = this.tacticalPoint();
     const form = FORMATION_BY_ID(this.teams[atk].backline);
     const dForm = FORMATION_BY_ID(this.teams[this.defending()].defence);
     const op = this.op;
@@ -4005,6 +4009,7 @@ export class Director {
 
   focusPoint(): { x: number; z: number } {
     if (this.chaos) return { x: this.chaos.player.x, z: this.chaos.player.z };
+    if (this.phase === 'OPEN_PLAY' && this.bc.free) return { x: this.bc.free.x, z: this.bc.free.z };
     if (this.op) return { x: this.op.carrierX, z: this.op.carrierZ };
     if (this.bd) return { x: this.bd.contactX, z: this.bd.contactZ };
     if (this.ml) return { x: this.ml.x, z: this.ml.z };
@@ -4205,7 +4210,7 @@ export class Director {
     if (!inRuck && this.phase !== 'OPEN_PLAY') return false;
     const attacking: 'A' | 'B' = inRuck ? bd!.attacking : (this.op?.attacking ?? this.possession);
     const dir: 1 | -1 = attacking === 'A' ? 1 : -1;
-    const f = this.focusPoint();
+    const f = this.tacticalPoint();
     /* the gate geometry: the referee's own while his window is open, else
      * drawn here from the same cluster so the routing starts the frame the
      * bodies go to ground, not the frame the whistle becomes possible */
@@ -4215,12 +4220,13 @@ export class Director {
     }
     const geo = inRuck ? this.ruckGeoThisFrame : null;
     const inRoster = inRuck && (this.ruckGateRosterCache?.has(`${p.team}:${p.num}`) ?? false);
-    const loose = this.bc.state === 'LOOSE' && this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
+    const loose = this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
     const op = this.op;
-    const carrier = !inRuck && op ? (() => { const c = this.L(op.attacking, op.carrierNum); return { num: c.num, x: c.x, z: c.z }; })() : null;
+    const carrier = !inRuck && op && !op.ball.live && !this.bc.free ? (() => { const c = this.L(op.attacking, op.carrierNum); return { num: c.num, x: c.x, z: c.z }; })() : null;
     const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
     const ctx: PackContext = {
       phase, team: p.team, attacking, dir, sigma: p.team === 'A' ? 1 : -1,
+      openSide: op ? (op.open < 0 ? -1 : 1) : undefined,
       p: { x: p.x, z: p.z }, ball: f, mark: { x: p.tx, z: p.tz },
       geo, stage: inRuck ? bd!.stage : '', ruckFormed: inRuck ? bd!.ruckFormed : false,
       inRoster, loose, carrier, latched: !!op?.latch, busy, toLine,
@@ -4293,17 +4299,17 @@ export class Director {
     if (!inRuck && this.phase !== 'OPEN_PLAY') return false;
     const attacking: 'A' | 'B' = inRuck ? bd!.attacking : (this.op?.attacking ?? this.possession);
     const dir: 1 | -1 = attacking === 'A' ? 1 : -1;
-    const f = this.focusPoint();
+    const f = this.tacticalPoint();
     /* the gate geometry: the referee's own while his window is open, else
      * drawn here from the same cluster (applyForwardPack already drew it
      * this frame for the forwards; reuse it — one geometry, two trees) */
     const geo = inRuck ? this.ruckGeoThisFrame : null;
     const inRoster = inRuck && (this.ruckGateRosterCache?.has(`${p.team}:${p.num}`) ?? false);
-    const loose = this.bc.state === 'LOOSE' && this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
+    const loose = this.bc.free ? { x: this.bc.free.x, z: this.bc.free.z } : null;
     const op = this.op;
     /* the carrier: only while the ball is in a hand — a pass in flight has
      * no carrier, and the marks that read "off the carrier" stand down */
-    const carrier = !inRuck && op && !op.ball.live
+    const carrier = !inRuck && op && !op.ball.live && !this.bc.free
       ? (() => { const c = this.L(op.attacking, op.carrierNum); return { num: c.num, x: c.x, z: c.z, vz: op.vz }; })()
       : null;
     const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
@@ -4315,6 +4321,7 @@ export class Director {
     const ctx: BacklineContext = {
       phase: inRuck ? 'BREAKDOWN' : 'OPEN_PLAY',
       team: p.team, attacking, dir, sigma: p.team === 'A' ? 1 : -1,
+      openSide: op ? (op.open < 0 ? -1 : 1) : undefined,
       p: { x: p.x, z: p.z }, vel: { x: p.vx, z: p.vz },
       ball: f, mark: { x: p.tx, z: p.tz },
       geo, stage: inRuck ? bd!.stage : '', ruckFormed: inRuck ? bd!.ruckFormed : false,
@@ -4327,7 +4334,7 @@ export class Director {
        * pose (AIM/METER on the KICK phase — where think() stands down and
        * the SETTING stage owns the rotation) or the run-and-hold charge
        * still in open play, where THIS tree rotates the men live */
-      kick: (op && !op.ball.live && op.kickCharge > 0.01
+      kick: (op && !op.ball.live && !this.bc.free && op.kickCharge > 0.01
         && (op.carrierNum === 9 || op.carrierNum === 10))
         ? { team: op.attacking, num: op.carrierNum, x: op.carrierX, z: op.carrierZ }
         : kickPoseOf(this.kk),
@@ -4382,7 +4389,27 @@ export class Director {
     return true;
   }
 
+  /** Final held-ball sanity check for EVERY AI mark path, including early
+   * dataset/pod returns. A receiver cannot demand a forward pass; a defender
+   * cannot guard the wrong goal. This adjusts targets, never player positions. */
+  private steerThought(p: Live, dt: number, sprint: boolean, gate: ForwardAttackGateReporter | undefined, label: string) {
+    const s = this.op;
+    if (this.phase === 'OPEN_PLAY' && s && !s.ball.live && !this.bc.free && !p.carrier) {
+      const car = this.L(s.attacking, s.carrierNum);
+      const depth = p.team === s.attacking ? (p.num <= 8 ? -1.5 : -3) : 0;
+      const relative = (p.tz - car.z) * s.dir;
+      if (p.team === s.attacking ? relative >= -0.05 : relative < 0) {
+        this.writeThinkPlayer(gate, `${label}:ball-side`, p, ['tz', 'job'] as const, () => {
+          p.tz = clamp(car.z + s.dir * depth, -60, 60);
+          if (p.team === s.attacking) p.job = 'RELOAD BEHIND THE BALL — GIVE A LEGAL PASS OPTION';
+        });
+      }
+    }
+    steer(p, dt, sprint, gate, label);
+  }
+
   private think(dt: number, input: Input) {
+    coordinateBall(this);
     const gate = this.forwardAttackGates();
     const s = this.shape();
     const atk = this.possession;
@@ -4396,7 +4423,7 @@ export class Director {
     const diff = DIFFICULTY_TABLE[clamp(this.difficulty, 0, 9)];
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
-    const f = this.focusPoint();
+    const f = this.tacticalPoint();
     /* SWITCHING MATRIX — the opt-in auto-switch runs off the same freshly
      * read positions as everything else in think(), before any mover acts. */
     this.tickAutoSwitch(dt);
@@ -4456,8 +4483,7 @@ export class Director {
         ? this.restartBallLive()
         : KICK.stage === 'FLIGHT';
       const ch = this.ctrlPlayer;
-      if (ch && this.isHuman(ch.team) && !ch.down && ballLive
-        && !KICK.chasers.some((c) => c.num === ch.num)) {
+      if (ch && this.isHuman(ch.team) && eligibleToGather(ch) && ballLive && !KICK.profile.atGoal) {
         this.writeThinkPlayer(gate, `think:kick-input:${ch.team}${ch.num}`, ch,
           ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy'] as const, () => {
             ch.controlled = true;
@@ -4475,55 +4501,21 @@ export class Director {
       return;
     }
 
-    // Which defenders leave the line and converge: the men in the carrier's channel.
-    const convergers = new Set<number>();
-    /* T-13. THE COVER CHASE. A defender the carrier has gone past turns and
-     * chases — at sprint, all of them, from anywhere within thirty metres.
-     * Until the carrier actually ran (T-13 carrier integration) this never
-     * mattered; after it, three channel convergers could not cover a full-
-     * pace runner and the match turned into sevens (5.9 line breaks a team,
-     * 66 tackles). The line holds its shape — dataset still owns the intact
-     * line — but once a man is beaten, pursuit is the only job. */
-    const coverChase = new Set<number>();
-    if (this.op && !this.op.ball.live) {
-      const carC = this.L(this.op.attacking, this.op.carrierNum);
-      for (const q of this.live) {
-        if (q.team === def || q.sinbin > 0 || q.beatenT > 0 || q.down) continue;
-        /* SPEC_11: "the carrier has gone past him" is `(carC.z − q.z) · dir
-         * > 0.5`. The old form was its negation with a −0.5 threshold, which
-         * armed the chase for every defender up to half a metre IN FRONT of
-         * the carrier — half the line turning and sprinting at a man they had
-         * not been beaten by. */
-        if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
-      }
-      /* THE CHASE IS NOT THE WHOLE TEAM.
-       *
-       * Any beaten man within 16 m joined the chase, and because a line break
-       * beats most of a flat line at once that meant up to TWELVE defenders
-       * abandoning their channels together (measured avg 6.9, p90 10). They
-       * converged into one clump around the ball — 30% of open-play frames had
-       * six or more defenders inside 3 m of the carrier, and COVER CHASE was
-       * the job on 50565 of those clustered frames, twice every other cause
-       * combined. That is the honey-pot.
-       *
-       * Real cover defence is two or three men: the nearest chasers plus the
-       * sweeper. Everyone else holds the line and trusts the shape, because a
-       * line that dissolves into a chase concedes the next phase even if this
-       * one is stopped. Keep the closest few and give the rest their channel
-       * back. */
-      if (coverChase.size > COVER_CHASE_MAX) {
-        const ranked = [...coverChase]
-          .map((num) => { const q = this.L(def, num); return { num, d: Math.hypot(q.x - carC.x, q.z - carC.z) }; })
-          .sort((a, b) => a.d - b.d);
-        coverChase.clear();
-        for (const r of ranked.slice(0, COVER_CHASE_MAX)) coverChase.add(r.num);
-      }
-      /* The sweeper never joins a chase — he IS the cover behind it. */
-      coverChase.delete(15);
-      const carLat = this.op.carrierX - f.x;
-      for (const r of DEFENCE_CHANNELS
-        .map((c) => ({ num: c.num, d: Math.abs(c.lat - carLat) }))
-        .sort((a, b) => a.d - b.d).slice(0, 3)) convergers.add(r.num);
+    // The nearest goal-side defenders confront the carrier; a small second
+    // wave turns after a line break. Compare LIVE positions, not channel
+    // offsets minus an anchor that is identically the carrier's own position.
+    const convergers = new Set<number>(), coverChase = new Set<number>();
+    const carC = this.ballBehaviour.read?.holder;
+    if (carC) {
+      const defenders = this.live.filter(p => p.team === def && eligibleToGather(p) && p.beatenT <= 0);
+      const distance = (p: Live) => Math.hypot(p.x - carC.x, p.z - carC.z);
+      const eta = (p: Live) => distance(p) / maxSpeed(p, false, true, p.stamina);
+      const front = defenders.filter(p => (carC.z - p.z) * dir <= 0.5 && distance(p) < 14)
+        .sort((a, b) => eta(a) - eta(b));
+      for (const p of front.slice(0, 2)) convergers.add(p.num);
+      const beaten = defenders.filter(p => (carC.z - p.z) * dir > 0.5 && distance(p) < 20 && (p.num !== 15 || front.length === 0))
+        .sort((a, b) => eta(a) - eta(b));
+      for (const p of beaten.slice(0, COVER_CHASE_MAX - convergers.size)) coverChase.add(p.num);
     }
 
     const boundNums = new Set<number>();
@@ -4563,7 +4555,8 @@ export class Director {
     // ---- the controlled player is driven by input, not by a target ----
     const ctrlHuman = this.ctrlPlayer;
     const human = !!ctrlHuman && this.isHuman(ctrlHuman.team);
-    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down) {
+    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down && ctrlHuman.sinbin <= 0
+      && (ctrlHuman.recoverT ?? 0) <= 0 && (ctrlHuman.diveT ?? 0) <= 0 && !ctrlHuman.latchingOnto) {
       this.writeThinkPlayer(gate, `think:human-input:${ctrlHuman.team}${ctrlHuman.num}`, ctrlHuman,
         ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy', 'face', 'lastFace', 'turnT', 'clip', 'clipT', 'stamina'] as const, () => {
           ctrlHuman.controlled = true;
@@ -4580,7 +4573,7 @@ export class Director {
            * evened and lowered; a step leaves a speed debt that recovers
            * over ~half a second, so a step is a gamble, not a teleport. */
           const debt = this.op?.speedDebt ?? 1;
-          const sp = maxSpeed(ctrlHuman, this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul * debt;
+          const sp = maxSpeed(ctrlHuman, !this.bc.free && !this.op?.ball.live && this.op?.attacking === ctrlHuman.team && this.op?.carrierNum === ctrlHuman.num, sprint, ctrlHuman.stamina) * burstMul * debt;
           // WASD is relative to the camera by default, so the stick always agrees
           // with what the player can see whatever the rig is doing.
           const m = mapInputToWorld(lat, dep, this.cam.yaw, dir, this.relativeControls);
@@ -4689,12 +4682,27 @@ export class Director {
       }
       this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
 
+      // Every free-flight role wins once: collect, support, contain, cover or
+      // retreat. Nobody then gets a contradictory old-carrier/positional job.
+      const task = this.ballBehaviour.tasks.get(`${p.team}:${p.num}`);
+      if (task) {
+        if (p.movedBy === 'steer') continue; // receiver already moved in upOpen
+        this.writeThinkPlayer(gate, `think:ball-${task.role}:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'urgency', 'job'] as const, () => {
+            p.tx = task.x;
+            p.tz = aiClean ? legalZFor(guardLines, p, task.z, CLEAN_MARGIN_METRES) : task.z;
+            p.urgency = task.urgency; p.job = task.job;
+          });
+        this.steerThought(p, dt, task.sprint, gate, `think:ball-steer:${p.team}${p.num}`);
+        continue;
+      }
+
       const onAtk = p.team === atk;
       const c: RoleContract = contractFor(p.num);
 
       if (onAtk) {
         // carrier: driven by phase logic, not by shape
-        if (this.op && p.num === this.op.carrierNum) {
+        if (this.op && p.num === this.op.carrierNum && !this.op.ball.live && !this.bc.free) {
           this.writeThinkPlayer(gate, `think:carrier:${p.team}${p.num}`, p, ['carrier', 'urgency'] as const, () => {
             p.carrier = true;
             p.urgency = 0;
@@ -4716,7 +4724,7 @@ export class Director {
            * holds. The 10's pocket depth and the 12's flat lane are the
            * release options the 9 is choosing between. */
           this.applyBackline(gate, p, false);
-          steer(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
+          this.steerThought(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
           continue;
         }
 
@@ -4727,7 +4735,7 @@ export class Director {
         const podFar = slot ? Math.abs(slot.lat) > 14 : false;
         if (this.op && hipMan && !podFar) {
           const car = this.L(atk, this.op.carrierNum);
-          const off = p.num === 7 ? 1.9 : -1.4;
+          const off = openSign * (p.num === 7 ? 1.9 : -1.4);
           this.writeThinkPlayer(gate, `think:hip-support:${p.team}${p.num}`, p,
             ['tx', 'tz', 'urgency', 'job'] as const, () => {
               p.tx = clamp(car.x + off, -33, 33);
@@ -4740,7 +4748,7 @@ export class Director {
               p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
             });
           this.applyForwardPack(gate, p, false);
-          steer(p, dt, true, gate, `think:hip-support-steer:${p.team}${p.num}`);
+          this.steerThought(p, dt, true, gate, `think:hip-support-steer:${p.team}${p.num}`);
           continue;
         }
 
@@ -4822,7 +4830,7 @@ export class Director {
               });
             this.applyForwardPack(gate, p, false);
             this.applyBackline(gate, p, false);
-            steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
+            this.steerThought(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
         }
@@ -4914,7 +4922,7 @@ export class Director {
         this.writeThinkPlayer(gate, `think:converge:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
             p.tx = clamp(car.x, -33, 33);
-            p.tz = clamp(car.z - this.op!.dir * lead, -58, 58);
+            p.tz = clamp(car.z + this.op!.dir * lead, -58, 58);
             p.job = defSys.job;
             p.urgency = 1;
           });
@@ -5137,7 +5145,7 @@ export class Director {
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
-      steer(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num),
+      this.steerThought(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num),
         gate, `think:steer:${p.team}${p.num}`);
     }
 
@@ -5479,7 +5487,7 @@ export class Director {
           vz: p.vz * (i === 0 ? 0 : 2.2),
         }));
 
-        const ball = world.addBall({ radius: 0.15, x: c.player.x, y: 1.53, z: c.player.z });
+        const ball = world.addBall({ x: c.player.x, y: 1.53, z: c.player.z });
         const ballCarrier = world.attachBallToCarrier(ragdolls[0], ball, {
           /* Stress focus is the 14-body pile; keep the weld secure so the
            * TARCS BALL_SECURED path is on-screen throughout. */
@@ -5530,7 +5538,10 @@ export class Director {
     c.physicsReady = false;
   }
 
-  startOpen(team: 'A' | 'B', x: number, z: number, num = 9, phase = 1, gained = 0, protect = 0) {
+  startOpen(team: 'A' | 'B', x: number, z: number, num = 9, phase = 1, gained = 0, protect = 0, preservePose = false) {
+    this.releaseBallControl();
+    // A direct gather/reset must not leave think() frozen in an old kick ritual.
+    this.kk = undefined;
     this.possession = team;
     const dir = team === 'A' ? 1 : -1;
     const open = Math.abs(x) > 8 ? -Math.sign(x) : Math.sign(x) || 1;
@@ -5545,6 +5556,7 @@ export class Director {
      * ruck), so the close-place path is the normal one. */
     const car = this.L(team, num);
     car.carrier = true;
+    car.job = 'CARRY THE BALL — LOOK FOR SUPPORT';
     let cx: number, cz: number;
     /* NO-TELEPORT: measure against the point he would actually be placed at —
      * the CLAMPED one. A ball near the touchline clamps inwards by a metre
@@ -5559,7 +5571,11 @@ export class Director {
      * stands (the systems that feed startOpen walk their carrier to the spot
      * first, so this path only handles the genuinely-off runners). */
     const CLOSE_PLACE_MAX = 1.0;
-    if (Math.hypot(car.x - gx, car.z - gz) < CLOSE_PLACE_MAX) {
+    if (preservePose) {
+      // A real gather happens AT the player's hands, never by relocating him
+      // to the ball or resetting his running velocity on the catch frame.
+      cx = car.x; cz = car.z;
+    } else if (Math.hypot(car.x - gx, car.z - gz) < CLOSE_PLACE_MAX) {
       /* D-2 — the close place still closed up to 1.0 m in a single frame, an
        * implied 60 m/s, and the tightened 0.80 m gate sees it. Bound the step;
        * the carrier's own open-play integration closes the rest over the next
@@ -5572,17 +5588,19 @@ export class Director {
     } else {
       cx = clamp(car.x, -33, 33); cz = clamp(car.z, -58, 58);
     }
-    car.vx = 0;
-    car.vz = dir * 3.4;
-    car.face = dir;
-    car.down = false;
-    car.bound = false;
-    this.live.forEach((p) => { p.passRank = 0; });
+    if (!preservePose) {
+      car.vx = 0;
+      car.vz = dir * 3.4;
+      car.face = dir;
+      car.down = false;
+      car.bound = false;
+    }
+    this.live.forEach((p) => { p.passRank = 0; p.carrier = p === car; });
 
     this.op = {
       t: 0, attacking: team, dir,
       carrierX: cx, carrierZ: cz, carrierNum: num,
-      vx: 0, vz: dir * 4.2, protect,
+      vx: preservePose ? car.vx : 0, vz: preservePose ? car.vz : dir * 4.2, protect,
       podHold: protect > 0 ? Math.min(1.0, protect) : 0,
       supports: [], defenders: [],
       gained, toLine: Math.abs(dir * 50 - z), z, pressure: 0, phase,
@@ -5600,14 +5618,31 @@ export class Director {
       aiTimer: num === 9 ? 0.13 + R() * 0.15 : 0.28 + R() * 0.42, aiIntent: 'CARRY', aiPlay: 'SP-POD', aiPhasePlan: 0,
       heldT: 0,
       open,
-      ball: { x, y: 1.05, z, vx: 0, vz: 0, live: false, t: 0 },
+      ball: { ...makeBall(x, 1.05, z), live: false, t: 0 },
       pendingReceiver: num, passT: 0, passDist: 8,
       passTargetX: x, passTargetZ: z,
     };    this.bd = undefined; this.ml = undefined;
     this.phase = 'OPEN_PLAY';
+    this.syncBallSocket();
     this.setCtrl(team, num);
     this.refreshPassOptions();
     if (!this.isHuman(team)) this.cpuCallPlay();
+  }
+
+  /** Kinematic weld, after ALL player writers; the renderer reads this pose. */
+  syncBallSocket() {
+    const s = this.op;
+    if (this.phase === 'OPEN_PLAY' && s && !s.ball.live && !this.bc.free) {
+      weldBall(s.ball, this.L(s.attacking, s.carrierNum));
+    }
+  }
+
+  /** Idempotent teardown, also used by whistles and direct phase transitions. */
+  releaseBallControl() {
+    clearBallBehaviour(this.ballBehaviour);
+    for (const a of this.actors) { a.ballLookX = undefined; a.ballLookZ = undefined; }
+    if (this.op) this.op.ball.socket = null;
+    clearCraft(this.bc);
   }
 
   /** Control always lands on the man with the ball, or the nearest defender. */
@@ -5623,6 +5658,20 @@ export class Director {
    * never touches a key the match still plays out as a game of rugby.
    */
   handoffControl() {
+    if (this.bc.free) {
+      // No carrier exists to hand back to. Keep a valid manual selection;
+      // otherwise choose an eligible human chaser, never the former owner.
+      const current = this.ctrlPlayer;
+      if (current && this.isHuman(current.team) && eligibleToGather(current)) return;
+      let best: Live | null = null, distance = Infinity;
+      for (const p of this.live) {
+        if (!this.isHuman(p.team) || !eligibleToGather(p)) continue;
+        const gap = Math.hypot(p.x - this.bc.free.x, p.z - this.bc.free.z);
+        if (gap < distance) { best = p; distance = gap; }
+      }
+      if (best) this.setCtrl(best.team, best.num);
+      return;
+    }
     if (!this.isHuman(this.possession)) return;
     const f = this.focusPoint();
     if (this.op) { this.setCtrl(this.op.attacking, this.op.carrierNum); return; }
@@ -5681,7 +5730,7 @@ export class Director {
     const atkDir: -1 | 1 = team === 'A' ? 1 : -1;
     const scored: { p: Live; score: number }[] = [];
     for (const p of this.live) {
-      if (p.team !== team || p.sinbin > 0 || p.down) continue;
+      if (p.team !== team || (this.bc.free ? !eligibleToGather(p) : p.sinbin > 0 || p.down) || !canPlayBall(this, p)) continue;
       const dist = Math.hypot(p.x - x, p.z - z);
       /* seconds for HIM to close, at his own top pace — aose-one sprinter
        * twenty out beats a tighthead ten out. */
@@ -5691,7 +5740,7 @@ export class Director {
        * line he defends. Facing the wrong way or upfield of the ball is a
        * chase, not an interception. */
       const goalSide = (p.z - z) * atkDir < -0.5;
-      if (goalSide) score -= 1.1;
+      if (goalSide && !this.bc.free) score -= 1.1;
       if (p.clip === 'dive') score += 2.5;   // committed — cannot be re-aimed
       if ((p.recoverT ?? 0) > 0) score += 2.0; // still getting up
       if (p.latchingOnto || p.latchedBy) score -= 0.6; // already in the fight
@@ -5726,7 +5775,11 @@ export class Director {
    * tap always grabs the right man and repeat taps still walk the options.
    */
   smartSwitch() {
-    const def = this.defending();
+    const controlledTeam = this.ctrlPlayer?.team;
+    const def = this.bc.free
+      ? (controlledTeam && this.isHuman(controlledTeam) ? controlledTeam
+        : this.isHuman('A') ? 'A' : this.isHuman('B') ? 'B' : this.defending())
+      : this.defending();
     const f = this.focusPoint();
     const ranked = this.rankInterceptors(def, f.x, f.z).slice(0, 3);
     if (!ranked.length) return;
@@ -5759,7 +5812,7 @@ export class Director {
   tickAutoSwitch(dt: number) {
     if (!this.autoSwitchEnabled()) return;
     if (this.phase !== 'OPEN_PLAY' || !this.op) return;
-    const def = this.defending();
+    const def = this.bc.free && this.ctrlPlayer ? this.ctrlPlayer.team : this.defending();
     if (!this.isHuman(def)) return;
     if (this.t - this.lastManualSwitch < AUTO_SWITCH_GRACE) return;
     const cur = this.live[this.ctrl];
@@ -5852,7 +5905,7 @@ export class Director {
       .join('|');
     /* SPEC_02 GATE: capture the derived state before its single replacement. */
     const before = { passOpts: signature(this.passOpts) };
-    if (!this.op) {
+    if (!this.op || this.bc.free) {
       this.passOpts = [];
       this.checkForwardAttackState(gate, 'Director.refreshPassOptions:clear', before,
         { passOpts: signature(this.passOpts) }, ['passOpts']);
@@ -5957,7 +6010,10 @@ export class Director {
 
   /* ============================ BREAKDOWN ============================ */
 
-  startBreakdown(tacklerNum?: number) { /* T-03: engine/breakdown */ return startBreakdown(this, tacklerNum); }
+  startBreakdown(tacklerNum?: number) {
+    this.releaseBallControl();
+    return startBreakdown(this, tacklerNum);
+  }
 
 
   upBreakdown(dt: number, _input: Input, pressed: Set<string>) { /* T-03: engine/breakdown */ return upBreakdown(this, dt, _input, pressed); }
@@ -6090,6 +6146,7 @@ export class Director {
    * jump — must call this or it will leave players frozen where they stood.
    */
   releaseAll() {
+    this.releaseBallControl();
     /* TEARDOWN HARDENING — the purge is UNCONDITIONAL. The old shape kept an
      * active drag's links alive across the whistle (advantage play-on), and a
      * second whistle landing before the play-on resolved then raced the
@@ -6124,6 +6181,7 @@ export class Director {
   /* ============================ MAUL ============================ */
 
   startMaul(team: 'A' | 'B', x: number, z: number, ranks = MAUL_RANKS_PER_SIDE, fromLineout = false) {
+    this.releaseBallControl();
     const dir = team === 'A' ? 1 : -1;
     const def: 'A' | 'B' = team === 'A' ? 'B' : 'A';
     this.possession = team;
@@ -6209,6 +6267,7 @@ export class Director {
 
 
   startScrum(feed: 'A' | 'B', x: number, z: number) {
+    this.releaseBallControl();
     this.possession = feed;
     // An award is one scrum even if it resets, ends in a penalty, or is stolen.
     this.recordSetPieceEvent('scrums');
@@ -6271,6 +6330,7 @@ export class Director {
   ];
 
   startLineout(thrower: 'A' | 'B', z: number, x: number) {
+    this.releaseBallControl();
     this.possession = thrower;
     // A not-straight rethrow earns a new call to this method and a new event.
     this.recordSetPieceEvent('lineouts');
@@ -6295,7 +6355,7 @@ export class Director {
     this.lo = {
       t: 0, stage: 'ASSEMBLE', markZ: zn, side,
       call: { targetX: side * 28.4, label: Director.LO_CALLS[1].label, jumpers: 5, kind: 'MIDDLE' },
-      ball: { x: side * 33.5, y: 1.6, z: zn, vx: 0, vy: 0, vz: 0, state: 'HELD', heldBy: 0, apexY: 0 },
+      ball: { ...makeBall(side * 33.5, 1.6, zn), state: 'HELD', heldBy: 0, apexY: 0 },
       players, history: [], winner: false, contestMargin: 0,
       thrower, quality: 0.5, callIdx: 1, meter: 0.5, meterDir: 1, meterOn: false,
       throwAngle: 0, throwCrooked: false,
@@ -6349,9 +6409,17 @@ export class Director {
     /* T-32. A conversion after a try is not a live kick — it begins with fanfare
      * and a walk to the tee, and only then does the button become active. */
     const isConversion = type === 'GOAL' && this.lastScorer?.kind === 'TRY';
+    const fromHand = !!this.op && this.op.attacking === team && type !== 'GOAL'
+      && type !== 'RESTART' && type !== 'DROP_OUT' && !this.penaltyTouchKick;
+    const body = makeBall(x, BALL_MAJOR, z);
+    if (fromHand) weldBall(body, this.L(team, num));
+    else { body.q.z = Math.SQRT1_2; body.q.w = Math.SQRT1_2; }
+    // A live kick releases on launch; the tee has no carrier momentum.
+    body.socket = null;
+    this.releaseBallControl();
     this.kk = {
       t: 0, stage: isConversion ? 'FANFARE' : 'AIM', type,
-      bx: x, by: 0.12, bz: z, vx: 0, vy: 0, vz: 0,
+      bx: body.x, by: body.y, bz: body.z, vx: 0, vy: 0, vz: 0, body, fromHand,
       dir, kicker: team, kickerNum: num, kickerName: this.teams[team].players[num - 1].name,
       history: [], profile: { label: labels[type], atGoal },
       goalProb: atGoal ? base : 0, goalDistance, goalAngle,
@@ -6637,10 +6705,9 @@ export class Director {
   }
 
   /** Held up in goal is a five-metre scrum to the attack, not a drop out. */
-  touchDown( /* T-03: engine-internal */) {
+  touchDown(defender: 'A' | 'B' = this.defending()) {
     // If the ball is dead in goal without being grounded by the attack, the
     // defending side restarts with a drop-out from their own 22-metre line.
-    const defender: 'A' | 'B' = this.defending();
     this.say('DEAD IN GOAL — 22-METRE DROP OUT');
     this.dropOut(defender);
   }
@@ -6740,6 +6807,13 @@ export class Director {
       const p = this.live[i];
       const a = this.actors[i];
       a.rx = p.x; a.rz = p.z; a.rf = p.face;
+      const task = this.ballBehaviour.tasks.get(`${p.team}:${p.num}`);
+      const reading = this.ballBehaviour.read;
+      const watching = eligibleToGather(p) && !p.carrier && reading
+        && (task?.role !== 'RETREAT') && (task || reading.kind === 'HELD')
+        && Math.hypot(p.x - reading.point.x, p.z - reading.point.z) < 28;
+      a.ballLookX = watching ? this.ballBehaviour.read?.point.x : undefined;
+      a.ballLookZ = watching ? this.ballBehaviour.read?.point.z : undefined;
       a.renderClip = p.clip; a.clipT = p.clipT; a.jitter = p.jitter;
       a.turnT = p.turnT ?? 0;
       a.size = p.size;
