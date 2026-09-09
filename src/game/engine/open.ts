@@ -64,6 +64,22 @@ export function upOpen(d: Director, dt: number, input: Input, pressed: Set<strin
   if (pressed.has('action') && d.tryJump()) return;
   const car = d.L(s.attacking, s.carrierNum);
   const human = d.isHuman(s.attacking);
+  /* "YOU ARE ONE MAN IN THE TEAM". A role lock (PICK YOUR SHIRT / a number key)
+   * fixes the human's stick to ONE shirt, so the human side can be attacking
+   * while the man with the ball is a TEAMMATE, not the player the human runs.
+   *
+   * Two consequences the old single `human` flag could not express:
+   *   1. Only when the human actually controls THIS carrier may the carrier's
+   *      verbs (J/K/T pass, G/F step/fend, L/H/P kick) fire — otherwise a press
+   *      would pass out of a teammate's hands, which read as "passing is broken".
+   *   2. A human-team carrier the human does NOT control has no brain (the old
+   *      `human` branch handed the side to the stick but the stick was elsewhere)
+   *      — it ran as a headless churn. Route it to the CPU carrier brain so it
+   *      plays structured rugby: run lines, and feed the role-locked man the
+   *      ball, which is how he gets to pass at all.
+   * When there is no role lock, the human controls the carrier whenever his side
+   * attacks, so `carHuman` collapses to `human` and behaviour is unchanged. */
+  const carHuman = human && d.ctrlPlayer === car;
   // A drop/strip is not a carry or a pass. Craft owns its free-body tick and
   // gather; the old carrier must not score, tackle, or launch another pass.
   if (d.bc.free) {
@@ -239,13 +255,13 @@ export function upOpen(d: Director, dt: number, input: Input, pressed: Set<strin
   if (s.latch) {
     /* he keeps his own legs — the human's input branch and cpuCarrier both
      * still integrate him, taxed by the drag multiplier in maxSpeed(). */
-    if (human) {
+    if (carHuman) {
       const dragCar = d.L(s.attacking, s.carrierNum);
       dragCar.job = 'FIGHT THROUGH IT — KEEP YOUR LEGS GOING';
     } else {
       cpuCarrierDrag(d, dt, s);
     }
-  } else if (human) {
+  } else if (carHuman) {
     // SPACE performs the context action when the player has asked for that
     if (pressed.has('action') && (d.options.spaceAction ?? 0) !== 0) { d.fireContext(); return; }
     if (pressed.has('step') && s.stepCd <= 0) { s.stepCd = 2.2; d.doStep(dt); }

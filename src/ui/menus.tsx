@@ -323,6 +323,85 @@ export function SquadScreen({ teamId, onBack, onConfirm }: {
   );
 }
 
+/* ============================ PICK YOUR SHIRT ============================ */
+/**
+ * WHO ARE YOU TODAY? Choose the shirt you control for the match — the role
+ * lock the Director honours from kick-off. Presented before kick-off so you
+ * pick the player you want to be in the team, rather than being silently
+ * given the fly-half. Number keys (1-15) and Q still switch live mid-match.
+ */
+export function PickRoleScreen({ teamId, onBack, onConfirm }: {
+  teamId: string; onBack: () => void; onConfirm: (num: number) => void;
+}) {
+  const T = TEAM_BY_ID(teamId);
+  const [sel, setSel] = useState(10);
+  const starters = T.squad.slice(0, 15);
+  const p = starters.find((s) => s.num === sel) ?? starters[0];
+  const w = POSITION_WEIGHTS[p.num];
+  const isForwards = (n: number) => n >= 1 && n <= 8;
+  return (
+    <div className="mx-auto max-w-4xl p-5">
+      <TitleBar kicker={`${T.name} · ${T.nickname}`} title="PICK YOUR SHIRT" right={<Btn onClick={onBack}>BACK</Btn>} />
+      <div className="mb-3 text-[10px] leading-relaxed text-[#8fa0b8]">
+        You will play the whole match as <span className="font-black text-[#e8cf46]">one man in the team</span> —
+        the AI coaches the other twenty-nine. Run with <Kbd>A/D</Kbd> <Kbd>◀/▶</Kbd>, sprint <Kbd>SPACE</Kbd>,
+        pass <Kbd>T</Kbd> (down the line) or <Kbd>J</Kbd>/<Kbd>K</Kbd> to a side. Press <Kbd>Q</Kbd> to switch to
+        whoever has the ball, or a <Kbd>1-15</Kbd> key to jump to that shirt, at any time.
+      </div>
+      <div className="grid gap-3 lg:grid-cols-[1fr_300px]">
+        <Panel title="THE FIFTEEN — TAP A SHIRT TO PLAY AS HIM">
+          <div className="grid grid-cols-1 gap-0.5 text-[10px] sm:grid-cols-2">
+            {starters.map((sp) => (
+              <button
+                key={sp.num}
+                onClick={() => setSel(sp.num)}
+                className={`grid grid-cols-[24px_1fr_64px] items-center gap-2 border px-2 py-1 text-left ${sel === sp.num ? 'border-[#e8cf46] bg-[#221d0f]' : 'border-[#26314a] bg-[#0e1522]'}`}
+              >
+                <span className="font-black text-[#e8cf46]">{sp.num}</span>
+                <span className="truncate font-bold text-[#f4efe2]">
+                  {sp.name}{sp.num === 10 && <span className="ml-1 text-[9px] text-[#7f8ea6]">(START)</span>}
+                </span>
+                <span className="text-right text-[#7f8ea6]">{sp.pos}</span>
+              </button>
+            ))}
+          </div>
+        </Panel>
+        <div className="space-y-3">
+          <Panel title={`${p.num} · ${p.pos}`}>
+            <div className="text-[15px] font-black text-[#f4efe2]">{p.name}</div>
+            <div className="mt-1 text-[9px] text-[#8fa0b8]">
+              {isForwards(p.num)
+                ? 'A big-man role: carries, tackles and grinds the breakdown. Tougher to score but always in the action.'
+                : p.num === 9
+                  ? 'The scrum-half: every ruck ball passes through your hands — you will touch it more than anyone.'
+                  : 'An open-play runner: you get the ball in space on the structured attacks. Best for scoring tries.'}
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {(['SPD', 'PWR', 'SKL', 'KCK', 'STA', 'TTL'] as const).map((k) => (
+                <div key={k}>
+                  <div className="flex justify-between text-[9px] tracking-[0.18em] text-[#7f8ea6]">
+                    <span>{k === 'SPD' ? 'PACE' : k === 'PWR' ? 'POWER' : k === 'SKL' ? 'SKILL' : k === 'KCK' ? 'KICKING' : k === 'STA' ? 'STAMINA' : 'TACKLING'}</span>
+                    <span className="tabular-nums text-[#cfd8e6]">{p.stats[k]}</span>
+                  </div>
+                  <Meter v={p.stats[k] / 100} />
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-1 text-[9px] text-[#6f7f96]">
+              <div>ROLE DEMAND: SPD {Math.round(w.SPD * 100)}%</div>
+              <div>PWR {Math.round(w.PWR * 100)}%</div>
+              <div>SKL {Math.round(w.SKL * 100)}%</div>
+              <div>KCK {Math.round(w.KCK * 100)}%</div>
+            </div>
+          </Panel>
+          <Btn wide onClick={() => onConfirm(p.num)}>PLAY AS {p.num} {p.name.split(' ').slice(-1)[0]}</Btn>
+          <div className="text-[9px] text-[#6f7f96]">Change your mind mid-match: <Kbd>Q</Kbd> or a number key.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ============================ TACTICS ============================ */
 
 export function TacticsScreen({ teamId, sliders, setSliders, onBack, onConfirm, form, setForm, assists, setAssists }: {

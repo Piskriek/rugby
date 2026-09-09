@@ -6,15 +6,16 @@ import {
 import { CLASSIC_MATCHES } from './game/jlr';
 import { MatchConfig, Slider, quickStartConfig } from './game/director';
 import {
-  TitleScreen, ModeScreen, TeamScreen, SquadScreen, TacticsScreen, OptionsScreen, GuideScreen, Mode,
+  TitleScreen, ModeScreen, TeamScreen, SquadScreen, PickRoleScreen, TacticsScreen, OptionsScreen, GuideScreen, Mode,
 } from './ui/menus';
+
 import { MatchView } from './ui/MatchView';
 import { AuditScreen } from './ui/AuditScreen';
 import { TableScreen, Bracket, Fixture, Row, emptyRow, record, roundRobin, simulate, sortTable } from './ui/competition';
 import { SaveBlob, loadSave, writeSave, clearSave } from './game/persist';
 
 type Screen =
-  | 'TITLE' | 'MODE' | 'TEAM' | 'SQUAD' | 'TACTICS' | 'OPTIONS' | 'GUIDE'
+  | 'TITLE' | 'MODE' | 'TEAM' | 'SQUAD' | 'ROLE' | 'TACTICS' | 'OPTIONS' | 'GUIDE'
   | 'MATCH' | 'TABLE' | 'BRACKET' | 'REPLAYS' | 'AUDIT';
 
 const defaultOptions = () => {
@@ -56,12 +57,25 @@ export default function App() {
    * coin toss — it routes straight into the same match pipeline.
    */
   const [quickCfg, setQuickCfg] = useState<MatchConfig | null>(null);
+  /* PLAYER ROLE — the shirt you control (team A / the coached side). Chosen
+   * on the pre-match PICK YOUR SHIRT screen; honoured by the Director's role
+   * lock from kick-off. */
+  const [controlTeam, setControlTeam] = useState<'A' | 'B'>('A');
+  const [controlNum, setControlNum] = useState(10);
+  /** The nation whose fifteen the PICK YOUR SHIRT screen is showing. */
+  const [roleTeam, setRoleTeam] = useState(saved?.squads.home ?? 'ENG');
+  /** True when the role screen was reached from QUICK START (so confirming
+   *  builds the quick-start config with the chosen shirt instead of the
+   *  setup-screen config). */
+  const [pendingQuick, setPendingQuick] = useState(false);
 
   const cfg: MatchConfig = useMemo(() => {
     if (quickCfg) return quickCfg;
     return {
       M_ID: `${home}_v_${away}`,
       homeId: home, awayId: away, kitA, kitB,
+      /* The coached side's shirt the human owns from kick-off. */
+      controlTeam, controlNum,
       difficulty: options.difficulty,
       halfLength: [2, 5, 10, 20, 40][options.halfLength] ?? 5,
       options,
@@ -76,7 +90,7 @@ export default function App() {
       // The default presentation is a broadcast camera. CHASE and TACTICAL remain
       // available from the pause menu.
     };
-  }, [quickCfg, home, away, kitA, kitB, options, sliders, form, kickerA, assists]);
+  }, [quickCfg, home, away, kitA, kitB, options, sliders, form, kickerA, assists, controlTeam, controlNum]);
 
   /**
    * QUICK START — the main-menu primary action. Sets up a friendly with the
@@ -88,11 +102,12 @@ export default function App() {
     setClinic(false);
     setClassic(null);
     setMode('FRIENDLY');
-    /* Quick Start always begins on home shirt 10 / fly-half. The Director
-     * keeps that role lock across kickoff handoffs until Q or a shirt key
-     * deliberately changes it. */
-    setQuickCfg(quickStartConfig({ controlTeam: 'A', controlNum: 10 }));
-    setScreen('MATCH');
+    /* QUICK START asks which shirt you want before the whistle — you are not
+     * silently handed the fly-half. The chosen shirt becomes the role lock. */
+    setPendingQuick(true);
+    setControlTeam('A');
+    setRoleTeam('ENG');
+    setScreen('ROLE');
   };
 
   /* T-12 — save on any change of the persisted state (which includes every
@@ -254,8 +269,26 @@ export default function App() {
     <TacticsScreen
       teamId={home} sliders={sliders} setSliders={setSliders} form={form} setForm={setForm}
       onBack={() => setScreen('SQUAD')}
-      onConfirm={() => setScreen('MATCH')}
+      onConfirm={() => { setRoleTeam(home); setPendingQuick(false); setScreen('ROLE'); }}
       assists={assists} setAssists={setAssists}
+    />,
+  );
+
+  /* PICK YOUR SHIRT — the final pre-match step for Quick Start and friendlies:
+   * choose which player you control before the whistle. */
+  if (screen === 'ROLE') return shell(
+    <PickRoleScreen
+      teamId={roleTeam}
+      onBack={() => setScreen(pendingQuick ? 'MODE' : 'TACTICS')}
+      onConfirm={(num) => {
+        setControlNum(num);
+        setControlTeam('A');
+        if (pendingQuick) {
+          setQuickCfg(quickStartConfig({ controlTeam: 'A', controlNum: num }));
+          setPendingQuick(false);
+        }
+        setScreen('MATCH');
+      }}
     />,
   );
 

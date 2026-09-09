@@ -654,21 +654,29 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         const st = rigRef.current;
         const md = plockRef.current?.consume() ?? { dx: 0, dy: 0 };
         const bp = d.ballPoint();
+        /* "YOU ARE THE PLAYER". The rig follows the shirt you control — the
+         * role lock from PICK YOUR SHIRT (or Q / a number key) — not the ball
+         * or the current carrier. Your WASD still steers that player through
+         * the normal sim path (camera-relative), and mouse-look turns him;
+         * the rig itself is given NO free-cam locomotion and NO ball-bias, so
+         * first/third person sit on your man and only your man, consistently.
+         * This is the fix for the view "following the ball at times" — it
+         * cannot, because the anchor is you. */
+        const me = d.ctrlPlayer;
+        const mine = !!me && d.isHuman(me.team);
         const rigInput: RigInput = {
-          fwd: inp.up, back: inp.down, left: inp.left, right: inp.right,
-          sprint: inp.sprint,
+          fwd: false, back: false, left: false, right: false,
+          sprint: false,
           mouseDX: md.dx, mouseDY: md.dy,
         };
-        const carrier = d.live.find((q) => d.op && q.team === d.op.attacking
-          && q.num === d.op.carrierNum);
         const res = updateRig(
           st,
           {
-            self: carrier
-              ? { x: carrier.x, z: carrier.z, face: carrier.face ?? 0 }
+            self: mine
+              ? { x: me.x, z: me.z, face: me.face ?? 0 }
               : { x: bp.x, z: bp.z, face: 0 },
-            ball: bp,
-            ballLanding: d.landingPrediction(),
+            ball: null,            // never auto-look at the ball in player view
+            ballLanding: null,
           },
           rigInput, dt, DEFAULT_TUNING, rigCamRef.current,
         );
