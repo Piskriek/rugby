@@ -26,6 +26,16 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
   const s = d.kk!;
   s.t += dt;
   const human = d.isHuman(s.kicker);
+  /* ONE-MAN (role lock). "You are one man in the team": you only drive the
+   * kick ritual when the man you control IS the kicker. If your team is
+   * kicking but you are role-locked to a different shirt, the designated
+   * kicker is run by the AI (the CPU branch below auto-aims and strikes) and
+   * the match never freezes waiting on you to take a kick your man is not
+   * taking — you stay on your own shirt to line up, chase or receive.
+   * When your side is NOT kicking the human is always a defender, so the
+   * ritual is never human-driven either. */
+  const humanDrives = human && !!d.ctrlPlayer
+    && d.ctrlPlayer.team === s.kicker && d.ctrlPlayer.num === s.kickerNum;
   /* PLAYTEST 4: Q on defence during the kick too — chasing coverage and
    * receiver control were dead zones for the defender switch. */
   if (!human && pressed.has('switchPlayer')) { d.cycleDefender(); return; }
@@ -76,7 +86,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
         const scorer = d.live.find((q) => q.team === d.lastScorer!.team && q.num === d.lastScorer!.num);
         if (scorer && scorer.clip === 'grounded' && !scorer.down) { scorer.clip = 'ready'; scorer.clipT = 0; }
       }
-      if (human) d.showHint('A/D AIM · HOLD SPACE TO KICK', 3);
+      if (humanDrives) d.showHint('A/D AIM · HOLD SPACE TO KICK', 3);
       return;
     }
     return;
@@ -109,7 +119,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
     const blocked = nearestGap < 9.5 || (s.formReady ?? 1) < 0.85;
     if (!blocked) s.delayT = (s.delayT ?? 0) + dt;
     const left = RESTART_SHOT_CLOCK - (s.delayT ?? 0);
-    if (human && left <= 3 && left > 0) d.showHint(`TAKE THE KICK — ${Math.ceil(left)}`, 0.4);
+    if (humanDrives && left <= 3 && left > 0) d.showHint(`TAKE THE KICK — ${Math.ceil(left)}`, 0.4);
     if ((s.delayT ?? 0) > RESTART_SHOT_CLOCK) {
       /* Time is up: the opposition get a free kick on halfway, as Law 12.8
        * provides for a restart not taken. `beginPenalty(..., free = true)`
@@ -122,7 +132,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
   }
 
   if (s.stage === 'AIM' || s.stage === 'METER') {
-    if (human) {
+    if (humanDrives) {
       /* HOLD-TO-CHARGE.
        * A/D aims. Hold SPACE and the power builds; the line drawn on the grass
        * grows to exactly where the ball will land. Release to strike.
