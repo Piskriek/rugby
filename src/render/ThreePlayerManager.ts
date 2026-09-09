@@ -450,6 +450,45 @@ function boneRegion(boneName: string, restY: number): Slot {
   return 'jersey';
 }
 
+/* -------------------------------------------------- HUMAN TURN RATES ------
+ * A body has mass; it cannot rotate like a turret. The heading update used to
+ * chase its target with a pure exponential (rate ~10/s), which spun a slow man
+ * through a 180-degree watch of the ball in about a third of a second and set
+ * every direction change as an instant snap the model could never have made —
+ * the standing "models turn frantically / move slow but spin fast" defect.
+ *
+ * These cap angular speed by gait. A man who is nearly still and watching the
+ * ball PLANTS AND PIVOTS in place at a human rate (the shuffle-to-face that
+ * makes defence look shaped rather than chased); a man in full flight may lead
+ * a hard cut faster, but never spins. Radians per second. (Run/walk thresholds
+ * mirror locomotion(): idle <0.7, walk <3.0, run <6.4, else sprint.) */
+export const TURN_PIVOT = 3.4;    // in-place watch of the ball   (~195 deg/s)
+export const TURN_WALK = 4.5;     // ambling to a slot            (~258 deg/s)
+export const TURN_RUN = 6.0;      // chasing / covering            (~344 deg/s)
+export const TURN_SPRINT = 7.5;   // a hard cut at pace            (~430 deg/s)
+
+/** Advance a facing toward `target` by at most `rate` rad/s, the shortest way
+ *  round. Pure bounded integration rather than an exponential chase, so a large
+ *  turn is spread over a realistic interval instead of mostly done in the first
+ *  few frames. */
+function stepTurn(face: number, target: number, rate: number, step: number): number {
+  let dy = target - face;
+  while (dy > Math.PI) dy -= Math.PI * 2;
+  while (dy < -Math.PI) dy += Math.PI * 2;
+  const cap = rate * step;
+  if (dy > cap) return face + cap;
+  if (dy < -cap) return face - cap;
+  return face + dy;
+}
+
+/** Human turn-rate for a man travelling at this ground speed, rad/s. */
+function turnRateFor(spd: number): number {
+  if (spd < 0.7) return TURN_PIVOT;
+  if (spd < 3.0) return TURN_WALK;
+  if (spd < 6.4) return TURN_RUN;
+  return TURN_SPRINT;
+}
+
 export class ThreePlayerManager {
   ready = false;
   private template: THREE.Group | null = null;
@@ -1308,10 +1347,10 @@ export class ThreePlayerManager {
       const watch = spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
       if (spd > 2.2 || watch) {
         const heading = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
-        let dy = heading - st.face;
-        while (dy > Math.PI) dy -= Math.PI * 2;
-        while (dy < -Math.PI) dy += Math.PI * 2;
-        st.face += dy * (1 - Math.exp(-step * 10));
+        /* bounded human turn: a slow watcher plants and pivots in place; a man
+         * on the move turns toward his path at a rate a body can actually make */
+        const rate = watch && spd < 0.7 ? TURN_PIVOT : turnRateFor(spd);
+        st.face = stepTurn(st.face, heading, rate, step);
       } else if (a.rf !== 0) {
         st.face = a.rf > 0 ? 0 : Math.PI;
       }
@@ -2347,10 +2386,13 @@ export class ThreePlayerManager {
       const watch = st.spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
       if (st.spd > 2.2 || watch) {
         const target = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
-        let dy = target - st.face;
-        while (dy > Math.PI) dy -= Math.PI * 2;
-        while (dy < -Math.PI) dy += Math.PI * 2;
-        st.face += dy * (1 - Math.exp(-step * 10));
+        /* Bounded human turn (see TURN_* / stepTurn): a still man watching the
+         * ball pivots in place rather than spinning at clip speed; a running
+         * man turns toward his path at a rate a body with mass can actually
+         * make. This is the structural cure for the "models turn frantically
+         * while moving slow" defect. */
+        const rate = watch && st.spd < 0.7 ? TURN_PIVOT : turnRateFor(st.spd);
+        st.face = stepTurn(st.face, target, rate, step);
       }
 
       // Bug-fix #4: in a SCRUM the two packs must lock head-on down the
