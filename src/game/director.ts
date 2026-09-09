@@ -1437,7 +1437,6 @@ export class Director {
      * context actually has. Whatever the phase branches added, the verb the
      * engine will fire is always the honest primary: guarantee it is listed. */
     if (!out.some((a) => a.primary) && cv.key) out.push({ key: cv.key, label: cv.label, primary: true });
-    if (this.chaos) add('C', 'RESTART CHAOS SCRIMMAGE');
     add('ESC', 'PAUSE'); add('TAB', 'STATS'); add('R', 'REPLAY');
     return out;
   }

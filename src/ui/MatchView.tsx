@@ -147,6 +147,8 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const threeDivRef = useRef<HTMLDivElement | null>(null);
   const keys = useRef<Set<string>>(new Set());
   const prev = useRef<Set<string>>(new Set());
+  /** Recent world-space ball points while it is airborne, for the flight trail. */
+  const ballTrailRef = useRef<{ x: number; y: number; z: number }[]>([]);
   const [, force] = useState(0);
   const [showStats, setShowStats] = useState(false);
 
@@ -567,10 +569,6 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         prev.current = new Set(keys.current);
       }
 
-      /* CHAOS_SCRIM — C is the accessible stress-test trigger. It starts the
-       * 14-body scrim from anywhere and restarts it while it is already live. */
-      if (rawPressed.has('c')) d.startChaosScrimmage();
-
       // The tutorial card resumes on the keys it lists, and only those.
       if (d.tut.active && d.tut.showing) {
         const step = stepAt(d.tut.index);
@@ -728,6 +726,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         /* Feet markers (rings, range, kick aim) are painted on the 2D layer
          * BEFORE the 3D squad so the GLB players stand on top of them. */
         drawIndicators(ctx, d, view);
+        /* A pass/kick in the air is drawn as a REAL rugby ball with a fading
+         * motion trail, painted on the 2D layer so it reads even in player
+         * (FPV/3rd) view, where a fast ball can otherwise cross the frame and
+         * get lost behind hands and shoulders. */
+        drawBallFlight(ctx, d, view, ballTrailRef.current);
         drawCenterReticle(ctx, w, h, centerReticleState(
           d, keys.current, rigOnRef.current && rigRef.current.mode === 'FIRST',
         ));
@@ -985,7 +988,6 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const contract = ctrl ? contractFor(ctrl.num) : null;
 
   const commandBar = () => {
-    if (d.chaos) return 'BALL SECURED · RUN · C RESTARTS THE 14-BODY CHAOS SCRIMMAGE';
     if (d.hint) return d.hint;
     if (d.phase === 'KICK' && d.kk) {
       return d.kk.stage === 'AIM'
@@ -1321,7 +1323,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       </div>
 
       <div className="pointer-events-none absolute bottom-3 right-3 text-right text-[9px] text-[#7f8ea6]">
-        <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · <Kbd>C</Kbd> CHAOS SCRIM · WHEEL ZOOM</div>
+        <div><Kbd>ESC</Kbd> PAUSE · <Kbd>TAB</Kbd> STATS · <Kbd>R</Kbd> REPLAY · <Kbd>C</Kbd> SMOTHER · WHEEL ZOOM</div>
         <div className="mt-0.5"><Kbd>1–9 / 0 / - / =</Kbd> ROLE LOCK · <Kbd>SHIFT+1/2/3</Kbd> SHIRTS 13–15 · <Kbd>Q</Kbd> EMERGENCY SWITCH</div>
         {/* SPEC_25 — the catch and the punt, on the one surface a player reads. The
             window is printed because 300 ms is not a number anyone can feel, and a
@@ -1629,6 +1631,107 @@ export function centerReticleState(d: Director, held: ReadonlySet<string>, playe
 /* ---- in-world indicators: pass target, tackle range, kick aim ---- */
 function ctrlTeam(d: Director): 'A' | 'B' | null {
   return d.ctrlPlayer ? d.ctrlPlayer.team : null;
+}
+
+/**
+ * A pass or kick in the air, drawn as a ball — not a marker. The engine gives
+ * the renderer a proper flight body, but a 13 m/s throw can cross the frame in
+ * half a second and, in player view (FPV/3rd), vanish behind a shoulder or a
+ * hand. So while a ball is genuinely airborne we draw it on the HUD layer as a
+ * white rugby ball with a short fading motion trail: enough afterimage that the
+ * eye reads a thrown object and follows it to the hands, which is the whole
+ * difference between "a ball" and "an indicator that something happened".
+ */
+function drawBallFlight(ctx: CanvasRenderingContext2D, d: Director, v: { w: number; h: number },
+  trail: { x: number; y: number; z: number }[]) {
+  const cam = { ...d.cam, shake: 0 };
+  /* A ball is in a real throw only while it is detached from every hand. */
+  let pt: { x: number; y: number; z: number } | null = null;
+  if (d.phase === 'OPEN_PLAY' && d.op && d.op.ball.live) {
+    pt = { x: d.op.ball.x, y: d.op.ball.y ?? 0, z: d.op.ball.z };
+  } else if ((d.phase === 'KICK' || d.phase === 'KICK_REPLAY') && d.kk && d.kk.stage === 'FLIGHT') {
+    pt = { x: d.kk.bx, y: d.kk.by, z: d.kk.bz };
+  }
+  if (!pt) {
+    trail.length = 0;
+    return;
+  }
+  /* Sample only when it is actually moving, so a just-caught/held ball never
+   * leaves a smear. */
+  const last = trail[trail.length - 1];
+  if (last) {
+    const dist = Math.hypot(pt.x - last.x, pt.z - last.z) + Math.abs(pt.y - last.y);
+    if (dist < 0.04) { /* stationary instant — drain and drop */ }
+    else trail.push(pt);
+  } else {
+    trail.push(pt);
+  }
+  if (trail.length > 7) trail.shift();
+
+  /* Shadow under the flight so the height reads against the turf. */
+  if (pt.y > 0.6) {
+    const s = project(cam, v, pt.x, 0.04, pt.z);
+    if (s) {
+      ctx.fillStyle = 'rgba(6,9,14,0.25)';
+      ctx.beginPath();
+      ctx.ellipse(s.sx, s.sy, Math.max(3, s.sc * 0.10), Math.max(1.6, s.sc * 0.04), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  /* The fading afterimage follows behind the ball's live point. */
+  const n = trail.length;
+  for (let i = 0; i < n - 1; i++) {
+    const p = trail[i];
+    const t = project(cam, v, p.x, p.y, p.z);
+    if (!t) continue;
+    const k = (i + 1) / n;                 // 0 old -> ~1 newest
+    ctx.globalAlpha = 0.10 + k * 0.16;
+    ctx.fillStyle = '#fff6df';
+    ctx.beginPath();
+    ctx.arc(t.sx, t.sy, Math.max(2.5, t.sc * (0.06 * k + 0.03)), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  /* The ball itself: elongated along its travel so it reads as a thrown object,
+   * with a seam and a rim light rather than a flat dot. */
+  const cur = project(cam, v, pt.x, pt.y, pt.z);
+  if (!cur) { trail.length = 0; return; }
+  const prevP = trail.length > 1 ? project(cam, v, trail[trail.length - 2].x, trail[trail.length - 2].y, trail[trail.length - 2].z) : null;
+  let ang = 0;
+  if (prevP && (Math.abs(prevP.sx - cur.sx) + Math.abs(prevP.sy - cur.sy)) > 0.5) {
+    ang = Math.atan2(cur.sy - prevP.sy, cur.sx - prevP.sx);
+  }
+  const rx = Math.max(6.5, cur.sc * 0.20);
+  const ry = Math.max(4, cur.sc * 0.11);
+  ctx.save();
+  ctx.translate(cur.sx, cur.sy);
+  ctx.rotate(ang);
+  /* outline */
+  ctx.fillStyle = '#2a2f3a';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx + 1.2, ry + 1.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  /* body */
+  const g = ctx.createLinearGradient(-rx, 0, rx, 0);
+  g.addColorStop(0, '#f4f0e4');
+  g.addColorStop(0.5, '#ffffff');
+  g.addColorStop(1, '#dcd8cc');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  /* the two seams so it is unmistakably a rugby ball, not a dot */
+  ctx.strokeStyle = 'rgba(30,34,42,0.75)';
+  ctx.lineWidth = 1.4;
+  for (const sgn of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(-rx * 0.82, sgn * ry * 0.34);
+    ctx.lineTo(rx * 0.82, sgn * ry * 0.34);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawIndicators(ctx: CanvasRenderingContext2D, d: Director, v: { w: number; h: number }) {
