@@ -221,7 +221,10 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const fxShakeRef = useRef(0);
 
   useEffect(() => {
-    const t = window.setTimeout(() => { setIntro(false); introRef.current = false; }, 7500);
+    /* The match-day card is an overlay, not a pause. It sits over the live
+     * kick-off and fades on its own or on any press — it must never hold the
+     * world frozen while a player waits. */
+    const t = window.setTimeout(() => { setIntro(false); introRef.current = false; }, 3600);
     return () => window.clearTimeout(t);
   }, []);
 
@@ -619,13 +622,12 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
       const hitStop = hitStopRef.current > 0 ? 0.16 : 1;
       hitStopRef.current = Math.max(0, hitStopRef.current - dt);
       d.gameSpeed = slow * hitStop;
-      /* AAA — the world stays in the kickoff frame until the matchday card is
-       * dismissed; the presentation is a curtain, not a running clock behind
-       * the text. */
-      /* Time the SIM STEP specifically, not the whole frame: the frame also
-       * carries rendering and React, and a physics readout that includes them
-       * cannot tell you whether the engine or the renderer is the cost. */
-      if (!introRef.current && !loadingRef.current) {
+      /* One-man rugby never stops for you. The world simulates continuously
+       * from the moment it is loaded — the match-day card is a translucent
+       * overlay on top of a live kick-off, not a curtain that freezes play
+       * until the player bothers to click it away. Nothing here makes the
+       * field stand still and wait on a human. */
+      if (!loadingRef.current) {
         if (showTarcsRef.current) {
           const t0 = performance.now();
           d.update(dt, inp, pressed, released);
