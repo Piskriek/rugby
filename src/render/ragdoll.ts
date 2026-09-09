@@ -59,6 +59,7 @@
  * a second line of turf with him. Same solver, different ground.
  */
 import * as THREE from 'three';
+import { angularDampFactor } from '../game/engine/ragdollStability';
 
 /** Model metres per second squared. One model unit is one pitch metre. */
 const G = 9.81;
@@ -375,10 +376,30 @@ export class Ragdoll {
   private substep() {
     const h2 = STEP * STEP;
     const damp = 0.9965;
+    /* ANGULAR DAMPING — γ = 10 s⁻¹ (engine/ragdollStability). The solver is
+     * position-based, so there is no angular velocity to damp directly; the
+     * equivalent is to decay the component of each body's motion that is
+     * TANGENTIAL to its radius from the pelvis (i.e. spin about the body's own
+     * vertical axis) while leaving the radial-to-floor fall untouched. That is
+     * the difference between a body that settles and one that shudders on the
+     * deck: rapid rocking and spin-jitter die out in ~0.1 s, a heavy fall still
+     * lands with its weight. */
+    const spin = angularDampFactor(STEP); // exp(−10·1/120) ≈ 0.920
+    const pcx = this.parts[0].p.x, pcz = this.parts[0].p.z;
     for (const q of this.parts) {
       let vx = (q.p.x - q.prev.x) * damp;
       let vy = (q.p.y - q.prev.y) * damp;
       let vz = (q.p.z - q.prev.z) * damp;
+      /* Strip the horizontal spin about the pelvis down to γ=10 s⁻¹. */
+      const rx = q.p.x - pcx, rz = q.p.z - pcz;
+      const r2 = rx * rx + rz * rz;
+      if (r2 > 1e-9) {
+        const inv = 1 / r2;
+        const radial = (vx * rx + vz * rz) * inv;
+        const ax = radial * rx, az = radial * rz;
+        vx = ax + (vx - ax) * spin;
+        vz = az + (vz - az) * spin;
+      }
       const m = Math.hypot(vx, vy, vz);
       if (m > MAX_STEP_MOVE) {
         const k = MAX_STEP_MOVE / m;
