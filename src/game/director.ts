@@ -53,6 +53,7 @@ import type { MaulBind, MaulCommit, MaulContestControl, MaulExitState } from './
  * resolves differently to the order you tested in. */
 import type { HandsState } from './engine/hands';
 import { MatchAudio } from './audio';
+import { commentaryLine, type CommentaryContext, type CommentaryEvent } from './atmosphere';
 import { updateCamera } from './engine/camera';
 import { makeCraft, stepCraft, clearCraft, type BallCraft } from './engine/ballcraft';
 import { eligibleToGather, canPlayBall, coordinateBall, readBall, makeBallBehaviour, clearBallBehaviour, type BallBehaviour, type KickChaseLaw } from './engine/ballAwareness';
@@ -1738,6 +1739,17 @@ export class Director {
 
   commentate(key: string, extra?: string) { commentate(this, key, extra); }
 
+  /**
+   * ATMOSPHERE — a deterministic, named commentary beat. Where `commentate`
+   * draws a random line from a bank, this speaks the scripted callouts the
+   * broadcast expects word-for-word (the 50:22, the Law 9.17 aerial, the
+   * rolling maul, the grounding) with the real team/player names baked in.
+   * Formatting is guaranteed never to leak `undefined` (see atmosphere.ts).
+   */
+  atmosphereCommentary(event: CommentaryEvent, ctx: CommentaryContext) {
+    this.say(commentaryLine(event, ctx).line);
+  }
+
   private commentarySequencer() { commentarySequencer(this); }
 
   say(text: string) { this.feed.unshift({ text, at: this.t }); if (this.feed.length > 30) this.feed.pop(); }
@@ -3080,7 +3092,14 @@ export class Director {
     const victim = challenge.victim;
     this.aerialTackles++;
     this.teams[offender.team].stats.penaltiesConceded++;
+    /* ATMOSPHERE — Law 9.17, named. Shirt colour and number first (the coach
+     * calls the man), then the scripted commentary beat with his name. */
     this.say(`DANGEROUS — ${offender.num} TOOK HIM OUT IN THE AIR`);
+    const offenderName = this.teams[offender.team].players[offender.num - 1]?.name ?? '';
+    this.atmosphereCommentary('AERIAL', {
+      player: offenderName || `shirt ${offender.num}`,
+      team: this.teams[offender.team].nation.short,
+    });
     /* The man who was taken out comes back to earth on the spot rather than
      * completing a jump he is no longer making; the whistle's releaseAll
      * (inside beginPenalty) clears the rest of the world. */
@@ -7029,6 +7048,13 @@ export class Director {
     this.emitEv({ t: this.t, type: 'TRY', x: spot.x, z: spot.z, num });
     const built = this.phasesGained >= 6 || lineBreak;
     this.commentate(built ? 'TRY_BUILT' : 'TRY', `— ${p.name}`);
+    /* ATMOSPHERE — the grounding is always called as a score, with the scorer
+     * and the side named. Spoken AFTER the colour line so the detail lands
+     * the beat, exactly as a real pair talk over a five-pointer. */
+    this.atmosphereCommentary('TRY', {
+      player: p.name,
+      team: this.teams[team].nation.short,
+    });
     this.phasesGained = 0;
     this.gainWindow.length = 0;
     /* W-011. Every grounding in the corner goes upstairs: the on-field

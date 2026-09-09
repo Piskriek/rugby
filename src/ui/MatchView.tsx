@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Director, Input, NO_INPUT, MatchConfig } from '../game/director';
+import { sinBinClock, strengthText } from '../game/atmosphere';
 import { drawMatch, drawWipe } from '../render/scene';
 import { drawFacingStrafeOverlay } from '../render/facingDebug';
 import { drawMinimap } from '../render/minimap';
@@ -1108,17 +1109,24 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
               </div>
             )}
             {(d.live.some((p) => p.sinbin > 0)) && (
-              <div className="mt-0.5 flex gap-2">
-                {(['A', 'B'] as const).map((t) => {
-                  const binned = d.live.filter((p) => p.team === t && p.sinbin > 0);
-                  if (!binned.length) return null;
-                  return (
-                    <span key={t} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]">
-                      <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
-                      {d.teams[t].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
-                    </span>
-                  );
-                })}
+              <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                <span className="text-[9px] font-black tabular-nums text-[#f4efe2]">
+                  {strengthText(d.activeCount('A'), d.activeCount('B'))}
+                </span>
+                {(['A', 'B'] as const).map((t) =>
+                  d.live
+                    .filter((p) => p.team === t && p.sinbin > 0)
+                    .map((p) => (
+                      <span
+                        key={`${t}-${p.num}`}
+                        className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[9px] font-black text-[#e8cf46]"
+                      >
+                        <span className="inline-block h-2.5 w-1.5 rounded-[1px] bg-[#f3cf2a]" />
+                        {d.teams[t].nation.short} {p.num}
+                        <span className="tabular-nums text-[#f4efe2]">{sinBinClock(p.sinbin)}</span>
+                      </span>
+                    )),
+                )}
               </div>
             )}
             {density !== 'MINIMAL' && (

@@ -15,6 +15,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Director, TeamRun } from '../game/director';
+import { sinBinClock, strengthText } from '../game/atmosphere';
 import { KITS, DIFFICULTY_TABLE, OPTION_ITEMS } from '../game/data';
 import type { Conditions } from '../render/conditions';
 
@@ -155,16 +156,26 @@ export function ScoreBug({ d, objective, density }: {
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-[#26314a] px-3 py-1 text-[8px] tracking-[0.14em] text-[#8fa0b8]">
           {objective && <span className="text-[#e8cf46]">{objective.name} · TARGET {objective.target}</span>}
-          {(['A', 'B'] as const).map((side) => {
-            const binned = d.live.filter((p) => p.team === side && p.sinbin > 0);
-            if (!binned.length) return null;
-            return (
-              <span key={side} className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 text-[#e8cf46]">
-                <span className="h-2 w-2 rounded-sm bg-[#e8cf46]" />
-                {d.teams[side].nation.short} 14 — {binned.map((p) => p.num).join(', ')} IN BIN
-              </span>
-            );
-          })}
+          {d.live.some((p) => p.sinbin > 0) && (
+            <span className="font-black tabular-nums text-[#f4efe2]">
+              {strengthText(d.activeCount('A'), d.activeCount('B'))}
+            </span>
+          )}
+          {(['A', 'B'] as const).map((side) =>
+            d.live
+              .filter((p) => p.team === side && p.sinbin > 0)
+              .map((p) => (
+                <span
+                  key={`${side}-${p.num}`}
+                  className="inline-flex items-center gap-1 border border-[#e8cf46] bg-[#2a2412] px-1 font-black text-[#e8cf46]"
+                  title={`${d.teams[side].nation.short} #${p.num} in the sin bin`}
+                >
+                  <span className="inline-block h-2.5 w-1.5 rounded-[1px] bg-[#f3cf2a]" />
+                  <span>{d.teams[side].nation.short} {p.num}</span>
+                  <span className="tabular-nums text-[#f4efe2]">{sinBinClock(p.sinbin)}</span>
+                </span>
+              )),
+          )}
           {density !== 'MINIMAL' && (
             <span className="text-[#6f7f96]">{d.op && d.op.phase > 0 ? `PHASE ${d.op.phase}` : ''} · {d.bc.free ? 'LOOSE BALL' : d.op?.ball.live || d.kk?.stage === 'FLIGHT' ? 'BALL IN FLIGHT' : `${d.possession === 'A' ? d.A.nation.short : d.B.nation.short} HAVE IT`}</span>
           )}

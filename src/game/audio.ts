@@ -23,9 +23,14 @@
  * into the app. Until then every method is a no-op: no audio before the first
  * interaction, and headless harness runs stay silent.
  *
- * The CROWD NOISE option gates the whole layer: OFF is a full mute, LOW is
- * −7 dB on everything.
+ * The whistle taxonomy — which referee decision gets which of the four
+ * whistle kinds — lives in `./atmosphere` so the headless probe can assert it
+ * without a Web Audio context. `refereeWhistle(call)` is the engine-facing
+ * entry point: it resolves the decision through that taxonomy and synthesises
+ * the matching whistle.
  */
+
+import { whistleFor, turfBounceVolume, type RefereeCall } from './atmosphere';
 
 /** A world point in PITCH coordinates (x across, y up, z downfield). */
 export interface AudioPoint {
@@ -579,8 +584,11 @@ export class MatchAudio {
   /** The referee: two detuned squares with a downward bend.
    * LONG is the law award; DOUBLE is the try; SPEC_08's SHORT is the single
    * sharp blast that marks a persistent call engaging (USE IT at a stalled
-   * maul) — one cue, fired when the call goes live. */
-  whistle(kind: 'LONG' | 'DOUBLE' | 'SHORT', at?: AudioPoint | null) {
+   * maul) — one cue, fired when the call goes live. TREBLE is the staccato
+   * triple for the forward/unplayable errors (knock-on, forward pass, an
+   * unplayable breakdown or reset scrum) — three short, even toots that
+   * read as "hold on, something was wrong." */
+  whistle(kind: 'LONG' | 'DOUBLE' | 'SHORT' | 'TREBLE', at?: AudioPoint | null) {
     if (!this.ctx || !this.master) return;
     /* ONE REFEREE, ONE WHISTLE. A stoppage can be flagged twice in the same
      * frame — `lawCall` blows for the penalty and the breakdown ledger emits
@@ -588,7 +596,9 @@ export class MatchAudio {
      * The first caller wins; anything inside the guard window is dropped. */
     const now = this.ctx.currentTime;
     if (now < this.whistleUntil) return;
-    const total = kind === 'LONG' ? 0.55 : kind === 'SHORT' ? 0.22 : 0.4;
+    const total = kind === 'LONG' ? 0.55
+      : kind === 'TREBLE' ? 0.42
+      : kind === 'SHORT' ? 0.22 : 0.4;
     this.whistleUntil = now + total + 0.12;
     const out = this.sink(at);
     if (!out) return;
@@ -619,7 +629,49 @@ export class MatchAudio {
     };
     if (kind === 'LONG') blast(0, 0.55);
     else if (kind === 'SHORT') blast(0, 0.22);
+    else if (kind === 'TREBLE') { blast(0, 0.11); blast(0.15, 0.11); blast(0.3, 0.11); }
     else { blast(0, 0.16); blast(0.24, 0.16); }
+  }
+
+  /**
+   * Engine-facing referee whistle. Resolves a referee DECISION through the
+   * atmosphere taxonomy (atmosphere.ts) and synthesises the matching sound —
+   * SHORT for routine stoppages, LONG for the sanctions, TREBLE for the
+   * forward/unplayable errors. `event()` below keeps its own crowd mapping
+   * (TRY is the double-plus-roar); this is the call the referee's state
+   * changes use when they are NOT already a broadcast crowd cue.
+   */
+  refereeWhistle(call: RefereeCall, at?: AudioPoint | null) {
+    this.whistle(whistleFor(call), at);
+  }
+
+  /** A turf impact — the prolate spheroid bouncing off the ground. Volume
+   *  scales with the impact speed and is silent below 2 m/s (a roll, not a
+   *  hit). Kept deliberately softer and shorter than a body impact. */
+  turfBounce(impactSpeedMs: number, at?: AudioPoint | null) {
+    if (!this.ctx || !this.master) return;
+    const vol = turfBounceVolume(impactSpeedMs);
+    if (vol <= 0) return;
+    const out = this.sink(at);
+    if (!out) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer(0.09);
+    if (!src.buffer) return;
+    /* A bouncing ball has no low body — it is the sharp tick of the casing.
+     * Band-passed mid, short, and light; a heavier drop reads as a fuller hit. */
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 1.4;
+    bp.frequency.value = 420 + vol * 700;
+    const g = this.ctx.createGain();
+    const gate = this.level === 1 ? 0.45 : 1;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime((0.03 + vol * 0.05) * gate, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05 + vol * 0.04);
+    src.connect(bp).connect(g).connect(out);
+    src.start(t);
+    src.stop(t + 0.11 + vol * 0.04);
   }
 
   /**
