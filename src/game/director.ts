@@ -156,6 +156,25 @@ export interface Actor {
   aiming?: boolean; aimX?: number; aimY?: number; aimZ?: number;
   /** Vertical jump offset, logical metres above the turf. */
   ry?: number;
+  /** INTENT-GAZE-TELEGRAPH CHANNEL (INNOVATION 2, M-4 / WS21 keystone).
+   * The MIND writes these; the BODY renders them; the OPPONENT's mind reads
+   * them; the CAMERA frames them. Optional and additive: consumers that do not
+   * yet publish or read them are unaffected (a player who never sets `intent`
+   * simply has no committed next action, which is itself a legible state). */
+  /** the action the body is committing to (e.g. 'PASS','STEP_LEFT','TACKLE_HIGH',
+   *  'KICK','CHASE','CARRY','STAND_SCAN'). Undefined = no current commitment. */
+  intent?: string;
+  /** 0..1 commitment to `intent`. Once rising past a threshold (see
+   *  behaviour/commitment) a man may not un-commit mid-telegraph. */
+  commit?: number;
+  /** world point (logical metres) the head/eyes are tracking right now. */
+  gazeX?: number;
+  gazeZ?: number;
+  /** optional id of the object being watched (ball, an opposing shirt). */
+  gazeOn?: string;
+  /** when the body must begin its wind-up (telegraph) before `intent` fires:
+   *  seconds until the commit becomes actionable. */
+  telegraph?: number;
   renderClip: string; clipT: number; jitter: number;
   ring: number;     // 0 none, 1 controlled, 2 pass target
   size: number;     // T-39 per-player build, 0.92 .. 1.12
@@ -7417,6 +7436,14 @@ export class Director {
         && Math.hypot(p.x - reading.point.x, p.z - reading.point.z) < 28;
       a.ballLookX = watching ? this.ballBehaviour.read?.point.x : undefined;
       a.ballLookZ = watching ? this.ballBehaviour.read?.point.z : undefined;
+      /* INTENT-GAZE PUBLISH (WS21): a gather-eligible watcher is looking AT the
+       * ball — publish that as his gaze so the renderer's head/eyes and the
+       * perception reaction table share one source. A player NOT watching has
+       * no gaze point published, which perception.ts reads as "not looking":
+       * he reacts late to a loose ball behind him (attention, not cones). */
+      a.gazeX = a.ballLookX;
+      a.gazeZ = a.ballLookZ;
+      a.gazeOn = watching ? 'ball' : undefined;
       a.renderClip = p.clip; a.clipT = p.clipT; a.jitter = p.jitter;
       a.turnT = p.turnT ?? 0;
       a.size = p.size;
