@@ -27,6 +27,7 @@ import type { Director, Actor } from '../game/director';
 import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
 import { ballReach } from '../game/engine/ballAwareness';
 import { RECOVER_SECONDS } from '../game/director';
+import { TURN_PIVOT, stepTurn, turnRateFor } from '../game/gait';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 import { Ragdoll } from './ragdoll';
@@ -450,44 +451,10 @@ function boneRegion(boneName: string, restY: number): Slot {
   return 'jersey';
 }
 
-/* -------------------------------------------------- HUMAN TURN RATES ------
- * A body has mass; it cannot rotate like a turret. The heading update used to
- * chase its target with a pure exponential (rate ~10/s), which spun a slow man
- * through a 180-degree watch of the ball in about a third of a second and set
- * every direction change as an instant snap the model could never have made —
- * the standing "models turn frantically / move slow but spin fast" defect.
- *
- * These cap angular speed by gait. A man who is nearly still and watching the
- * ball PLANTS AND PIVOTS in place at a human rate (the shuffle-to-face that
- * makes defence look shaped rather than chased); a man in full flight may lead
- * a hard cut faster, but never spins. Radians per second. (Run/walk thresholds
- * mirror locomotion(): idle <0.7, walk <3.0, run <6.4, else sprint.) */
-export const TURN_PIVOT = 3.4;    // in-place watch of the ball   (~195 deg/s)
-export const TURN_WALK = 4.5;     // ambling to a slot            (~258 deg/s)
-export const TURN_RUN = 6.0;      // chasing / covering            (~344 deg/s)
-export const TURN_SPRINT = 7.5;   // a hard cut at pace            (~430 deg/s)
-
-/** Advance a facing toward `target` by at most `rate` rad/s, the shortest way
- *  round. Pure bounded integration rather than an exponential chase, so a large
- *  turn is spread over a realistic interval instead of mostly done in the first
- *  few frames. */
-function stepTurn(face: number, target: number, rate: number, step: number): number {
-  let dy = target - face;
-  while (dy > Math.PI) dy -= Math.PI * 2;
-  while (dy < -Math.PI) dy += Math.PI * 2;
-  const cap = rate * step;
-  if (dy > cap) return face + cap;
-  if (dy < -cap) return face - cap;
-  return face + dy;
-}
-
-/** Human turn-rate for a man travelling at this ground speed, rad/s. */
-function turnRateFor(spd: number): number {
-  if (spd < 0.7) return TURN_PIVOT;
-  if (spd < 3.0) return TURN_WALK;
-  if (spd < 6.4) return TURN_RUN;
-  return TURN_SPRINT;
-}
+/* TURN RATES — human-gait turn math now lives in the shared headless module
+ * src/game/gait.ts (WS14) so the sim and its probes share one ground truth
+ * with the renderer. This file imports TURN_PIVOT / stepTurn / turnRateFor
+ * from there and applies them to the two heading sites below. */
 
 export class ThreePlayerManager {
   ready = false;
