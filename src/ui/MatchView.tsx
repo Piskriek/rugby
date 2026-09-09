@@ -161,6 +161,14 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
   const [rigOn, setRigOn] = useState(false);
   const [rigLocked, setRigLocked] = useState(false);
   const rigOnRef = useRef(false);
+  /* Default-camera hand-off. The fantasy is that you are one locked shirt in a
+   * live team, so once a match with a human shirt boots (i.e. not the skills
+   * clinic, where a top-down broadcast is what the drill needs) the player rig
+   * is ARMED automatically in third person, seeded from wherever the director's
+   * camera already is. This is exactly the first-V arming path — minus the
+   * pointer-lock grab, which must stay a click so the intro card and menus stay
+   * reachable. `autoCamRef` guards it so only the first real kick-off flips it. */
+  const autoCamRef = useRef(false);
   const rigCamRef = useRef<Camera>({
     x: 0, z: 0, h: 1.68, yaw: 0, tilt: 0, fov: 1.2, shake: 0, horizon: 0.5, roll: 0,
   });
@@ -470,6 +478,28 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     };
   }, []);
 
+  /* ---- default camera: hand the view to your man once the world is up ----
+   * You are one locked shirt in a live team, so when a real match (not the
+   * skills clinic) finishes booting and a human shirt is on the field, ARM the
+   * player rig in THIRD person — seeded from wherever the director's camera
+   * already is, exactly like a first V press but WITHOUT grabbing pointer lock
+   * (a click still does that, so the intro card and menus stay reachable). */
+  useEffect(() => {
+    if (load !== null || autoCamRef.current) return;
+    const d0 = dirRef.current;
+    if (!d0 || clinic) return;
+    const locked = d0.ctrlPlayer && d0.isHuman(d0.ctrlPlayer.team);
+    if (!locked) return;
+    const st = rigRef.current;
+    if (st.mode !== 'THIRD') { st.mode = 'THIRD'; st.blend = 0; }
+    st.yaw = st.smoothYaw = d0.cam.yaw;
+    st.pitch = st.smoothPitch = -d0.cam.tilt;
+    st.posX = d0.cam.x; st.posZ = d0.cam.z; st.posH = d0.cam.h;
+    rigOnRef.current = true;
+    setRigOn(true);
+    autoCamRef.current = true;
+  }, [load, clinic]);
+
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
@@ -612,6 +642,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         } else {
           toggleViewMode(rigRef.current);
           force((n) => n + 1);
+          /* Auto-armed matches start WITHOUT pointer lock (the click takes it),
+           * so the first V after that must grab the lock too — otherwise a
+           * first-person switch has no way to look around. request() is a no-op
+           * if the lock is already held. */
+          plockRef.current?.request();
         }
       }
 
