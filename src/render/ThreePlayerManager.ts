@@ -251,6 +251,11 @@ const _ballAim = new THREE.Vector3();
  *  reason they are kept apart from each other: a binder's hands may be on a
  *  body while the ball is being reached for by the same rig. */
 const _bindAim = new THREE.Vector3();
+/* THE POSE ACCUMULATOR's temporaries — see PlayerInstance.pose. One shared set,
+ * because the table is filled, flushed and cleared for one man at a time. */
+const _poseQuat = new THREE.Quaternion();
+const _poseEuler = new THREE.Euler();
+const POSE_SLOTS = 12;                 // spine_01..03, neck, pelvis + headroom
 /** how hard the solved elbow is written onto the forearm. Not 1: the clip's own
  *  elbow curve is still the animation, and an override that replaces it makes a
  *  reaching man look like a stop-motion puppet for as long as he holds the button. */
@@ -335,6 +340,33 @@ interface PlayerInstance {
   soilShown: number;
   /** lazily-resolved procedural bone set — see resolveRig() */
   rig?: ProceduralRig;
+  /** THE POSE ACCUMULATOR (see applyProcedural).
+   *
+   * This frame's procedural bone offsets, in the bone's own euler terms, keyed
+   * by bone identity. Three writers touch the spine — the set-piece posture, the
+   * torso dip and the struggle — and each of them used to `+=` straight onto the
+   * bone. That is only safe while the mixer re-writes the bone every frame, and
+   * it does not: PropertyMixer.apply() compares its two accumulators and skips
+   * `setValue` when the blended value has not changed, so a bone whose track is
+   * CONSTANT in the playing clip (spine_01 in `Push`) keeps whatever it was last
+   * written to. The posture then compounded +0.23 rad a frame for the length of
+   * the scrum set and snapped to the clip value on the engage crossfade — the
+   * reported full backwards turn of the pack.
+   *
+   * So the writers add into this table and NOTHING is written to the skeleton
+   * until poseFlush(), which writes each bone ABSOLUTELY as
+   * `mixer value + summed offset`. Two consequences, both of them the point:
+   * the accumulated offset can never survive into the next frame, and the three
+   * writers compose exactly as they did before when the mixer behaves (they all
+   * contribute to the same sum). */
+  pose: { bones: (THREE.Bone | null)[]; dx: Float64Array; dy: Float64Array; dz: Float64Array; n: number };
+  /** what the table last wrote through the no-mixer fallback, per slot */
+  posePrev: { x: number; y: number; z: number }[];
+  /** bone -> the PropertyMixer driving its local quaternion, or null. Built
+   *  lazily: the bindings only exist once an action has played. */
+  poseBinds?: Map<THREE.Bone, unknown>;
+  /** one-shot dev notice if the mixer accumulator ever becomes unreadable */
+  poseWarned?: boolean;
   /** the solved fall, or null while the clip owns this man (render/ragdoll.ts) */
   rag?: Ragdoll | null;
   /** lazily-resolved ragdoll bone set and its rest directions */
@@ -1511,6 +1543,8 @@ export class ThreePlayerManager {
         pointerW: 0, pointerX: 0, pointerY: 0.9, pointerZ: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
+      pose: { bones: new Array(POSE_SLOTS).fill(null), dx: new Float64Array(POSE_SLOTS), dy: new Float64Array(POSE_SLOTS), dz: new Float64Array(POSE_SLOTS), n: 0 },
+      posePrev: Array.from({ length: POSE_SLOTS }, () => ({ x: 0, y: 0, z: 0 })),
       st: {
         oneShot: null, lock: 0, lie: false, jerk: 0, jx: 0, jz: 0,
         lx: actor.rx, lz: actor.rz, spd: 0, faceRate: 0,
@@ -1950,6 +1984,127 @@ export class ThreePlayerManager {
     inst.root.position.y += Math.abs(p.stagA) * 0.5 * RENDER_SCALE;
   }
 
+  /* ============ THE POSE ACCUMULATOR ============ */
+
+  /**
+   * Add one bone's procedural offset to this frame's table (see
+   * PlayerInstance.pose). NOTHING is written to the skeleton here: a writer that
+   * touched a bone directly would be composing with whatever the bone happened
+   * to hold, which is exactly the bug this replaced.
+   */
+  private poseAdd(inst: PlayerInstance, bone: THREE.Bone | null | undefined, dx: number, dy: number, dz: number) {
+    if (!bone) return;
+    if (dx === 0 && dy === 0 && dz === 0) return;
+    const pose = inst.pose;
+    for (let i = 0; i < pose.n; i++) {
+      if (pose.bones[i] === bone) {
+        pose.dx[i] += dx; pose.dy[i] += dy; pose.dz[i] += dz;
+        return;
+      }
+    }
+    if (pose.n >= POSE_SLOTS) return;
+    const i = pose.n++;
+    pose.bones[i] = bone; pose.dx[i] = dx; pose.dy[i] = dy; pose.dz[i] = dz;
+  }
+
+  /**
+   * THE MIXER'S OWN VALUE for a bone's local quaternion, or null if it cannot be
+   * read. This is the base every procedural offset is measured from.
+   *
+   * Why it cannot simply be `bone.quaternion`: PropertyMixer.apply() writes the
+   * scene graph only when its blended value has CHANGED since the previous frame
+   * (it keeps two accumulators and compares them). A constant track in the
+   * playing clip therefore leaves the bone holding whatever was last written to
+   * it — including our own offset from the previous frame. Reading the
+   * accumulator is reading what the mixer WOULD have written, whether or not it
+   * bothered to write it, which is the only value that makes an absolute write
+   * correct on both kinds of frame.
+   *
+   * The lookup is cached per instance; a positive hit is permanent, a miss is
+   * retried (the bindings do not exist until an action has played).
+   */
+  private mixerBase(inst: PlayerInstance, bone: THREE.Bone, out: THREE.Euler): boolean {
+    const mixer = inst.mixer as unknown as { _bindings?: unknown[]; _accuIndex?: number };
+    const bindings = mixer._bindings;
+    if (!bindings) return false;
+    type PM = {
+      valueSize?: number; buffer?: Float64Array;
+      binding?: { node?: unknown; path?: string; parsedPath?: { propertyName?: string } };
+    };
+    let pm = inst.poseBinds?.get(bone) as PM | undefined;
+    if (!pm) {
+      for (const cand of bindings) {
+        const c = cand as PM;
+        /* the property name lives on `parsedPath` (three 0.185): a PropertyBinding
+         * exposes `path`, `parsedPath`, `node` and the accessors, and `path` is the
+         * raw track name — `spine_01.quaternion`. */
+        const prop = c?.binding?.parsedPath?.propertyName
+          ?? (c?.binding?.path ? c.binding.path.split('.').pop() : undefined);
+        if (c?.binding?.node === bone && prop === 'quaternion') { pm = c; break; }
+      }
+      if (!pm) return false;
+      (inst.poseBinds ??= new Map()).set(bone, pm);
+    }
+    const stride = pm.valueSize ?? 1;
+    const buffer = pm.buffer;
+    if (!buffer || stride < 4) return false;
+    /* buffer layout is [ incoming | accu0 | accu1 | orig | addAccu | work ], and
+     * apply(accuIndex) writes accu(accuIndex) — the accumulator at
+     * `accuIndex * stride + stride` is the one holding this frame's blend. */
+    const off = ((mixer._accuIndex ?? 0) * stride) + stride;
+    if (off + 4 > buffer.length) return false;
+    _poseQuat.set(buffer[off], buffer[off + 1], buffer[off + 2], buffer[off + 3]);
+    if (_poseQuat.w === 0 && _poseQuat.x === 0 && _poseQuat.y === 0 && _poseQuat.z === 0) return false;
+    out.setFromQuaternion(_poseQuat, bone.rotation.order);
+    return true;
+  }
+
+  /**
+   * Write the table to the skeleton: each bone ABSOLUTELY, as the mixer's own
+   * value plus everything the procedural layer asked for this frame.
+   *
+   * Idempotent by construction — the base is re-read from the mixer every call,
+   * never from the bone — so it is safe to flush more than once a frame, which
+   * the arm reach needs: the hands must be aimed from a torso that already wears
+   * this frame's posture, not last frame's.
+   *
+   * If the mixer's accumulator cannot be read (a three.js internals change),
+   * the bone's current rotation is used as the base. That degrades to the old
+   * add-on-top behaviour, so it is announced once in dev rather than failing
+   * silently into a spinning forward.
+   */
+  private poseFlush(inst: PlayerInstance) {
+    const pose = inst.pose;
+    if (!pose.n) return;
+    for (let i = 0; i < pose.n; i++) {
+      const bone = pose.bones[i];
+      if (!bone) continue;
+      if (this.mixerBase(inst, bone, _poseEuler)) {
+        bone.rotation.set(
+          _poseEuler.x + pose.dx[i], _poseEuler.y + pose.dy[i], _poseEuler.z + pose.dz[i],
+          bone.rotation.order,
+        );
+      } else {
+        if (import.meta.env?.DEV && !inst.poseWarned) {
+          inst.poseWarned = true;
+          console.warn('[procedural] cannot read the mixer accumulator — the pose '
+            + 'offsets fall back to the previous frame\'s bone value. Check the '
+            + 'three.js version (PropertyMixer buffer layout).');
+        }
+        /* The mixer's value is unknown, so the bone keeps whatever it holds — but
+         * the flush may run twice a frame, and a relative write would then apply
+         * the offset twice. Since the offsets are absolute per-frame totals, the
+         * write is made idempotent by remembering what this table last put there
+         * and subtracting it first. */
+        const prev = inst.posePrev[i];
+        bone.rotation.x += pose.dx[i] - prev.x;
+        bone.rotation.y += pose.dy[i] - prev.y;
+        bone.rotation.z += pose.dz[i] - prev.z;
+      }
+      const put = inst.posePrev[i]; put.x = pose.dx[i]; put.y = pose.dy[i]; put.z = pose.dz[i];
+    }
+  }
+
   /** Resolve (once, lazily) the bones the procedural layer drives. */
   private resolveRig(inst: PlayerInstance): ProceduralRig {
     if (inst.rig) return inst.rig;
@@ -2051,11 +2206,11 @@ export class ThreePlayerManager {
     for (let i = 0; i < POSTURE_SHARE.length; i++) {
       const bone = rig.spine[i];
       if (!bone) continue;
-      bone.rotation.x += angle * POSTURE_SHARE[i];
+      this.poseAdd(inst, bone, angle * POSTURE_SHARE[i], 0, 0);
       applied += POSTURE_SHARE[i];
     }
     /* the head fights to stay level — a scrum forward is not looking at grass */
-    if (rig.neck) rig.neck.rotation.x -= angle * applied * POSTURE_NECK_RELIEF;
+    this.poseAdd(inst, rig.neck, -angle * applied * POSTURE_NECK_RELIEF, 0, 0);
   }
 
   /**
@@ -2203,11 +2358,10 @@ export class ThreePlayerManager {
     const angle = DIP_MAX * p.dip;
     const share = [0.45, 0.35];        // spine_01, spine_02 — spine_03 left free
     for (let i = 0; i < share.length; i++) {
-      const bone = rig.spine[i];
-      if (bone) bone.rotation.x += angle * share[i];
+      this.poseAdd(inst, rig.spine[i], angle * share[i], 0, 0);
     }
     /* head stays up: undo most of what the spine just added */
-    if (rig.neck) rig.neck.rotation.x -= angle * 0.62;
+    this.poseAdd(inst, rig.neck, -angle * 0.62, 0, 0);
   }
 
   /**
@@ -2239,14 +2393,10 @@ export class ThreePlayerManager {
     const share = [0.34, 0.33, 0.33];
     rig.spine.forEach((bone, i) => {
       if (!bone) return;
-      bone.rotation.z += wobble * share[i];
-      bone.rotation.x += pitch * share[i];
+      this.poseAdd(inst, bone, pitch * share[i], 0, wobble * share[i]);
     });
     /* the head fights to stay level — counter the total the spine just took */
-    if (rig.neck) {
-      rig.neck.rotation.z -= wobble * 0.55;
-      rig.neck.rotation.x -= pitch * 0.55;
-    }
+    this.poseAdd(inst, rig.neck, -pitch * 0.55, 0, -wobble * 0.55);
   }
 
   /**
@@ -2257,6 +2407,10 @@ export class ThreePlayerManager {
   private applyProcedural(
     inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
   ) {
+    /* THE POSE TABLE IS PER FRAME. Cleared here, filled by the writers below
+     * (posture, dip, thrash), written to the skeleton by poseFlush(). Nothing
+     * between those two points touches a bone rotation — see poseAdd. */
+    inst.pose.n = 0;
     /* A SOLVED fall owns this man's whole body: the root tilt, the torso dip and
      * the thrash would all fight it for the same bones, and the argument is lost
      * by whichever runs last. The arm reach still runs below, at reduced weight,
@@ -2264,6 +2418,7 @@ export class ThreePlayerManager {
     if (inst.proc.ragW > 0.30) {
       this.applyArmReach(inst, null, 0, step);
       this.applyTorsoDip(inst, 0, step);
+      this.poseFlush(inst);
       return;
     }
     const latching = state === 'latchHang';
@@ -2299,6 +2454,12 @@ export class ThreePlayerManager {
         (inst.actor.bindY ?? 0) * RENDER_SCALE + this.groundY(inst.actor.bindX),
         -(inst.actor.bindZ ?? 0) * RENDER_SCALE,
       );
+
+    /* THE TORSO IS FINISHED FOR THIS FRAME — write it before the arms are aimed
+     * out of it. The reach resolves its target against the parent's world
+     * matrix, so a posture still sitting in the table would have this frame's
+     * hands attached to last frame's chest. */
+    this.poseFlush(inst);
 
     /* --- 2. the magnetic latch (tackler's arms onto the carrier) ---
      *
@@ -2387,6 +2548,9 @@ export class ThreePlayerManager {
      * mechanism — a spine under load that the clip has no idea about — so the
      * strip borrows the thrash rather than inventing a fourth procedural pass. */
     this.applySpineThrash(inst, inst.st.spd, Math.max(latched ? 1 : 0, Math.min(1, inst.st.strip) * 0.75), step);
+    /* the struggle writes the same spine the posture does; one last flush takes
+     * the whole frame's sum to the skeleton. */
+    this.poseFlush(inst);
   }
 
   /* ------------------------------------------------------------- update -- */
@@ -2503,6 +2667,13 @@ export class ThreePlayerManager {
          * his own, and the exponential blend left the last man in still
          * square to the touchline for half a second. */
         const want = scrumFacing(a.team as 'A' | 'B');
+        /* Keep the yaw in (-pi, pi]. This branch eases toward a fixed angle
+         * instead of stepping by a capped delta, so without the wrap a pack that
+         * approached from the far side carried `face` out to eight turns (the
+         * probe caught -9.47 rad). It is the same heading on screen — every
+         * reader either takes a rotation or a wrapped delta — but an unbounded
+         * yaw is a trap for the next comparison somebody writes. */
+        st.face = wrappedDelta(0, st.face);
         let dy = want - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;
         while (dy < -Math.PI) dy += Math.PI * 2;
@@ -2681,6 +2852,21 @@ export class ThreePlayerManager {
         inst.root.position.set(a.rx * s, this.groundY(a.rx) + ((a.ry ?? 0) + (a.liftY ?? 0)) * s, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
+        /* REMEMBER THE PLAYHEAD, EVERY FRAME.
+         *
+         * `tackleClipT` is what the "continue, do not restart" line above
+         * resumes from, and it was written on the LATCH path only. The tackle
+         * timeline therefore held a stale 0 for its whole life, and every stage
+         * boundary whose stages resolve to the same clip — both of them do:
+         * hitReact->carrierFall and present are all MX_TackleReact, and
+         * tackleDrive/tackleGround/rollAway are all MX_Tackle — rewound the
+         * retargeted clip to frame 0. That is the reported freeze-and-jitter at
+         * a tackle: the man is driven down, snaps back to the top of the fall
+         * and falls again from the beginning, once per stage.
+         *
+         * Taking the time AFTER the mixer has run is what makes it the playhead
+         * the next stage continues from rather than the one it starts on. */
+        if (inst.active) st.tackleClipT = inst.active.action.time;
         pending.push(inst);
         continue;
       }

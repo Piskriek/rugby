@@ -7609,8 +7609,25 @@ export class Director {
       const watching = eligibleToGather(p) && !p.carrier && reading
         && (task?.role !== 'RETREAT') && (task || reading.kind === 'HELD')
         && Math.hypot(p.x - reading.point.x, p.z - reading.point.z) < 28;
-      a.ballLookX = watching ? this.ballBehaviour.read?.point.x : undefined;
-      a.ballLookZ = watching ? this.ballBehaviour.read?.point.z : undefined;
+      /* A BOUND MAN WATCHES THE CONTEST — and nothing was telling him where it
+       * was. The look point above only exists for a man who is ELIGIBLE TO
+       * GATHER, and a forward locked in a ruck or a maul is not chasing
+       * anything: he is engaged. So he published no look point, and the
+       * renderer — which turns a slow man toward his look point and otherwise
+       * leaves him facing wherever he was when he stopped running — held
+       * whatever heading he arrived on. That is the reported defect: at a ruck
+       * the pile read as men shoving in random directions, because half of them
+       * were still facing the angle they ran in on. The place they are all
+       * working toward is the contest, which the engine already publishes (the
+       * ruck's contact, the maul's ball, the lineout's mark), and the engine's
+       * own ruck plan says the same thing for the same reason: "yaw once he is
+       * on his mark — facing the ball, not the try line".
+       *
+       * This is the LOOK point only, not the gaze: `gazeX/gazeZ` above stay the
+       * perception contract, so no defender's reaction table changes. */
+      const contest = !watching && p.bound ? this.focusPoint() : null;
+      a.ballLookX = watching ? this.ballBehaviour.read?.point.x : contest?.x;
+      a.ballLookZ = watching ? this.ballBehaviour.read?.point.z : contest?.z;
       /* INTENT-GAZE PUBLISH (WS21): a gather-eligible watcher is looking AT the
        * ball — publish that as his gaze so the renderer's head/eyes and the
        * perception reaction table share one source. A player NOT watching has
