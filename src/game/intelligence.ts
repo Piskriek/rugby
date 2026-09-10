@@ -303,100 +303,261 @@ export function steer(
  * frames. */
 const MAX_SHOVE_PER_FRAME = 0.22;
 
+/**
+ * Teammate mark de-confliction:
+ * For settled off-ball teammates, if pairwise mark distance d < 1.5m,
+ * offsets the lower-priority player along the line formation corridor.
+ */
+export function deconflictMarks(
+  all: Live[],
+  ballPos?: { x: number; z: number },
+  isExempt?: (p: Live) => boolean,
+  writeHook?: (p: Live, fn: () => void) => void,
+) {
+  const MIN_DIST = 1.5;
+  const MIN_DIST_SQ = MIN_DIST * MIN_DIST;
+
+  for (let iter = 0; iter < 8; iter++) {
+    let anyAdjusted = false;
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const a = all[i], b = all[j];
+        if (a.team !== b.team) continue;
+        if (a.sinbin > 0 || b.sinbin > 0) continue;
+        if (a.down || b.down) continue;
+        if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+        if ((a.diveT ?? 0) > 0 || (b.diveT ?? 0) > 0) continue;
+
+        const exA = isExempt ? isExempt(a) : (a.carrier || a.bound);
+        const exB = isExempt ? isExempt(b) : (b.carrier || b.bound);
+        if (exA && exB) continue;
+
+        const dx = b.tx - a.tx;
+        const dz = b.tz - a.tz;
+        const dsq = dx * dx + dz * dz;
+        if (dsq >= MIN_DIST_SQ) continue;
+
+        const d = Math.sqrt(dsq);
+        const overlap = MIN_DIST - d;
+        if (overlap <= 0.0001) continue;
+
+        let nx = 0, nz = 0;
+        if (d > 0.001) {
+          nx = dx / d;
+          nz = dz / d;
+        } else {
+          const px = b.x - a.x;
+          const pz = b.z - a.z;
+          const pd = Math.hypot(px, pz);
+          if (pd > 0.001) {
+            nx = px / pd;
+            nz = pz / pd;
+          } else {
+            nx = b.num > a.num ? 1 : -1;
+            nz = 0;
+          }
+        }
+
+        let aHigh: boolean;
+        if (exA && !exB) {
+          aHigh = true;
+        } else if (!exA && exB) {
+          aHigh = false;
+        } else if (ballPos) {
+          const da = Math.hypot(a.tx - ballPos.x, a.tz - ballPos.z);
+          const db = Math.hypot(b.tx - ballPos.x, b.tz - ballPos.z);
+          if (Math.abs(da - db) > 0.05) {
+            aHigh = da < db;
+          } else {
+            aHigh = a.num <= b.num;
+          }
+        } else {
+          aHigh = a.num <= b.num;
+        }
+
+        const higher = aHigh ? a : b;
+        const lower = aHigh ? b : a;
+        const dirSign = aHigh ? 1 : -1;
+
+        const targetLowerX = lower.tx + nx * overlap * dirSign;
+        const targetLowerZ = lower.tz + nz * overlap * dirSign;
+
+        // Boundary handling: clamp lower to pitch bounds; shift higher inward if lower is against boundary
+        const clampedLowerX = Math.max(-33, Math.min(33, targetLowerX));
+        const clampedLowerZ = Math.max(-59, Math.min(59, targetLowerZ));
+
+        const overflowX = targetLowerX - clampedLowerX;
+        const overflowZ = targetLowerZ - clampedLowerZ;
+
+        const applyShift = () => {
+          lower.tx = clampedLowerX;
+          lower.tz = clampedLowerZ;
+          if (!exA && !exB) {
+            if (Math.abs(overflowX) > 0.001) {
+              higher.tx = Math.max(-33, Math.min(33, higher.tx - overflowX));
+            }
+            if (Math.abs(overflowZ) > 0.001) {
+              higher.tz = Math.max(-59, Math.min(59, higher.tz - overflowZ));
+            }
+          }
+        };
+
+        if (writeHook) {
+          writeHook(lower, applyShift);
+        } else {
+          applyShift();
+        }
+        anyAdjusted = true;
+      }
+    }
+    if (!anyAdjusted) break;
+  }
+}
+
 export function separate(
   all: Live[], dt: number,
   reportGate?: ForwardAttackGateReporter,
   gateLabel = 'separate',
 ) {
-  /* Snapshot the pre-shove positions so the budget is measured against where
-   * each man started the frame, not against the running total. */
-  const shoveOrigin = all.map((p) => ({ x: p.x, z: p.z }));
+  const beforeSnapshots = reportGate ? all.map((p) => snapshotForwardAttackPlayer(p)) : undefined;
+  const deltas = all.map(() => ({ dx: 0, dz: 0, dvx: 0, dvz: 0 }));
+
   for (let i = 0; i < all.length; i++) {
     for (let j = i + 1; j < all.length; j++) {
       const a = all[i], b = all[j];
-      const dx = b.x - a.x, dz = b.z - a.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 0.0001) continue;
-      /* SPEC_02 GATE: each collision pair has its own before-image and label;
-       * this makes a separation shove attributable without changing T-02's
-       * existing movement-owner semantics. */
-      const beforeA = reportGate ? snapshotForwardAttackPlayer(a) : undefined;
-      const beforeB = reportGate ? snapshotForwardAttackPlayer(b) : undefined;
 
       /* LATCH-AND-DRAG: the two men in a latch are DELIBERATELY occupying the
-       * same half-metre of grass — that is the tackle. The separation shove
-       * would prise them apart every frame and the defender would appear to
-       * bounce off the man he is supposed to be hanging onto. */
+       * same half-metre of grass — that is the tackle. */
       if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
         || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
-      /* T-04. Opposing players must not run through one another. Two cases:
-       *
-       * TEAM-MATES — the existing rule. The carrier has right of way; his own
-       * men step out of his line.
-       *
-       * OPPONENTS — the new rule. Neither body may occupy the other's grass. If
-       * neither is the carrier they both give ground. If one is the carrier and
-       * the other is NOT in the tackle's convergence set (the tackle has already
-       * resolved the contact by the time it matters), the carrier brushes through
-       * and the defender yields — the actual tackle stays owned by the radius
-       * test in upOpen, so there is no double-fire.
-       *
-       * T-80. A BOUND pair — anywhere in the pod, either side — is exempt from
-       * the projection pass entirely: the ruck's overlap is real contact being
-       * resolved by the 6DOF bind lattice, not two men occupying one metre of
-       * grass, and shoving bound bodies apart here fights the solver (the
-       * scrum/maul packs are pinned afterwards anyway, so the exemption changes
-       * nothing there). */
+      /* T-80. A BOUND pair — anywhere in the pod, either side — is exempt from
+       * the projection pass entirely. */
       if (a.bound || b.bound) continue;
+
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const d = Math.hypot(dx, dz);
+
       if (a.team === b.team) {
         const min = 1.05;
-        if (d > min) continue;
-        const push = (min - d) * 0.5;
-        const nx = dx / d, nz = dz / d;
+        if (d >= min) continue;
+        const overlap = min - d;
+
+        // Collision normal n = (p1.pos - p2.pos) / d = (-dx/d, -dz/d)
+        let nx = 0, nz = 0;
+        if (d > 0.001) {
+          nx = (a.x - b.x) / d;
+          nz = (a.z - b.z) / d;
+        } else {
+          nx = a.num <= b.num ? -1 : 1;
+          nz = 0;
+        }
+
         const wA = a.carrier || a.controlled ? 0.15 : 1;
         const wB = b.carrier || b.controlled ? 0.15 : 1;
-        a.x -= nx * push * wA; a.z -= nz * push * wA;
-        b.x += nx * push * wB; b.z += nz * push * wB;
+
+        // Velocity Damping: Zero the inward relative velocity component for non-carriers
+        if (!a.carrier && !b.carrier) {
+          const vRelX = a.vx - b.vx;
+          const vRelZ = a.vz - b.vz;
+          const inwardSpeed = vRelX * nx + vRelZ * nz;
+          if (inwardSpeed < 0) {
+            deltas[i].dvx -= 0.5 * inwardSpeed * nx;
+            deltas[i].dvz -= 0.5 * inwardSpeed * nz;
+            deltas[j].dvx += 0.5 * inwardSpeed * nx;
+            deltas[j].dvz += 0.5 * inwardSpeed * nz;
+          }
+        }
+
+        // Settle Deadband: low speed and minor overlap corrected over 5 frames
+        const spdA = Math.hypot(a.vx, a.vz);
+        const spdB = Math.hypot(b.vx, b.vz);
+        const isDeadband = spdA < 1.5 && spdB < 1.5 && overlap < 0.10;
+        const pushScale = isDeadband ? 0.2 : 1.0;
+        const push = overlap * 0.5 * pushScale;
+
+        deltas[i].dx += nx * push * wA;
+        deltas[i].dz += nz * push * wA;
+        deltas[j].dx -= nx * push * wB;
+        deltas[j].dz -= nz * push * wB;
       } else {
         // Opponents. Bodies do not overlap; they shunt.
         if (a.down || b.down) continue;
         const min = 0.82;
-        if (d > min) continue;
-        const push = (min - d) * 0.5;
-        const nx = dx / d, nz = dz / d;
-        if (a.carrier) {
-          b.x += nx * push * 1.0; b.z += nz * push * 1.0;   // defender gives way
-        } else if (b.carrier) {
-          a.x -= nx * push * 1.0; a.z -= nz * push * 1.0;
+        if (d >= min) continue;
+        const overlap = min - d;
+
+        // Collision normal n = (p1.pos - p2.pos) / d
+        let nx = 0, nz = 0;
+        if (d > 0.001) {
+          nx = (a.x - b.x) / d;
+          nz = (a.z - b.z) / d;
         } else {
-          a.x -= nx * push; a.z -= nz * push;
-          b.x += nx * push; b.z += nz * push;
+          nx = a.num <= b.num ? -1 : 1;
+          nz = 0;
+        }
+
+        // Velocity Damping: Zero the inward relative velocity component for non-carriers
+        if (!a.carrier && !b.carrier) {
+          const vRelX = a.vx - b.vx;
+          const vRelZ = a.vz - b.vz;
+          const inwardSpeed = vRelX * nx + vRelZ * nz;
+          if (inwardSpeed < 0) {
+            deltas[i].dvx -= 0.5 * inwardSpeed * nx;
+            deltas[i].dvz -= 0.5 * inwardSpeed * nz;
+            deltas[j].dvx += 0.5 * inwardSpeed * nx;
+            deltas[j].dvz += 0.5 * inwardSpeed * nz;
+          }
+        }
+
+        // Settle Deadband: low speed and minor overlap corrected over 5 frames
+        const spdA = Math.hypot(a.vx, a.vz);
+        const spdB = Math.hypot(b.vx, b.vz);
+        const isDeadband = spdA < 1.5 && spdB < 1.5 && overlap < 0.10;
+        const pushScale = isDeadband ? 0.2 : 1.0;
+        const push = overlap * 0.5 * pushScale;
+
+        if (a.carrier) {
+          deltas[j].dx -= nx * push * 1.0;
+          deltas[j].dz -= nz * push * 1.0;
+        } else if (b.carrier) {
+          deltas[i].dx += nx * push * 1.0;
+          deltas[i].dz += nz * push * 1.0;
+        } else {
+          deltas[i].dx += nx * push;
+          deltas[i].dz += nz * push;
+          deltas[j].dx -= nx * push;
+          deltas[j].dz -= nz * push;
         }
       }
-      if (reportGate && beforeA && beforeB) {
-        const pairLabel = `${gateLabel}:${a.team}${a.num}-${b.team}${b.num}`;
-        for (const gate of forwardAttackPlayerWriteFailures(pairLabel, beforeA, snapshotForwardAttackPlayer(a), ['x', 'z'] as const)) reportGate(gate);
-        for (const gate of forwardAttackPlayerWriteFailures(pairLabel, beforeB, snapshotForwardAttackPlayer(b), ['x', 'z'] as const)) reportGate(gate);
-      }
-      /* T-11 void audit: frozen-interface param — the collision resolve is
-       * positional (separation per frame), dt is not needed here. */
-      void dt;
     }
   }
 
-  /* D-2 — clip each man's TOTAL displacement for this frame. Direction is
-   * preserved; only the magnitude is bounded. */
   for (let i = 0; i < all.length; i++) {
-    const p = all[i], o = shoveOrigin[i];
-    const mx = p.x - o.x, mz = p.z - o.z;
-    const m = Math.hypot(mx, mz);
-    if (m > MAX_SHOVE_PER_FRAME) {
-      const k = MAX_SHOVE_PER_FRAME / m;
-      p.x = o.x + mx * k;
-      p.z = o.z + mz * k;
+    const p = all[i];
+    const shoveDist = Math.hypot(deltas[i].dx, deltas[i].dz);
+    if (shoveDist > MAX_SHOVE_PER_FRAME) {
+      const s = MAX_SHOVE_PER_FRAME / shoveDist;
+      deltas[i].dx *= s;
+      deltas[i].dz *= s;
+    }
+    p.x += deltas[i].dx;
+    p.z += deltas[i].dz;
+    p.vx += deltas[i].dvx;
+    p.vz += deltas[i].dvz;
+
+    if (reportGate && beforeSnapshots) {
+      const beforeP = beforeSnapshots[i];
+      const playerLabel = `${gateLabel}:${p.team}${p.num}`;
+      for (const gate of forwardAttackPlayerWriteFailures(playerLabel, beforeP, snapshotForwardAttackPlayer(p), ['x', 'z', 'vx', 'vz'] as const)) {
+        reportGate(gate);
+      }
     }
   }
+
+  /* T-11 void audit: frozen-interface param — the collision resolve is
+   * positional (separation per frame), dt is not needed here. */
+  void dt;
 }
 
 /* ============================ SHAPE ============================ */

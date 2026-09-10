@@ -32,7 +32,7 @@ import {
   contractFor, PhaseName, RoleContract,
 } from './jlr';
 import {
-  Live, steer, separate, attackMark, defenceMark, ShapeInput, passOptions, PassOption,
+  Live, steer, separate, deconflictMarks, attackMark, defenceMark, ShapeInput, passOptions, PassOption,
   ruckDistributor, assignReceiver,
   maxSpeed, FORWARDS,
 } from './intelligence';
@@ -4655,7 +4655,7 @@ export class Director {
   /** Final held-ball sanity check for EVERY AI mark path, including early
    * dataset/pod returns. A receiver cannot demand a forward pass; a defender
    * cannot guard the wrong goal. This adjusts targets, never player positions. */
-  private steerThought(p: Live, dt: number, sprint: boolean, gate: ForwardAttackGateReporter | undefined, label: string) {
+  private sanitizeBallSide(p: Live, gate: ForwardAttackGateReporter | undefined, label: string) {
     const s = this.op;
     if (this.phase === 'OPEN_PLAY' && s && !s.ball.live && !this.bc.free && !p.carrier) {
       const car = this.L(s.attacking, s.carrierNum);
@@ -4668,7 +4668,6 @@ export class Director {
         });
       }
     }
-    steer(p, dt, sprint, gate, label);
   }
 
   private think(dt: number, input: Input) {
@@ -4876,6 +4875,7 @@ export class Director {
     }
 
     // ---- everyone else ----
+    const toSteer: { p: Live; sprint: boolean; label: string }[] = [];
     for (const p of this.live) {
       if (p === ctrlHuman && p.controlled) continue;
       if (p.sinbin > 0) {
@@ -4957,7 +4957,7 @@ export class Director {
             p.tz = aiClean ? legalZFor(guardLines, p, task.z, CLEAN_MARGIN_METRES) : task.z;
             p.urgency = task.urgency; p.job = task.job;
           });
-        this.steerThought(p, dt, task.sprint, gate, `think:ball-steer:${p.team}${p.num}`);
+        toSteer.push({ p, sprint: task.sprint, label: `think:ball-steer:${p.team}${p.num}` });
         continue;
       }
 
@@ -4988,7 +4988,7 @@ export class Director {
            * holds. The 10's pocket depth and the 12's flat lane are the
            * release options the 9 is choosing between. */
           this.applyBackline(gate, p, false);
-          this.steerThought(p, dt, false, gate, `think:pod-hold:${p.team}${p.num}`);
+          toSteer.push({ p, sprint: false, label: `think:pod-hold:${p.team}${p.num}` });
           continue;
         }
 
@@ -5012,7 +5012,7 @@ export class Director {
               p.job = c.job.OPEN_PLAY ?? 'SUPPORT THE CARRIER AT THE HIP';
             });
           this.applyForwardPack(gate, p, false);
-          this.steerThought(p, dt, true, gate, `think:hip-support-steer:${p.team}${p.num}`);
+          toSteer.push({ p, sprint: true, label: `think:hip-support-steer:${p.team}${p.num}` });
           continue;
         }
 
@@ -5094,7 +5094,7 @@ export class Director {
               });
             this.applyForwardPack(gate, p, false);
             this.applyBackline(gate, p, false);
-            this.steerThought(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
+            toSteer.push({ p, sprint: true, label: `think:dataset-steer:${p.team}${p.num}:${sit}` });
             continue;
           }
         }
@@ -5183,9 +5183,12 @@ export class Director {
         // top of the pursuit logic every frame.
         const car = this.L(atk, this.op!.carrierNum);
         const lead = 0.4;
+        const convArray = [...convergers];
+        const idx = convArray.indexOf(p.num);
+        const bracketOffset = convArray.length > 1 ? (idx === 0 ? -0.8 : 0.8) : 0;
         this.writeThinkPlayer(gate, `think:converge:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
-            p.tx = clamp(car.x, -33, 33);
+            p.tx = clamp(car.x + bracketOffset, -33, 33);
             p.tz = clamp(car.z + this.op!.dir * lead, -58, 58);
             p.job = defSys.job;
             p.urgency = 1;
@@ -5193,9 +5196,12 @@ export class Director {
       } else if (coverChase.has(p.num)) {
         // T-13 cover chase: beaten men hunt the carrier at full tilt.
         const car = this.L(atk, this.op!.carrierNum);
+        const chaseArray = [...coverChase];
+        const idx = chaseArray.indexOf(p.num);
+        const bracketOffset = chaseArray.length > 1 ? (idx === 0 ? -0.8 : 0.8) : 0;
         this.writeThinkPlayer(gate, `think:cover-chase:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
-            p.tx = clamp(car.x, -33, 33);
+            p.tx = clamp(car.x + bracketOffset, -33, 33);
             p.tz = clamp(car.z, -58, 58);
             p.job = 'COVER CHASE — RUN HIM DOWN';
             p.urgency = 1;
@@ -5409,8 +5415,47 @@ export class Director {
       // T-24b. Convergers sprint to the tackle. They were jogging because the old
       // call only sprinted the controlled player — the carrier simply outran the
       // defence and tackles never happened.
-      this.steerThought(p, dt, (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num),
-        gate, `think:steer:${p.team}${p.num}`);
+      toSteer.push({
+        p,
+        sprint: (input.sprint && p === ctrlHuman) || convergers.has(p.num) || coverChase.has(p.num),
+        label: `think:steer:${p.team}${p.num}`,
+      });
+    }
+
+    // 1. Run ball-side target sanitization on all queued players
+    for (const item of toSteer) {
+      this.sanitizeBallSide(item.p, gate, item.label);
+    }
+
+    // 2. Teammate mark de-confliction pass for settled off-ball teammates
+    if (this.phase === 'OPEN_PLAY') {
+      const isDeconflictExempt = (p: Live): boolean => {
+        if (p.carrier) return true;
+        if (this.op && p.team === this.op.attacking && p.num === this.op.carrierNum && !this.op.ball.live && !this.bc.free) return true;
+        if (isBound(p) || p.bound || p.movedBy === 'bound') return true;
+        if (this.bd && this.bd.players.some((b) => b.team === p.team && b.num === p.num && b.role === 'JACKAL')) return true;
+        if (p.job?.includes('JACKAL') || p.clip === 'jackal') return true;
+        if (p === ctrlHuman && p.controlled) return true;
+        if (p.sinbin > 0 || p.down || (p.recoverT ?? 0) > 0 || (p.diveT ?? 0) > 0) return true;
+        if (this.op?.ball.live && p.team === this.op.attacking && p.num === this.op.pendingReceiver) return true;
+        return false;
+      };
+
+      const ballFocus = this.tacticalPoint();
+      deconflictMarks(
+        this.live,
+        ballFocus,
+        isDeconflictExempt,
+        (player, applyShift) => {
+          this.writeThinkPlayer(gate, `think:deconflict:${player.team}${player.num}`, player,
+            ['tx', 'tz'] as const, applyShift);
+        },
+      );
+    }
+
+    // 3. Final steer integration
+    for (const item of toSteer) {
+      steer(item.p, dt, item.sprint, gate, item.label);
     }
 
     separate(this.live, dt, gate, 'think:separate');
