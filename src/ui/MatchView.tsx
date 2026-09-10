@@ -1597,6 +1597,18 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
                       ))}
                     </div>
                   )}
+                  {(d.trySpotLog ?? []).length > 0 && (
+                    <div className="mt-2 border-t border-[#26314a] pt-1">
+                      <div className="font-black tracking-[0.2em] text-[#7f8ea6]">
+                        TRY SPOT CORRECTIONS — {d.trySpotLog.length} GROUNDING{' '}CLAMP{d.trySpotLog.length === 1 ? '' : 'S'}
+                      </div>
+                      <div className="mt-1 max-h-24 space-y-0.5 overflow-auto text-[9px] text-[#ffd18c]">
+                        {d.trySpotLog.slice().reverse().map((l, i) => (
+                          <div key={i} className="tabular-nums">{l}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="mt-1 text-[8px] tracking-[0.12em] text-[#6f7f96]">
                     LOCK ENGAGES THE FRAME A TRY IS AWARDED · CLEARS ON RESTART KICKOFF OR WATCHDOG RESET
                   </div>

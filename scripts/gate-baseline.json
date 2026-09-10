@@ -1,5 +1,5 @@
 {
   "_why": "The ratchet. `audit-cli` prints FAIL counts but exits 0, so a gate that trusts only exit codes lets a session add law failures silently. This file is the recorded state of the tree; a run that EXCEEDS it is red, a run that improves it is green with a note to lower the number in the same commit.",
-  "_history": "FAIL 2 before the open-play calibration merged in (73475f8); FAIL 5 after it (01a7673). The +3 is LAW-66 alone, diagnosed in HANDOFF §11 and at the call site in engine/open.ts. Brief (a) in SENIOR_PLAYBOOK.md owns getting this back to 2 — and it must be fixed by a fold-back budget, never by re-baselining this number to whatever the branch happens to produce.",
-  "audit": { "fail": 5, "warn": 4 }
+  "_history": "FAIL 2 before the open-play calibration merged in (73475f8); FAIL 5 after it (01a7673). The +3 is LAW-66 alone, diagnosed in HANDOFF §11 and at the call site in engine/open.ts. Brief (a) in SENIOR_PLAYBOOK.md owns getting this back to 2 — and it must be fixed by a fold-back budget, never by re-baselining this number to whatever the branch happens to produce. RATCHETED TO FAIL 1 by the set-piece/locomotion pass: the same 120 s run at the same seed now reports FAIL 1 / WARN 2 (three consecutive identical runs), because the acceleration ramp is the real one (steer was reaching ~95% of top speed in a third of a second, which packed contacts and inflated the open-play findings). The remaining FAIL is still the LAW-66 family, not new; the fold-back budget in Brief (a) still owns it.",
+  "audit": { "fail": 1, "warn": 2 }
 }

@@ -97,6 +97,32 @@ export interface Live {
   recoverX?: number;
   recoverZ?: number;
   attrs: { SPD: number; PWR: number; SKL: number; AGG: number; AWA: number; STA: number };
+  /* ========================= SET-PIECE POSTURE =========================
+   * THE SHAPE IS ENGINE DATA, NOT AN ANIMATOR'S GUESS.
+   *
+   * A scrum, a maul and a lineout are not the same cluster of upright men
+   * with different marks — a front-rower drives bent double, a maul binder
+   * stays on his feet with his arms wrapped at chest height, and a lineout
+   * jumper is off the ground entirely while the two men beside him lift him.
+   * The renderer has sixteen bodies and no idea which row, pod or rank a man
+   * is in, so the geometry modules that DID author the shapes
+   * (behaviour/setpiece-overrides.ts, maulRegate.ts, engine/setpieces.ts)
+   * publish the posture here, per man, every frame — the same rule the
+   * engagement heading already follows. These fields are presentation-safe:
+   * no law, contest or physics term reads them.
+   */
+  /** torso pitch out of vertical, radians, + = forward (a driving forward). */
+  pitch?: number;
+  /** the world point his hands work at (logical metres): the opposing front
+   *  row's shoulders in a scrum, the body in front of him in a maul, his
+   *  jumper's thighs in a lineout. The procedural arm layer reaches for it. */
+  bindX?: number; bindY?: number; bindZ?: number;
+  /** feet elevation above the turf, logical metres — the lineout lift. The
+   *  engine owns it as a lifter's contract, so it is deliberately NOT
+   *  `jumpY` (that channel is the open-play jump, with its own gravity). */
+  liftY?: number;
+  /** hands above the turf, logical metres — the catch plane a lift buys. */
+  reachY?: number;
   /**
    * T-02 — ownership tag. Every frame, exactly one system may move a player:
    * `steer` (think), `bound` (placeBound), `phase` (phase logic), `carrier` (the
@@ -168,8 +194,18 @@ export function steer(
     const ramp = clamp(dist / 2.4, 0.28, 1);
     const tvx = nx * want * ramp, tvz = nz * want * ramp;
     // one continuous curve — the accel rate is the only difference between
-    // a prop and a wing, so sprint never feels like a different game
-    let accel = 9 + (p.attrs.SPD / 100) * 5;
+    // a prop and a wing, so sprint never feels like a different game.
+    /* THE RAMP, NOT THE TARGET. This was `9 + SPD/100*5` (~9–14 m/s²), which
+     * is a bicycle: a standing man reached 95% of top speed in a third of a
+     * second, so the walk band (0.7–3.0 m/s) lasted about four frames and the
+     * renderer cut straight from Idle to Sprint — the reported "he stands
+     * still, then the sprint animation starts with the legs already extended
+     * and frozen". A real acceleration curve is ~4.5 m/s² at rest, falling as
+     * the body approaches its own ceiling (see engine/approach.ts, a(v));
+     * 5.0 + SPD/100*3.5 keeps the prop/wing spread while spreading a standing
+     * start to top speed over a second and a half of visible walking,
+     * jogging, running, then sprinting. */
+    let accel = 6.5 + (p.attrs.SPD / 100) * 4.0;
     /* LATCH-AND-DRAG: a held man cannot build pace either — the drag taxes
      * acceleration as hard as it taxes top speed, which is what turns the
      * churn into a few heavy metres rather than a jog that happens to be

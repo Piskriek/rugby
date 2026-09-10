@@ -27,7 +27,8 @@ import type { Director, Actor } from '../game/director';
 import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
 import { ballReach } from '../game/engine/ballAwareness';
 import { RECOVER_SECONDS } from '../game/director';
-import { TURN_PIVOT, stepTurn, turnRateFor } from '../game/gait';
+import { TURN_PIVOT, stepTurn, turnRateFor, wrappedDelta } from '../game/gait';
+import { clamp } from '../game/engine/clamp';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 import { Ragdoll } from './ragdoll';
@@ -246,6 +247,10 @@ const _target = new THREE.Vector3();
  *  and at a body in the same frame, and one scratch shared by both is one of the
  *  two aiming at the other. */
 const _ballAim = new THREE.Vector3();
+/** A SET-PIECE BIND POINT — kept separate from the two above for the same
+ *  reason they are kept apart from each other: a binder's hands may be on a
+ *  body while the ball is being reached for by the same rig. */
+const _bindAim = new THREE.Vector3();
 /** how hard the solved elbow is written onto the forearm. Not 1: the clip's own
  *  elbow curve is still the animation, and an override that replaces it makes a
  *  reaching man look like a stop-motion puppet for as long as he holds the button. */
@@ -268,6 +273,37 @@ const HAND_OVER_BALL_TILT = 0.52;
  *  left to the animation. 0.15 is where a man one stride out sits; without the
  *  floor every body in a five-metre radius of a ruck waves at the ball. */
 const HAND_MIN = 0.15;
+
+/* ---- SET-PIECE POSTURE (scrum bind, maul bind, lineout lift) --------------
+ *
+ * The engine authors every set-piece shape (behaviour/setpiece-overrides.ts,
+ * maulRegate.ts, engine/setpieces.ts) and publishes, per man, a torso pitch and
+ * the world point his hands work at (Actor.pitch / Actor.bind*). These are the
+ * same numbers the marks were placed from, so the rendered pack and the
+ * simulated pack cannot disagree about how low a scrum drives, how upright a
+ * maul stays, or how high a jumper goes.
+ */
+/** How much of an authored pitch lands on the spine chain rather than the root.
+ *  A scrum is a FOLDED body — hips low, chest over the tunnel — not a body
+ *  rotating about its ankles, so the pitch is spread up the spine and the legs
+ *  stay under the man. */
+const POSTURE_SHARE = [0.42, 0.30, 0.22];
+/** The head stays up in a scrum: a forward's neck is the last thing to give. */
+const POSTURE_NECK_RELIEF = 0.55;
+/** Rate the posture bleeds in and out at (1/s). A pack does not snap low. */
+const POSTURE_RATE = 5;
+/** How hard a bind's hands are pulled onto the authored anchor. */
+const BIND_WEIGHT = 0.66;
+/** Below this ground speed a man turns on the balls of his feet — the shuffle. */
+const TURN_MIN_SPEED = 0.45;
+/** How fast a body's REPORTED speed may rise, m/s². The engine integrates the
+ *  real acceleration; this only refuses to believe a frame whose position moved
+ *  further than legs could have carried it (a placement, a phase hand-off, a
+ *  snap), because a single teleport frame used to fire the Sprint clip under a
+ *  man who was standing still. */
+const GAIT_SPEED_CLIMB = 13;
+/** Lateral lean into a slow turn, radians per rad/s of yaw, walking pace. */
+const SHUFFLE_LEAN = 0.05;
 /** reused rotation scratch, so the reach allocates nothing per bone */
 const _qBone = new THREE.Quaternion();
 const _dir = new THREE.Vector3();
@@ -342,6 +378,8 @@ interface PlayerInstance {
     ragW: number;
     /** T-41 the lean a shove has bought him, radians, see applyBalance */
     stagA: number;
+    /** 0..1 smoothed weight of the set-piece torso pitch (Actor.pitch) */
+    posture: number;
     /** the FSM state resolved this frame, for the post-mixer pass */
     state: string;
   };
@@ -354,7 +392,11 @@ interface PlayerInstance {
      *  world direction of the shove, held so the lean can outlive the frame. */
     jerk: number; jx: number; jz: number;
     lx: number; lz: number;
+    /** the gait's ground speed: the frame difference, CLAMPED to a value legs
+     *  could have reached (a teleport frame is not a sprint — see update()). */
     spd: number;
+    /** smoothed yaw rate, rad/s — the shuffle lean reads it (see applyBalance) */
+    faceRate: number;
     face: number;                // smoothed heading, radians
     /* PART 1 — THE ONE-SHOT LATCH. A `pass` that is re-`play()`ed on the
      * frames after the first restarts the clip, which is what read as the
@@ -1464,14 +1506,14 @@ export class ThreePlayerManager {
       active: null,
       ragPlay: null, ragBlend: 0, ragRate: 1,
       proc: {
-        tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0, stagA: 0,
+        tilt: 0, reach: 0, thrash: 0, dip: 0, ragW: 0, stagA: 0, posture: 0,
         craftW: 0, pickup: false, craftL: null, craftR: null,
         pointerW: 0, pointerX: 0, pointerY: 0.9, pointerZ: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
         oneShot: null, lock: 0, lie: false, jerk: 0, jx: 0, jz: 0,
-        lx: actor.rx, lz: actor.rz, spd: 0,
+        lx: actor.rx, lz: actor.rz, spd: 0, faceRate: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
         passLatched: false,
         tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
@@ -1880,11 +1922,19 @@ export class ThreePlayerManager {
       if (inst.root.rotation.z !== 0) inst.root.rotation.z = 0;
       return;
     }
+    /* THE SHUFFLE. A man coming round at walking pace plants a foot and
+     * weight-transfers; the body leans INTO the turn for as long as the yaw
+     * lasts and comes back level as he straightens up. It rides the same
+     * rotation.z the shove reaction owns (one writer per axis per frame), and
+     * it is zero above a jog — a runner's lean is the gait's business. */
+    const shuffle = st.spd < 2.5
+      ? clamp(-st.faceRate * SHUFFLE_LEAN, -0.16, 0.16)
+      : 0;
     const want = st.jerk * 0.42;
     p.stagA += (want - p.stagA) * (1 - Math.exp(-11 * step));
     if (p.stagA < 2e-3) {
       p.stagA = 0;
-      inst.root.rotation.z = 0;
+      inst.root.rotation.z = shuffle;
       return;
     }
     /* world shove direction into HIS frame: forward is +Z after the heading
@@ -1893,7 +1943,7 @@ export class ThreePlayerManager {
     const c = Math.cos(inst.root.rotation.y), si = Math.sin(inst.root.rotation.y);
     const fwd = -(st.jz * c + st.jx * si);   // negative because a shove FROM BEHIND
     const lat = st.jx * c - st.jz * si;      // ...throws him forward, not back
-    inst.root.rotation.z = -lat * p.stagA * 1.6;
+    inst.root.rotation.z = shuffle - lat * p.stagA * 1.6;
     inst.root.rotation.x += fwd * p.stagA * 1.2;
     /* a lean about the feet sinks the head; the same compensation the tilt layer
      * uses, at the same scale, or the two systems disagree about the ground. */
@@ -1950,7 +2000,7 @@ export class ThreePlayerManager {
        * never otherwise written (only rotation.y is, every frame). */
       p.tilt = 0;
       inst.root.rotation.x = 0;
-      inst.root.position.y = this.groundY(inst.actor.rx) + (inst.actor.ry ?? 0) * RENDER_SCALE;
+      inst.root.position.y = this.groundY(inst.actor.rx) + ((inst.actor.ry ?? 0) + (inst.actor.liftY ?? 0)) * RENDER_SCALE;
       if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
       return;
     }
@@ -1968,13 +2018,44 @@ export class ThreePlayerManager {
      * only while the man is still on his feet leaning in, where the pivot is
      * genuinely at the feet and the chest would otherwise sink. */
     const rise = lift ? Math.sin(p.tilt) * 0.62 : 0;
-    inst.root.position.y = rise * RENDER_SCALE + this.groundY(inst.actor.rx) + (inst.actor.ry ?? 0) * RENDER_SCALE;
+    inst.root.position.y = rise * RENDER_SCALE + this.groundY(inst.actor.rx) + ((inst.actor.ry ?? 0) + (inst.actor.liftY ?? 0)) * RENDER_SCALE;
     if (inst.shadow) {
       /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
        * on the turf under the man. */
       inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
       inst.shadow.position.y = 0.02 - rise;
     }
+  }
+
+  /**
+   * 4 — SET-PIECE POSTURE.
+   *
+   * A scrum drives low, a maul is fought upright, a lineout jumper leaves the
+   * ground: the engine authors all three (Actor.pitch / Actor.liftY) and this
+   * is where the rig wears it. The pitch is spread up the SPINE rather than
+   * applied to the root, because a forward's low body is a fold at the hips —
+   * his legs stay under him and drive — and a root rotation about the feet
+   * would swing the whole man forward like a plank.
+   *
+   * The neck takes most of it back, so the head stays up and the pack reads as
+   * sixteen men looking at the ball instead of a row of divers.
+   */
+  private applySetPiecePosture(inst: PlayerInstance, step: number) {
+    const p = inst.proc;
+    const want = inst.actor.pitch ?? 0;
+    p.posture += (want - p.posture) * (1 - Math.exp(-POSTURE_RATE * step));
+    if (p.posture < 1e-3) { p.posture = 0; return; }
+    const rig = this.resolveRig(inst);
+    const angle = p.posture;
+    let applied = 0;
+    for (let i = 0; i < POSTURE_SHARE.length; i++) {
+      const bone = rig.spine[i];
+      if (!bone) continue;
+      bone.rotation.x += angle * POSTURE_SHARE[i];
+      applied += POSTURE_SHARE[i];
+    }
+    /* the head fights to stay level — a scrum forward is not looking at grass */
+    if (rig.neck) rig.neck.rotation.x -= angle * applied * POSTURE_NECK_RELIEF;
   }
 
   /**
@@ -2208,6 +2289,17 @@ export class ThreePlayerManager {
     /* no procedural lift once the clip itself is putting him on the ground */
     this.applyBodyTilt(inst, wantTilt, step, !grounding);
 
+    /* --- 1b. THE SET PIECE'S OWN POSTURE (scrum bind, maul, lineout lift) ---
+     * The shape is engine data, and this is the rig wearing it. */
+    this.applySetPiecePosture(inst, step);
+    const bind = inst.actor.bindX === undefined
+      ? null
+      : _bindAim.set(
+        inst.actor.bindX * RENDER_SCALE,
+        (inst.actor.bindY ?? 0) * RENDER_SCALE + this.groundY(inst.actor.bindX),
+        -(inst.actor.bindZ ?? 0) * RENDER_SCALE,
+      );
+
     /* --- 2. the magnetic latch (tackler's arms onto the carrier) ---
      *
      * The anchor is the carrier's PELVIS dropped 0.15 m, not his chest: a legal
@@ -2233,6 +2325,13 @@ export class ThreePlayerManager {
          * looking like a man bending only at the shoulders. */
         this.applyTorsoDip(inst, w, step);
       }
+    } else if (bind) {
+      /* THE BIND. A scrum forward's hands are on the opposing front row, a
+       * maul binder's are wrapped forward at chest height, a lineout lifter's
+       * are under his jumper's thighs. The engine solves the anchor (it knows
+       * who is bound to whom and where); the rig only aims the arms at it. */
+      this.applyArmReach(inst, bind, BIND_WEIGHT, step);
+      this.applyTorsoDip(inst, 0, step);
     } else if (inst.proc.pointerW > 0.01) {
       /* RETICLE AIM — hands follow the viewport centre while LMB is held.
        * Logical pitch Z maps to renderer -Z, exactly like the ball socket. */
@@ -2326,7 +2425,17 @@ export class ThreePlayerManager {
       const vx = (a.rx - st.lx) / Math.max(step, 1e-4);
       const vz = (a.rz - st.lz) / Math.max(step, 1e-4);
       st.lx = a.rx; st.lz = a.rz;
-      st.spd = Math.hypot(vx, vz);
+      /* A TELEPORT IS NOT A SPRINT. `st.spd` is a one-frame finite difference of
+       * the streamed positions, so ANY engine placement — a set-piece pin, a
+       * phase hand-off, a recovered man restored to his spot — reads as an
+       * impossible velocity for exactly one frame, and the gait picker answered
+       * it by firing the Sprint clip under a man who was standing still: the
+       * reported "he stands in place, then the sprint animation starts and the
+       * legs stay extended". The clamp below only refuses speeds a body could
+       * not have reached in this frame; a genuine 12 m/s² acceleration is
+       * untouched, and the position is still drawn where the engine put it. */
+      const rawSpd = Math.hypot(vx, vz);
+      st.spd = Math.min(rawSpd, st.spd + GAIT_SPEED_CLIMB * step);
       /* Smoothed, because this feeds the initial conditions of a physics solve
        * and a single noisy frame from a snapped position would fire a man into
        * the third row. The engine's own `live` velocities are not on the
@@ -2350,16 +2459,33 @@ export class ThreePlayerManager {
 
       // heading: a moving man walks where he is going (smoothed); a slow man
       // holds his last facing.
+      /* HE FACES WHERE HE IS GOING, AT EVERY SPEED. The gate used to be 2.2
+       * m/s — above a walking pace — so a man stepping, jockeying or running a
+       * support line at 1-2 m/s kept whatever heading he last had and slid
+       * sideways across the pitch. A body turns when it walks; the belt from
+       * 2.2 down to a shuffle's 0.45 m/s is where the "he does not face his own
+       * movement" report lived. Below that he is standing, and a standing man
+       * keeps his facing (or watches the ball). */
       const watch = st.spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
-      if (st.spd > 2.2 || watch) {
+      if (st.spd > TURN_MIN_SPEED || watch) {
         const target = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
         /* Bounded human turn (see TURN_* / stepTurn): a still man watching the
          * ball pivots in place rather than spinning at clip speed; a running
          * man turns toward his path at a rate a body with mass can actually
          * make. This is the structural cure for the "models turn frantically
          * while moving slow" defect. */
-        const rate = watch && st.spd < 0.7 ? TURN_PIVOT : turnRateFor(st.spd);
+        /* THE SHUFFLE. A man barely moving does not glide round an arc — he
+         * plants, shuffles his feet and comes round in short steps, so the turn
+         * rate is capped at the in-place pivot rate until he is properly
+         * walking (1.6 m/s), and the lean below is what makes it read as a
+         * weight transfer rather than a rotation about the spine. */
+        const rate = st.spd < 1.6 ? TURN_PIVOT : turnRateFor(st.spd);
+        const was = st.face;
         st.face = stepTurn(st.face, target, rate, step);
+        st.faceRate += (wrappedDelta(was, st.face) / Math.max(step, 1e-4) - st.faceRate)
+          * Math.min(1, step * 8);
+      } else {
+        st.faceRate *= Math.exp(-6 * step);
       }
 
       // Bug-fix #4: in a SCRUM the two packs must lock head-on down the
@@ -2433,7 +2559,7 @@ export class ThreePlayerManager {
         st.tackleRole = null; st.tackleT = -1;
         st.ragFired = false;   // arm the next hit, or a man ragdolls only once
         inst.proc.state = desired;
-        inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
+        inst.root.position.set(a.rx * s, this.groundY(a.rx) + ((a.ry ?? 0) + (a.liftY ?? 0)) * s, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
         /* remember where the tackle clip actually got to, so the next stage
@@ -2552,7 +2678,7 @@ export class ThreePlayerManager {
           : wantStage === 1
             ? (st.tackleRole === 'CARRIER' ? 'carrierFall' : 'tackleGround')
             : (st.tackleRole === 'CARRIER' ? 'present' : 'rollAway');
-        inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
+        inst.root.position.set(a.rx * s, this.groundY(a.rx) + ((a.ry ?? 0) + (a.liftY ?? 0)) * s, -a.rz * s);
         inst.root.rotation.y = Math.PI - st.face;
         inst.mixer.update(step);
         pending.push(inst);
@@ -2635,7 +2761,7 @@ export class ThreePlayerManager {
 
       // ---- transform: logical pitch -> scaled 3D world ----
       inst.proc.state = desired;
-      inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
+      inst.root.position.set(a.rx * s, this.groundY(a.rx) + ((a.ry ?? 0) + (a.liftY ?? 0)) * s, -a.rz * s);
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 

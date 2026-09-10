@@ -127,32 +127,104 @@ export const SCRUM_ROWS_341: number[][] = [
 
 /** Lateral spacing between shoulders within a row, metres. */
 const ROW_SPACING = 0.68;
-/** Distance from the mark to the front row, and between successive rows. */
-const ROW_ONE_DEPTH = 0.62;
+/** Distance from the mark to the front row, and between successive rows.
+ *  The front rows are 2 × 0.35 = 0.70 m apart centre to centre, which is
+ *  shoulder-to-shoulder contact — they are bound on each other, not standing
+ *  a stride apart — and the head reach below then carries each man's head
+ *  through the pocket and beside his opposite number's. */
+const ROW_ONE_DEPTH = 0.35;
 const ROW_GAP = 0.66;
+
+/**
+ * THE FRONT ROW'S HEAD INTERLOCK — the one place the two packs are NOT
+ * congruent.
+ *
+ * Two packs authored symmetrically about the mark put A's loosehead's head
+ * exactly opposite B's tighthead's head: nose to nose, which is a clash, not
+ * a scrum. A real front row binds HEADS SIDE BY SIDE, each man's head in the
+ * half-shoulder of daylight between the opposing prop's head and his
+ * neighbour's shoulder. Shifting each pack's front row a half-head to its own
+ * side of the tunnel axis (A one way, B the other) is that interlock, and it
+ * leaves the two hookers straddling the axis exactly on the ball's line —
+ * which is what "you hook on the tunnel" means geometrically.
+ */
+export const HEAD_INTERLEAVE_M = 0.19;
 
 export interface ScrumBlockSlot {
   num: number; team: 'A' | 'B'; row: number; x: number; z: number;
   /** the locked engagement heading, radians (renderer frame) */
   facing: number;
+  /**
+   * Torso pitch out of vertical for this man's row, radians — the scrum's
+   * posture. A front rower is 38° down and driving, the engine room binds
+   * behind him a shade deeper (40°), and the back row — the eight, whose
+   * head is between the locks' hips at the base — stays at 32°: lower than
+   * a standing man, still looking at the ball rather than at the grass.
+   */
+  pitch: number;
+  /** where his head ends up: forward of his shoulders, on the interlock */
+  headX: number; headZ: number;
+  /** the point his hands work at (the opposing front row's shoulders) */
+  bindX: number; bindZ: number; bindY: number;
 }
+
+/**
+ * Torso pitch by row, radians. Front row 38°, second row 40°, back row 32°.
+ *
+ * EVERY forward in the block pitches between 30° and 45° — the band the
+ * set-piece visual probe asserts (scripts/setpiecevisualprobe.ts). The pack
+ * is a wall of low bodies driving forward; a man outside that band is either
+ * standing up in the scrum (illegal, and it reads as a huddle) or bent so far
+ * over that his shoulders are below his hips.
+ */
+export const SCRUM_FRONT_ROW_PITCH = (38 * Math.PI) / 180;
+export const SCRUM_SECOND_ROW_PITCH = (40 * Math.PI) / 180;
+export const SCRUM_BACK_ROW_PITCH = (32 * Math.PI) / 180;
+
+/** How far forward of his hips a bound front-rower's head carries, metres. */
+export const SCRUM_HEAD_REACH_M = 0.42;
+/** Where a forward's hands bind: shoulder height, metres. */
+export const SCRUM_BIND_Y_M = 1.05;
 
 /**
  * Every one of the sixteen forwards' locked coordinates for a scrum on the
  * mark (ax, az), in the 3-4-1 block, both packs facing down the engagement
  * axis. Pure — the caller places the men.
+ *
+ * The block is authored ONCE here — front row, then the locks bound between
+ * the two flankers, then the eight alone at the base — together with the
+ * locked engagement heading, the row posture and the head/bind geometry, so
+ * the renderer and the engine cannot disagree about which way the packs are
+ * pointing or how low they are driving.
  */
 export function scrumBlock(ax: number, az: number): ScrumBlockSlot[] {
   const out: ScrumBlockSlot[] = [];
   for (const team of ['A', 'B'] as const) {
     const back = team === 'A' ? -1 : 1;   // A packs from −z, B from +z
+    const facing = scrumFacing(team);
+    /* the interleave: each pack's front row sits a half-head to its own side
+     * of the tunnel axis so the two heads bind BESIDE each other. */
+    const interleave = -back * HEAD_INTERLEAVE_M;
     SCRUM_ROWS_341.forEach((row, ri) => {
+      const pitch = ri === 0 ? SCRUM_FRONT_ROW_PITCH
+        : ri === 1 ? SCRUM_SECOND_ROW_PITCH : SCRUM_BACK_ROW_PITCH;
       row.forEach((num, ci) => {
+        const lat = ci - (row.length - 1) / 2;
+        /* loosehead on the pack's OWN left, tighthead on its right: the
+         * mirror is what makes loosehead meet tighthead across the tunnel
+         * instead of loosehead meeting loosehead. */
+        const x = ax + back * lat * ROW_SPACING + (ri === 0 ? interleave : 0);
+        const z = az + back * (ROW_ONE_DEPTH + ri * ROW_GAP);
         out.push({
-          num, team, row: ri + 1,
-          x: ax + (ci - (row.length - 1) / 2) * ROW_SPACING,
-          z: az + back * (ROW_ONE_DEPTH + ri * ROW_GAP),
-          facing: scrumFacing(team),
+          num, team, row: ri + 1, x, z, facing, pitch,
+          headX: x,
+          /* FORWARD of him is TOWARD the tunnel, against his own pack's
+           * offset — `back` points away from the engagement, so the head and
+           * the hands both carry by −back. */
+          headZ: z - back * SCRUM_HEAD_REACH_M,
+          bindX: x,
+          bindZ: z - back * 0.55,
+          bindY: SCRUM_BIND_Y_M,
         });
       });
     });

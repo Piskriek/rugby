@@ -46,8 +46,19 @@ import type {
   ForwardAttackGateFailure, ForwardAttackGateReporter, ForwardAttackGateValue,
   ForwardAttackPlayerField,
 } from './forwardAttackGates';
-import { MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START, MAUL_RANKS_PER_SIDE, maulClusterMass, maulTailMark } from './maulRegate';
-import type { MaulBind, MaulCommit, MaulContestControl, MaulExitState } from './maulRegate';
+import {
+  MAUL_REGATE_WINDOW_SECONDS, MAUL_TRANSFER_PASS_START, MAUL_RANKS_PER_SIDE,
+  maulClusterMass, maulClusterSlots, maulTailMark, maulBallMark,
+} from './maulRegate';
+import type { MaulBind, MaulCommit, MaulContestControl, MaulExitState, MaulClusterSlot } from './maulRegate';
+import {
+  SCRUM_FRONT_ROW_PITCH, SCRUM_SECOND_ROW_PITCH, SCRUM_BACK_ROW_PITCH,
+  SCRUM_BIND_Y_M,
+} from './behaviour/setpiece-overrides';
+import {
+  lineoutMarks, lineoutMarkX, LINEOUT_LINE_GAP_M, LINEOUT_POD_SPACING_M,
+  LINEOUT_POD_FRONT_FROM_TOUCH_M, LINEOUT_TAIL_FROM_TOUCH_M,
+} from './engine/setpieces';
 /* type-only: hands.ts imports this file for BreakdownState, and a runtime cycle
  * between the director and an engine module is the sort of thing a bundler
  * resolves differently to the order you tested in. */
@@ -74,7 +85,7 @@ import { situationOf, beatOf, datasetOffset, SITUATION_LATERAL } from './engine/
 import {
   evaluateForwardTree, routeThroughGate, plantedUrgency, isForwardShirt,
   scrumBindProfile, frontRowStability,
-  LINEOUT_LINE_THROWING, LINEOUT_LINE_DEFENDING, lineoutRole, ROUTE_FIELD_HALF_M,
+  LINEOUT_LINE_THROWING, LINEOUT_LINE_DEFENDING, ROUTE_FIELD_HALF_M,
   type PackContext, type PackMark,
 } from './engine/forwardPack';
 import {
@@ -156,6 +167,14 @@ export interface Actor {
   aiming?: boolean; aimX?: number; aimY?: number; aimZ?: number;
   /** Vertical jump offset, logical metres above the turf. */
   ry?: number;
+  /* SET-PIECE POSTURE — see Live.pitch, Live.bind*, Live.liftY and
+   * Live.reachY. Published by placeBound from the authored shapes so the rig
+   * poses the same block the engine placed: a scrum drives bent double, a
+   * maul stays on its feet, a lineout jumper leaves the ground. */
+  pitch?: number;
+  bindX?: number; bindY?: number; bindZ?: number;
+  liftY?: number;
+  reachY?: number;
   /** INTENT-GAZE-TELEGRAPH CHANNEL (INNOVATION 2, M-4 / WS21 keystone).
    * The MIND writes these; the BODY renders them; the OPPONENT's mind reads
    * them; the CAMERA frames them. Optional and additive: consumers that do not
@@ -217,7 +236,21 @@ export interface LineoutState {
    *  carries the ball off the tunnel line, so the flight is judged on its
    *  real angle, not just its timing. */
   ball: BallBody & { state: string; heldBy: number; apexY: number };
-  players: { id: number; num: number; team: 'A' | 'B'; x: number; z: number; handY: number; role: string }[];
+  players: {
+    id: number; num: number; team: 'A' | 'B'; x: number; z: number; handY: number; role: string;
+    /** POD the man belongs to (engine/setpieces.lineoutPlacements) — the
+     *  front pair of lifters around lock 4, the back pair around lock 5. */
+    pod?: 'FRONT' | 'BACK' | 'TAIL';
+    /** metres from the touchline along the line of touch — the authored mark. */
+    fromTouchM?: number;
+    /** feet elevation above the turf while LIFTED, logical metres. */
+    liftY?: number;
+    /** hands above the turf (the catch plane) while reaching. */
+    reachY?: number;
+    /** the point his hands work at: a lifter's hands are at his jumper's
+     *  thighs, the jumper's at the ball. */
+    bindX?: number; bindY?: number; bindZ?: number;
+  }[];
   history: { ballX: number; ballY: number }[];
   winner: boolean; contestMargin: number;
   thrower: 'A' | 'B'; quality: number; callIdx: number; meter: number; meterDir: number; meterOn: boolean;
@@ -1668,7 +1701,13 @@ export class Director {
       const b = this.bc.free ?? this.op.ball;
       return { x: b.x, y: b.y, z: b.z }; // the same physical body/socket the rig draws
     }
-    if ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && this.ml) return { x: this.ml.x, y: 1.02, z: this.ml.z };
+    if ((this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY') && this.ml) {
+      /* THE BALL RIDES THE RANKS. It is not a marker floating on the cluster's
+       * centre: it is in the carrier's hands at the head and walks hand-to-hand
+       * down the bound bodies to the tail as the channelling clock runs
+       * (maulBallMark reads that same ranked shape). */
+      return maulBallMark(this.ml.dir, this.ml.x, this.ml.z, this.ml.yaw, this.ml.ballRank + 1);
+    }
     if ((this.phase === 'BREAKDOWN' || this.phase === 'BREAKDOWN_REPLAY') && this.bd) {
       const b = this.bd;
       if (b.ball.placed || b.stage === 'RUCK' || b.stage === 'RECYCLE') return { x: b.ball.x, y: 0.16, z: b.ball.z };
@@ -3325,6 +3364,13 @@ export class Director {
   tryLock: { at: number; team: 'A' | 'B'; num: number } | null = null;
   tryGuardBlocks = 0;
   tryGuardLog: string[] = [];
+  /* A SECOND CHANNEL, DELIBERATELY. The in-goal spot corrections used to ride
+   * in `tryGuardLog`, and SPEC_07's C6 invariant is `blocks === log.length`
+   * (the pause panel surfaces a block per line): one correction with no block
+   * broke the ledger check, which is a gate that fails for a reason that has
+   * nothing to do with the score guard. Blocks and corrections are different
+   * events with different counts, so they are different lines. */
+  trySpotLog: string[] = [];
 
   /* SPEC_07 — the locked-in touchdown coordinate (x_try, z_try) of the last
    * try, captured the millisecond the award lands, before the teardown
@@ -3343,12 +3389,15 @@ export class Director {
   /** A grounding trigger whose raw spot sat outside the in-goal band (beyond
    * the reach tolerance or past touch-in-goal): the spot is corrected onto
    * the lawful bounds and the correction is surfaced in the same
-   * pause-panel log as the guard blocks — a silent coordinate clamp is an
-   * unexplained conversion line, which is worse than the note. */
+   * pause panel as the guard blocks — a silent coordinate clamp is an
+   * unexplained conversion line, which is worse than the note. It is a
+   * separate LIST (see trySpotLog) because it is a separate event: SPEC_07's
+   * ledger check counts blocks against the block log, and a shared channel
+   * made a lawful correction look like a missing guard line. */
   private noteTryGroundingClamp(rawX: number, rawZ: number, x: number, z: number) {
     const line = `${this.clockText} — TRY spot corrected from (${rawX.toFixed(1)}, ${rawZ.toFixed(1)}) onto the in-goal bounds (${x.toFixed(1)}, ${z.toFixed(1)})`;
-    this.tryGuardLog.push(line);
-    if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
+    this.trySpotLog.push(line);
+    if (this.trySpotLog.length > 40) this.trySpotLog.shift();
   }
 
   /* ======================== SPEC_02 GATE SINK ========================
@@ -3554,6 +3603,18 @@ export class Director {
    * the stage. Everything else is free; these men are part of a structure.
    */
   private placeBound(dt: number) {
+    /* SET-PIECE POSTURE IS PHASE STATE, and it is cleared here every frame
+     * before a set-piece branch may write it. A pack that leaves the scrum bent
+     * 38° over and then runs the ball would otherwise carry the crouch into
+     * open play, and a lifted lineout jumper would stay off the ground; the
+     * phase branches below are the only writers, so one sweep at the top is the
+     * whole ownership story. */
+    for (const p of this.live) {
+      if (p.pitch) p.pitch = 0;
+      if (p.liftY) p.liftY = 0;
+      if (p.reachY) p.reachY = 0;
+      if (p.bindX !== undefined) { p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined; }
+    }
     const clip = (p: Live, name: string) => {
       if (p.clip !== name) { p.clip = name; p.clipT = 0; }
       p.clipT += dt;
@@ -3569,6 +3630,15 @@ export class Director {
        * measured here from the bound offsets and priced into the collapse
        * risk by upScrum (`s.frontRowStability`). */
       const frontRowOffsets: number[] = [];
+      /* THE PACK'S POSTURE. A scrum is not a huddle: the front row drives at
+       * 38°, the engine room binds behind it at 40°, and the eight stays at
+       * the base at 32° with his head between the locks' hips. The angles are
+       * authored once in behaviour/setpiece-overrides.ts (scrumBlock); the rig
+       * has sixteen bodies and no idea which row a man is in, so the pitch and
+       * the hand anchor are published per man here, on the same ownership
+       * contract as the marks. */
+      const rowPitch = (row: number) =>
+        row === 1 ? SCRUM_FRONT_ROW_PITCH : row === 2 ? SCRUM_SECOND_ROW_PITCH : SCRUM_BACK_ROW_PITCH;
       /* T-16/NO-TELEPORT. The packs used to be pinned to their slots from the
        * first SCRUM frame — sixteen men arriving instantly from wherever the
        * last phase left them, up to 80 m away in one frame. The ASSEMBLE stage
@@ -3614,6 +3684,22 @@ export class Director {
           else if (s.stage === 'ENGAGE') clip(p, 'scrumCrouch');
           else clip(p, 'scrumBind');
           p.job = bind.job;
+          /* THE LOCKED PACK IS BENT. Shoulders drive against the opposing
+           * front row, hands on the man in front (a front rower's hands are on
+           * the opposing shoulders; a lock's are through the hips of the prop
+           * ahead of him). The anchor runs forward along the pack's own drive
+           * axis, so a wheeled scrum keeps its hands on the man it is bound to
+           * instead of reaching at the old tunnel line. */
+          const fwd = slot.team === 'A' ? 1 : -1;
+          p.pitch = rowPitch(slot.row);
+          p.bindX = wx - fwd * sinY * 0.55;
+          p.bindY = SCRUM_BIND_Y_M;
+          p.bindZ = wz + fwd * cosY * 0.55;
+        } else {
+          /* walking in: upright, hands free — the crouch belongs to the pack,
+           * not to the queue. */
+          p.pitch = 0;
+          p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined;
         }
       }
       /* the low-COM condition: the pack is in or past its crouch */
@@ -3657,12 +3743,27 @@ export class Director {
           p.tx = slot.x; p.tz = slot.z;
           p.urgency = 1;
           p.job = 'GET TO THE LINEOUT';
+          /* still walking in: upright, on the ground. A man cannot be lifted
+           * before he is in his pod, and a lift that started during the walk-on
+           * would leave him hanging in the air over the wrong blade of grass. */
+          p.pitch = 0; p.liftY = 0; p.reachY = 0;
+          p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined;
           steer(p, dt, true);
           continue;
         }
         /* D-2 — bounded settle, no whole-gap snap on the last step. */
         if (this.settleToward(p, slot.x, slot.z, dt, 'bound')) { p.vx = 0; p.vz = 0; }
         p.stamina = clamp(p.stamina + dt * 2.6, 0, 100);   // set-piece breath
+        /* THE LIFT, PUBLISHED. A lineout is played on the feet: the line stands
+         * upright (the POD shape does the reading, not a crouch), the jumper
+         * leaves the ground by `liftY` with his hands at `reachY` — the catch
+         * plane the whole two-man lift exists to buy — and his lifters' hands
+         * are anchored on his thighs. engine/setpieces owns the numbers
+         * (upLineout); placeBound only publishes them. */
+        p.pitch = 0;
+        p.liftY = slot.liftY ?? 0;
+        p.reachY = slot.reachY ?? 0;
+        p.bindX = slot.bindX; p.bindY = slot.bindY; p.bindZ = slot.bindZ;
         if (slot.role === 'THROWER') clip(p, s.stage === 'THROW' || s.stage === 'CONTEST' ? 'lineoutThrow' : 'idle');
         else if (slot.role === 'JUMPER' && contesting) clip(p, Math.abs(slot.x - s.ball.x) < 1.6 ? 'lineoutJump' : 'lineoutStand');
         else if (slot.role === 'LIFTER' && contesting) clip(p, 'lineoutLift');
@@ -3677,7 +3778,6 @@ export class Director {
 
     if (this.ml && (this.phase === 'MAUL' || this.phase === 'MAUL_REPLAY')) {
       const s = this.ml;
-      const yawR = (s.yaw * Math.PI) / 180;
       /* T-16/NO-TELEPORT — the maul ranks walk on like every other set piece;
        * the bind is exact only once a man is actually at his rank. */
       const settle = (p: Live, wx: number, wz: number, face: number) => {
@@ -3702,33 +3802,42 @@ export class Director {
        * and holds him there); steering him into a maul rank from here made
        * two writers fight over one body, and the man in the bin drifted
        * back onto the field inside the drive. */
-      for (let i = 1; i <= 8; i++) {
-        const rank = i % 3, col = Math.floor(i / 3);
-        const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
-        const lz = -s.dir * (i * 0.72);
-        const a = this.L(s.attacking, i);
-        if (a.sinbin <= 0) {
-        settle(a,
-          s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
-          s.z + lz,
-          s.dir >= 0 ? 1 : -1);
-        const runnerLeaving = (s.exit === 'PICK_AND_GO' || s.exit === 'WHEEL_AND_PEEL') && a.num === s.exitRunner;
-        clip(a, runnerLeaving ? 'carry' : attackClip);
-        a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
-          ? 'KEEP THE LEGS GOING, STAY BOUND'
-          : 'BIND TIGHT AND HOLD THE MAUL';
-        }
+      /* SPEC_03 — THE UPRIGHT CONDENSED OVAL, NOT A QUEUE.
+       *
+       * The old lattice strung the eight attackers down the drive axis at a
+       * fixed 0.72 m cadence — a single file five and a half metres long — and
+       * put the defence on two parallel lines up to six metres ahead of the
+       * ball. Sixteen forwards in three straight lines is not a maul; it read
+       * on screen exactly as authored. The shape is now authored once in
+       * maulRegate.maulClusterSlots: a 2.5 m × 3.0 m oval, the carrier at the
+       * head, binders either side of him with their hands wrapped forward at
+       * chest height (1.2 m), the defenders pushing back against that front
+       * wall — and every man's posture (upright; nobody in a formed maul is
+       * bent past ~12°) published with his mark. */
+      const cluster: MaulClusterSlot[] = maulClusterSlots(s.attacking, s.dir, s.x, s.z, s.yaw, s.ranks);
+      for (const slot of cluster) {
+        const p = this.L(slot.team, slot.num);
+        if (p.sinbin > 0) continue;
+        settle(p, slot.x, slot.z, slot.face);
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
-         * team. */
-        const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
-        const d = this.L(dTeam, i);
-        if (d.sinbin > 0) continue;
-        const dlx = 1.4 - (i % 2) * 2.2;
-        settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
-        clip(d, 'maulBind');
-        d.job = s.contest === 'DEFENCE_CONTROL' ? 'HOLD THE MAUL UP AND WAIT FOR USE IT' : 'BIND AND RESIST THE DRIVE';
+         * team. The cluster's slot carries its side, so that cannot regress. */
+        if (slot.team === s.attacking) {
+          const runnerLeaving = (s.exit === 'PICK_AND_GO' || s.exit === 'WHEEL_AND_PEEL')
+            && p.num === s.exitRunner;
+          clip(p, runnerLeaving ? 'carry' : attackClip);
+          p.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
+            ? 'KEEP THE LEGS GOING, STAY BOUND'
+            : 'BIND TIGHT AND HOLD THE MAUL';
+        } else {
+          clip(p, 'maulBind');
+          p.job = s.contest === 'DEFENCE_CONTROL'
+            ? 'HOLD THE MAUL UP AND WAIT FOR USE IT'
+            : 'BIND AND RESIST THE DRIVE';
+        }
+        p.pitch = slot.pitch;
+        p.bindX = slot.handX; p.bindY = slot.handY; p.bindZ = slot.handZ;
       }
       /* The nine has a fixed base behind the maul. It is marked bound by
        * think(), then placed here, so TRANSFER_TO_9 can show existing idle
@@ -6611,6 +6720,13 @@ export class Director {
       p.recoverT = 0;
       p.recoverX = undefined; p.recoverZ = undefined;
       p.jumpY = 0; p.jumpVY = 0;
+      /* THE SET PIECE'S POSTURE DIES WITH THE SET PIECE. A pack that leaves the
+       * scrum bent over 38° and then runs the ball would carry the crouch into
+       * open play: pitch, bind anchors and the lineout lift are phase state,
+       * and the whistle purges them exactly like `bound` and `down`. */
+      p.pitch = 0;
+      p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined;
+      p.liftY = 0; p.reachY = 0;
       if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup' || p.clip === 'jump') { p.clip = 'ready'; p.clipT = 0; }
     }
     this.bd = undefined;
@@ -6770,11 +6886,16 @@ export class Director {
    * engine/forwardPack.ts. */
   static readonly LINE_A = LINEOUT_LINE_THROWING;
   static readonly LINE_B = LINEOUT_LINE_DEFENDING;
+  /* Every call is authored in METRES FROM THE TOUCHLINE, on the same axis as
+   * the pod marks (engine/setpieces.lineoutMarks), so a call cannot land
+   * between two pods. FRONT is the front pod's jumper (lock 4), MIDDLE the
+   * back pod's (lock 5), OFF_TOP the back pod's ball off the top, TAIL the
+   * eight two pod-gaps in. */
   static readonly LO_CALLS = [
-    { kind: 'FRONT', label: 'FRONT BALL', targetX: -1.8, jumpers: 4 },
-    { kind: 'MIDDLE', label: 'MIDDLE + DRIVE', targetX: -3.4, jumpers: 5 },
-    { kind: 'OFF_TOP', label: 'OFF THE TOP', targetX: -4.6, jumpers: 5 },
-    { kind: 'TAIL', label: 'TAIL BALL', targetX: -6.6, jumpers: 7 },
+    { kind: 'FRONT', label: 'FRONT BALL', fromTouchM: LINEOUT_POD_FRONT_FROM_TOUCH_M, jumpers: 4 },
+    { kind: 'MIDDLE', label: 'MIDDLE + DRIVE', fromTouchM: LINEOUT_POD_FRONT_FROM_TOUCH_M + LINEOUT_POD_SPACING_M, jumpers: 5 },
+    { kind: 'OFF_TOP', label: 'OFF THE TOP', fromTouchM: LINEOUT_POD_FRONT_FROM_TOUCH_M + LINEOUT_POD_SPACING_M, jumpers: 5 },
+    { kind: 'TAIL', label: 'TAIL BALL', fromTouchM: LINEOUT_TAIL_FROM_TOUCH_M, jumpers: 8 },
   ];
 
   startLineout(thrower: 'A' | 'B', z: number, x: number) {
@@ -6793,13 +6914,19 @@ export class Director {
        * shorter lineout instead of leaving a gap where a body should be. */
       const nums = (t === thrower ? Director.LINE_A : Director.LINE_B)
         .filter((n) => this.L(t, n).sinbin <= 0);
-      for (let i = 0; i < nums.length; i++) {
+      /* THE TWO PODS, PLACED. Each man's mark is authored in metres from the
+       * touchline (engine/setpieces.lineoutMarks): the front pod on the
+       * 5-metre line, the back pod 3.5 m in, the eight two pod-gaps further.
+       * The old loop spaced the line at a flat 0.62 m per man from 30 m out,
+       * which is a nine-man chain, not a lineout. The two lines face each
+       * other across LINEOUT_LINE_GAP_M, and the throw travels that gap. */
+      for (const m of lineoutMarks(nums)) {
         players.push({
-          id: id++, num: nums[i], team: t,
-          x: side * (30 - i * 0.62), z: zn + (t === 'A' ? -0.7 : 0.7),
+          id: id++, num: m.num, team: t,
+          x: lineoutMarkX(side, m.fromTouchM), z: zn + (t === 'A' ? -LINEOUT_LINE_GAP_M : LINEOUT_LINE_GAP_M),
           /* FORWARD PACK — role by SHIRT, not by position in the line: the
            * locks (and the eight) jump, the props and flankers lift. */
-          handY: 0, role: lineoutRole(nums[i]),
+          handY: 0, role: m.role, pod: m.pod, fromTouchM: m.fromTouchM, liftY: 0, reachY: 0,
         });
       }
     }
@@ -6816,7 +6943,7 @@ export class Director {
     players.push({ id: id++, num: nineNum, team: thrower, x: side * 20, z: zn + (thrower === 'A' ? -6 : 6), handY: 0, role: 'SCRUMMY' });
     this.lo = {
       t: 0, stage: 'ASSEMBLE', markZ: zn, side,
-      call: { targetX: side * 28.4, label: Director.LO_CALLS[1].label, jumpers: 5, kind: 'MIDDLE' },
+      call: { targetX: lineoutMarkX(side, Director.LO_CALLS[1].fromTouchM), label: Director.LO_CALLS[1].label, jumpers: 5, kind: 'MIDDLE' },
       ball: { ...makeBall(side * 33.5, 1.6, zn), state: 'HELD', heldBy: 0, apexY: 0 },
       players, history: [], winner: false, contestMargin: 0,
       thrower, quality: 0.5, callIdx: 1, meter: 0.5, meterDir: 1, meterOn: false,
@@ -7464,6 +7591,9 @@ export class Director {
       const p = this.live[i];
       const a = this.actors[i];
       a.rx = p.x; a.rz = p.z; a.ry = p.jumpY ?? 0; a.rf = p.face;
+      a.pitch = p.pitch ?? 0;
+      a.bindX = p.bindX; a.bindY = p.bindY; a.bindZ = p.bindZ;
+      a.liftY = p.liftY ?? 0; a.reachY = p.reachY ?? 0;
       const isLocal = this.ctrlPlayer === p && this.isHuman(p.team);
       const reticle = this.reticleAimPoint();
       /* A held LMB over a loose ball should pull the rendered hands to the

@@ -172,6 +172,12 @@ const GATES: Gate[] = [
     budget: 240,
   },
   {
+    id: 'setpiecevisual', file: 'setpiecevisualprobe',
+    asks: 'the shapes themselves: a 3-4-1 scrum bent 30-45 degrees, a maul that stays on its feet, a lineout of two pods that lifts a jumper to the ball',
+    cmd: [...VN, 'scripts/setpiecevisualprobe.ts'],
+    budget: 240,
+  },
+  {
     id: 'audit',
     asks: 'the rule audit: LAW / UX / LOGIC failures across a real 120 s match',
     cmd: [...VN, 'scripts/audit-cli.ts', '120', '3', '1'], file: 'audit-cli',

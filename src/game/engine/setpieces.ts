@@ -11,7 +11,10 @@ import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
 import { clamp } from './clamp';
 import { scrumBlock } from '../behaviour/setpiece-overrides';
-import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor, forwardMass } from './forwardPack';
+import {
+  engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum,
+  forwardMass, lineoutRole,
+} from './forwardPack';
 import {
   judgeLineoutThrow, stepMaulStall, maulUseItRemaining, maulCollapseHazard,
   type MaulStallFrame,
@@ -30,9 +33,16 @@ import {
 import type { MaulBind, MaulExitState } from '../maulRegate';
 
 /**
- * FORWARD PACK — the two lifters bound to a jumper: the men immediately in
- * front of and behind him in his team's line (ordered by position along the
- * line), each of whom must be a LIFTER. Pure over the lineout roster.
+ * FORWARD PACK — the two lifters bound to a jumper: the two LIFTERS standing
+ * nearest him along the line of touch, which is what a pod IS. In the front
+ * pod those are the prop and the flanker either side of lock 4; in the back
+ * pod the prop and flanker either side of lock 5; at the tail the back pod's
+ * pair step back with the eight.
+ *
+ * Read from the AUTHORED POD LAYOUT (lineoutMarks) and the men's own marks —
+ * nearest along the line, not roster adjacency — because the roster order and
+ * the pod order are deliberately different: the pods are the shape, the roster
+ * is the squad. Pure; used by the catch contest and by the per-frame lift.
  */
 function podLifters<T extends { num: number; team: 'A' | 'B'; x: number; role: string }>(
   players: T[], team: 'A' | 'B', jumperNum: number,
@@ -41,8 +51,11 @@ function podLifters<T extends { num: number; team: 'A' | 'B'; x: number; role: s
     .sort((a, b) => Math.abs(a.x) - Math.abs(b.x));
   const idx = line.findIndex((q) => q.num === jumperNum);
   if (idx < 0) return [];
-  const nums = liftersFor(line.map((q) => q.num), idx);
-  return line.filter((q) => nums.includes(q.num));
+  const jumper = line[idx];
+  return line
+    .filter((q) => q.role === 'LIFTER' && q.num !== jumper.num)
+    .sort((a, b) => Math.abs(Math.abs(a.x) - Math.abs(jumper.x)) - Math.abs(Math.abs(b.x) - Math.abs(jumper.x)))
+    .slice(0, 2);
 }
 
 /** The calls that exist to be driven — the index set the CPU leans on in
@@ -335,6 +348,172 @@ export function scrumSlots(d: Director, feed: 'A' | 'B', ax: number, az: number)
   return out;
 }
 
+/* ================== THE LINEOUT'S SHAPE — TWO PODS AND A TAIL ==================
+ *
+ * A lineout is not a row of men evenly spaced across the grass. It is TWO
+ * PODS in the channel between the 5-metre line and the 15-metre line — each
+ * pod a jumper between two lifters — with the tail beyond them, and the same
+ * two pods facing them from across the line of touch. The old engine spread
+ * the line as one chain of nine men at a flat 0.62 m spacing running 30 m out
+ * from the touchline, which is why every lineout read as a line of bodies
+ * across the field and every jumper looked like he was queuing to be lifted.
+ *
+ *   FRONT POD   prop · LOCK 4 · flanker   centred on the 5-metre line
+ *   BACK POD    prop · LOCK 5 · flanker   centred 3.5 m further in
+ *   TAIL        the eight                 two pod-gaps in
+ *
+ * The defending side is the same two pods; their seven roves, so the eight
+ * takes the back pod's third slot. Every man's mark is authored here, once, in
+ * metres from the touchline — the same axis the throw's calls are authored on
+ * (Director.LO_CALLS) — so the ball, the jumper and the pod cannot drift
+ * apart. Pure geometry: the caller writes the marks.
+ */
+export const LINEOUT_POD_SPACING_M = 3.5;
+/** The front pod's centre, metres from the touchline. It is set so that the
+ *  pod's FRONT LIFTER stands exactly on the 5-metre line (5.7 − 0.7): the
+ *  channel opens where the law opens it, and every other man of the line is
+ *  inside it. */
+export const LINEOUT_POD_FRONT_FROM_TOUCH_M = 5.0 + 0.7;
+/** Men inside one pod stand this far apart — shoulders, not arms' length. */
+export const LINEOUT_POD_INTERNAL_M = 0.7;
+/** The tail's mark: two pod-gaps in, comfortably inside the 15-metre line. */
+export const LINEOUT_TAIL_FROM_TOUCH_M = LINEOUT_POD_FRONT_FROM_TOUCH_M + 2 * LINEOUT_POD_SPACING_M;
+/** Each line stands this far off the line of touch, so the two face each other
+ *  across 1.4 m — the gap the throw must travel through. */
+export const LINEOUT_LINE_GAP_M = 0.7;
+/** The lifted jumper's hands at full extension: the catch plane the whole lift
+ *  exists to buy, and the elevation the set-piece visual probe asserts. A
+ *  standing reach is ~2.35 m; the lift buys the rest. */
+export const LINEOUT_JUMP_REACH_Y_M = 2.8;
+/** The plane the thrown ball is caught at, metres — the engine's contact test
+ *  and the flight's target must be the same number or the ball is caught by a
+ *  man who is not there. */
+export const LINEOUT_CATCH_PLANE_M = LINEOUT_JUMP_REACH_Y_M;
+/** How far his feet leave the turf at that reach. */
+export const LINEOUT_JUMP_BODY_LIFT_M = 0.55;
+/** Where his lifters' hands are: on his thighs, above their own shoulders.
+ *  The pair supports the MAN, not the ball. */
+export const LINEOUT_LIFT_GRIP_Y_M = 1.35;
+/** The two pods by shirt, throwing side: front pod, then back pod. */
+export const LINEOUT_POD_MEN_THROWING: readonly (readonly number[])[] = [[1, 4, 6], [3, 5, 7]];
+/** The defending side is the same line minus the seven, who roves; the back
+ *  pod is a pair, and the eight stands the tail as both sides' tail jumper. */
+export const LINEOUT_POD_MEN_DEFENDING: readonly (readonly number[])[] = [[1, 4, 6], [3, 5]];
+
+export interface LineoutPod {
+  key: 'FRONT' | 'BACK';
+  /** centre of the pod, metres from the touchline. */
+  centerM: number;
+  /** its men, in line order from the touchline inward. */
+  men: number[];
+  jumper: number;
+  lifters: number[];
+  /** every man's mark inside the pod, metres from touch. */
+  fromTouchM: number[];
+}
+
+/** The pods of one line, front pod first. Pure over the roster: `line` is the
+ *  team's lineout line (Director.LINE_A / LINE_B), and which table applies is
+ *  read from the line itself — a seven-man line is throwing, a six-man line
+ *  defending. */
+export function lineoutPods(line: readonly number[]): LineoutPod[] {
+  const table = line.includes(7) ? LINEOUT_POD_MEN_THROWING : LINEOUT_POD_MEN_DEFENDING;
+  const out: LineoutPod[] = [];
+  table.forEach((men, i) => {
+    const live = men.filter((n) => line.includes(n));
+    if (!live.length) return;
+    const jumper = live.find((n) => lineoutRole(n) === 'JUMPER') ?? live[0];
+    const centerM = LINEOUT_POD_FRONT_FROM_TOUCH_M + i * LINEOUT_POD_SPACING_M;
+    out.push({
+      key: i === 0 ? 'FRONT' : 'BACK',
+      centerM, men: live, jumper,
+      lifters: live.filter((n) => n !== jumper),
+      fromTouchM: live.map((_, k) => centerM + (k - (live.length - 1) / 2) * LINEOUT_POD_INTERNAL_M),
+    });
+  });
+  return out;
+}
+
+/** One man's place in the channel. */
+export interface LineoutMark {
+  num: number; role: string; pod: 'FRONT' | 'BACK' | 'TAIL'; fromTouchM: number;
+}
+
+/** EVERY man of a line's mark: the pods first (front pod on the 5-metre line,
+ *  back pod 3.5 m in), then anyone the pod tables do not name — the throwing
+ *  side's tail eight, or a reshuffled line after a card — in the tail. */
+export function lineoutMarks(line: readonly number[]): LineoutMark[] {
+  const out: LineoutMark[] = [];
+  for (const pod of lineoutPods(line)) {
+    pod.men.forEach((num, k) => {
+      out.push({ num, role: lineoutRole(num), pod: pod.key, fromTouchM: pod.fromTouchM[k] });
+    });
+  }
+  const placed = new Set(out.map((m) => m.num));
+  let extra = 0;
+  for (const num of line) {
+    if (placed.has(num)) continue;
+    out.push({
+      num, role: lineoutRole(num), pod: 'TAIL',
+      fromTouchM: LINEOUT_TAIL_FROM_TOUCH_M + extra * LINEOUT_POD_INTERNAL_M,
+    });
+    extra++;
+  }
+  return out;
+}
+
+/** The world x of a mark `fromTouchM` metres out from the touchline. */
+export function lineoutMarkX(side: number, fromTouchM: number): number {
+  return side * (FIELD.maxX - Math.abs(fromTouchM));
+}
+
+/* ===================== THE PACK'S SHAPE (VISUAL CONTRACT) =====================
+ *
+ * scrumSlots answers WHERE a forward packs down; this answers HOW he stands
+ * there, and both come from the same authored block
+ * (behaviour/setpiece-overrides.scrumBlock): the front row's head interlock
+ * on the tunnel, the row's torso pitch (38° / 40° / 32° out of vertical), and
+ * the point each man's hands are working at. The rig has sixteen bodies and no
+ * idea which row a man is in, so the engine publishes the posture per man and
+ * ThreePlayerManager's procedural layer poses him from it.
+ *
+ * Without it the sixteen packed down on one 'Push' clip at a uniform upright
+ * posture and read as a loose huddle wherever the camera was; the block's
+ * SHAPE is what tells a viewer which pack is which, and it is authored here so
+ * the renderer cannot invent a different one.
+ */
+export interface ScrumSlotPose {
+  num: number;
+  team: 'A' | 'B';
+  row: number;
+  /** torso pitch out of vertical, radians: front row 38°, locks 40°, the
+   *  eight 32° — every forward inside the 30°–45° band the probe asserts. */
+  pitch: number;
+  /** the locked engagement heading, radians (renderer frame). */
+  facing: number;
+  /** where his head carries to: the interlock with the opposing front row. */
+  headX: number; headZ: number;
+  /** the point his hands work at: the opposing front row's shoulders. */
+  bindX: number; bindY: number; bindZ: number;
+  x: number; z: number;
+}
+
+/** The whole 3-4-1 block's posture plan for a scrum on the mark (ax, az),
+ *  keyed `A:1` … `B:8`. Pure; the caller places and poses. */
+export function scrumVisualPlan(ax: number, az: number): Map<string, ScrumSlotPose> {
+  const out = new Map<string, ScrumSlotPose>();
+  for (const b of scrumBlock(ax, az)) {
+    out.set(`${b.team}:${b.num}`, {
+      num: b.num, team: b.team, row: b.row,
+      pitch: b.pitch, facing: b.facing,
+      headX: b.headX, headZ: b.headZ,
+      bindX: b.bindX, bindY: b.bindY, bindZ: b.bindZ,
+      x: b.x, z: b.z,
+    });
+  }
+  return out;
+}
+
 export function upLineout(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
   const s = d.lo!;
@@ -378,7 +557,7 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
     const c = Director.LO_CALLS[s.callIdx];
     const thr = s.players.find((p) => p.role === 'THROWER')!;
     const side = thr.x >= 0 ? 1 : -1;
-    s.call = { targetX: side * (31.2 - Math.abs(c.targetX) * 0.72), label: c.label, jumpers: c.jumpers, kind: c.kind };
+    s.call = { targetX: lineoutMarkX(side, c.fromTouchM), label: c.label, jumpers: c.jumpers, kind: c.kind };
     /* T-18. The middle call drives the maul; inside the ten a tail call
      * drives too — a five-metre lineout exists to be driven over. */
     const nearLine = Math.abs(s.markZ) > 36;
@@ -402,7 +581,7 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
     s.history.push({ ballX: s.ball.x, ballY: s.ball.y });
     if (s.history.length > 90) s.history.shift();
     s.ball.apexY = Math.max(s.ball.apexY, s.ball.y);
-    if (s.ball.y <= 2.4 && s.ball.vy < 0) {
+    if (s.ball.y <= LINEOUT_CATCH_PLANE_M && s.ball.vy < 0) {
       // First player contact: the catch contest owns the ball, not free flight.
       touchBall(s.ball);
       s.ball.vx = s.ball.vy = s.ball.vz = 0;
@@ -487,8 +666,17 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       d.recordSetPieceOutcome('lineouts', thrower);
       touchBall(s.ball);
       s.ball.state = 'HELD';
-      const jumper = s.players.find((p) => p.team === thrower && p.role === 'JUMPER');
-      if (jumper) { s.ball.heldBy = jumper.id; jumper.handY = 2.6; }
+      /* THE MAN WHO WON IT IS THE MAN WHO CAUGHT IT. `find` returned the first
+       * jumper in ROSTER order, which in a two-pod line is always the front
+       * pod's lock 4 — so a ball thrown to the back pod (or the tail eight)
+       * was awarded to a man three and a half metres away from it, and the
+       * rendered catch happened where the ball was not. `reachOf` already
+       * contests with the jumper nearest the ball; the award reads the same
+       * man, at the same catch plane the throw was solved onto. */
+      const jw = s.players
+        .filter((q) => q.team === thrower && q.role === 'JUMPER')
+        .sort((a, b) => Math.hypot(a.x - bx, a.z - bz) - Math.hypot(b.x - bx, b.z - bz))[0];
+      if (jw) { s.ball.heldBy = jw.id; jw.handY = LINEOUT_JUMP_REACH_Y_M; }
       d.lo = undefined;
       /* SPEC_03 — the cleanest maul birth in rugby: the jumper lands with
        * the ball and the pack is ALREADY around him, so the bound forward
@@ -499,23 +687,61 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
     }
   }
   void input;
+  /* ======================= THE LIFT, EVERY FRAME =======================
+   *
+   * A lineout's whole point is a man off the ground with two team-mates
+   * holding him there, and none of it existed as engine data: the lift was a
+   * `handY` scalar on the jumper that nothing rendered, and the lifters' hands
+   * rose by a fraction of the jumper's. The three numbers below are the lift's
+   * geometry, published for the rig:
+   *
+   *   handY/reachY  the jumper's hands — the catch plane the lift buys
+   *                 (LINEOUT_JUMP_REACH_Y_M = 2.8 m at full extension)
+   *   liftY         his feet, off the turf by LINEOUT_JUMP_BODY_LIFT_M
+   *   bindX/Y/Z     where a hand works: the jumper's straight up over his own
+   *                 head; his LIFTERS' on his thighs (LINEOUT_LIFT_GRIP_Y_M)
+   *
+   * A lifter goes up only with the jumper of his own pod — the pair beside
+   * him — and that pair is the reason the jumper has a catch plane at all.
+   */
+  const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
+  const closestJumper = contesting
+    ? s.players
+      .filter((q) => q.role === 'JUMPER')
+      .sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x))[0]
+    : undefined;
   for (const p of s.players) {
-    if (p.role === 'JUMPER') {
-      const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
-      const target = contesting ? (Math.abs(p.x - s.ball.x) < 1.6 ? s.ball.y : 0.4) : 0.4;
-      p.handY = approach(p.handY, target, 6, dt);
-    } else if (p.role === 'LIFTER') {
+    if (p.role === 'JUMPER' && contesting) {
+      const mine = closestJumper !== undefined && closestJumper.num === p.num && closestJumper.team === p.team;
+      const reach = mine
+        ? Math.max(LINEOUT_JUMP_REACH_Y_M * 0.6, Math.min(s.ball.y + 0.25, LINEOUT_JUMP_REACH_Y_M))
+        : LINEOUT_JUMP_REACH_Y_M * 0.75;
+      p.handY = approach(p.handY, reach, 6, dt);
+      p.reachY = p.handY;
+      /* the man at the ball is the one the pair actually gets off the ground */
+      p.liftY = approach(p.liftY ?? 0, mine ? LINEOUT_JUMP_BODY_LIFT_M : LINEOUT_JUMP_BODY_LIFT_M * 0.55, 5, dt);
+      p.bindX = p.x; p.bindY = p.handY; p.bindZ = p.z;   // arms up over his own head
+    } else if (p.role === 'LIFTER' && contesting) {
       /* T-06: one shared timeline — the lifters' hands rise with their own
-       * jumper, half a beat behind him, instead of animating alone.
-       * FORWARD PACK: a lifter goes up only with the jumper he is BOUND TO —
-       * the man immediately beside him in the line; a lifter two pods away
-       * holds his ground. */
-      const contesting = s.stage === 'CONTEST' || s.stage === 'CATCH';
-      const atBall = contesting ? s.players
+       * jumper, half a beat behind him, instead of animating alone. */
+      const atBall = s.players
         .filter((q) => q.team === p.team && q.role === 'JUMPER')
-        .sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x))[0] : undefined;
+        .sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x))[0];
       const mine = atBall && podLifters(s.players, p.team, atBall.num).some((w) => w.num === p.num) ? atBall : undefined;
-      p.handY = approach(p.handY, mine ? mine.handY * 0.5 : 0, 6, dt);
+      p.handY = approach(p.handY, mine ? LINEOUT_LIFT_GRIP_Y_M : 0.4, 6, dt);
+      p.reachY = p.handY;
+      p.liftY = approach(p.liftY ?? 0, 0, 6, dt);
+      if (mine) {
+        /* hands on the jumper's thighs: above his own hips, under the man */
+        p.bindX = mine.x; p.bindY = LINEOUT_LIFT_GRIP_Y_M; p.bindZ = mine.z;
+      } else {
+        p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined;
+      }
+    } else {
+      p.handY = approach(p.handY, 0.4, 6, dt);
+      p.liftY = approach(p.liftY ?? 0, 0, 6, dt);
+      p.reachY = p.handY;
+      p.bindX = undefined; p.bindY = undefined; p.bindZ = undefined;
     }
   }
 }
@@ -542,7 +768,11 @@ export function releaseThrow(d: Director, ) {
   const dx = s.call.targetX - from.x;
   const flight = 1.15;
   s.ball.vx = dx / flight;
-  s.ball.vy = (4.4 - 1.6) / flight + 0.5 * 9.81 * flight;
+  /* thrown UP TO the catch plane the lift buys (LINEOUT_JUMP_REACH_Y_M) and
+   * SOLVED to come down onto it at the nominal flight time — the closed form
+   * replaces a made-up apex velocity that made the ball arrive 40% late and
+   * well above any hand. */
+  s.ball.vy = (LINEOUT_CATCH_PLANE_M - 1.6) / flight + 0.5 * 9.81 * flight;
   /* THE METER HAS GEOMETRY. An early or late release leaves the ball off
    * the tunnel line — a real longitudinal component, so the throw is
    * judged on its flight angle as well as its timing. The referee's call
