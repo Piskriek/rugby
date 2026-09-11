@@ -71,6 +71,26 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     rec.job = 'TAKE THE PASS';
     steer(rec, dt, true);
 
+    /* THE THROWER KEEPS RUNNING. Freezing him for the flight turned every
+     * pass into a standing pop. A rugby pass is given on the run — he coasts
+     * forward while the ball is in the air. */
+    const thrower = d.L(s.attacking, s.carrierNum);
+    if (thrower && thrower !== rec && (thrower.recoverT ?? 0) <= 0
+      && (thrower.diveT ?? 0) <= 0) {
+      const coast = maxSpeed(thrower, false, false, thrower.stamina) * 0.58;
+      thrower.vx *= Math.exp(-2.4 * dt);
+      thrower.vz = approach(thrower.vz, s.dir * coast, 5, dt);
+      thrower.x = clamp(thrower.x + thrower.vx * dt, -34.5, 34.5);
+      thrower.z = clamp(thrower.z + thrower.vz * dt, -61, 61);
+      thrower.movedBy = 'carrier';
+      if (Math.abs(thrower.vz) > 0.4) thrower.face = thrower.vz > 0 ? 1 : -1;
+      const tsp = Math.hypot(thrower.vx, thrower.vz);
+      if (tsp > 0.7) {
+        const gait = tsp > 6.2 ? 'sprint' : 'jog';
+        if (thrower.clip !== gait) { thrower.clip = gait; thrower.clipT = 0; }
+      }
+    }
+
     /* PLAYTEST 4: THE FLASH, preserved. The ball flies at PASS_SPEED over
      * its own length. The difference is WHAT it flies at: a fixed point
      * solved at release, not a man who is being pushed forward to meet it. */
@@ -769,6 +789,20 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * flight, so the release vector, the average flight velocity and the
    * landing point are all the same fact. */
   const dir = s.dir >= 0 ? 1 : -1;
+  /* RUN ONTO IT. The intercept is solved against the run the receiver is
+   * ABOUT to make, not the stand he is in. A stationary man made every pass
+   * a pop onto a statue, and "in front of where he's going to be" is the
+   * whole point of a rugby pass. The thrower jogs too — Law 11 is relative
+   * to HIM, so a standing dump cannot lead. */
+  {
+    const rec = opt.player;
+    const run = maxSpeed(rec, false, false, rec.stamina) * RUN_ON_SPEED_FRACTION;
+    const alongNow = rec.vz * dir;
+    rec.vz = Math.max(alongNow, run) * dir;
+    rec.vx *= 0.55;
+    const jog = maxSpeed(car, true, false, car.stamina) * 0.62;
+    if (car.vz * dir < jog * 0.45) car.vz = dir * jog;
+  }
   const solvedAim = solvePassAim(car, opt.player);
   const rel = passReleaseRel(car, solvedAim, car.vz, dir);
   const fwdProf = fwdProfile(d.options.fwdPass ?? 1);

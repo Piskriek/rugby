@@ -68,7 +68,7 @@ import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
 import { isGoalKickState, goalKickMark, scrumFaceSign, lineoutBacklineMark } from './behaviour/setpiece-overrides';
-import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
+import { inEchelon, echelonTargetZ, echelonDepthBehindTen, runOntoEchelonZ } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
 /* ============================ INPUT ============================ */
@@ -3562,7 +3562,7 @@ export class Director {
                 const tempo10 = this.slider(atk, 'tempo') / 100;
                 const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
                 const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
-                tz = this.boundMark(mark.x, echelonTargetZ(p.num, tenZ, atkSigma)).z;
+                tz = this.boundMark(mark.x, runOntoEchelonZ(echelonTargetZ(p.num, tenZ, atkSigma), f.z, atkSigma)).z;
               }
             }
             const gap = Math.hypot(mark.x - p.x, tz - p.z);
@@ -3878,7 +3878,7 @@ export class Director {
           const tempo10 = this.slider(atk, 'tempo') / 100;
           const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
           const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
-          const echZ = echelonTargetZ(p.num, tenZ, atkSigma);
+          const echZ = runOntoEchelonZ(echelonTargetZ(p.num, tenZ, atkSigma), f.z, atkSigma);
           const mark = this.boundMark(p.tx, echZ);
           this.writeThinkPlayer(gate, `think:echelon:${p.team}${p.num}`, p,
             ['tz', 'job'] as const, () => {

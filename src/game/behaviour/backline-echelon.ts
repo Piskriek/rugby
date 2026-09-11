@@ -77,6 +77,17 @@ export function echelonTargetZ(num: number, tenTargetZ: number, dir: 1 | -1): nu
   return tenTargetZ - dir * echelonDepthBehindTen(num);
 }
 
+/**
+ * Advance an echelon mark a couple of metres toward the ball so the back
+ * is JOGGING onto his line rather than parked on it. Still capped behind
+ * the ball — he must not run offside to "already be running".
+ */
+export function runOntoEchelonZ(echelonZ: number, ballZ: number, dir: 1 | -1, lead = 2.4): number {
+  const onto = echelonZ + dir * lead;
+  const cap = ballZ - dir * 1.0;
+  return dir > 0 ? Math.min(onto, cap) : Math.max(onto, cap);
+}
+
 /* ==================== ANTICIPATORY ACCELERATION ==================== */
 
 /**
@@ -98,8 +109,16 @@ export const ANTICIPATION_SHIRTS = [10, 12, 13] as const;
  * arrives, or the whole line takes the ball standing still one pass later.
  */
 export function anticipates(num: number, passerNum: number, receiverNum: number): boolean {
-  if (passerNum !== 9 || receiverNum !== 10) return false;
-  return (ANTICIPATION_SHIRTS as readonly number[]).includes(num);
+  if (num === passerNum || num === receiverNum) return false;
+  /* Any pass down the chain starts the men OUTSIDE the receiver. 9→10 used
+   * to be the only trigger, so 10→12 left 13 standing still for the catch. */
+  const chain = [9, 10, 12, 13] as const;
+  const pi = (chain as readonly number[]).indexOf(passerNum);
+  const ri = (chain as readonly number[]).indexOf(receiverNum);
+  const ni = (chain as readonly number[]).indexOf(num);
+  if (ni < 0) return false;
+  const from = ri >= 0 ? ri : pi;
+  return from >= 0 && ni > from;
 }
 
 export interface RunOnVector { vx: number; vz: number }

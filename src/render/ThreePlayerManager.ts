@@ -15,7 +15,6 @@
  *
  * Animation is a small state machine over the clips the GLB ships:
  *   idle Idle · walk Walk · jog Jog · run Run · sprint Run (forward)
- *   lookAside BackpedalDiag — a few seconds of glance-sideways into sprint
  *   pass/lineoutThrow LineoutThrow · tackle DoubleLegTackle / SideDive
  *   dive SideDive · try Dive · kick Kick · maul/scrum ScrumDrive
  *   crouch ScrumCrouch · jump LineoutJump · getup GetUp · grounded Death.
@@ -257,6 +256,10 @@ interface PlayerInstance {
     lx: number; lz: number;
     spd: number;
     face: number;                // smoothed heading, radians
+    /* GET-UP PLANT. Where he started to rise. The engine pins xz while
+     * recoverT runs; the renderer also holds this so a leftover lie flag
+     * cannot slide him across the grass on a GetUp clip. */
+    plantX: number; plantZ: number;
     /* PART 1 — THE ONE-SHOT LATCH. A `pass` that is re-`play()`ed on the
      * frames after the first restarts the clip, which is what read as the
      * throw looping three times in a third of a second. Once the latch is
@@ -292,11 +295,6 @@ export const TACKLE_GROUND_END = 0.40;
  * jogging. Slow enough to read as effort, fast enough not to read as slow
  * motion. */
 export const LATCH_CHURN_RATE = 0.72;
-
-/** Glance-sideways into a sprint (`Jog Backward Diagonal` / Mixamo lead-run).
- *  A few seconds, then the looping forward Run takes over — never the default
- *  gait. If pace drops while it is playing, locomotion falls back to jog. */
-const LOOK_ASIDE_SECONDS = 1.6;
 
 /* ================================================================== */
 /**
@@ -799,6 +797,7 @@ export class ThreePlayerManager {
         oneShot: null, lock: 0, lie: false,
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
+        plantX: actor.rx, plantZ: actor.rz,
         passLatched: false,
         tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
       },
@@ -862,7 +861,10 @@ export class ThreePlayerManager {
       case 'getup': return 'getup';
       case 'maul': case 'maulBind': case 'maulDrive': case 'maulPush':
       case 'scrumBind': case 'scrumShove': return 'bind';
-      case 'ruck': case 'jackal': case 'cleanout': return 'ruck';
+      case 'ruck': case 'jackal': case 'cleanout':
+        /* A standing Jackal pose while xz is still translating is the
+         * floating grab. Keep locomotion until he has actually arrived. */
+        return spd > 2.2 ? this.locomotion(spd) : 'ruck';
       case 'lineoutJump': case 'lift': case 'lineoutLift': return 'lineoutJump';
       case 'catch': case 'catchHigh': case 'lineoutCatch': return 'catch';
       case 'jump': return 'jump';
@@ -917,10 +919,8 @@ export class ThreePlayerManager {
       case 'run': return { name: 'Run', loop: true };
       /* Sprint loops the FORWARD Run. `Sprint` in the GLB is Mixamo
        * leadingTargetRun and `BackpedalDiag` is Jog Backward Diagonal —
-       * both look sideways. Those play only as the brief lookAside into
-       * a sprint, never as the default gait. */
+       * both look sideways, so they are never the default gait. */
       case 'sprint': return { name: 'Run', loop: true };
-      case 'lookAside': return { name: this.pick('BackpedalDiag', 'Sprint', 'Sidestep'), loop: false };
       case 'crouch': return { name: this.pick('ScrumCrouch', 'Crouch', 'Jackal'), loop: true };
       case 'bind': return { name: this.pick('ScrumDrive', 'ScrumBind', 'Push'), loop: true };
       case 'ruck': return { name: this.pick('Jackal', 'RuckDive', 'Push'), loop: true };
@@ -970,7 +970,12 @@ export class ThreePlayerManager {
        *               the carrier's hip by the engine, so a held pose is all
        *               that is needed to read as a man being towed. */
       case 'latchCarry': return { name: this.pick('JogCarry', 'Run'), loop: true };
-      case 'latchHang': return { name: this.pick('DoubleLegTackle', 'Tackle'), loop: false };
+      /* Feet must cycle while he is towed. A clamped standing tackle pose
+       * with the engine snapping xz is the floating grab — a man in a
+       * statue pose sliding across the grass. Jog at the churn rate so
+       * the legs work; the procedural tilt and arm-reach still wrap him
+       * onto the carrier. */
+      case 'latchHang': return { name: this.pick('Jog', 'Run'), loop: true };
       /* ASSET NOTE — these tackle states are driven by STAND-IN clips
        * (Tackle, SlideStart, DiveRoll, Death — see the cases above) with the
        * procedural layer compensating for what they lack. The real fix
@@ -1486,10 +1491,9 @@ export class ThreePlayerManager {
             const a = this.play(inst, 'latchCarry', 0.3, LATCH_CHURN_RATE);
             a?.setLoop(THREE.LoopRepeat, Infinity);
           } else {
-            /* the hanger holds the drive pose. LoopOnce + clampWhenFinished
-             * (set in play()) freezes him wrapped around the carrier's
-             * waist, and the engine's coordinate snap does the travelling. */
-            this.play(inst, 'latchHang', 0.12, 1.35);
+            /* Legs labour while the engine tows him — never a frozen pose. */
+            const hang = this.play(inst, 'latchHang', 0.12, LATCH_CHURN_RATE);
+            hang?.setLoop(THREE.LoopRepeat, Infinity);
           }
           st.oneShot = desired;
           st.lock = 0;
@@ -1622,6 +1626,7 @@ export class ThreePlayerManager {
          * mid-rise and he snaps to a run from a crouch. */
         this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
         st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
+        st.plantX = a.rx; st.plantZ = a.rz;
       } else if (desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup')) {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
@@ -1636,22 +1641,13 @@ export class ThreePlayerManager {
       } else if (locomoting) {
         // stood back up -> let the GetUp one-shot finish, then locomotion takes over
         if (st.oneShot === 'getup') { /* held until lock expires */ }
-        else if (st.oneShot === 'lookAside') {
-          /* Dropping out of sprint while glancing sideways → back to jog. */
-          if (desired !== 'sprint') {
-            st.oneShot = null; st.lock = 0;
-            st.lie = false;
-            this.setLocomotion(inst, desired, st.spd);
-          }
-        } else if (st.lie && st.oneShot !== 'getup') {
-          this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
-          st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
-        } else if (desired === 'sprint' && inst.active?.name !== 'sprint' && inst.active?.name !== 'lookAside') {
-          /* A few seconds of look-sideways, then the looping forward Run. */
-          this.play(inst, 'lookAside', 0.12, 1.05);
-          st.oneShot = 'lookAside';
-          st.lock = LOOK_ASIDE_SECONDS;
+        else if (st.lie && st.oneShot !== 'getup') {
+          /* Engine is already locomoting — they are ON THEIR FEET in the
+           * sim. Playing GetUp while following engine xz is the "sliding
+           * on the ground" look. Drop the lie and run. */
           st.lie = false;
+          st.oneShot = null;
+          this.setLocomotion(inst, desired, st.spd);
         } else {
           st.oneShot = null;
           st.lie = false;
@@ -1684,7 +1680,14 @@ export class ThreePlayerManager {
 
       // ---- transform: logical pitch -> scaled 3D world ----
       inst.proc.state = desired;
-      inst.root.position.set(a.rx * s, 0, -a.rz * s);
+      /* GET-UP is a plant. Following engine xz during the one-shot is how
+       * a leftover lie (or a recoverT that expired a frame early) slid
+       * men across the grass on their backs. */
+      if (st.oneShot === 'getup') {
+        inst.root.position.set(st.plantX * s, 0, -st.plantZ * s);
+      } else {
+        inst.root.position.set(a.rx * s, 0, -a.rz * s);
+      }
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 
