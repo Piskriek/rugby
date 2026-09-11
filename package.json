@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:env": "node tools/_verify_env.mjs"
+    "test:env": "node tools/_verify_env.mjs",
+    "assetverify": "vite-node scripts/assetverify.ts",
+    "build:player": "node tools/build_player_glb.mjs"
   },
   "dependencies": {
     "@types/three": "^0.185.4",

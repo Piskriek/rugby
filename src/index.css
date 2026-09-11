@@ -1,1 +1,7 @@
 @import "tailwindcss";
+/* AnimationRef/ is ~110 MB of FBX. Tailwind v4's default content scan would
+ * read those binaries and OOM the Vite build. Keep the scan on source. */
+@source not "../AnimationRef";
+@source not "../.cache";
+@source not "../public";
+@source not "../dist";
