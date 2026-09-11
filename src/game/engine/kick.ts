@@ -324,7 +324,7 @@ export function upKick(d: Director, dt: number, input: Input, pressed: Set<strin
          * margin so the strike is not riding the line. */
         const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
         for (const p of d.live) {
-          if (p.team === s.kicker || p.sinbin > 0) continue;
+          if (p.team === s.kicker || p.sinbin > 0 || (p.recoverT ?? 0) > 0) continue;
           const gap = (p.z - s.bz) * s.dir;
           if (gap < 10.9) p.z += Math.min(RETREAT, 10.9 - gap) * s.dir;
         }

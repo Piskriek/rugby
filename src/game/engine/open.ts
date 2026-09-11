@@ -6,6 +6,7 @@
  */
 
 import { Director, Input, OpenPlayState } from '../director';
+import { lineoutBacklineMark } from '../behaviour/setpiece-overrides';
 import { FIELD } from '../../render/retro';
 import { DIFFICULTY_TABLE } from '../data';
 import { contractFor } from '../jlr';
@@ -46,10 +47,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * while it flies — the pass is a commitment. */
   if (s.ball.live) {
     const rec = d.L(s.attacking, s.pendingReceiver);
-    /* Playtest 3: a throw flies at ~13 m/s OVER ITS OWN LENGTH — a 6 m pop
-     * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
-     * made every pass feel like a teleport. */
-    s.passT += dt * (13 / s.passDist);
+    /* Playtest 3: a throw flies at PASS_SPEED over its own length — a 6 m
+     * pop takes ~0.6 s, a 20 m cut-out ~1.9 s. The old fixed half-second
+     * homing made every pass feel like a teleport. */
+    s.passT += dt * (PASS_SPEED / s.passDist);
     /* T-40, REWRITTEN BY SPEC_13.
      *
      * The receiver was steered to `ball.z + dir * 1.0` — a point one metre in
@@ -70,16 +71,35 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     rec.job = 'TAKE THE PASS';
     steer(rec, dt, true);
 
-    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at its TRUE 13 m/s
-     * ground speed over its own length — a 6 m pop takes 0.46 s, a 20 m
-     * cut-out 1.5 s. The difference is WHAT it flies at: a fixed point
+    /* THE THROWER KEEPS RUNNING. Freezing him for the flight turned every
+     * pass into a standing pop. A rugby pass is given on the run — he coasts
+     * forward while the ball is in the air. */
+    const thrower = d.L(s.attacking, s.carrierNum);
+    if (thrower && thrower !== rec && (thrower.recoverT ?? 0) <= 0
+      && (thrower.diveT ?? 0) <= 0) {
+      const coast = maxSpeed(thrower, false, false, thrower.stamina) * 0.58;
+      thrower.vx *= Math.exp(-2.4 * dt);
+      thrower.vz = approach(thrower.vz, s.dir * coast, 5, dt);
+      thrower.x = clamp(thrower.x + thrower.vx * dt, -34.5, 34.5);
+      thrower.z = clamp(thrower.z + thrower.vz * dt, -61, 61);
+      thrower.movedBy = 'carrier';
+      if (Math.abs(thrower.vz) > 0.4) thrower.face = thrower.vz > 0 ? 1 : -1;
+      const tsp = Math.hypot(thrower.vx, thrower.vz);
+      if (tsp > 0.7) {
+        const gait = tsp > 6.2 ? 'sprint' : 'jog';
+        if (thrower.clip !== gait) { thrower.clip = gait; thrower.clipT = 0; }
+      }
+    }
+
+    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at PASS_SPEED over
+     * its own length. The difference is WHAT it flies at: a fixed point
      * solved at release, not a man who is being pushed forward to meet it. */
     const dx = s.passTargetX - s.ball.x, dz = s.passTargetZ - s.ball.z;
     const dd = Math.max(0.01, Math.hypot(dx, dz));
     const step = Math.min(dd, PASS_SPEED * dt);
     s.ball.x += (dx / dd) * step;
     s.ball.z += (dz / dd) * step;
-    s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
+    s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 1.0;
     /* SPEC_13: the catch is PROXIMITY TO THE RECEIVER, not arrival at the
      * target. Flying to a fixed point means the ball can reach the aim with
      * the receiver two metres away, and snapping it to him there is the
@@ -87,7 +107,17 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * a ball that jumped forward at the moment of the catch. */
     const toRec = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
     const arrived = dd <= step;
-    if (toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) || arrived || s.passT >= 1.35) {
+    /* A receiver who has sprinted PAST the aim toward the try must not
+     * snatch the ball mid-flight in front of the thrower — that is the
+     * massive forward the player sees even when the release was legal.
+     * Keep flying to the aim; he comes back, or the timeout hands it over. */
+    const recPastAim = (rec.z - s.passTargetZ) * s.dir > 1.4;
+    const recOnAim = Math.hypot(rec.x - s.passTargetX, rec.z - s.passTargetZ) < 2.2;
+    const nearRec = toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) && !recPastAim;
+    /* Do not complete on "ball arrived" if the receiver has already run past
+     * the aim — snapping the ball to him there is the massive forward. He
+     * comes back onto the mark, or the timeout hands it over. */
+    if (nearRec || (arrived && recOnAim && !recPastAim) || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
       /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
@@ -123,6 +153,26 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       d.setCtrl(s.attacking, s.carrierNum);
       d.run(s.attacking, s.carrierNum).carries++;
       d.refreshPassOptions();
+      /* Off-the-top: 9 takes the tap and fires it to 10 in one motion.
+       * The ball stays in the air — it never sits on the fly-half's chest
+       * the frame the jumper won it. */
+      if (s.lineoutTap === 'TO_NINE') {
+        s.lineoutTap = 'TO_TEN';
+        const ten = d.L(s.attacking, 10);
+        if (ten && ten.sinbin <= 0 && !ten.down) {
+          /* Aim at the Law 18 first-receiver mark, not at 10's body — he
+           * may still be walking onto it. He is steered to the aim. */
+          const h = s.lineoutHold;
+          const mark = h
+            ? lineoutBacklineMark(10, s.attacking, h.markZ, h.side)
+            : { x: ten.x, z: ten.z };
+          d.launchPassFlight(rec.x, rec.z, 1.05, mark.x, mark.z, 10);
+        } else {
+          s.lineoutTap = undefined;
+        }
+      } else if (s.lineoutTap) {
+        s.lineoutTap = undefined;
+      }
     }
     return;
   }
@@ -293,10 +343,19 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * directly and did not consult the get-up lock, so it dragged recovering
      * players 627 m across three matches while their clip said 'getup' —
      * the single largest source of foot-sliding on a planted animation. */
+    if (d.ruckPeel && d.t < d.ruckPeel.until && d.ruckPeel.nums.has(`${p.team}:${p.num}`)) {
+      /* think() owns the peel — do not chase the nine through the pile. */
+      continue;
+    }
     if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer) && (p.recoverT ?? 0) <= 0) {
-      const gap = (p.z - rb!.z) * rb!.dir;
-      if (gap < 2.0) {
-        p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;
+      /* The 3 m line is IN FRONT of the ruck (toward the try). The old
+       * write subtracted dir and marched them THROUGH the pile, past the
+       * nine. Jog to the line; never through the gate. */
+      const line = rb!.z + rb!.dir * 3.0;
+      const toLine = (line - p.z) * rb!.dir;
+      if (toLine > 0.25) {
+        p.z += Math.min(toLine, 5.2 * dt) * rb!.dir;
+        p.vx *= Math.exp(-6 * dt);
         p.movedBy = 'release';
         p.job = 'RELEASE AND RETREAT';
         continue;   // the retreat owns this frame — no steer on top
@@ -709,18 +768,12 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * absolute rate is calibrated to the real thing. */
   const errorChance = clamp(opt.risk * 0.45 * (1 - d.assists.pass * 0.5), 0.008, 0.18);
   if (R() < errorChance) {
-    /* A spilled pass is a turnover in any box score — the ball changed
-     * hands through an error, which is exactly the "in the tackle and from
-     * errors" family the realism ranges measure alongside steals. */
+    /* A spilled pass is a knock-on, not a throw-forward. Labelling half of
+     * them FWD_PASS is why the referee seemed to pick up forwards only
+     * "sometimes" — the real Law 11 test never ran on these, a coin did. */
     d.teams[d.defending()].stats.turnovers++;
-    const strict = d.options.fwdPass ?? 1;
-    if (strict < 2 && R() < 0.5) {
-      d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
-      d.startScrum(d.defending(), car.x, car.z);
-    } else {
-      d.commentate('MISSED');
-      d.startScrum(d.defending(), car.x, car.z);
-    }
+    d.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, s.attacking);
+    d.startScrum(d.defending(), car.x, car.z);
     return;
   }
 
@@ -736,6 +789,20 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * flight, so the release vector, the average flight velocity and the
    * landing point are all the same fact. */
   const dir = s.dir >= 0 ? 1 : -1;
+  /* RUN ONTO IT. The intercept is solved against the run the receiver is
+   * ABOUT to make, not the stand he is in. A stationary man made every pass
+   * a pop onto a statue, and "in front of where he's going to be" is the
+   * whole point of a rugby pass. The thrower jogs too — Law 11 is relative
+   * to HIM, so a standing dump cannot lead. */
+  {
+    const rec = opt.player;
+    const run = maxSpeed(rec, false, false, rec.stamina) * RUN_ON_SPEED_FRACTION;
+    const alongNow = rec.vz * dir;
+    rec.vz = Math.max(alongNow, run) * dir;
+    rec.vx *= 0.55;
+    const jog = maxSpeed(car, true, false, car.stamina) * 0.62;
+    if (car.vz * dir < jog * 0.45) car.vz = dir * jog;
+  }
   const solvedAim = solvePassAim(car, opt.player);
   const rel = passReleaseRel(car, solvedAim, car.vz, dir);
   const fwdProf = fwdProfile(d.options.fwdPass ?? 1);
@@ -751,12 +818,29 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
     ? clampAimLegal(car, solvedAim, car.vz, dir, fwdProf.tol)
     : null;
   if (clamped) d.notePassClamped();
-  const aim = clamped ?? solvedAim;
-  /* Ordering matters for the ledger: a corrected pass is not a whistled one,
-   * and counting it as both would flatter the referee and hide the CPU's
-   * debt. The rate is counted before the verdict, the whistle after it. */
-  const whistled = blown && !clamped && fwdProf.blows;
-  d.notePassRelease(rel, forwardMetres(rel, solvedAim.flight), whistled);
+  let aim = clamped ?? solvedAim;
+  /* Even a Law-11-legal release can land metres in front of the thrower when
+   * the receiver is sprinting and the solve leads him — that is the massive
+   * ground-forward the player sees. CPU throws stay within a stride. */
+  if (!d.isHuman(s.attacking)) {
+    const along = (aim.z - car.z) * dir;
+    if (along > 1.2) {
+      const z = car.z + dir * 1.2;
+      const dist = Math.hypot(aim.x - car.x, z - car.z);
+      aim = { x: aim.x, z, dist, flight: Math.max(0.08, dist / PASS_SPEED) };
+    }
+  }
+  /* Re-test the throw that will actually fly. A clamp that still leaves the
+   * ball travelling forward is not a correction — it is a forward pass, and
+   * the referee blows it for the CPU the same as for the human. The old
+   * `blown && !clamped` test meant ANY clamp, even a failed one, never
+   * scrummed, so massive forwards sailed. */
+  const relAfter = passReleaseRel(car, aim, car.vz, dir);
+  const stillIllegal = relAfter > fwdProf.tol;
+  /* Clamp is a correction. Whistle only if the throw that actually flies is
+   * still a throw-forward — human and CPU alike. */
+  const whistled = fwdProf.blows && stillIllegal;
+  d.notePassRelease(relAfter, forwardMetres(relAfter, aim.flight), whistled);
   if (whistled) {
     /* Scrum WHERE THE BALL WAS THROWN, not where it was caught — that is the
      * law, and it is also what the old error branch already did. */
@@ -768,12 +852,21 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   // T-35. The receiver is already moving; the ball flies to him instead of
   // teleporting. Launch the flight — upOpen carries it to the target.
   const receiverBefore = gate ? snapshotForwardAttackPlayer(opt.player) : undefined;
-  opt.player.vz = s.dir * maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
-  opt.player.face = s.dir >= 0 ? 1 : -1;
+  /* Run ONTO the aim, not blindly upfield. Injecting try-line velocity
+   * sent the receiver past a legal (behind/flat) aim and he caught the
+   * ball in front of the thrower. */
+  {
+    const toAx = aim.x - opt.player.x, toAz = aim.z - opt.player.z;
+    const toA = Math.hypot(toAx, toAz) || 1;
+    const run = maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
+    opt.player.vx = (toAx / toA) * run;
+    opt.player.vz = (toAz / toA) * run;
+  }
+  if (Math.abs(opt.player.vz) > 0.3) opt.player.face = opt.player.vz > 0 ? 1 : -1;
   if (gate && receiverBefore) {
     for (const failure of forwardAttackPlayerWriteFailures(
       `open:pass-launch-receiver:${opt.player.team}${opt.player.num}`, receiverBefore,
-      snapshotForwardAttackPlayer(opt.player), ['vz', 'face'] as const,
+      snapshotForwardAttackPlayer(opt.player), ['vx', 'vz', 'face'] as const,
     )) gate(failure);
   }
 

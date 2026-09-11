@@ -32,7 +32,8 @@
  * The ball's ground speed in flight. `upOpen` flies it at a constant rate;
  * this is that rate, and it is what turns a direction into a velocity.
  */
-export const PASS_SPEED = 13;
+/** 10.4 m/s is 13 m/s with 25% more airtime — a slower, loftier throw. */
+export const PASS_SPEED = 10.4;
 
 /**
  * How much of the receiver's run-on the throw is led by. This is the engine's
@@ -132,8 +133,10 @@ export function forwardMetres(rel: number, flight: number): number {
  * A stepping search rather than a closed form, because the closed form is
  * degenerate when the pass is thrown straight up the line (no lateral
  * component to trade against), and a referee should not need to handle a
- * special case correctly at speed. Twelve steps of 35 cm covers 4.2 m, which
- * is more depth than any legal pass in this game has.
+ * special case correctly at speed. Thirty-two steps of 35 cm covers 11.2 m —
+ * enough to flatten a throw that was aimed straight at a man well in front
+ * of the thrower. Twelve steps (4.2 m) left those throws still illegal, and
+ * because `doPass` treated "we clamped" as "do not whistle", they flew.
  */
 export function clampAimLegal(
   from: { x: number; z: number },
@@ -144,7 +147,7 @@ export function clampAimLegal(
 ): PassAim {
   let z = aim.z;
   let rel = passReleaseRel(from, { x: aim.x, z }, throwerVz, dir);
-  for (let i = 0; i < 12 && rel > tol; i++) {
+  for (let i = 0; i < 32 && rel > tol; i++) {
     z -= dir * 0.35;
     rel = passReleaseRel(from, { x: aim.x, z }, throwerVz, dir);
   }

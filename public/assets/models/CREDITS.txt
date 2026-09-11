@@ -1,36 +1,40 @@
-rugby_player.glb - CC0 1.0 Universal (public domain)
+player.glb - CC0 1.0 Universal (public domain)
+
+Character mesh:   Quaternius "Animated Human" (October 2017 low-poly, rigged)
+                  OpenGameArt: https://opengameart.org/content/animated-human-low-poly
+                  Source archive in AnimationRef/Man Animated - Oct 2017-*.zip
+Animations:       Native Idle/Walk/Run/Jump/Death/Working from the 2017 FBX,
+                  Mixamo Male Locomotion Pack (walk/run/strafe/turns),
+                  and the rugby-named Mixamo clips in AnimationRef/*.fbx
+                  (lineout throw/jump, side dive, double-leg tackle, scrum bind,
+                  placekick, get-up, jackal, …). Retargeted onto the 2017
+                  skeleton by tools/build_player_glb.mjs; horizontal root
+                  translation stripped so the 2D engine owns world motion.
+Author:           Quaternius - https://quaternius.com  (mesh + native clips)
+                  Mixamo / Adobe (locomotion + rugby-named clips)
+Licence:          Mesh + native clips CC0 1.0.
+                  Mixamo animations are free to use with an Adobe account;
+                  see the Mixamo terms before a commercial redistribution.
+
+Rebuilt into a single GLB by tools/build_player_glb.mjs. Clip vocabulary:
+Idle, Walk, Jog, Run, Sprint, Backpedal, Shuffle, Sidestep,
+LineoutThrow, LineoutJump, Catch, SideDive, Dive, DoubleLegTackle,
+Tackle, HitReact, ScrumDrive, ScrumBind, ScrumCrouch, Jackal,
+Kick, DropKick, GetUp, Death, Push, Crouch, JumpLand.
+There is no baseball OverhandThrow / Pass clip.
+
+--------------------------------------------------------------------------
+rugby_player.glb - previous Superhero_Male pack (kept as a fallback asset)
 
 Character mesh:   Quaternius "Universal Base Characters" (male, Superhero proportions)
-Animations:       Quaternius "Universal Animation Library" (UAL1 + UAL2 standard/free clips)
-Author:           Quaternius - https://quaternius.com
-Licence:          CC0 1.0 - https://creativecommons.org/publicdomain/zero/1.0/
-
-Rebuilt into a single GLB by tools/build_player_glb.py: the male base mesh
-keeps its Universal Rig skeleton; animation clips were remapped onto it by
-bone name and renamed to the state-machine vocabulary
-(Idle, Walk, Run, Sprint, Pass, Tackle, GetUp, SlideStart, Slide, SlideExit,
- Kick, Push, Crouch, DiveRoll, Death, JumpLand).
+Animations:       Quaternius "Universal Animation Library" (UAL1 + UAL2)
+Licence:          CC0 1.0
 
 --------------------------------------------------------------------------
 tackle_pair.glb - Mixamo (Adobe)
 
 Clips:            MX_Tackle, MX_TackleReact
 Source:           github.com/CandyManGames/Enable3dFootball_Prod
-                    animations/Player_Actions/tackle_ip.gltf
-                    animations/Player_Actions/tackle_react_ip.gltf
-Origin:           Mixamo (mixamo.com), Adobe. The clip name inside both source
-                  files is literally "mixamo.com".
-
 LICENCE NOTE - REVIEW BEFORE SHIPPING COMMERCIALLY.
-Mixamo animations are free to use, including commercially, for anyone with an
-Adobe account, but the Adobe terms cover redistribution of the raw animation
-data. These clips were obtained from a third-party public GitHub repository
-rather than downloaded from Mixamo directly, so the upstream repository's own
-right to redistribute them has NOT been verified. The safe path for a public
-release is to download the equivalent clips from mixamo.com under your own
-account and re-run tools/fetch_mixamo.mjs against those local files.
-
-Retargeted onto the Quaternius skeleton by tools/fetch_mixamo.mjs using a
-world-space transfer (the two rigs' bind poses differ by up to 178 degrees, so
-a bone-name remap alone produces an inverted skeleton). Animation data only -
-no mesh - so it rides on the rig in rugby_player.glb.
+The current player.glb uses AnimationRef tackle clips retargeted onto the
+2017 skeleton; tackle_pair.glb is Unreal-bone-named and is not required.

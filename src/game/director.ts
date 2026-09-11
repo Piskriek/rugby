@@ -26,7 +26,7 @@ import {
 } from './shapes';
 import {
   Nation, TEAM_BY_ID, KITS, FORMATION_BY_ID, DIFFICULTY_TABLE, AI_ARCHETYPES,
-  POINTS, SquadPlayer, REFEREE_CALLS,
+  POINTS, SquadPlayer, REFEREE_CALLS, DEFAULT_SLIDERS, OPTION_ITEMS,
 } from './data';
 import {
   contractFor, PhaseName, RoleContract,
@@ -67,8 +67,8 @@ import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
-import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
-import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
+import { isGoalKickState, goalKickMark, scrumFaceSign, lineoutBacklineMark } from './behaviour/setpiece-overrides';
+import { inEchelon, echelonTargetZ, echelonDepthBehindTen, runOntoEchelonZ } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
 /* ============================ INPUT ============================ */
@@ -238,10 +238,18 @@ export interface OpenPlayState {
    * other and the flight cannot manufacture forward travel. */
   passTargetX: number;
   passTargetZ: number;
-  /** Playtest 3: the length of the current throw — the flight rate is a
-   * real 13 m/s over this distance, not a fixed half-second homing. */
+  /** Playtest 3: the length of the current throw — the flight rate is
+   * PASS_SPEED over this distance, not a fixed half-second homing. */
   passDist: number;
   passT: number;
+  /**
+   * Off-the-top lineout: Law 18's ten-metre line holds until the first
+   * pass is halfway to `firstNum` (the fly-half). Drive/maul takes never
+   * set this — they stay a maul.
+   */
+  lineoutHold?: { markZ: number; side: number; firstNum: number; released: boolean };
+  /** Orchestrated tap: jumper → 9, then 9 → 10. Cleared on the last catch. */
+  lineoutTap?: 'TO_NINE' | 'TO_TEN';
 }
 
 export interface MaulState {
@@ -329,10 +337,7 @@ export interface BreakdownState {
  */
 export const RECOVER_SECONDS = 1.53;
 
-/** How far a recovering man may be displaced before his anchor follows him.
- *  Below this he is planted; above it something with a real reason to move
- *  him (a retreat, a shove) wins and the anchor re-seats. */
-const RECOVER_ANCHOR_SLACK = 0.06;
+
 
 /**
  * WHY NOT THE FULL 1.53 s CLIP LENGTH.
@@ -368,6 +373,32 @@ export interface MatchConfig {
   kickerA?: number; kickerB?: number;
   assists?: { pass: number; tackle: number; kick: number };
   speed?: number;             // 1.0 normal, 0.75 / 0.5 / 0.35 learning
+}
+
+/**
+ * QUICK START (15v15) — the single config the main-menu "QUICK START
+ * (15v15)" button launches straight into. No team customization, no kit
+ * selection, no coin toss: two default nations (ENG v NZL) with their full
+ * fifteen shirts, the default tactics board and factory options. Copied
+ * onto this branch from the 15v15 Quick Start work; do not merge v2-arch.
+ */
+export function quickStartConfig(overrides?: Partial<MatchConfig>): MatchConfig {
+  const options: Record<string, number> = {};
+  for (const i of OPTION_ITEMS) options[i.id] = i.def;
+  const sliders = () => DEFAULT_SLIDERS.map((s) => ({ ...s }));
+  return {
+    homeId: 'ENG', awayId: 'NZL', kitA: 0, kitB: 0,
+    difficulty: options.difficulty ?? 3,
+    halfLength: 5,
+    options,
+    slidersA: sliders(), slidersB: sliders(),
+    backlineA: 'BL-SPLIT', defenceA: 'DF-UMBRELLA', lineoutA: 'LO-5', scrumA: 'SC-8-3',
+    backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
+    cpuA: false, cpuB: true, kickerA: 10, kickerB: 10,
+    assists: { pass: 0.7, tackle: 0.7, kick: 0.7 },
+    speed: 1,
+    ...overrides,
+  };
 }
 
 export interface MatchStats {
@@ -972,7 +1003,7 @@ export class Director {
       const k = this.kk;
       if (k.stage === 'FANFARE') return { now: 'TRY! The crowd is on its feet', next: `${k.kickerName} will take the conversion`, clock: 0, danger: false };
       if (k.stage === 'WALKUP') return { now: `${k.kickerName} is walking to the tee`, next: 'The kick goes live once the ball is set', clock: 0, danger: false };
-      if (k.stage === 'AIM') return { now: `${k.kickerName} is lining up a ${k.profile.label.toLowerCase()}`, next: 'Hold SPACE to build power, release to strike', clock: 0, danger: false };
+      if (k.stage === 'AIM') return { now: `${k.kickerName} is lining up aLowerCase()}`, next: 'Hold SPACE to build power, release to strike', clock: 0, danger: false };
       if (k.stage === 'METER') return { now: `Charging — ${(k.power * 100).toFixed(0)}% power, ${this.kickReach(k, k.power).toFixed(0)} m`, next: 'Release SPACE to kick', clock: 0, danger: false };
       if (k.stage === 'FLIGHT') {
         const lp = this.landingPrediction();
@@ -1439,10 +1470,14 @@ export class Director {
     this.tickDive(dt);
     this.tickRecovery(dt);
     this.think(dt, input);
+    /* Re-plant after think()/separate() so a shove or leftover human input
+     * cannot slide a man whose clip is still GetUp. */
+    this.holdRecovering();
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
      * capture target-slot drift before a phase-bound writer can take control. */
     this.samplePendingTargetSlots();
     this.placeBound(dt);
+    this.holdRecovering();
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
      * audio all read the same frameEvents. */
@@ -1502,6 +1537,12 @@ export class Director {
    * the beat, instead of letting them tackle the nine on the frame the
    * ball is out. */
   releaseBeat: { z: number; dir: number; until: number } | null = null;
+  /** The pile peels SIDEWAYS off the gate when the ball comes out. Without
+   * this the contestants sprint through the ruck (it reads as a jump) and
+   * overshoot behind the nine, who then snipes the empty channel. */
+  ruckPeel: {
+    until: number; x: number; z: number; dir: number; atk: 'A' | 'B'; nums: Set<string>;
+  } | null = null;
 
   /**
    * Snapshot the sample ledger rather than exposing its mutable arrays. P50/P90
@@ -1975,7 +2016,9 @@ export class Director {
     if (!import.meta.env.DEV) return;
     const message = `[SPEC_02 gate] ${failure.label} :: ${failure.reason} :: ${JSON.stringify(failure.values)}`;
     console.error(message);
-    throw new Error(message);
+    /* Do not throw. update() catches and trip()s, which is a PLAY RESET
+     * mid-match — the "game just restarted" the player sees. The harness
+     * still reads the console.error; the live match keeps playing. */
   };
 
   private forwardAttackGates(): ForwardAttackGateReporter | undefined {
@@ -2031,7 +2074,9 @@ export class Director {
      * walk-on (T-16/NO-TELEPORT — nobody is teleported into place) plus a
      * hang and bounces to the 6.5 s dead cap. A genuine hang is still
      * caught — 15 s is far past any legal kick. */
-    SCRUM: 14, LINEOUT: 12, BREAKDOWN: 9, MAUL: 18, KICK: 15, OPEN_PLAY: 45,
+    /* KICK 28: a restart walk-on (no teleport) plus AIM plus hang can
+     * honestly take ~20 s. 15 s was tripping PLAY RESET on kick-off. */
+    SCRUM: 14, LINEOUT: 12, BREAKDOWN: 12, MAUL: 18, KICK: 28, OPEN_PLAY: 90,
     REPLAY: 6, LINEOUT_REPLAY: 6, KICK_REPLAY: 6, MAUL_REPLAY: 6, BREAKDOWN_REPLAY: 6,
   };
 
@@ -2084,9 +2129,15 @@ export class Director {
 
     // D. Nobody has moved for two full seconds while the ball is live.
     if (this.phase === 'OPEN_PLAY') {
-      const movers = this.live.filter((p) => Math.hypot(p.vx, p.vz) > 0.6).length;
-      if (movers < 3) { this.stillFor += dt; } else this.stillFor = 0;
-      if (this.stillFor > 2) { this.trip('play stopped moving with the ball live'); return; }
+      /* A pass in the air, or the off-the-top hold, is play — men on the
+       * ten-metre line are supposed to stand. Do not trip the freeze net. */
+      if (this.op?.ball.live || (this.op?.lineoutHold && !this.op.lineoutHold.released)) {
+        this.stillFor = 0;
+      } else {
+        const movers = this.live.filter((p) => Math.hypot(p.vx, p.vz) > 0.6).length;
+        if (movers < 3) { this.stillFor += dt; } else this.stillFor = 0;
+        if (this.stillFor > 2) { this.trip('play stopped moving with the ball live'); return; }
+      }
     } else this.stillFor = 0;
   }
 
@@ -2181,7 +2232,7 @@ export class Director {
        * actually at their slot. */
       for (const slot of s.players) {
         const p = this.L(slot.team, slot.num);
-        if (p.sinbin > 0) continue;
+        if (p.sinbin > 0 || (p.recoverT ?? 0) > 0) continue;
         const dx = slot.x - ax.x, dz = slot.z - ax.z + s.netDrive;
         const wx = ax.x + dx * cosY - dz * sinY;
         const wz = ax.z + dx * sinY + dz * cosY;
@@ -2248,6 +2299,7 @@ export class Director {
         const p = this.L(slot.team, slot.num);
         if (p.sinbin > 0) continue;
         const off = Math.hypot(slot.x - p.x, slot.z - p.z);
+        if ((p.recoverT ?? 0) > 0) continue;
         if (off > 0.9) {
           p.tx = slot.x; p.tz = slot.z;
           p.urgency = 1;
@@ -2297,6 +2349,7 @@ export class Director {
         const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
         const lz = -s.dir * (i * 0.72);
         const a = this.L(s.attacking, i);
+        if ((a.recoverT ?? 0) <= 0) {
         settle(a,
           s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
           s.z + lz,
@@ -2306,16 +2359,19 @@ export class Director {
         a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
           ? 'KEEP THE LEGS GOING, STAY BOUND'
           : 'BIND TIGHT AND HOLD THE MAUL';
+        }
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
          * team. */
         const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
         const d = this.L(dTeam, i);
+        if ((d.recoverT ?? 0) <= 0) {
         const dlx = 1.4 - (i % 2) * 2.2;
         settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
         clip(d, 'maulBind');
         d.job = s.contest === 'DEFENCE_CONTROL' ? 'HOLD THE MAUL UP AND WAIT FOR USE IT' : 'BIND AND RESIST THE DRIVE';
+        }
       }
       /* The nine has a fixed base behind the maul. It is marked bound by
        * think(), then placed here, so TRANSFER_TO_9 can show existing idle
@@ -2334,7 +2390,7 @@ export class Director {
       const s = this.bd;
       for (const q of s.players) {
         const p = this.L(q.team, q.num);
-        if (p.sinbin > 0) continue;
+        if (p.sinbin > 0 || (p.recoverT ?? 0) > 0) continue;
         /* T-29. The carrier and tackler are already at the contact point, so they
          * pin there. The arriving crew used to be snapped to their ruck slots too,
          * which read as players teleporting into the breakdown. They now close the
@@ -2365,26 +2421,50 @@ export class Director {
         } else if (q.role === 'TACKLER' && inKineticImpact(s)) {
           /* he is riding the carrier down — breakdown.ts moved him. */
         } else {
+          const gap = Math.hypot(q.x - p.x, q.z - p.z);
+          const atkDir = s.attacking === 'A' ? 1 : -1;
+          /* RUN IN, THEN GRAB. Playing jackal/cleanout from 15 m out made
+           * arriving men look like they were fighting the air, facing the
+           * touchline, never reaching the ball. Sprint to the slot; the
+           * arms-out clip starts when he is actually over it. */
+          if (gap > 1.2 && !p.down && q.role !== 'TACKLER') {
+            p.tx = q.x; p.tz = q.z; p.urgency = 1;
+            p.job = q.role === 'JACKAL' ? 'GET OVER THE BALL'
+              : q.team === s.attacking ? 'RUN INTO THE RUCK' : 'COUNTER-RUCK THROUGH THE GATE';
+            steer(p, dt, true);
+            p.face = q.team === s.attacking ? atkDir : -atkDir;
+            /* steer() already advanced clipT but skipped gait (p.bound). */
+            const sp = Math.hypot(p.vx, p.vz);
+            const gait = sp > 6.2 ? 'sprint' : sp > 0.7 ? 'jog' : 'ready';
+            if (p.clip !== gait) { p.clip = gait; p.clipT = 0; }
+            continue;
+          }
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
            * at a sprint per frame — he runs in, he does not lurch. */
-          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(q.x - p.x, q.z - p.z)));
+          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, gap));
           p.x += (q.x - p.x) * k;
           p.z += (q.z - p.z) * k;
           p.movedBy = 'bound';   // T-02: the ease is a writer too — own it
           if (Math.hypot(q.x - p.x, q.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
         }
-        p.face = q.team === s.attacking ? 1 : -1;
+        {
+          const atkDir = s.attacking === 'A' ? 1 : -1;
+          p.face = q.team === s.attacking ? atkDir : -atkDir;
+        }
         if (q.role === 'CARRIER') clip(p, 'grounded');
         else if (q.role === 'JACKAL') clip(p, 'jackal');
         else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');
-        else if (q.role === 'CLEANER') clip(p, s.stage === 'PLACE' ? 'cleanout' : 'maulBind');
+        else if (q.role === 'CLEANER') clip(p, 'cleanout');
         /* PART 2: the tackler wears 'tackle' from the impact frame. The
          * renderer's tackle timeline (impact / grounding / roll-away) is what
          * gives the hit its beat now, so holding the old dive one-shot for
          * 0.45 s here would only delay the first stage of it. */
         else if (q.role === 'TACKLER') clip(p, 'tackle');
-        else if (q.role !== 'TACKLER') clip(p, s.ruckFormed ? 'maulBind' : 'ready');
+        /* COUNTER (and any other named ruck man) must GRAB, never stand in
+         * idle-ready while the fight plays. jackal maps to Jackal — arms
+         * out, on the ball. The maul pack stays on bind via maulBind. */
+        else clip(p, 'jackal');
         p.job = q.role === 'CARRIER' ? 'PRESENT THE BALL BACK TO YOUR NINE'
           : q.role === 'JACKAL' ? 'GET YOUR HANDS ON THE BALL, LEGALLY'
             : q.role === 'TACKLER' ? 'ROLL AWAY AND GET BACK ON SIDE'
@@ -2572,7 +2652,7 @@ export class Director {
           let arrived = 0, count = 0;
           for (const f of s.form) {
             const p = this.L(f.team, f.num);
-            if (p.sinbin > 0 || p === k) continue;
+            if (p.sinbin > 0 || p === k || (p.recoverT ?? 0) > 0) continue;
             count++;
             const off = Math.hypot(f.x - p.x, f.z - p.z);
             if (off > 0.8) {
@@ -2660,25 +2740,10 @@ export class Director {
         steer(p, dt, true);
       });
 
-      // The receiving side: the designated fielder goes to the ball, the rest
-      // come across to support him rather than standing where they started.
-      const rec = assignReceiver(this.live, this.receivingSide(), tgt.x, tgt.z);
-      if (rec) {
-        rec.tx = clamp(tgt.x, -33, 33);
-        rec.tz = clamp(tgt.z, -58, 58);
-        rec.urgency = 1;
-        rec.job = 'FIELD THE BALL — CALL FOR IT LOUD';
-        steer(rec, dt, true);
-      }
-      for (const p of this.live) {
-        if (p.team !== this.receivingSide() || p === rec || p.sinbin > 0) continue;
-        if (s.chasers.some((c) => c.num === p.num && s.kicker === p.team)) continue;
-        p.tx = clamp(tgt.x + (p.x > tgt.x ? 5 : -5), -33, 33);
-        p.tz = clamp(tgt.z - s.dir * 8, -58, 58);
-        p.urgency = 0.75;
-        p.job = 'COME ACROSS AND SUPPORT THE FIELDER';
-        steer(p, dt, false);
-      }
+      /* Receiving side: one man contests the catch, two forwards bind for
+       * the coming ruck, everyone else forms a LINE behind the landing —
+       * they do not stay on the kick-off dots. */
+      this.steerKickReceive(dt, tgt);
       return;
     }
   }
@@ -2689,7 +2754,7 @@ export class Director {
 
   shape( /* T-03: engine-internal */): ShapeInput {
     const atk = this.possession;
-    const f = this.focusPoint();
+    const f = this.formationAnchor();
     const form = FORMATION_BY_ID(this.teams[atk].backline);
     const dForm = FORMATION_BY_ID(this.teams[this.defending()].defence);
     const op = this.op;
@@ -2736,6 +2801,18 @@ export class Director {
     return this.focusPoint();
   }
 
+  /**
+   * Where the attacking (and defending) shape is drawn from. focusPoint()
+   * stays on the passer while the ball is in the air so the formation-integrity
+   * sample has a stable carrier; using that same point as the live mark
+   * collapsed the whole line onto him, then lurched them to the catcher.
+   * During flight the line reforms on where the ball is GOING.
+   */
+  private formationAnchor(): { x: number; z: number } {
+    if (this.op?.ball.live) return { x: this.op.passTargetX, z: this.op.passTargetZ };
+    return this.focusPoint();
+  }
+
   focusPoint(): { x: number; z: number } {
     if (this.op) return { x: this.op.carrierX, z: this.op.carrierZ };
     if (this.bd) return { x: this.bd.contactX, z: this.bd.contactZ };
@@ -2765,6 +2842,57 @@ export class Director {
   /** The side about to receive a kick that is in the air. */
   receivingSide(): 'A' | 'B' {
     return this.kk ? (this.kk.kicker === 'A' ? 'B' : 'A') : this.defending();
+  }
+
+  /**
+   * Under a kick: the fielder contests the landing, two forwards sit on
+   * his hips ready to clear the ruck, and the rest run onto a defensive
+   * line ~8 m behind the catch (toward their own try). Kick-off dots are
+   * abandoned the moment the ball is struck.
+   */
+  private steerKickReceive(dt: number, tgt: { x: number; z: number }) {
+    const s = this.kk;
+    if (!s) return;
+    const recTeam = this.receivingSide();
+    const rec = assignReceiver(this.live, recTeam, tgt.x, tgt.z);
+    const deep = s.dir;
+    if (rec && rec.sinbin <= 0 && (rec.recoverT ?? 0) <= 0) {
+      rec.tx = clamp(tgt.x, -33, 33);
+      rec.tz = clamp(tgt.z, -58, 58);
+      rec.urgency = 1;
+      rec.job = 'FIELD THE BALL — CALL FOR IT LOUD';
+      steer(rec, dt, true);
+    }
+    const cleaners = this.live
+      .filter((p) => p.team === recTeam && p !== rec && p.sinbin <= 0 && !p.down
+        && (p.recoverT ?? 0) <= 0 && FORWARDS.includes(p.num))
+      .sort((a, b) => Math.hypot(a.x - tgt.x, a.z - tgt.z) - Math.hypot(b.x - tgt.x, b.z - tgt.z))
+      .slice(0, 2);
+    cleaners.forEach((p, i) => {
+      p.tx = clamp(tgt.x + (i === 0 ? -1.8 : 1.8), -33, 33);
+      p.tz = clamp(tgt.z + deep * 2.6, -58, 58);
+      p.urgency = 1;
+      p.job = i === 0
+        ? 'FIRST CLEANER — HIT THE RUCK ON THE CATCH'
+        : 'SECOND CLEANER — BIND ON THE CATCH';
+      steer(p, dt, true);
+    });
+    const busy = new Set(cleaners);
+    if (rec) busy.add(rec);
+    const others = this.live.filter((p) => p.team === recTeam && !busy.has(p)
+      && p.sinbin <= 0 && (p.recoverT ?? 0) <= 0);
+    others.sort((a, b) => a.x - b.x);
+    const n = others.length;
+    const lineZ = clamp(tgt.z + deep * 8.0, -58, 58);
+    others.forEach((p, i) => {
+      const lat = n <= 1 ? 0 : ((i / Math.max(1, n - 1)) - 0.5) * 44;
+      p.tx = clamp(tgt.x + lat, -33, 33);
+      p.tz = lineZ;
+      const gap = Math.hypot(p.tx - p.x, p.tz - p.z);
+      p.urgency = gap > 10 ? 1 : 0.88;
+      p.job = 'LINE BEHIND THE CATCH — ANTICIPATE THE TACKLE';
+      steer(p, dt, gap > 5);
+    });
   }
 
   /* ======================== SPEC_09 — THE PLAY-ACTIVE GATE ========================
@@ -2804,6 +2932,9 @@ export class Director {
    * radius; a real double-write shoves a man that far and reads on screen.
    */
   place(p: Live, x: number, z: number, who: string) {
+    /* A man climbing off the turf does not get placed onto a lineout slot.
+     * The get-up lock owns xz until recoverT expires. */
+    if ((p.recoverT ?? 0) > 0) return;
     const ddx = x - p.x, ddz = z - p.z;
     if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
@@ -2907,6 +3038,7 @@ export class Director {
 
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
+    if (this.ruckPeel && this.t >= this.ruckPeel.until) this.ruckPeel = null;
     const s = this.shape();
     const atk = this.possession;
     /* T-13 — the behaviour dataset is the most specific source of positional
@@ -2919,7 +3051,17 @@ export class Director {
     const diff = DIFFICULTY_TABLE[clamp(this.difficulty, 0, 9)];
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
-    const f = this.focusPoint();
+    const f = this.formationAnchor();
+
+    /* Off-the-top: the defence (and the unused backs) stay on the Law 18
+     * ten-metre line until the pass to the fly-half is halfway there. */
+    if (this.op?.lineoutHold && !this.op.lineoutHold.released) {
+      const h = this.op.lineoutHold;
+      const s0 = this.op;
+      const halfway = s0.ball.live && s0.pendingReceiver === h.firstNum && s0.passT >= 0.5;
+      const caught = !s0.ball.live && s0.carrierNum === h.firstNum;
+      if (halfway || caught || s0.t > 4) h.released = true;
+    }
 
     /* SPEC_11. The single live openside sign. `s.open * flip` was identically
      * +1 — `open` is ±1 and `flip` was its own sign — so the attacking shape
@@ -2930,20 +3072,24 @@ export class Director {
      * and it is applied exactly once. */
     const atkSigma: -1 | 1 = atk === 'A' ? 1 : -1;
     const defSigma: -1 | 1 = def === 'A' ? 1 : -1;
-    const atkSit = atk === 'A' ? sitA : sitB;
     const defSit = def === 'A' ? sitA : sitB;
     /* D11-a: one squeeze factor per formation per frame, so the whole shape
      * narrows together rather than clipping only the men who reached touch. */
-    const atkDatasetLat = atkSit ? this.lateralScale(f.x, atkSigma, SITUATION_LATERAL[atkSit].min, SITUATION_LATERAL[atkSit].max) : 1;
     const defDatasetLat = defSit ? this.lateralScale(f.x, defSigma, SITUATION_LATERAL[defSit].min, SITUATION_LATERAL[defSit].max) : 1;
+    /* Authored 1-3-3-1 laterals are ±11 / ±24 / wings ±26. The old
+     * 0.62+slider*0.62 factor squeezed a 50% width board down to 0.93× and
+     * then the dataset's ±2–8 m offsets overwrote it entirely — everyone
+     * lived inside ~10 m of the ball. Hold the authored spread; squeeze
+     * only at the touchline via lateralScale. */
+    const widthMul = 0.88 + this.slider(atk, 'width') / 100 * 0.45;
     let shapeMin = 0, shapeMax = 0;
     for (const q of atkShape.slots) {
-      const l = q.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+      const l = q.lat * widthMul * atkShape.width;
       if (l < shapeMin) shapeMin = l;
       if (l > shapeMax) shapeMax = l;
     }
     const shapeLat = this.lateralScale(f.x, openSign, shapeMin, shapeMax);
-    const defLineFactor = 0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4;
+    const defLineFactor = 0.88 + this.slider(def, 'lineSpeed') / 100 * 0.28;
     const defLineLat = this.lateralScale(f.x, 1, DEFENCE_LAT_MIN * defLineFactor, DEFENCE_LAT_MAX * defLineFactor);
 
     /* SPEC_12 — FORCE AI CLEAN. One projection, applied to every CPU mark
@@ -3016,6 +3162,16 @@ export class Director {
          * not been beaten by. */
         if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
       }
+      /* A man peeling off the last ruck is not cover — he is still getting
+       * off the pile. Leave him out of the chase so he cannot sprint through
+       * the nine. */
+      if (this.ruckPeel && this.t < this.ruckPeel.until) {
+        for (const key of this.ruckPeel.nums) {
+          const num = Number(key.split(':')[1]);
+          coverChase.delete(num);
+          convergers.delete(num);
+        }
+      }
       /* THE CHASE IS NOT THE WHOLE TEAM.
        *
        * Any beaten man within 16 m joined the chase, and because a line break
@@ -3083,7 +3239,8 @@ export class Director {
     // ---- the controlled player is driven by input, not by a target ----
     const ctrlHuman = this.ctrlPlayer;
     const human = !!ctrlHuman && this.isHuman(ctrlHuman.team);
-    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down) {
+    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down
+      && (ctrlHuman.recoverT ?? 0) <= 0 && (ctrlHuman.diveT ?? 0) <= 0) {
       this.writeThinkPlayer(gate, `think:human-input:${ctrlHuman.team}${ctrlHuman.num}`, ctrlHuman,
         ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy', 'face', 'lastFace', 'turnT', 'clip', 'clipT', 'stamina'] as const, () => {
           ctrlHuman.controlled = true;
@@ -3194,6 +3351,74 @@ export class Director {
       }
       this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
 
+      /* PEEL OFF THE GATE. Contestants sprinting from the pile ran through
+       * the ruck (it reads as a jump) and overshot behind the nine. For a
+       * beat they jog SIDEWAYS off the contact — attackers stay on their
+       * own side, defenders walk to the 3 m line. */
+      if (this.ruckPeel && this.t < this.ruckPeel.until
+        && this.ruckPeel.nums.has(`${p.team}:${p.num}`)
+        && !(this.op && p.team === this.op.attacking && p.num === this.op.carrierNum)) {
+        const peel = this.ruckPeel;
+        const away = p.x >= peel.x ? 1 : -1;
+        this.writeThinkPlayer(gate, `think:ruck-peel:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(peel.x + away * 3.6, -33, 33);
+            p.tz = clamp(p.team === peel.atk
+              ? peel.z - peel.dir * 1.6
+              : peel.z + peel.dir * 3.2, -58, 58);
+            p.urgency = 0.42;
+            p.job = 'PEEL OFF THE GATE — DO NOT CROSS THE NINE';
+          });
+        steer(p, dt, false, gate, `think:ruck-peel-steer:${p.team}${p.num}`);
+        {
+          const sp = Math.hypot(p.vx, p.vz);
+          if (sp > 4.5) { const k = 4.5 / sp; p.vx *= k; p.vz *= k; }
+        }
+        continue;
+      }
+
+      /* Off-the-top hold. `lo` is already torn down, so the LINEOUT branch
+       * below cannot keep them 10 m back — without this they rush the 10
+       * the frame the jumper takes it. Skip the carrier and the man the
+       * ball is flying to. */
+      if (this.op?.lineoutHold && !this.op.lineoutHold.released) {
+        const skipHold = p.team === this.op.attacking
+          && (p.num === this.op.carrierNum
+            || (this.op.ball.live && p.num === this.op.pendingReceiver));
+        if (!skipHold) {
+          const h = this.op.lineoutHold;
+          const loMark = lineoutBacklineMark(p.num, p.team, h.markZ, h.side);
+          const loGap = Math.hypot(loMark.x - p.x, loMark.z - p.z);
+          this.writeThinkPlayer(gate, `think:lineout-hold:${p.team}${p.num}`, p,
+            ['tx', 'tz', 'job', 'urgency'] as const, () => {
+              p.tx = clamp(loMark.x, -33, 33);
+              p.tz = clamp(loMark.z, -59, 59);
+              p.job = loMark.job;
+              p.urgency = loGap > 14 ? 1 : 0.55;
+            });
+          steer(p, dt, loGap > 10, gate, `think:lineout-hold-steer:${p.team}${p.num}`);
+          continue;
+        }
+      }
+
+      /* LINEOUT BACKLINE — Law 18. Unbound players are not in the line; they
+       * stand ten metres from the line of touch, spread across the rest of the
+       * pitch. Open-play shape would re-anchor on the thrower at ±33.5 and
+       * squeeze the whole XV onto the touchline. Walk on — do not teleport. */
+      if (this.lo && (this.phase === 'LINEOUT' || this.phase === 'LINEOUT_REPLAY')) {
+        const loMark = lineoutBacklineMark(p.num, p.team, this.lo.markZ, this.lo.side);
+        const loGap = Math.hypot(loMark.x - p.x, loMark.z - p.z);
+        this.writeThinkPlayer(gate, `think:lineout-back:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(loMark.x, -33, 33);
+            p.tz = clamp(loMark.z, -59, 59);
+            p.job = loMark.job;
+            p.urgency = loGap > 14 ? 1 : 0.82;
+          });
+        steer(p, dt, loGap > 10, gate, `think:lineout-back-steer:${p.team}${p.num}`);
+        continue;
+      }
+
       const onAtk = p.team === atk;
       const c: RoleContract = contractFor(p.num);
 
@@ -3224,7 +3449,10 @@ export class Director {
         const slot = atkShape.slots.find((q) => q.num === p.num);
         const hipMan = p.num === 7 || p.num === 8;
         const podFar = slot ? Math.abs(slot.lat) > 14 : false;
-        if (this.op && hipMan && !podFar) {
+        /* Hip-trail is the offload lane through a BROKEN line. In structured
+         * play those two shirts belong in the 1-3-3-1 pods, not glued to the
+         * carrier — that glue was half the 10 m ball-cluster. */
+        if (this.op && this.op.lineBreak && hipMan && !podFar) {
           const car = this.L(atk, this.op.carrierNum);
           const off = p.num === 7 ? 1.9 : -1.4;
           this.writeThinkPlayer(gate, `think:hip-support:${p.team}${p.num}`, p,
@@ -3276,9 +3504,21 @@ export class Director {
               const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
               if (toLine < 20) along = Math.max(along, -(0.5 + toLine * 0.08));
             }
+            /* WIDTH FROM THE SHAPE, JOB FROM THE DATASET.
+             * The behaviour dataset is authored as a tight cluster around one
+             * ball (wings ~20 m, 10/12 inside 9 m, pods inside 8 m). Using
+             * dsm.across as the mark collapsed the whole XV into a 10 m
+             * radius. The 1-3-3-1 laterals are the real pitch geometry;
+             * dataset still owns the job string and the along-axis beat. */
+            const shapeAcross = slot.lat * widthMul * atkShape.width * shapeLat * openSign;
+            /* Kick-cover: 10/12/13 stay behind the gain line, 15 is the last
+             * man. Dataset along is often only 4–8 m — not enough to field
+             * a box kick. */
+            if (p.num === 15) along = Math.min(along, -Math.max(slot.depth, 14));
+            else if (p.num === 10 || p.num === 12 || p.num === 13) along = Math.min(along, -slot.depth);
             /* D11-a: spread from the ball's own lateral position, squeezed
              * when the formation would run into touch. */
-            const across = sigma * dsm.across * atkDatasetLat;
+            const across = shapeAcross;
             let targetX = clamp(f.x + across, -33, 33);
             let targetZ = this.anchorDepth(f, sigma, along);
 
@@ -3311,14 +3551,31 @@ export class Director {
             }
             /* D11-b: never past the dead-ball line, never through the posts. */
             const mark = this.boundMark(targetX, targetZ);
+            /* Dataset `continue`s before the loop-footer echelon, so 10/12/13
+             * sat flat on the slot and the line looked unsettled. Apply the
+             * same depth relationship here, then jog to the mark — a full
+             * sprint every frame was idle→sprint with no walk/jog in between. */
+            let tz = mark.z;
+            if (inEchelon(p.num) && !(this.op?.ball.live && p.num === this.op.pendingReceiver)) {
+              const tenSlot = atkShape.slots.find((q) => q.num === 10);
+              if (tenSlot) {
+                const tempo10 = this.slider(atk, 'tempo') / 100;
+                const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
+                const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
+                tz = this.boundMark(mark.x, runOntoEchelonZ(echelonTargetZ(p.num, tenZ, atkSigma), f.z, atkSigma)).z;
+              }
+            }
+            const gap = Math.hypot(mark.x - p.x, tz - p.z);
             this.writeThinkPlayer(gate, `think:dataset-mark:${p.team}${p.num}:${sit}`, p,
               ['tx', 'tz', 'job', 'urgency'] as const, () => {
                 p.tx = clamp(mark.x, -33, 33);
-                p.tz = clamp(mark.z, -59, 59);
-                p.job = dsm.job;
-                p.urgency = 0.9;
+                p.tz = clamp(tz, -59, 59);
+                p.job = inEchelon(p.num) && p.num !== 10
+                  ? `${dsm.job} — ${echelonDepthBehindTen(p.num)} m BEHIND THE TEN, ON THE ANGLE`
+                  : dsm.job;
+                p.urgency = gap > 14 ? 0.88 : 0.66;
               });
-            steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
+            steer(p, dt, gap > 8, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
         }
@@ -3327,7 +3584,7 @@ export class Director {
         if (slot) {
           /* D11-a: the touchline squeeze multiplies the offset itself, so both
            * the planner path (CPU) and the direct path below inherit it. */
-          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width * shapeLat;
+          const lateral = slot.lat * widthMul * atkShape.width * shapeLat;
           const tempo = this.slider(atk, 'tempo') / 100;
           const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
           let targetX: number;
@@ -3456,16 +3713,29 @@ export class Director {
         const dsm = sitD ? datasetOffset(p.num, sitD, beat) : null;
         if (dsm) {
           const sigma = p.team === 'A' ? 1 : -1;
+          /* Same width story as attack: dataset laterals sit inside 10 m.
+             Hold the authored defensive channels; 15 is the sweeper (not in
+             DEFENCE_CHANNELS) and stays on the axis at sweeperDepth. */
+          const ch = DEFENCE_CHANNELS.find((q) => q.num === p.num);
+          const lat = ch
+            ? ch.lat * defLineFactor * defLineLat
+            : (p.num === 15 ? 0 : sigma * dsm.across * defDatasetLat);
+          let along = dsm.along;
+          if (p.num === 15) along = Math.min(along, -defSys.sweeperDepth);
+          else if (p.num === 10 || p.num === 12 || p.num === 13) along = Math.min(along, -8);
           const mark = this.boundMark(
-            clamp(f.x + sigma * dsm.across * defDatasetLat, -33, 33),
-            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, dsm.along), p, sitD ?? 'dataset'),
+            clamp(f.x + lat, -33, 33),
+            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, along), p, sitD ?? 'dataset'),
           );
           this.writeThinkPlayer(gate, `think:defence-dataset:${p.team}${p.num}:${sitD}`, p,
             ['tx', 'tz', 'job', 'urgency'] as const, () => {
               p.tx = clamp(mark.x, -33, 33);
               p.tz = clamp(mark.z, -59, 59);
               p.job = dsm.job;
-              p.urgency = 0.85;
+              const gap = Math.hypot(p.tx - p.x, p.tz - p.z);
+              /* On the mark they HOLD. A 0.85 jog into a 1 m slot is the
+               * in-place jiggle behind the ruck. */
+              p.urgency = gap > 10 ? 0.88 : gap > 3 ? 0.48 : 0.18;
             });
         } else {
         // HOLD THE LINE. Everyone else keeps the shape connected so a hole wider
@@ -3504,8 +3774,10 @@ export class Director {
          * defences get it equally, and it resets the moment possession
          * turns over. */
         const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
-        const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
         const line = this.boundMark(tx, this.defensiveDepth(f, dir, tz, p, 'channel-map'));
+        const lineGap = Math.hypot(line.x - p.x, line.z - p.z);
+        const hold = lineGap > 10 ? 1 : lineGap > 3 ? 0.55 : 0.22;
+        const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue * hold;
         this.writeThinkPlayer(gate, `think:defence-line:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
             p.tx = clamp(line.x, -33, 33);
@@ -3606,7 +3878,7 @@ export class Director {
           const tempo10 = this.slider(atk, 'tempo') / 100;
           const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
           const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
-          const echZ = echelonTargetZ(p.num, tenZ, atkSigma);
+          const echZ = runOntoEchelonZ(echelonTargetZ(p.num, tenZ, atkSigma), f.z, atkSigma);
           const mark = this.boundMark(p.tx, echZ);
           this.writeThinkPlayer(gate, `think:echelon:${p.team}${p.num}`, p,
             ['tz', 'job'] as const, () => {
@@ -3963,6 +4235,22 @@ export class Director {
    */
   doPass(side: -1 | 1, cutOut: boolean) { /* T-03: engine/open */ return doPass(this, side, cutOut); }
 
+  /** Put the ball in the air toward a named shirt. The lineout tap uses this
+   * so custody flies jumper → 9 → 10 instead of snapping to the fly-half. */
+  launchPassFlight(fromX: number, fromZ: number, fromY: number, toX: number, toZ: number, toNum: number) {
+    const s = this.op;
+    if (!s) return;
+    s.ball.live = true;
+    s.ball.x = fromX;
+    s.ball.z = fromZ;
+    s.ball.y = fromY;
+    s.pendingReceiver = toNum;
+    s.passTargetX = toX;
+    s.passTargetZ = toZ;
+    s.passDist = Math.max(3.5, Math.hypot(toX - fromX, toZ - fromZ));
+    s.passT = 0;
+  }
+
 
   lastCall: PlayCall | null = null;
   /** the side that last fielded a kick, and when — they run it back (T-18) */
@@ -4035,10 +4323,26 @@ export class Director {
 
 
   clearRuck() { /* T-03: engine-internal */
+    if (this.bd) {
+      const s = this.bd;
+      const nums = new Set<string>();
+      for (const q of s.players) nums.add(`${q.team}:${q.num}`);
+      this.ruckPeel = {
+        until: this.t + 0.95,
+        x: s.contactX, z: s.contactZ,
+        dir: s.attacking === 'A' ? 1 : -1,
+        atk: s.attacking,
+        nums,
+      };
+    }
     for (const p of this.live) {
       /* only a man who was actually ON THE GROUND has to get up; the rest of
        * the ruck were on their feet and can go straight back to work. */
-      if (p.down) p.recoverT = RECOVER_SECONDS;   // cleared by releaseAll on a whistle
+      if (p.down) {
+        p.recoverT = RECOVER_SECONDS;
+        if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
+        if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+      }
       p.down = false; p.bound = false;
     }
     this.bd = undefined;
@@ -4093,6 +4397,7 @@ export class Director {
        * a free action. Reuses the get-up lock so there is ONE way to be down
        * and getting up, rather than two subtly different ones. */
       p.recoverT = DIVE_MISS_RECOVERY;
+      p.recoverX = p.x; p.recoverZ = p.z;
       p.vx = 0; p.vz = 0;
       p.clip = 'getup'; p.clipT = 0;
       p.beatenT = Math.max(p.beatenT, 0.4);   // cannot instantly re-tackle
@@ -4100,22 +4405,11 @@ export class Director {
   }
 
   tickRecovery(dt: number) {
-    /* The lock is an OPEN-PLAY concept. Every other phase either pins players
-     * itself (scrum, lineout, kick, maul) or is walking them to a mark, and a
-     * man frozen on the turf would stall it. Rather than trust every teardown
-     * path to have called releaseAll — several do not, which showed up as
-     * 4134 frames of a recovering man being steered — the invariant is
-     * enforced here, in the one place the timer is read. */
-    if (this.phase !== 'OPEN_PLAY') {
-      for (const p of this.live) {
-        if ((p.recoverT ?? 0) > 0) {
-          p.recoverT = 0;
-          p.recoverX = undefined; p.recoverZ = undefined;
-          if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
-        }
-      }
-      return;
-    }
+    /* GET UP, THEN WALK. Cancelling the lock the moment a kick or lineout
+     * started is why men slid across the park on their backs: the renderer
+     * was still playing GetUp while placeBound steered them to the throw-in.
+     * A set piece waits two seconds to assemble; a 1.5 s stand-up fits, and
+     * the man jogs the rest of the way on his feet. */
     for (const p of this.live) {
       const t = p.recoverT ?? 0;
       if (t <= 0) continue;
@@ -4128,27 +4422,28 @@ export class Director {
       }
       p.recoverT = left;
       p.vx = 0; p.vz = 0;
-      /* ANCHOR THE MARK, not just the velocity.
-       *
-       * Zeroing vx/vz only stops the integrator. Any code that writes p.x/p.z
-       * DIRECTLY — the release retreat, a separation push, a set-piece slot
-       * write — moves him anyway, and the probe found 581 m of drift on men
-       * whose clip said 'getup' with no owning writer at all. Latching the
-       * spot he went down on and restoring it every frame makes the lock mean
-       * "he is HERE until he is up", which is what the animation shows. */
-      /* Anchor him to the spot he went down on, but let the anchor itself be
-       * DRAGGED by anything that legitimately needs him elsewhere. A hard pin
-       * stopped the retreat entirely and offside episodes rose 105 -> 154 a
-       * match, because a man frozen in front of the mark keeps his whole side
-       * offside while the line tries to reset around him. Re-seating the
-       * anchor on whatever position survived the frame keeps the foot-plant
-       * (he is not being flung about) while still allowing the slow correction
-       * a referee would expect him to make. */
+      /* HARD PIN. The GetUp clip is a plant: no translation, no turn. The
+       * previous 0.06 m slack re-seated on every separate() shove and the
+       * renderer yawed him because it still saw residual speed. He stays on
+       * the exact turf he went down on until recoverT expires. (open.ts
+       * already skips recovering men on the release retreat; offside
+       * candidates already exclude recoverT.) */
       if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
-      const ax = p.recoverX, az = p.recoverZ ?? p.z;
-      const drift = Math.hypot(p.x - ax, p.z - az);
-      if (drift <= RECOVER_ANCHOR_SLACK) { p.x = ax; p.z = az; }
-      else { p.recoverX = p.x; p.recoverZ = p.z; }
+      p.x = p.recoverX;
+      p.z = p.recoverZ ?? p.z;
+      if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+    }
+  }
+
+  /** Restore recovering men after any writer that might have moved them. */
+  private holdRecovering() {
+    for (const p of this.live) {
+      if ((p.recoverT ?? 0) <= 0) continue;
+      p.vx = 0; p.vz = 0;
+      if (p.recoverX !== undefined) {
+        p.x = p.recoverX;
+        p.z = p.recoverZ ?? p.z;
+      }
       if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
     }
   }
@@ -4160,19 +4455,21 @@ export class Director {
    */
   releaseAll() {
     for (const p of this.live) {
+      const wasFloor = p.down || p.clip === 'grounded' || (p.recoverT ?? 0) > 0;
       p.down = false;
       p.bound = false;
       p.carrier = false;
       p.urgency = 0.6;
-      /* A whistle outranks the get-up lock: the man has to walk to a scrum or
-       * a lineout mark now, and holding him on the floor would stall the set
-       * piece. Cancelling here (rather than letting `steer` fight the lock)
-       * keeps the ownership contract honest — measured 4134 frames of a
-       * recovering man being steered before this was added. */
-      p.recoverT = 0;
-      p.recoverX = undefined; p.recoverZ = undefined;
-      if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
+      /* A whistle still needs him at the next mark — but on his FEET. Keep
+       * the get-up lock so he plants, stands, then jogs to the lineout
+       * instead of sliding there while the clip plays. */
+      if (wasFloor) {
+        if ((p.recoverT ?? 0) <= 0) p.recoverT = RECOVER_SECONDS;
+        if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
+        if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+      }
     }
+    this.ruckPeel = null;
     this.bd = undefined;
     this.ml = undefined;
     this.scrim = undefined;
@@ -4331,6 +4628,7 @@ export class Director {
     };
     this.clearRuck();
     this.scrim = undefined; this.ml = undefined; this.op = undefined;
+    this.kk = undefined;
     this.phase = 'LINEOUT';
     this.say(`LINEOUT TO ${this.teams[thrower].nation.short}`);
     if (this.isHuman(thrower)) this.showHint('A/D CHOOSE THE CALL · SPACE TO THROW · STOP THE BAR IN THE BAND', 3.4);

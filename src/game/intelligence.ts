@@ -151,6 +151,20 @@ export function steer(
    * invoked from Director.think(). Other phase callers retain the zero-cost
    * three-argument path. */
   const gateBefore = reportGate ? snapshotForwardAttackPlayer(p) : undefined;
+  if ((p.recoverT ?? 0) > 0) {
+    /* GET-UP LOCK. Zero velocity, hold xz, keep GetUp, do not turn, do not
+     * integrate. think() already continues recovering men; this is the
+     * belt for placeBound/open callers that still invoke steer. */
+    p.vx = 0; p.vz = 0;
+    if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+    else p.clipT += dt;
+    if (reportGate && gateBefore) {
+      for (const gate of forwardAttackPlayerWriteFailures(gateLabel, gateBefore, snapshotForwardAttackPlayer(p), [
+        'vx', 'vz', 'clip', 'clipT',
+      ] as const)) reportGate(gate);
+    }
+    return;
+  }
   const dx = p.tx - p.x, dz = p.tz - p.z;
   const dist = Math.hypot(dx, dz);
   const want = maxSpeed(p, p.carrier, sprint, p.stamina) * p.urgency;
@@ -215,7 +229,9 @@ export function steer(
   let clip = p.clip;
   let clipSpeed = 0;
   if (p.down) clip = 'grounded';
-  else if (p.clip === 'dive' && p.clipT < 0.5) {
+  else if ((p.recoverT ?? 0) > 0) {
+    clip = 'getup';
+  } else if (p.clip === 'dive' && p.clipT < 0.5) {
     /* LATCH-AND-DRAG (Part 3): the committed dive is a one-shot and the gait
      * picker must not stomp it. It used to be overwritten on the very next
      * frame — the human-input branch in Director had its own guard for
@@ -324,6 +340,13 @@ export function separate(
       if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
         || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
+      /* GET-UP LOCK. A shove on a man climbing off the turf both slides him
+       * and (via the renderer's spd>2.2 heading) turns him mid-rise. */
+      if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+      /* Bound ruck/set-piece men are owned by placeBound. Shoving a jackal
+       * off the ball (or a cleaner off the gate) is the in-place jitter. */
+      if (a.bound || b.bound) continue;
+
       /* T-04. Opposing players must not run through one another. Two cases:
        *
        * TEAM-MATES — the existing rule. The carrier has right of way; his own
@@ -411,10 +434,10 @@ export function attackMark(num: number, s: ShapeInput): { x: number; z: number; 
   const c = contractFor(num);
   const lat = (c.lateral[s.phase] ?? 0);
   const dep = (c.depth[s.phase] ?? 4);
-  const wide = 0.55 + s.width * 0.7;
+  const wide = 0.85 + s.width * 0.5;
   let x = s.ballX + lat * s.open * wide;
   // hard channel clamps per unit — the fix for props at fly-half
-  if (FORWARDS.includes(num)) x = s.ballX + clamp(x - s.ballX, -8, 8);
+  if (FORWARDS.includes(num)) x = s.ballX + clamp(x - s.ballX, -24, 24);
   else if (num !== 15) x = s.ballX + clamp(x - s.ballX, -25, 25);
   else x = s.ballX + clamp(x - s.ballX, -18, 18);
   x = clamp(x, -33, 33);
@@ -711,11 +734,12 @@ export function passOptions(
     const side: -1 | 1 = rel >= 0 ? 1 : -1;
     const absRel = Math.abs(rel);
     if (absRel < 0.4) continue;
-    // a pass is only offered to a man who is roughly level or ahead
+    // a pass is only offered to a man who is roughly level or behind
     // T-18: support legitimately trails the carrier by up to 10 m (that is
     // what depth IS) — the old 6 m cutoff removed the receivers a moving
     // attack actually has, and the CPU had nobody to pass to.
-    if ((m.z - carrier.z) * atkDir < -10) continue;
+    const recAlong = (m.z - carrier.z) * atkDir;
+    if (recAlong < -10) continue;
     const dist = Math.hypot(m.x - carrier.x, m.z - carrier.z);
     // HARD CLAMP: a pass can never exceed the widest eligible receiver
     if (dist > 26) continue;
@@ -752,8 +776,13 @@ export function passOptions(
      * law he cannot learn, and a referee who never blows is not a referee.
      * `forwardContext` is exactly the CPU flag — it is only passed for a
      * CPU-driven side — so the two behaviours fall out of the existing
-     * structure rather than a second option. */
-    if (forwardContext?.enabled && aimRel > PASS_FORWARD_EPSILON) {
+     * structure rather than a second option.
+     *
+     * A man clearly in front of the thrower is a forward pass on the grass
+     * even when the thrower's own sprint makes the relative-velocity test
+     * legal — that is the "massive forward" the player sees. */
+    const aimAlong = (aim.z - carrier.z) * atkDir;
+    if (forwardContext?.enabled && (aimRel > PASS_FORWARD_EPSILON || recAlong > 0.75 || aimAlong > 1.2)) {
       forwardContext?.noteRejection?.(m.num, aimRel);
       continue;
     }
