@@ -172,6 +172,24 @@ const GATES: Gate[] = [
     budget: 240,
   },
   {
+    /* FORWARD PACK — both scrum harnesses are IN THE VERDICT now. They were
+     * written as the measurement for the bind/collapse work, and an assertion a
+     * reviewer never runs is an assertion that rots: the orphan sweep in this file
+     * is the repo telling me so. `bindprobe` loads the shipped GLB and poses it for
+     * real, so it is the only check in the tree that can catch a bone write that
+     * typechecks beautifully and draws a man with his arms behind him. */
+    id: 'bindprobe', file: 'bindprobe',
+    asks: 'the scrum on the shipped rig: 32 grips on the anatomy, hips on the published height, the collapse drawn to the deck, and the pose handed BACK to the animation when the whistle blows',
+    cmd: [...VN, 'scripts/bindprobe.ts'],
+    budget: 150,
+  },
+  {
+    id: 'anticipationprobe', file: 'anticipationprobe',
+    asks: 'the proactive-steering cone measured A/B against the reactive baseline — and, since it did not win on every seed, that it still ships switched off',
+    cmd: [...VN, 'scripts/anticipationprobe.ts'],
+    budget: 240,
+  },
+  {
     id: 'audit',
     asks: 'the rule audit: LAW / UX / LOGIC failures across a real 120 s match',
     cmd: [...VN, 'scripts/audit-cli.ts', '120', '3', '1'], file: 'audit-cli',

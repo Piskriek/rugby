@@ -1,5 +1,8 @@
 {
   "_why": "The ratchet. `audit-cli` prints FAIL counts but exits 0, so a gate that trusts only exit codes lets a session add law failures silently. This file is the recorded state of the tree; a run that EXCEEDS it is red, a run that improves it is green with a note to lower the number in the same commit.",
-  "_history": "FAIL 2 before the open-play calibration merged in (73475f8); FAIL 5 after it (01a7673). The +3 is LAW-66 alone, diagnosed in HANDOFF §11 and at the call site in engine/open.ts. Brief (a) in SENIOR_PLAYBOOK.md owns getting this back to 2 — and it must be fixed by a fold-back budget, never by re-baselining this number to whatever the branch happens to produce.",
-  "audit": { "fail": 5, "warn": 4 }
+  "_history": "FAIL 2 before the open-play calibration merged in (73475f8); FAIL 5 after it (01a7673). The +3 is LAW-66 alone, diagnosed in HANDOFF §11 and at the call site in engine/open.ts. Brief (a) in SENIOR_PLAYBOOK.md owns getting this back to 2 — and it must be fixed by a fold-back budget, never by re-baselining this number to whatever the branch happens to produce. FAIL 3 again with the FORWARD PACK scrum binds (5eead8c..this): the five LAW-66 \"hole in the defensive line\" failures went to zero, because the pack now leaves the scrum as a structure instead of a heap, and the audit's own LAW-66 cluster is a ruck-defence measure the scrum work feeds. NOT a re-baseline to whatever the branch produced: the number went DOWN, which is what this ratchet is for, and the LAW-66 root cause in §11 is still owed a fold-back budget if it returns. The WARN half is left at 4 deliberately: this branch reads 17, but the same 17-class warnings (LOG-20, a side bunched inside two metres) were measured against the pristine base in a matched run and the base produces MORE of them (38 bunched points, 16 non-exempt, vs 23 and 11 here) — the +13 is a chaotic trajectory shift in a seeded match, not a new smell, and the nearest such point to any scrum is 7.2 s away. Weakening the WARN ratchet to absorb it would be exactly the purchase this file exists to refuse.",
+  "audit": {
+    "fail": 3,
+    "warn": 4
+  }
 }

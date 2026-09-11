@@ -76,6 +76,7 @@ import {
   scrumBindProfile, frontRowStability,
   LINEOUT_LINE_THROWING, LINEOUT_LINE_DEFENDING, lineoutRole, ROUTE_FIELD_HALF_M,
   type PackContext, type PackMark,
+  bindSag,
 } from './engine/forwardPack';
 import {
   evaluateBacklineTree, kickPoseOf, nineBaseZ, nineBaseX,
@@ -101,7 +102,11 @@ import { sampleSlot, planSlotOf } from './engine/breakdownPlan';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY, findAerialChallenge } from './engine/latch';
 import { aerialLandingMark, isAirborne, AERIAL_STANDING_REACH_M } from './engine/approach';
-import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
+import {
+  isGoalKickState, goalKickMark, scrumFaceSign,
+  scrumHipY, STANDING_PELVIS_Y, SCRUM_COLLAPSE, scrumBindSockets, scrumNineDepth,
+  SCRUM_COMPRESSION_FROM, type BindBody,
+} from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen, pendulumMark } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, doPassToNum as throwPassToNum, cpuCarrier } from './engine/open';
 import { LatchSystem } from './engine/latch';
@@ -156,6 +161,13 @@ export interface Actor {
   aiming?: boolean; aimX?: number; aimY?: number; aimZ?: number;
   /** Vertical jump offset, logical metres above the turf. */
   ry?: number;
+  /** FORWARD PACK — the scrum pose, streamed from Live by syncActors: the
+   *  published pelvis height this man is holding, his two bind grips and how
+   *  far he has folded. See Live's mirror of these fields. */
+  hipY?: number;
+  collapseW?: number;
+  bindLX?: number; bindLY?: number; bindLZ?: number; bindLW?: number;
+  bindRX?: number; bindRY?: number; bindRZ?: number; bindRW?: number;
   /** INTENT-GAZE-TELEGRAPH CHANNEL (INNOVATION 2, M-4 / WS21 keystone).
    * The MIND writes these; the BODY renders them; the OPPONENT's mind reads
    * them; the CAMERA frames them. Optional and additive: consumers that do not
@@ -189,7 +201,7 @@ export interface ScrumSlot { num: number; team: 'A' | 'B'; x: number; z: number;
 
 export interface ScrumState {
   t: number;
-  stage: 'ASSEMBLE' | 'MARK' | 'FORM' | 'CROUCH' | 'BIND' | 'SET' | 'ENGAGE' | 'STEADY' | 'FEED' | 'STRIKE' | 'DRIVE' | 'BASE' | 'OUT' | 'DONE';
+  stage: 'ASSEMBLE' | 'MARK' | 'FORM' | 'CROUCH' | 'BIND' | 'SET' | 'ENGAGE' | 'STEADY' | 'FEED' | 'STRIKE' | 'DRIVE' | 'BASE' | 'OUT' | 'DONE' | 'COLLAPSE';
   outcome: string;
   feed: 'A' | 'B';
   players: ScrumSlot[];
@@ -206,6 +218,46 @@ export interface ScrumState {
   /** FORWARD PACK — 0..1, how bound and how low the two front rows are this
    *  frame (engine/forwardPack.ts). Written by placeBound, read by upScrum. */
   frontRowStability?: number;
+  /** THE CADENCE POSE — 0..1, how bound the pack is on screen, read off the one
+   *  authored stage timeline (behaviour/setpiece-overrides). Written every
+   *  frame by upScrum; placeBound resolves the hands against it, and the
+   *  renderer never has to guess where in crouch → bind → set it is standing. */
+  bindPose: number;
+  /** FORWARD PACK — each slot's last published pelvis height, held across the
+   *  collapse. See `hipHold` in placeBound. */
+  hipHold: number[];
+  /** THE DRIVE SHEAR — degrees the winning pack's drive vector makes with the
+   *  tunnel axis, and how long it has been over the law's tolerance. Both are
+   *  what decides a collapse instead of a dice roll (see upScrum's collapse). */
+  shearDeg: number; shearT: number;
+  /** The LOWEST published hip height in either front row, metres above the
+   *  turf, as placeBound measured it this frame. UpScrum compares it with the
+   *  authored floor to decide whether a pack has come down on its own bind. */
+  frontRowHipY?: number;
+  /** WHICH OF THE SIXTEEN HAVE EVER HELD A BIND (one per `players` slot, 0/1).
+   *  This is the difference between a collapsed scrum and a slow one. A
+   *  front-rower 0.92 m off his seat at ENGAGE — which is what ten authored
+   *  scrums measured before this was written — is a man still walking into the
+   *  pack, and he holds his height. A front-rower 0.92 m off his seat who WAS
+   *  bound and is no longer is a pack that has come apart, and he does not. */
+  bindHeld: number[];
+  /** Whether this slot's scrum pose is LIVE this frame (one per `players`
+   *  slot). A forward who has never made his bind is a man jogging to a mark,
+   *  not a man in a crouch: he publishes no sag, no grip and no collapse, and
+   *  he does not count toward the front row's hip floor. Without this gate the
+   *  pose measured a pack still 40 m upfield as a pack on the deck. */
+  poseLive: number[];
+  /** Seconds either front row has spent with its hips under the authored floor.
+   *  The floor has to be HELD, like the shear, or a single settled frame drops
+   *  a scrum. */
+  hipT: number;
+  /** THE COLLAPSE. `collapseSeen` latches for the life of the scrum — it is the
+   *  flag the probes assert, and it is deliberately not cleared by the
+   *  teardown, so a fold that happened is a fold a test can still find after
+   *  the phase has moved on. `collapseBlend` is the renderer's 0..1 fold. */
+  collapseBlend: number;
+  collapseSeen: boolean;
+  collapse?: { team: 'A' | 'B'; why: string; shearDeg: number; hipY: number; offenderNum: number };
 }
 
 export interface LineoutState {
@@ -890,6 +942,11 @@ const CHAOS_ALLY_FAN = [
 ];
 
 /* ============================ DIRECTOR ============================ */
+
+/** FORWARD PACK — how fast a published hip height may move, m/s. Bodies, not
+ *  switches: a man who is a metre off his mark at SET drops into his crouch at
+ *  this rate instead of teleporting into it. See `placeBound`. */
+const SCRUM_HIP_RATE = 1.5;
 
 export class Director {
   t = 0;
@@ -3324,6 +3381,14 @@ export class Director {
    */
   tryLock: { at: number; team: 'A' | 'B'; num: number } | null = null;
   tryGuardBlocks = 0;
+  /** SPEC_07 C6 — the OTHER writer of `tryGuardLog`. Grounding clamps are notes,
+   *  not guard blocks, and until now they shared the log with no counter of
+   *  their own: `tryGuardBlocks !== tryGuardLog.length` was therefore TRUE for
+   *  any match where a spot got corrected, which is how C6 came to fail one run
+   *  and pass the next on an unseeded harness. One counter per writer, so the
+   *  parity the panel's own comment promises ("counted here AND surfaced") is
+   *  actually checkable. */
+  tryGroundingClamps = 0;
   tryGuardLog: string[] = [];
 
   /* SPEC_07 — the locked-in touchdown coordinate (x_try, z_try) of the last
@@ -3347,6 +3412,7 @@ export class Director {
    * unexplained conversion line, which is worse than the note. */
   private noteTryGroundingClamp(rawX: number, rawZ: number, x: number, z: number) {
     const line = `${this.clockText} — TRY spot corrected from (${rawX.toFixed(1)}, ${rawZ.toFixed(1)}) onto the in-goal bounds (${x.toFixed(1)}, ${z.toFixed(1)})`;
+    this.tryGroundingClamps++;
     this.tryGuardLog.push(line);
     if (this.tryGuardLog.length > 40) this.tryGuardLog.shift();
   }
@@ -3553,6 +3619,85 @@ export class Director {
    * Set-piece participants are placed exactly, and given the correct clip for
    * the stage. Everything else is free; these men are part of a structure.
    */
+  /**
+   * Resolve the pack's authored bind sockets and stream them to the sixteen
+   * forwards. Pure per-frame arithmetic over `scrumBindSockets` (see
+   * behaviour/setpiece-overrides), with one allocation: the body list. The
+   * hands themselves are written as flat numbers, never vectors, because this
+   * runs for every bound shirt at every frame of a scrum.
+   */
+  /** FORWARD PACK — how fast a published hip height may move, metres per second.
+   * See the note in placeBound: it is the difference between a crouch and a
+   * collapse, and between a bind being priced and a pack being dropped. */
+  private publishScrumBinds(s: ScrumState) {
+    const bodies: BindBody[] = [];
+    for (let si = 0; si < s.players.length; si++) {
+      const slot = s.players[si];
+      if (!s.poseLive[si]) continue;
+      const p = this.L(slot.team, slot.num);
+      if (p.sinbin > 0) continue;
+      bodies.push({
+        team: slot.team, num: slot.num, row: slot.row,
+        x: p.x, z: p.z, face: p.face > 0 ? 1 : -1,
+        hipY: p.hipY ?? scrumHipY(slot.row, slot.num),
+      });
+    }
+    if (bodies.length < 2) return;
+    const pts = scrumBindSockets(bodies, s.bindPose);
+    for (const q of pts) {
+      const p = this.L(q.team, q.num);
+      /* the socket travels with the pack: the point is authored against a body,
+       * and the renderer wants it in the world, which is where it is already. */
+      if (q.hand === 'left') {
+        p.bindLX = q.x; p.bindLY = q.y; p.bindLZ = q.z; p.bindLW = q.weight;
+      } else {
+        p.bindRX = q.x; p.bindRY = q.y; p.bindRZ = q.z; p.bindRW = q.weight;
+      }
+    }
+  }
+
+  /**
+   * FORWARD PACK — PAY THE POSE BACK TO THE ANIMATION.
+   *
+   * A scrum does not animate these sixteen men, it OVERWRITES them: the engine
+   * publishes a pelvis height, two grips and a fold, and the renderer solves
+   * limbs onto those numbers instead of onto the clip. Every one of those four
+   * channels is therefore a debt, and the moment the phase ends it has to be
+   * cancelled — otherwise the man keeps the scrum with him. That is not a
+   * hypothetical, it is what this file used to do: `this.scrim = undefined` is
+   * written on three different paths (the whistle, the chaos dive, a converted
+   * lineout), and the loop that publishes the pose lives INSIDE the scrum, so a
+   * teardown stopped the writes on the frame the phase ended and left whatever
+   * value each man last held on his `Live` forever.
+   *
+   * Worth keeping the note because the reset list in `releaseAll` is not new: it
+   * already clears `down`, `bound`, `carrier`, `recoverT`, `recoverX/Z`, `jumpY`
+   * and `jumpVY`. Four channels were simply never added to it, and `hipY` — the
+   * one that decides whether the renderer poses the man at all — was one of the
+   * four. Measured on the shipped rig 2.4 s after the whistle, before this fix:
+   * sixteen forwards still publishing a crouch height with the pose layer still
+   * running on every one of them (still writing at frame 69 of a window that
+   * ends at 25), the pelvis held at 0.54-0.77 m where his own animation wanted
+   * 0.76-0.88 m, `collapseW` frozen at 1.00 with the root still pitched over,
+   * and a wrist at 99.1% of the rig's full arm span against a control band of
+   * 96.6% — a locked elbow reaching at a body two seconds gone, which is what
+   * "arm stretched out behind him" is. The legs then follow: a knee solved onto
+   * an ankle the man has run past bends the only way it can.
+   *
+   * It is one rule with three call sites: when the structure that owns these
+   * men stops existing, the channels go back to the animation. The renderer
+   * fades the pose out over its own clock (`SCRUM_RELEASE_S`) so this frame's
+   * value is not the last frame's pop.
+   */
+  private clearScrumPose() {
+    for (const p of this.live) {
+      if (p.hipY === undefined && !p.collapseW && !p.bindLW && !p.bindRW) continue;
+      p.hipY = undefined;
+      p.collapseW = 0;
+      p.bindLW = 0; p.bindRW = 0;
+    }
+  }
+
   private placeBound(dt: number) {
     const clip = (p: Live, name: string) => {
       if (p.clip !== name) { p.clip = name; p.clipT = 0; }
@@ -3562,13 +3707,18 @@ export class Director {
     if (this.scrim && (this.phase === 'SCRUM' || this.phase === 'REPLAY')) {
       const s = this.scrim;
       const ax = this.scrumAnchor;
-      const set = ['CROUCH', 'BIND', 'SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE', 'OUT'].includes(s.stage);
+      const set = ['CROUCH', 'BIND', 'SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE', 'OUT', 'COLLAPSE'].includes(s.stage);
       const yawR = (s.yaw * Math.PI) / 180;
       const cosY = Math.cos(yawR), sinY = Math.sin(yawR);
       /* FORWARD PACK — the front row's low centre-of-mass stabilisation is
        * measured here from the bound offsets and priced into the collapse
        * risk by upScrum (`s.frontRowStability`). */
       const frontRowOffsets: number[] = [];
+      /* The sag only begins where reaching for your seat stops being legal
+       * behaviour: by SET the referee has called the pack and a forward still
+       * not on his bind has lost it, which is exactly when his height goes. */
+      const settledStage = ['SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE'].includes(s.stage);
+      const frontRowHips: { A: number[]; B: number[] } = { A: [], B: [] };
       /* T-16/NO-TELEPORT. The packs used to be pinned to their slots from the
        * first SCRUM frame — sixteen men arriving instantly from wherever the
        * last phase left them, up to 80 m away in one frame. The ASSEMBLE stage
@@ -3576,7 +3726,8 @@ export class Director {
        * nothing was ever moving them. They now run on under steer() and are
        * only pinned once the stage needs a rigid pack (CROUCH on) AND they are
        * actually at their slot. */
-      for (const slot of s.players) {
+      for (let si = 0; si < s.players.length; si++) {
+        const slot = s.players[si];
         const p = this.L(slot.team, slot.num);
         if (p.sinbin > 0) continue;
         const dx = slot.x - ax.x, dz = slot.z - ax.z + s.netDrive;
@@ -3615,10 +3766,165 @@ export class Director {
           else clip(p, 'scrumBind');
           p.job = bind.job;
         }
+        /* FORWARD PACK — THE PUBLISHED POSE. The crouch has always been a
+         * number the engine scored (`scrumBindProfile.crouch`, straight into the
+         * collapse risk) and the renderer never read, so a bound pack stood up
+         * on screen: the pelvis sat a full standing-to-crouch gap above the
+         * height the referee was pricing it at. It is published per man now, and
+         * the renderer is obliged to land the pelvis on it with his feet still
+         * on the turf — bend the hips and knees, do not lift the pack.
+         *
+         * The sag term is what makes it a MEASUREMENT and not a decoration: a
+         * forward who has not made his bind cannot hold his height, so the
+         * height he is published at drops with how far off his seat he is. That
+         * single line is the reason a dropped bind can now collapse a scrum. */
+        /* No COLLAPSE term here, and that is deliberate: `collapseScrum()` zeroes
+         * `bindPose` to release the hands, which would re-publish the front row at
+         * STANDING height on the frame the fold starts — a pack jumping to its
+         * feet to fall over (measured: 0.41 m up, then 0.83 m down, in single
+         * frames). The fix is NOT a clause in the pose multiplier either: it is
+         * `hipHold` below, which owns the question of what a collapsing man's
+         * height IS. A clause here was tried and measured as a second writer of
+         * one number — with `hipHold` in place, adding and removing it changes
+         * nothing any check can see, so it is not here. */
+        const pose = s.stage === 'ASSEMBLE' || s.stage === 'MARK' ? 0 : s.bindPose;
+        /* who is holding this man up: see ScrumState.bindHeld. `off <= tol` is
+         * bound; a man who was bound and is not any more has lost the scrum
+         * outright, which is the full sag. */
+        const bound = set && off <= bind.bindTolerance;
+        if (bound && s.bindHeld[si] === 0) s.bindHeld[si] = 1;
+        /* IN THE PACK? Only a man who is bound now, or who has held a bind in
+         * this scrum and come off it, has a bind to fail. Anyone else is still
+         * running in: he publishes standing height, no grip, and no weight in
+         * the collapse test. */
+        const live = bound || s.bindHeld[si] === 1;
+        s.poseLive[si] = live ? 1 : 0;
+        /* HOW MUCH of the bind is lost, not WHETHER. The first cut was a cliff —
+         * one frame 0.75 m off a 0.70 m tolerance read as a bind fully gone, and
+         * `setpieceprobe` lost three scrums in ten to a hip floor that a settling
+         * prop had not actually crossed. The excursion is now priced against the
+         * tolerance it came off, so a man a hand-width out sags a hand-width's
+         * worth and a man two tolerances out is on the deck. */
+        const lost = bound || !settledStage || s.bindHeld[si] !== 1
+          ? 0
+          : clamp((off - bind.bindTolerance) / bind.bindTolerance, 0, 1);
+        /* COMPRESSION — the other way a front row loses its height. A pack that
+         * is being driven over the top of them does not only lose the shove, it
+         * gets pushed DOWN into the turf, so the contest risk is priced into the
+         * hip height of the pack the tunnel is running away from. Below the
+         * authored band this is exactly zero, which is why an even scrum keeps
+         * the height the cadence published. */
+        const compMag = s.collapseRisk > SCRUM_COMPRESSION_FROM
+          ? clamp((s.collapseRisk - SCRUM_COMPRESSION_FROM) / (1 - SCRUM_COMPRESSION_FROM), 0, 1)
+            * SCRUM_COLLAPSE.COMPRESSION_MAX
+          : 0;
+        const compression = s.tunnelV >= 0
+          ? (slot.team === 'B' ? compMag : 0)
+          : (slot.team === 'A' ? compMag : 0);
+        const sag = settledStage && live ? Math.max(bindSag(off, bind.bindTolerance), lost, compression) : 0;
+        const hipTarget = scrumHipY(slot.row, slot.num, sag);
+        /* outside the pack there is no pose AT ALL — which means publishing
+         * nothing, not publishing standing height. The first version wrote
+         * `STANDING_PELVIS_Y` for a man still jogging to his mark, and since
+         * the renderer's gate is "the engine gave me a hip height", every
+         * forward in the fifteen got the whole scrum pose layer run on him
+         * frame after frame: his head yaw zeroed, his legs solved, for a delta
+         * of nothing. `undefined` is the honest value for "no structure owns
+         * this man", and it is also the only one that lets the release below
+         * be a single rule. */
+        const hipPub = live ? STANDING_PELVIS_Y + (hipTarget - STANDING_PELVIS_Y) * pose
+          : undefined;
+        /* THE COLLAPSE FOLDS FROM WHERE HE IS. `settledStage` deliberately stops
+         * at BASE, so on the frame the stage turns to COLLAPSE the sag term goes
+         * to zero and a prop who had sunk to 0.37 m under a lost bind was
+         * re-published at the clean crouch — 0.63 m — before the fold started
+         * dragging him down. Measured on the rig: 0.28 m UP in one frame at the
+         * moment of falling over, which is the same class of hitch this pass
+         * exists to remove, arrived at from the other end. The bind is not
+         * re-decided by a collapse, so his height is not either: the last height
+         * the contest priced is held and the blend owns the descent from there.
+         * Written per slot every live frame and read back only at COLLAPSE, so
+         * no other measurement in the scrum sees a value it did not already have. */
+        /* HOW FAST that height may move. A man who arrives a metre off his mark
+         * at the referee's SET does not fall 0.23 m in a frame — `bindSag`
+         * prices the excursion and the excursion appears fully priced the next
+         * tick, which the rig then draws as the pack's hips dropping out from
+         * under them all at once (measured: 0.23-0.28 m in one frame, at DRIVE,
+         * on whoever was late to the row). The number is a body's, so it is
+         * limited like one: 1.5 m/s of hip, which crosses the whole
+         * standing-to-crouch span in a fifth of a second — long enough that the
+         * eye reads a crouch, short enough that no stage boundary or bind
+         * failure is softened into a float, and the settled value still lands
+         * EXACTLY on the published height, which is what (c) of `bindprobe`
+         * holds this to. */
+        let hipWant = hipPub;
+        if (live && s.stage === 'COLLAPSE') hipWant = s.hipHold[si] ?? hipPub;
+        if (!live || hipWant === undefined) p.hipY = undefined;
+        else {
+          const from = p.hipY ?? hipWant;
+          const gap = hipWant - from;
+          const reach = SCRUM_HIP_RATE * dt;
+          p.hipY = Math.abs(gap) <= reach ? hipWant : from + Math.sign(gap) * reach;
+          if (s.stage !== 'COLLAPSE') s.hipHold[si] = p.hipY;
+        }
+        if (slot.row === 1 && live) frontRowHips[slot.team].push(p.hipY!);
+        /* A man outside the pack has nothing to hold on to: zero the grips
+         * rather than leave last frame's aiming him at a body he has left. */
+        if (!live) { p.bindLW = 0; p.bindRW = 0; p.collapseW = 0; }
+        /* THE COLLAPSE. The front row is the part of a scrum that visibly
+         * fails, so it is the part that folds: pitch to the authored angle and
+         * hips to the deck, owned by ONE number (`collapseBlend`) so a stalled
+         * frame cannot leave a pack half-folded. The second row and the eight do
+         * not fold — a pack whose back rows go too is a pile-up, not a
+         * collapse — they drive forward into the gap their props have left,
+         * which is what a coming-down scrum reads as from the base: weight with
+         * nowhere to go, running out. */
+        if (s.stage === 'COLLAPSE') {
+          p.collapseW = slot.row === 1 ? s.collapseBlend : s.collapseBlend * 0.25;
+          if (slot.row > 1) {
+            const into = slot.team === 'A' ? 1 : -1;
+            p.tx = wx; p.tz = wz + into * SCRUM_COLLAPSE.SLIDE_M * s.collapseBlend;
+            p.urgency = 0.9;
+            p.job = 'PACK COMING DOWN — DRIVE UP THROUGH THE GAP';
+            clip(p, 'scrumDrive');
+          } else {
+            p.tx = wx; p.tz = wz;
+            p.urgency = 0.2;
+            p.job = 'DOWN — CLEAR THE TUNNEL';
+            clip(p, 'grounded');
+          }
+        } else if (p.collapseW) p.collapseW = 0;
       }
+      /* THE SIXTEEN GRIPS. Resolved against where the men ACTUALLY stand, not
+       * against their authored marks: a pack driven three metres back has to
+       * still be holding each other three metres back, and a hand aimed at a
+       * phantom mark is the exact defect this replaces. */
+      if (set) this.publishScrumBinds(s);
       /* the low-COM condition: the pack is in or past its crouch */
       const crouched = ['CROUCH', 'BIND', 'SET', 'ENGAGE', 'STEADY', 'FEED', 'STRIKE', 'DRIVE', 'BASE'].includes(s.stage);
       s.frontRowStability = frontRowStability(frontRowOffsets, crouched);
+      /* THE FLOOR. The lowest published hip in either front row, handed to
+       * upScrum so a scrum comes down because a body actually came down. During
+       * the fold itself the front row is deliberately ON the deck, so the test
+       * stands aside — otherwise the collapse it just called would re-trigger
+       * itself every frame and the whistle would never land. */
+      /* THE FRONT ROW'S HEIGHT, BY PACK, TAKEN AT THE MEDIAN. The first cut
+       * read the single lowest hip across both packs, and it collapsed 3 of the
+       * 10 scrums in `setpieceprobe` for it: one prop settling at the edge of a
+       * 0.70 m bind tolerance sagged 0.15 m and tripped a floor the other two
+       * were nowhere near. A collapse is a row failing, not a man being imprecise
+       * about his seat, so the middle of three is the statistic — a pack still
+       * fires when two of its front row have genuinely come down, and one drifter
+       * cannot. */
+      s.frontRowHipY = s.stage === 'COLLAPSE' ? undefined : (() => {
+        const med = (list: number[]) => {
+          if (list.length < 2) return undefined;
+          const sorted = [...list].sort((x, y) => x - y);
+          return sorted[Math.floor((sorted.length - 1) / 2)];
+        };
+        const a = med(frontRowHips.A), b = med(frontRowHips.B);
+        return a === undefined ? b : b === undefined ? a : Math.min(a, b);
+      })();
       for (const n of s.nine) {
         const p = this.L(n.team, 9);
         const dx = n.x - ax.x, dz = n.z - ax.z + s.netDrive;
@@ -5455,7 +5761,10 @@ export class Director {
 
     // 3. Final steer integration
     for (const item of toSteer) {
-      steer(item.p, dt, item.sprint, gate, item.label);
+      /* PROACTIVE AVOIDANCE gets the whole field: an anticipation cone that can
+       * only see one man at a time cannot tell an intersecting path from a
+       * crowd, and the crowd is what the tacklers were being steered through. */
+      steer(item.p, dt, item.sprint, gate, item.label, this.live);
     }
 
     separate(this.live, dt, gate, 'think:separate');
@@ -5727,6 +6036,7 @@ export class Director {
     /* Disable any live phase objects and switch to the scrim phase. */
     this.op = undefined; this.bd = undefined; this.ml = undefined;
     this.kk = undefined; this.lo = undefined; this.scrim = undefined;
+    this.clearScrumPose();          // the scrum is gone; so is its pose
     this.passOpts = [];
     this.pendingPenalty = null;
     this.advantage = 0;
@@ -6617,6 +6927,12 @@ export class Director {
     this.ml = undefined;
     this.scrim = undefined;
     this.lo = undefined;
+    /* THE POSE GOES BACK. The four channels the scrum was writing per frame are
+     * now unwritten, so a bound prop walking to the next lineout is a prop in a
+     * crouch with a grip on nobody. `bindLW`/`bindRW` are zeroed too: a hand
+     * still aimed at the body of a man who has left is the arm-behind-the-back
+     * the eye reads first. */
+    this.clearScrumPose();
   }
 
   /* ============================ MAUL ============================ */
@@ -6735,15 +7051,23 @@ export class Director {
          * real base positions: a stride behind his own hindmost row (the
          * rows end at back*1.94), on the axle. The OUT hand-off mark in
          * setpieces matches these exactly. */
-        { team: 'A', x: this.scrumAnchor.x - 0.3, z: this.scrumAnchor.z - 2.95 },
-        { team: 'B', x: this.scrumAnchor.x + 0.3, z: this.scrumAnchor.z + 2.95 },
+        { team: 'A', x: this.scrumAnchor.x - 0.3, z: this.scrumAnchor.z - scrumNineDepth() },
+        { team: 'B', x: this.scrumAnchor.x + 0.3, z: this.scrumAnchor.z + scrumNineDepth() },
       ],
       ball: { x: 0, y: 0.16, z: 0, state: 'OUT' },
       packs: { A: mk('A'), B: mk('B') },
       yaw: 0, netDrive: 0, collapseRisk: 0, tunnelV: 0,
       strikeClock: 0, wheelDir: R() < 0.5 ? -1 : 1, resets: 0,
       ready: 0, cadence: '',
+      bindPose: 0, shearDeg: 0, shearT: 0, hipT: 0,
+      bindHeld: [],
+      hipHold: [],          // FORWARD PACK — see hipHold in placeBound
+      poseLive: [],
+      collapseBlend: 0, collapseSeen: false,
     };
+    /* one entry per slot, in slot order — the pose layer indexes these */
+    this.scrim.bindHeld = new Array(this.scrim.players.length).fill(0);
+    this.scrim.poseLive = new Array(this.scrim.players.length).fill(0);
     this.clearRuck();
     this.lo = undefined; this.ml = undefined; this.op = undefined;
     this.phase = 'SCRUM';
@@ -6825,6 +7149,7 @@ export class Director {
     };
     this.clearRuck();
     this.scrim = undefined; this.ml = undefined; this.op = undefined;
+    this.clearScrumPose();          // a scrum that became a lineout must not stay folded
     this.phase = 'LINEOUT';
     this.say(`LINEOUT TO ${this.teams[thrower].nation.short}`);
     if (this.isHuman(thrower)) this.showHint('A/D CHOOSE THE CALL · SPACE TO THROW · STOP THE BAR IN THE BAND', 3.4);
@@ -7464,6 +7789,24 @@ export class Director {
       const p = this.live[i];
       const a = this.actors[i];
       a.rx = p.x; a.rz = p.z; a.ry = p.jumpY ?? 0; a.rf = p.face;
+      /* FORWARD PACK — the scrum pose rides along with the position rather than
+       * being pulled out of the phase object by the renderer: one writer, one
+       * channel, and a man outside a scrum simply has nothing set. */
+      /* THE PHASE OWNS THIS CHANNEL, AND THE MIRROR ENFORCES IT. placeBound only
+       * writes while the scrum exists, so the instant it does not, every value
+       * it had written would otherwise be replayed to the renderer forever. The
+       * explicit clearScrumPose() on each teardown path is the honest fix; this
+       * guard is the belt, because a scrum dies on several paths (whistle, chaos
+       * dive, converted lineout, replay) and a fourth one added next month that
+       * forgets to clear would strand fifteen men in a crouch rather than
+       * visibly break. The condition is placeBound's own, deliberately: a
+       * scrum being posed is a scrum being DRAWN, including during a replay of
+       * one, and anything else has no pose to mirror. */
+      const posed = !!this.scrim && (this.phase === 'SCRUM' || this.phase === 'REPLAY');
+      a.hipY = posed ? p.hipY : undefined;
+      a.collapseW = posed ? p.collapseW : undefined;
+      a.bindLX = p.bindLX; a.bindLY = p.bindLY; a.bindLZ = p.bindLZ; a.bindLW = posed ? p.bindLW : 0;
+      a.bindRX = p.bindRX; a.bindRY = p.bindRY; a.bindRZ = p.bindRZ; a.bindRW = posed ? p.bindRW : 0;
       const isLocal = this.ctrlPlayer === p && this.isHuman(p.team);
       const reticle = this.reticleAimPoint();
       /* A held LMB over a loose ball should pull the rendered hands to the

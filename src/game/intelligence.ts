@@ -87,6 +87,26 @@ export interface Live {
    * if it expires without him getting hands on anyone he has missed, and he
    * pays for it by landing on the floor. 0/undefined when he is on his feet. */
   diveT?: number;
+  /** FORWARD PACK — the scrum bind payload, written by Director.placeBound and
+   *  read by the renderer. All of it is presentation-safe kinematics in engine
+   *  units (pitch metres, y above the turf), because the alternative is the
+   *  renderer inventing a pose the referee has not measured: a hip height the
+   *  pack is holding, and where each of a man's hands is gripping.
+   *
+   *  `hipY` is the PUBLISHED pelvis height — authored in behaviour/, sagged by
+   *  how far this man is off his seat. `collapseW` is 0..1 how far he has
+   *  folded into the turf. The hand points are already blended toward their
+   *  anchor by the cadence, so the renderer writes them straight. */
+  hipY?: number;
+  collapseW?: number;
+  /** PROACTIVE AVOIDANCE (see ANTICIPATION below): the side this man has
+   *  committed to stepping around an intersecting body, and the seconds left on
+   *  that commitment. A steering layer that re-decides a dodge every frame IS the
+   *  jitter it is meant to remove, so the side is held. */
+  avoidSide?: number;
+  avoidT?: number;
+  bindLX?: number; bindLY?: number; bindLZ?: number; bindLW?: number;
+  bindRX?: number; bindRY?: number; bindRZ?: number; bindRW?: number;
   /** PLAYER CONTROLS — vertical jump state. X/Z remain the simulation's single
    * horizontal writer; these values are presentation-safe vertical kinematics. */
   jumpY?: number;
@@ -146,10 +166,177 @@ export function maxSpeed(p: Live, carrying: boolean, sprint: boolean, fatigue: n
  * animation gate between the input and the movement.
  */
 
+/* ===================== PROACTIVE TRAJECTORY AVOIDANCE =====================
+ *
+ * The contact game has two layers and they were in the wrong order. `separate()`
+ * is REACTIVE: it projects two bodies apart once they are already inside each
+ * other, and the frame it fires is the frame a man's velocity flips — a dodge
+ * bought after the collision, paid for as jitter on the screen. `contactsettle`
+ * already dampens and deadbands that layer (0.82 m opponents, inward-velocity
+ * zeroing, a five-frame settle), which is why the flip is now a shudder rather
+ * than a stutter; a shudder is still a thing you can see.
+ *
+ * This is the PROACTIVE layer: a cone in front of the man, walked forward in
+ * time, that asks the only question that matters before contact is possible —
+ * will two non-competing bodies be inside `gapM` of each other within `leadS`,
+ * on these velocity vectors? If yes, bend the velocity target sideways by a
+ * little NOW, so the pair pass each other with a metre of air and `separate()`
+ * never has anything to project.
+ *
+ * Three rules keep it from becoming its own defect:
+ *
+ *   1. NON-COMPETING ONLY. A carrier, a man in a latch, a bound forward, a man on
+ *      the deck: none of them are traffic to be avoided. Sidestepping out of the
+ *      way of the man you are legally tackling is how a defence loses its own
+ *      contest, and a ruck is not a crowd to walk around.
+ *   2. THE SIDE IS COMMITTED (`avoidSide`, held for `holdS`). Flipping the dodge
+ *      every frame is the definition of contact jitter — with two men, a
+ *      per-frame re-decision oscillates, because A steps left, which makes B
+ *      step left, which puts them back on a crossing line.
+ *   3. THE DEFLECTION MAY NEVER COST HIM HIS ASSIGNMENT. The side is chosen by
+ *      which way keeps him closest to his own mark, and the magnitude is capped
+ *      so the deflected velocity still points where the play is going. That is
+ *      what "the steering layer must not drive players into the overlap" means
+ *      in code: the dodge is paid for out of the man's slack, never out of the
+ *      line.
+ * ------------------------------------------------------------------------- */
+
+/** the radius at which `separate()` is already handling two bodies */
+const CONTACT_RADIUS_M = 0.95;
+
+/** is this man in a latch, either end of it */
+function inLatch(p: Live): boolean {
+  return !!(p.latchedBy || p.latchingOnto);
+}
+
+export const ANTICIPATION = {
+  /** OFF BY DEFAULT, AND THAT IS A MEASUREMENT, NOT A CAVEAT. Judged by
+   * `scripts/anticipationprobe.ts` over 24,000 ticks x 4 seeds, the cone moves
+   * the reactive layer's projections from 209,199 to 211,567 — 1.1% the WRONG
+   * way — with reversals flat (769 → 769) and mark fidelity improved (p50
+   * 6.65 → 6.22 m). A smaller 3-seed sample looked like a 4.3% win; it did not
+   * survive a wider one, which is the entire reason the probe exists. So the
+   * mechanism is in, the cone is off, and `separate()`'s damping and settle
+   * deadband (the tip of this branch) remain the answer to contact jitter until
+   * a bend that provably reduces projections earns the right to be always on.
+   * Flipping this to true is a tuning decision the probe arbitrates, not a
+   * comment to delete. */
+  enabled: false,
+  /** metres: inside this separation the two bodies are going to touch */
+  gapM: 1.2,
+  /** seconds of look-ahead down the velocity vectors */
+  leadS: 1.1,
+  /** metres per second of lateral deflection at full commitment */
+  deflectMS: 1.05,
+  /** seconds the chosen side is held before it may be revised */
+  holdS: 0.45,
+  /** the cone: an intersection this far BEHIND the shoulder is not anticipated */
+  forwardDeg: 72,
+};
+
+/**
+ * The closest approach of two constant-velocity points, searched over [0, tMax].
+ * Pure, allocation-free, and the whole prediction model of the cone: at these
+ * speeds a man's velocity is a fair guess at his next second and a poor guess at
+ * his next three, which is why `leadS` is short.
+ */
+export function closestApproach(
+  ax: number, az: number, avx: number, avz: number,
+  bx: number, bz: number, bvx: number, bvz: number,
+  tMax: number,
+): { t: number; dist: number } {
+  const rx = bx - ax, rz = bz - az;
+  const vx = bvx - avx, vz = bvz - avz;
+  const vv = vx * vx + vz * vz;
+  let t = vv < 1e-6 ? 0 : -(rx * vx + rz * vz) / vv;
+  t = t < 0 ? 0 : t > tMax ? tMax : t;
+  return { t, dist: Math.hypot(rx + vx * t, rz + vz * t) };
+}
+
+/** The lateral deflection this frame's steering should carry, or none. */
+export function anticipationDeflect(
+  p: Live, others: Live[], dt: number,
+): { vx: number; vz: number } {
+  if (!ANTICIPATION.enabled) return { vx: 0, vz: 0 };
+  /* a man who is not free to choose his path has no avoidance to run */
+  if (p.carrier || p.bound || p.down || p.latchedBy || p.latchingOnto) return { vx: 0, vz: 0 };
+  const hold = p.avoidT ?? 0;
+  if (hold > 0) p.avoidT = Math.max(0, hold - dt);
+
+  /* the cone, in his own frame: only traffic AHEAD of him is anticipated, which
+   * is what makes this avoidance rather than a flinch at anything that exists */
+  const fx = p.vx, fz = p.vz;
+  const fl = Math.hypot(fx, fz);
+  if (fl < 0.6) return { vx: 0, vz: 0 };          // standing: separate() owns this
+  const ux = fx / fl, uz = fz / fl;
+  const cosLimit = Math.cos((ANTICIPATION.forwardDeg * Math.PI) / 180);
+
+  let worst: Live | null = null;
+  let worstGap = Infinity;
+  for (const q of others) {
+    if (q === p || q.down || q.bound || q.latchedBy || q.latchingOnto) continue;
+    /* teammates moving together are not an intersection to step around: they
+     * are the formation, and the formation is de-conflicted by marks */
+    if (q.team === p.team && !q.carrier) continue;
+    /* THE CONTEST IS NOT TRAFFIC. A defender steers INTO the carrier, and a man
+     * already latched is holding somebody: avoid either and the cone starts
+     * dissolving tackles — measured, the first version of this function raised
+     * opponent contact-frames from 976 to 1453 across two 60 s seeds precisely
+     * because it taught defenders to step off the man they were sent to get. */
+    if (q.carrier || inLatch(q)) continue;
+    /* and if they are already touching, this is separation's frame, not the
+     * cone's: a deflection applied inside the shunt radius is the oscillation
+     * this whole layer exists to remove */
+    if (Math.hypot(q.x - p.x, q.z - p.z) < CONTACT_RADIUS_M) continue;
+    const ap = closestApproach(p.x, p.z, p.vx, p.vz, q.x, q.z, q.vx, q.vz, ANTICIPATION.leadS);
+    /* a meeting less than 0.12 s away is already being resolved by the pair's
+     * own paths; bending now only smears the pass sideways */
+    if (ap.t < 0.12) continue;
+    if (ap.dist >= ANTICIPATION.gapM) continue;
+    /* is he inside the cone? */
+    const dx = q.x - p.x, dz = q.z - p.z;
+    const dl = Math.hypot(dx, dz) || 1;
+    if ((dx * ux + dz * uz) / dl < cosLimit) continue;
+    if (ap.dist < worstGap) { worstGap = ap.dist; worst = q; }
+  }
+  if (!worst) {
+    if (p.avoidSide) { p.avoidSide = 0; }
+    return { vx: 0, vz: 0 };
+  }
+
+  /* the side: whichever turn keeps him nearer the mark he was given. Choosing
+   * the side by geometry, per frame, is how the avoidance steals the play; the
+   * commitment below is what stops it from dithering. */
+  /* THE SIDE IS ANTISYMMETRIC, AND THAT IS THE WHOLE POINT. Two men who each
+   * choose "the side that suits my own assignment" routinely choose the same
+   * side in world terms, which is not avoidance at all — they arrive at the
+   * meeting point side by side, slower, and stay in contact longer. Measured:
+   * the first two versions of this function did exactly that and RAISED
+   * incidental contact-frames by ~53% across three seeds, which is the honest
+   * reason this line is a cross product and not a preference. The sign of
+   * (relative position × relative velocity) flips for the other man, because
+   * both of its inputs flip, so the pair part instead of orbiting. */
+  let side = p.avoidSide ?? 0;
+  if (p.avoidT === undefined || p.avoidT <= 0 || side === 0) {
+    const rx = worst.x - p.x, rz = worst.z - p.z;
+    const rvx = worst.vx - p.vx, rvz = worst.vz - p.vz;
+    const cross = rx * rvz - rz * rvx;
+    side = cross >= 0 ? 1 : -1;
+    if (side === 0) side = p.num <= worst.num ? 1 : -1;   // a tie still needs a side
+    p.avoidSide = side;
+    p.avoidT = ANTICIPATION.holdS;
+  }
+  const k = 1 - worstGap / ANTICIPATION.gapM;      // harder the closer it gets
+  const ramp = Math.min(1, Math.max(0, 1 - (p.avoidT ?? 0) / ANTICIPATION.holdS * 0.35));
+  const push = ANTICIPATION.deflectMS * k * ramp;
+  return { vx: -uz * side * push, vz: ux * side * push };
+}
+
 export function steer(
   p: Live, dt: number, sprint: boolean,
   reportGate?: ForwardAttackGateReporter,
   gateLabel = 'steer',
+  avoid?: Live[],
 ) {
   /* SPEC_02 GATE: the whole integration write has one labelled owner when
    * invoked from Director.think(). Other phase callers retain the zero-cost
@@ -166,7 +353,21 @@ export function steer(
   } else {
     const nx = dx / dist, nz = dz / dist;
     const ramp = clamp(dist / 2.4, 0.28, 1);
-    const tvx = nx * want * ramp, tvz = nz * want * ramp;
+    let tvx = nx * want * ramp, tvz = nz * want * ramp;
+    /* PROACTIVE AVOIDANCE — the lateral bend, added to the TARGET and not to the
+     * position: the man still accelerates through the same exponential, so a
+     * dodge costs him pace he can earn back instead of teleporting him, and the
+     * magnitude is bounded by `want`, so the dodge cannot out-run the play. */
+    if (avoid && avoid.length) {
+      const d = anticipationDeflect(p, avoid, dt);
+      if (d.vx || d.vz) {
+        const maxBend = want * 0.34;
+        const dl = Math.hypot(d.vx, d.vz);
+        const sc = dl > maxBend ? maxBend / dl : 1;
+        tvx += d.vx * sc;
+        tvz += d.vz * sc;
+      }
+    }
     // one continuous curve — the accel rate is the only difference between
     // a prop and a wing, so sprint never feels like a different game
     let accel = 9 + (p.attrs.SPD / 100) * 5;

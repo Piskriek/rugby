@@ -84,12 +84,19 @@ function check(name: string, ok: boolean, detail?: string) {
       console.log(`  match ${m}: LEDGER MISMATCH A ${ledgerA} vs ${d.teams.A.score}, B ${ledgerB} vs ${d.teams.B.score}`);
     }
     tries += d.events.filter((e: any) => e.kind === 'TRY').length;
-    /* every block must be visible in the log the pause panel renders */
-    if (d.tryGuardBlocks !== d.tryGuardLog.length && d.tryGuardLog.length !== 40) guardArmedOutsideWindow = true;
+    /* every block must be visible in the log the pause panel renders — and every
+     * grounding clamp too, since both writers share the one log. The old form
+     * compared the block counter against the whole array (and forgave it once the
+     * array was full at 40), which is a parity test that only held by accident. */
+    if (d.tryGuardBlocks + d.tryGroundingClamps !== d.tryGuardLog.length) {
+      guardArmedOutsideWindow = true;
+      console.log(`  match ${m}: PANEL LOG OUT OF PARITY — ${d.tryGuardBlocks} blocks + `
+        + `${d.tryGroundingClamps} clamps vs ${d.tryGuardLog.length} logged`);
+    }
     if (d.tryGuardBlocks > 0) console.log(`  match ${m}: guard blocked ${d.tryGuardBlocks} duplicate trigger(s) — see pause panel log`);
   }
   check('C6 every point on the board has exactly one score event', ledgerExact);
-  check('C6 every guard block is surfaced in the panel log', !guardArmedOutsideWindow);
+  check('C6 every guard block and every grounding clamp is surfaced in the panel log', !guardArmedOutsideWindow);
   console.log(`      (${tries} tries across ${MATCHES} matches — ledger verified)`);
 }
 

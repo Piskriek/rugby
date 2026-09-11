@@ -25,11 +25,12 @@ import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
 import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
+import { solveTwoBone } from '../game/engine/ballcraft';
 import { ballReach } from '../game/engine/ballAwareness';
 import { RECOVER_SECONDS } from '../game/director';
 import { TURN_PIVOT, stepTurn, turnRateFor } from '../game/gait';
 import { RENDER_SCALE, Camera, View } from './retro';
-import { scrumFacing } from '../game/behaviour/setpiece-overrides';
+import { scrumFacing, SCRUM_COLLAPSE_PITCH, STANDING_PELVIS_Y } from '../game/behaviour/setpiece-overrides';
 import { Ragdoll } from './ragdoll';
 import { NODE_COUNT, NODE } from './ragdollKernel';
 import { RagdollPlayback, pickClip } from './ragdollClips';
@@ -175,6 +176,15 @@ interface ProceduralRig {
   head: THREE.Bone | null;
   upperArms: (THREE.Bone | null)[];
   foreArms: (THREE.Bone | null)[];
+  /** THE SCRUM BIND SET. The arms already had a driven layer and the legs did
+   *  not exist to it, which is the whole reason a published crouch height had
+   *  nowhere to go: dropping the pelvis without a knee solve drops the man
+   *  through the turf, so the renderer had no choice but to leave him standing.
+   *  [right, left] throughout, like the arms. */
+  hands: (THREE.Bone | null)[];
+  thighs: (THREE.Bone | null)[];
+  calves: (THREE.Bone | null)[];
+  feet: (THREE.Bone | null)[];
 }
 
 /** Unreal-convention bone names, with the Mixamo spellings as fallbacks so a
@@ -195,6 +205,22 @@ const BONE_NAMES = {
   foreArms: [
     ['lowerarm_r', 'RightForeArm', 'mixamorigRightForeArm'],
     ['lowerarm_l', 'LeftForeArm', 'mixamorigLeftForeArm'],
+  ],
+  hands: [
+    ['hand_r', 'RightHand', 'mixamorigRightHand'],
+    ['hand_l', 'LeftHand', 'mixamorigLeftHand'],
+  ],
+  thighs: [
+    ['thigh_r', 'RightUpLeg', 'mixamorigRightUpLeg'],
+    ['thigh_l', 'LeftUpLeg', 'mixamorigLeftUpLeg'],
+  ],
+  calves: [
+    ['calf_r', 'RightLeg', 'mixamorigRightLeg'],
+    ['calf_l', 'LeftLeg', 'mixamorigLeftLeg'],
+  ],
+  feet: [
+    ['foot_r', 'RightFoot', 'mixamorigRightFoot'],
+    ['foot_l', 'LeftFoot', 'mixamorigLeftFoot'],
   ],
 };
 
@@ -225,6 +251,50 @@ const REACH_MIN = 0.2;
 const DIP_MAX = 0.52;          // ~30 deg, spread over spine_01/02 + neck
 const DIP_RATE = 9;
 const REACH_RATE = 12;
+
+/** THE SCRUM BIND. There is deliberately NO render-side smoothing weight on
+ * either the pelvis or the hands, and that is a change of policy worth
+ * explaining: the first version of this pass multiplied its bone writes by a
+ * one-frame `1 - exp(-rate·dt)` blend, which on a clip the mixer re-drives every
+ * frame leaves the pose about 21% corrected and the float 79% intact — a filter
+ * that only ever dials toward its own last value cannot own a bone the
+ * animation rewrites each frame. What ramps instead is the ENGINE: `Live.hipY`
+ * and `Live.bindLW` are already the cadence pose (0 at FORM → 1 at SET) times
+ * each grip's authored commit, so the smoothing lives in the one place that
+ * also decides what a bound pack means, and the renderer lands the pose exactly.
+ *
+ * The hands are NOT scaled down here, whatever the latch does: a bound scrum
+ * hand is a hand GRIPPING a shirt, and the ramp onto that grip is already
+ * owned by the cadence (`Live.bindLW` is commit × pose, authored in
+ * behaviour/setpiece-overrides and blended by the engine). A 0.72 on top of it
+ * would leave every grip 28% short of its anchor forever — which is exactly
+ * the class of defect `scripts/bindprobe.ts` exists to catch, measured against
+ * the shipped rig rather than argued about in review. */
+const BIND_ARM_WEIGHT = 1;
+const BIND_LEG_WEIGHT = 1;
+/** how far a collapsed front row's pelvis comes to rest above the turf, metres */
+const COLLAPSE_HIP_ABOVE_TURF = 0.12;
+/**
+ * THE RELEASE, in seconds: how long a forward takes to hand his bones back to
+ * the animation once the engine stops publishing a pose. It is a render-side
+ * number on purpose: the engine decides WHICH pose a man is in, and the moment
+ * the scrum is torn down the honest answer is "none" — it has no opinion about
+ * how gracefully a prop stands up.
+ *
+ * WHAT IT BUYS, MEASURED BOTH WAYS. I expected this to be the fix for a pop, and
+ * the probe says otherwise: the worst one-frame pelvis movement across the whole
+ * departure is 0.077 m at 0.35 s against 0.072 m with the release cut to a
+ * single frame, because the mixer is cross-fading `scrumDrive` into `jog` over
+ * the same window and absorbs most of the step by itself. What the window is
+ * load-bearing for is the COLLAPSE. The fold is drawn by this layer and by
+ * nobody else, so at 0.001 s the front row is handed back to its clips before
+ * the deck pose has been drawn once, and `bindprobe` (d) fails with the collapsed
+ * props standing at 0.915 m. So 0.35 s is the shortest window that keeps a
+ * collapsed pack on the ground long enough to be seen there — which happens to be
+ * about how long a real prop takes to get up, so the cosmetic reason and the
+ * load-bearing one agree on the number and on nothing else.
+ */
+const SCRUM_RELEASE_S = 0.35;
 
 /** Peak spine thrash, radians, at full sprint. */
 const THRASH_MAX = 0.3;
@@ -274,6 +344,21 @@ const _dir = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qb = new THREE.Quaternion();
 const _mat = new THREE.Matrix4();
+/* the scrum bind's own scratch: the aim helper runs for four limbs a frame for
+ * sixteen men, and a Vector3 per limb per frame is a GC pause at 60 Hz. */
+const _v3 = new THREE.Vector3();
+const _v4 = new THREE.Vector3();
+const _v5 = new THREE.Vector3();
+const _q3 = new THREE.Quaternion();
+const _pole = new THREE.Vector3();
+/* the scrum bind's own scratch: a blended ankle goal per leg. Distinct from
+ * _v1.._v5 because applyScrumBind holds five of those live at once. */
+const _qIdent = new THREE.Quaternion();
+const _bindGoalR = new THREE.Vector3();
+/* scratch for the planted point being lifted back into the world — one per leg
+ * is not enough, because `legs` is filled in a first loop and read in a second */
+const _bindGoalT = new THREE.Vector3();
+const _bindGoalL = new THREE.Vector3();
 
 /* -------------------------------------------------------------- instance -- */
 interface PlayerInstance {
@@ -299,6 +384,33 @@ interface PlayerInstance {
   soilShown: number;
   /** lazily-resolved procedural bone set — see resolveRig() */
   rig?: ProceduralRig;
+  /** segment lengths measured off the LOADED rig, in render units, the first
+   *  time a scrum asks for them (see resolveRig's note on why the legs are not
+   *  authored here): the two-bone solves need the skeleton's real thigh, calf,
+   *  upper-arm and forearm lengths, and a guess about a specific GLB export is
+   *  how an IK chain ends up bending a knee backwards. */
+  scrumRest?: { up: number; fore: number; thigh: number; calf: number };
+  /** FORWARD PACK — the last pose the ENGINE published for this man, held so
+   *  the release can FADE (see SCRUM_RELEASE_S). The channels stop arriving the
+   *  frame the scrum is torn down; without a snapshot there is nothing left to
+   *  fade FROM, and the man is cut upright instead of standing up.
+   *
+   *  `plant` is the load-bearing field: the two ankles the crouch was solved
+   *  onto, stored in THIS MAN'S ROOT frame rather than in world space. Held in
+   *  world space they are a memory of where the PACK stood, so a forward who
+   *  runs off leaves his feet behind him and the solver obligingly bends the leg
+   *  the only way it can — measured at 0.79 m of hip-to-ankle behind the hip,
+   *  i.e. the backward leg. In the root frame the memory travels with the man
+   *  and decays to nothing as the fade closes. */
+  scrumPose?: {
+    hipY: number; fold: number;
+    lx: number; ly: number; lz: number; lw: number;
+    rx: number; ry: number; rz: number; rw: number;
+    plant: [THREE.Vector3, THREE.Vector3];
+    hasPlant: boolean;
+  };
+  /** 1 while the engine owns the pose, ramping to 0 after it lets go. */
+  scrumFade?: number;
   /** the solved fall, or null while the clip owns this man (render/ragdoll.ts) */
   rag?: Ragdoll | null;
   /** lazily-resolved ragdoll bone set and its rest directions */
@@ -1535,7 +1647,15 @@ export class ThreePlayerManager {
       case 'dive': return 'dive';
       case 'try': case 'slide': return 'try';
       case 'getup': return 'getup';
-      case 'maul': case 'scrumBind': case 'scrumShove': return 'bind';
+      /* THE SCRUM'S OWN GAITS. The engine publishes three names for a bound
+       * pack — scrumBind at the cadence, scrumCrouch at the engage, scrumDrive
+       * for the shove — and only one of them used to be mapped. The other two
+       * fell through to `default:` → `locomotion(0)` → the UPRIGHT IDLE, which is
+       * the real shape of the "pack floats / nobody is binding" defect: for
+       * DRIVE, the longest stage of a scrum, sixteen forwards were standing at
+       * rest in a line. `bindprobe` measures it and said so in metres. */
+      case 'maul': case 'scrumBind': case 'scrumShove': case 'scrumDrive': return 'bind';
+      case 'scrumCrouch': return 'crouch';
       case 'ruck': case 'jackal': case 'cleanout': return 'ruck';
       case 'jump': case 'lift': case 'lineoutJump': case 'lineoutLift':
       case 'catch': case 'catchHigh': case 'lineoutCatch': return 'jump';
@@ -1914,6 +2034,10 @@ export class ThreePlayerManager {
       head: find(BONE_NAMES.head),
       upperArms: BONE_NAMES.upperArms.map(find),
       foreArms: BONE_NAMES.foreArms.map(find),
+      hands: BONE_NAMES.hands.map(find),
+      thighs: BONE_NAMES.thighs.map(find),
+      calves: BONE_NAMES.calves.map(find),
+      feet: BONE_NAMES.feet.map(find),
     };
     inst.rig = rig;
     if (import.meta.env?.DEV && !rig.pelvis && !rig.spine.some(Boolean)) {
@@ -2112,6 +2236,341 @@ export class ThreePlayerManager {
      * a joint that is no longer there. The weight decays with the pose, so the two
      * converge rather than fight. */
     inst.proc.craftW = weight;
+  }
+
+  /**
+   * 2c — THE SCRUM BIND: hands to the anatomy, hips to the published height,
+   * feet left where the turf put them.
+   *
+   * THREE WRITES, IN THIS ORDER, AND THE ORDER IS THE POINT:
+   *
+   *   hips first. The engine publishes a pelvis height per man
+   *   (`Live.hipY`, sagged by his bind, blended by the cadence — see
+   *   Director.placeBound). The clip's own pelvis height is what it is, so the
+   *   difference is written onto the pelvis bone. Dropped on its own that is a
+   *   man sinking into the pitch, which is why the leg solve below has to run in
+   *   the same frame and never separately.
+   *
+   *   legs second. The ankles are captured BEFORE the pelvis moves and then the
+   *   two-bone chain is solved BACK ONTO them, so the feet stay flat on the turf
+   *   and the crouch is bought entirely by the hips and knees. The foot is
+   *   counter-rotated by the calf's own delta so the sole does not toe up as
+   *   the knee comes over. This is the fix for the float: a pack that is drawn
+   *   standing is not holding a crouch, it is holding a lie.
+   *
+   *   hands third, because they are children of the spine the hips just moved:
+   *   solved after, aimed at a point the ENGINE resolved off the body the hand
+   *   is gripping, so a pack driven six metres back arrives with its grips
+   *   intact.
+   *
+   * The head is locked last and cheaply: a bound forward has no head of his
+   * own, so whatever yaw the clip put on the neck and head is taken away and
+   * the face is left pointing down the tunnel with the rest of the pack.
+   *
+   * A FOURTH WRITE, INVISIBLE WHILE IT WORKS: everything above is a debt to the
+   * animation, and `SCRUM_RELEASE_S` is the repayment. The engine stops
+   * publishing the pose the frame the scrum is torn down, so this reads a
+   * snapshot of the last pose it WAS given and scales every write above by a
+   * fading weight — hips, ankles, grips, head yaw and the fold alike, in the same
+   * frame, so a released pack stands up as one unit instead of being cut out of
+   * the crouch. Skipping that is how sixteen men end a scrum twisted: a pelvis
+   * still pinned at 0.63 m, an arm still aimed at the shirt of a man who has
+   * left, a foot still planted where the pack stood.
+   */
+  private applyScrumBind(inst: PlayerInstance) {
+    const a = inst.actor;
+    const rig = this.resolveRig(inst);
+    const s = RENDER_SCALE;
+    /* THE FADE. `live` is the engine owning this man's pose; the instant it
+     * stops, `scrumFade` walks down (the clock is advanced by the caller, next
+     * to the gate, so one place decides the rate) and the pose departs over
+     * SCRUM_RELEASE_S instead of in a frame. */
+    const live = a.hipY !== undefined;
+    const fade = Math.min(1, Math.max(0, inst.scrumFade ?? 1));
+    const snap = inst.scrumPose ?? (inst.scrumPose = {
+      hipY: STANDING_PELVIS_Y, fold: 0,
+      lx: 0, ly: 0, lz: 0, lw: 0, rx: 0, ry: 0, rz: 0, rw: 0,
+      plant: [new THREE.Vector3(), new THREE.Vector3()], hasPlant: false,
+    });
+    if (live) {
+      snap.hipY = a.hipY!;
+      snap.fold = Math.min(1, Math.max(0, a.collapseW ?? 0));
+      snap.lx = a.bindLX ?? 0; snap.ly = a.bindLY ?? 0; snap.lz = a.bindLZ ?? 0; snap.lw = a.bindLW ?? 0;
+      snap.rx = a.bindRX ?? 0; snap.ry = a.bindRY ?? 0; snap.rz = a.bindRZ ?? 0; snap.rw = a.bindRW ?? 0;
+    }
+    /* the fold fades with everything else, on the one number the engine owns: a
+     * man left ten degrees nose-down after the whistle is the twisted body the
+     * eye catches first, and `collapseW` frozen at 1.00 was precisely that */
+    const fold = snap.fold * fade;
+
+    /* FRESH MATRICES, TWICE, AND BOTH ARE LOAD-BEARING. The mixer has just
+     * written this man's bones, but the pelvis hangs off the clip-animated
+     * `root` bone, whose own `matrixWorld` is whatever the last scene traversal
+     * left behind — so a `updateWorldMatrix` on the pelvis alone recomputes the
+     * parent under the child and the delta you measured is not the delta you
+     * wrote. `updateMatrixWorld(true)` is the only way to read this rig as the
+     * renderer is about to draw it, and it has to run again after the pelvis
+     * write or the arms aim from a spine that has already moved. */
+    inst.root.updateMatrixWorld(true);
+
+    /* one measurement of the loaded skeleton, then never again */
+    const rest = this.scrumRestLengths(inst, rig);
+
+    /* ---- the pelvis, onto its published height ------------------------ */
+    if (rig.pelvis?.parent && fade > 0.001) {
+      /* the ankles BEFORE the write. They are the constraint, not the output. */
+      const legs: { ankle: THREE.Vector3; calf: THREE.Bone; thigh: THREE.Bone | null; foot: THREE.Bone | null }[] = [];
+      for (let i = 0; i < 2; i++) {
+        const thigh = rig.thighs[i], calf = rig.calves[i], foot = rig.feet[i];
+        if (!calf || !foot) continue;
+        foot.updateWorldMatrix(true, false);
+        const cur = _v4.setFromMatrixPosition(foot.matrixWorld).clone();
+        /* PLANTED IN HIS OWN FRAME. While the engine owns the pose this man is
+         * pinned to his slot, so the ankle the crouch solves onto is wherever his
+         * clip currently has it and the feet stay on the turf; remembering that
+         * point in HIS frame rather than the world's means the memory travels
+         * with him if he leaves at a run.
+         *
+         * SAY WHAT THIS IS, AND WHAT IT IS NOT. It is not the fix for the dragged
+         * leg: `bindprobe` measures 0.763 m of foot behind thigh through the
+         * release with this frame and 0.759 m with a world-space memory — half a
+         * centimetre apart — because a sprinting back legitimately trails 0.639 m
+         * and the exposure is only the distance a man covers inside the release
+         * window. The fix is that the layer STOPS WRITING. What this is, is
+         * insurance for the case that window makes real: props hauling themselves
+         * out of a long, driven scrum, where half a metre of travel lands inside
+         * 0.35 s and a world-space memory would yank two knees at once. It costs
+         * one matrix inverse. */
+        if (live) {
+          snap.plant[i].copy(cur);
+          inst.root.worldToLocal(snap.plant[i]);
+          snap.hasPlant = true;
+        }
+        const goal = fade > 0.001 && snap.hasPlant
+          ? (i === 0 ? _bindGoalR : _bindGoalL)
+            .copy(cur)
+            .lerp(inst.root.localToWorld(_bindGoalT.copy(snap.plant[i])), fade)
+          : cur;
+        legs.push({ ankle: goal, calf, thigh, foot });
+      }
+      rig.pelvis.updateWorldMatrix(true, false);
+      _v1.setFromMatrixPosition(rig.pelvis.matrixWorld);
+      /* THE PUBLISHED HEIGHT IS MEASURED FROM THE BODY'S OWN ORIGIN, not from
+       * the raw turf line, and the difference is not nothing: `applyBodyTilt`
+       * lifts the root by `sin(tilt)·0.62` to keep a leaning man's chest off the
+       * grass, and aiming at the turf line instead of at the origin left every
+       * front-rower 61 mm high with a 6 mm error on the eight — i.e. the float
+       * survived in inverse, and scaled by how hard each row was leaning. */
+      const turfY = inst.root.position.y;
+      /* THE FOLD IS RAMPED, NOT CUT. The deck height used to be selected the
+       * instant `collapseW` was nonzero, which is a cliff: measured on the rig,
+       * the whole front row went 0.95 -> 0.12 m in ONE frame at the start of a
+       * collapse and back 0.34 -> 0.95 in one frame at the end of it, while the
+       * spine pitch next to it was easing over 0.45 s. A pack that teleports onto
+       * its stomach and then pops upright is not collapsing, and the eye reads
+       * the pop as a body thrown out of shape — the same complaint the release
+       * fade fixes, on the other end of the scrum. Interpolating the TARGET by
+       * the blend (not the bone after the fact) keeps the solve honest: the legs
+       * are solved onto whatever height this frame asks for, so the knees fold
+       * with the hips instead of being yanked at them. */
+      const heldY = turfY + snap.hipY * s;
+      const deckY = turfY + COLLAPSE_HIP_ABOVE_TURF * s;
+      let goalY = heldY + (deckY - heldY) * snap.fold;
+      /* THE WORLD→LOCAL TRANSFORM IS THE WHOLE FIX, AND IT IS NOT A DETAIL.
+       * The first version of this line was `pelvis.position.y += dy / scale`,
+       * which is arithmetically tidy and completely wrong: the armature's
+       * `root` bone carries a −90° rotation about X (a glTF export convention,
+       * not an animation), so the pelvis's LOCAL Y runs along the world Z and
+       * the height lives on its LOCAL Z. `bindprobe` caught it: the bone moved
+       * two thirds of a metre ACROSS the pitch while the hips stayed exactly
+       * where the clip left them. So the delta goes through `worldToLocal`,
+       * which owns the rotation, the scale and the refresh — hand-decomposing a
+       * parent matrix here is how the next export quietly breaks the scrum. */
+      rig.pelvis.updateWorldMatrix(true, false);
+      _v1.setFromMatrixPosition(rig.pelvis.matrixWorld);
+      /* CLOSED BY MEASUREMENT, NOT BY ALGEBRA. Under the armature's −90° root
+       * rotation the height lives on the pelvis's local Z, and the parent chain
+       * is scaled by the group — a single-shot correction written into one axis
+       * lands about two thirds of the way (measured: 94 mm short on a 300 mm
+       * drop, which is exactly the float this pass exists to remove). Two
+       * passes of "apply, refresh, read the residual" is not a hack around the
+       * maths; it is the only formulation that stays right when the clip, the
+       * balance lean and the fold have all just touched the same chain. The
+       * residual after the second pass is what `bindprobe` asserts against. */
+      /* THE DEPARTURE. Bound, this lands the bone ON the published height
+       * exactly as it always did (fade is 1, so this is the identity). As the
+       * release fades, the target slides from the published height toward the
+       * height the clip itself is asking for THIS frame — which is what makes it
+       * a stand-up rather than a cut. `_v1` is the pristine clip height: the
+       * mixer has just rewritten the pelvis and nothing above has touched it. */
+      goalY = _v1.y + (goalY - _v1.y) * fade;
+      for (let pass = 0; pass < 2; pass++) {
+        const err = goalY - _v1.y;
+        if (Math.abs(err) < 2e-4) break;
+        /* move the bone so its WORLD position lands on the published height:
+         * difference the two points in the parent's local frame, which is where
+         * `position` lives */
+        _v4.copy(_v1);
+        rig.pelvis.parent!.worldToLocal(_v4);
+        _v5.set(_v1.x, goalY, _v1.z);
+        rig.pelvis.parent!.worldToLocal(_v5);
+        rig.pelvis.position.x += _v5.x - _v4.x;
+        rig.pelvis.position.y += _v5.y - _v4.y;
+        rig.pelvis.position.z += _v5.z - _v4.z;
+        rig.pelvis.updateWorldMatrix(true, false);
+        _v1.setFromMatrixPosition(rig.pelvis.matrixWorld);
+      }
+
+      /* ---- the legs: solve each chain back onto its planted ankle ---- */
+      if (rest && rest.thigh > 0 && rest.calf > 0) {
+        /* the knee's pole is the man's own forward: a scrum knee drives into
+         * the pitch, it does not splay toward the touchline */
+        _pole.set(0, 0, 1).applyQuaternion(_q.setFromRotationMatrix(inst.root.matrixWorld));
+        _pole.y = 0;
+        for (const leg of legs) {
+          if (!leg.thigh) continue;
+          leg.thigh.updateWorldMatrix(true, false);
+          _v1.setFromMatrixPosition(leg.thigh.matrixWorld);
+          const sol = solveTwoBone(
+            { x: _v1.x, y: _v1.y, z: _v1.z },
+            { x: leg.ankle.x, y: leg.ankle.y, z: leg.ankle.z },
+            rest.thigh, rest.calf,
+            { x: _v1.x + _pole.x, y: _v1.y - 0.25, z: _v1.z + _pole.z },
+          );
+          _v2.set(sol.elbow.x, sol.elbow.y, sol.elbow.z);
+          this.aimBone(leg.thigh, _v2, BIND_LEG_WEIGHT * fade);
+          const before = _q3.copy(leg.calf.quaternion);
+          this.aimBone(leg.calf, leg.ankle, BIND_LEG_WEIGHT * fade);
+          /* keep the sole flat. The foot is the calf's child, so everything the
+           * calf write did to its rotation the foot inherits — and a crouched
+           * pack on its toes is the "players floating" read this whole pass
+           * exists to remove. Undo it in the foot's own frame. */
+          if (leg.foot) {
+            _q.copy(leg.calf.quaternion).invert().multiply(before);
+            /* the counter-rotation is only as real as the calf write that
+             * caused it, so it fades on the same weight — otherwise a pose that
+             * has gone away is still levelling the sole, which is a foot that
+             * unbends a fraction before the leg does */
+            _q.slerp(_qIdent, 1 - fade);
+            leg.foot.quaternion.premultiply(_q);
+          }
+        }
+      }
+    }
+
+    /* ---- the hands: onto the anatomy the engine resolved ------------- */
+    if (rig.pelvis) inst.root.updateMatrixWorld(true);
+    if (rest && rest.up > 0 && rest.fore > 0) {
+      /* the elbow's pole: DOWN and slightly out. A bound arm is a hook around
+       * a body, and a pole above the joint solves an arm broken backwards. */
+      _pole.set(0, -1, 0).applyQuaternion(_q.setFromRotationMatrix(inst.root.matrixWorld));
+      const arms: [THREE.Bone | null, THREE.Bone | null, number, number, number, number][] = [
+        [rig.upperArms[0], rig.foreArms[0], snap.rx, snap.ry, snap.rz, snap.rw],
+        [rig.upperArms[1], rig.foreArms[1], snap.lx, snap.ly, snap.lz, snap.lw],
+      ];
+      for (const [ua, fa, hx, hy, hz, wRaw] of arms) {
+        /* THE GRIP FADES WITH THE POSE, and this is the line that answers "arms
+         * stretched out behind them": a bind socket is a point in the world where
+         * a BODY was, and an arm still aimed at it at full weight is a locked
+         * elbow reaching after a man who has gone. The envelope clamp in
+         * `solveTwoBone` cannot save it either — it just makes the reach
+         * anatomical, which is why a straight arm is what you see. */
+        const w = Math.min(1, Math.max(0, wRaw)) * BIND_ARM_WEIGHT * fade;
+        if (!ua || w < 0.01) continue;
+        /* engine pitch metres → render world, on the convention every other
+         * world-space aim in this file uses: x and z scale, y rides the turf. */
+        _target.set(hx * s, hy * s + this.groundY(hx), -hz * s);
+        ua.updateWorldMatrix(true, false);
+        _v1.setFromMatrixPosition(ua.matrixWorld);
+        const sol = solveTwoBone(
+          { x: _v1.x, y: _v1.y, z: _v1.z },
+          { x: _target.x, y: _target.y, z: _target.z },
+          rest.up, rest.fore,
+          { x: _v1.x + _pole.x, y: _v1.y + _pole.y, z: _v1.z + _pole.z },
+        );
+        /* THE FOREARM RUNS TO THE SOLVER'S HAND, NOT TO THE REQUEST. A socket
+         * just outside the envelope is legal — the pack's spacing and a 0.547 m
+         * arm do not always agree — and `solveTwoBone` answers by returning the
+         * reachable point on the same line. Aiming the forearm at the raw target
+         * instead swings the wrist PAST the anchor and leaves the hand short of
+         * it in the same frame, which is the 156 mm miss and the 40-60° arm
+         * deviation `bindprobe` was reporting before this line read `sol.hand`. */
+        _v2.set(sol.elbow.x, sol.elbow.y, sol.elbow.z);
+        this.aimBone(ua, _v2, w);
+        _v5.set(sol.hand.x, sol.hand.y, sol.hand.z);
+        if (fa) this.aimBone(fa, _v5, w);
+      }
+    }
+
+    /* ---- the head: the tunnel owns the face ------------------------- */
+    /* A bound forward has no heading of his own — that is what "bound" means —
+     * so whatever yaw the clip has put on his neck and head is taken away and
+     * he looks down the tunnel with the rest of his pack. The yaw is the ONLY
+     * channel written: the clip keeps its head-lift and its side-bend, because
+     * a head welded level is a mannequin, and the law only cares which way his
+     * face is pointing. */
+    /* The yaw is REMOVED in proportion to the pose, not set to zero and left:
+     * `rotation.y` is rewritten by the mixer every frame, so scaling what the
+     * clip asked for by the part the pose has not taken back returns the face to
+     * its owner as the fade closes instead of snapping to it. */
+    if (rig.head) rig.head.rotation.y *= 1 - fade;
+    if (rig.neck) rig.neck.rotation.y *= 1 - fade;
+
+    /* the fold: pitched about the feet, by the one weight the engine owns */
+    if (fold > 0.001) inst.root.rotation.x = -SCRUM_COLLAPSE_PITCH * fold;
+    else if (inst.root.rotation.x !== 0 && inst.proc.tilt < 1e-3) inst.root.rotation.x = 0;
+  }
+
+  /** The loaded rig's segment lengths, in render units, measured once. */
+  private scrumRestLengths(inst: PlayerInstance, rig: ProceduralRig): PlayerInstance['scrumRest'] {
+    if (inst.scrumRest) return inst.scrumRest;
+    const out = { up: 0, fore: 0, thigh: 0, calf: 0 };
+    const dist = (p: THREE.Bone | null, q: THREE.Bone | null): number => {
+      if (!p || !q) return 0;
+      p.updateWorldMatrix(true, false);
+      q.updateWorldMatrix(true, false);
+      _v3.setFromMatrixPosition(p.matrixWorld);
+      _v4.setFromMatrixPosition(q.matrixWorld);
+      return _v3.distanceTo(_v4);
+    };
+    /* [right, left] on both chains; take the first side that resolves, and the
+     * two are mirror images on this rig so the longer is the honest one when a
+     * pose has one arm across the body. */
+    out.up = Math.max(dist(rig.upperArms[0], rig.foreArms[0]), dist(rig.upperArms[1], rig.foreArms[1]));
+    out.fore = Math.max(dist(rig.foreArms[0], rig.hands[0]), dist(rig.foreArms[1], rig.hands[1]));
+    out.thigh = Math.max(dist(rig.thighs[0], rig.calves[0]), dist(rig.thighs[1], rig.calves[1]));
+    out.calf = Math.max(dist(rig.calves[0], rig.feet[0]), dist(rig.calves[1], rig.feet[1]));
+    inst.scrumRest = out;
+    return inst.scrumRest;
+  }
+
+  /**
+   * Aim one bone's own +Y at a world point, in the parent's frame, blended.
+   *
+   * The same three lines `applyArmReach` runs — a bone that points down its
+   * local +Y cannot use `lookAt()`, which aims +Z and twists the limb into the
+   * chest — lifted out so the legs and the arms are solved by ONE piece of
+   * maths instead of two that can drift apart.
+   */
+  private aimBone(bone: THREE.Bone, target: THREE.Vector3, weight: number) {
+    if (!bone.parent || weight <= 0) return;
+    bone.updateWorldMatrix(true, false);
+    _v3.setFromMatrixPosition(bone.matrixWorld);
+    _dir.copy(target).sub(_v3);
+    if (_dir.lengthSq() < 1e-8) return;
+    _dir.normalize();
+    _v4.set(0, 1, 0).applyQuaternion(
+      _qb.setFromRotationMatrix(_mat.extractRotation(bone.matrixWorld)),
+    ).normalize();
+    _q.setFromUnitVectors(_v4, _dir);
+    const parentWorld = _qb.setFromRotationMatrix(
+      _mat.extractRotation(bone.parent.matrixWorld),
+    ).invert();
+    const boneWorld = _qBone.setFromRotationMatrix(
+      _mat.extractRotation(bone.matrixWorld),
+    );
+    const wanted = parentWorld.multiply(_q).multiply(boneWorld);
+    bone.quaternion.slerp(wanted, weight);
   }
 
   private applyTorsoDip(inst: PlayerInstance, weight: number, step: number) {
@@ -2661,7 +3120,38 @@ export class ThreePlayerManager {
       if (this.updateRagdoll(inst, step)) continue;
       const partner = this.latchPartner(inst, pending);
       this.applyProcedural(inst, inst.proc.state, partner, step);
+      /* THE SCRUM BIND. After `applyProcedural`, for the reason every override
+       * in this file is written there: the mixer has already had its say about
+       * these bones. Before `applyBalance`, because a shove that staggers a
+       * bound man should lean the whole pack and not undo a grip.
+       *
+       * Gated on the pose the ENGINE published rather than on a gait name, for
+       * two reasons: the sixteen forwards are the only men who get a `hipY`, so
+       * open play never pays for one of these matrix updates; and the scrum's
+       * own clip names are a moving target — `scrumDrive` reached this file as a
+       * name the state mapper had never heard, which is how a bound pack ended
+       * up playing the upright idle through the longest stage of a scrum. A
+       * pose check cannot go stale the way a name list can. */
       this.applyBalance(inst, step);
+      /* THE SCRUM BIND, LAST. It runs after `applyBalance` and not before it
+       * for a reason that cost a debugging session: the balance lean writes
+       * `root.rotation.x/z`, which re-maps every bone's world position under the
+       * pelvis's parent transform, so a hip height grounded *before* the lean is
+       * wrong by the lean. After it, the published number is the number drawn. */
+      /* THE RELEASE CLOCK, advanced here because the clock and the gate are the
+       * same decision: while the engine publishes a hip height this man is posed
+       * at full weight, and from the frame it stops the pose walks off over
+       * SCRUM_RELEASE_S with `applyScrumBind` still being called for exactly that
+       * long. The engine closing its channel is what stops a prop staying twisted
+       * for the rest of the match; this window is what unwinds the writes the
+       * layer OWNS — the fold and the planted ankles, which no clip will restore
+       * on its own, and which (see SCRUM_RELEASE_S) are the reason a collapsed
+       * pack is drawn on the deck at all. */
+      if (inst.actor.hipY !== undefined) inst.scrumFade = 1;
+      else if ((inst.scrumFade ?? 0) > 0) {
+        inst.scrumFade = Math.max(0, (inst.scrumFade ?? 1) - step / SCRUM_RELEASE_S);
+      }
+      if ((inst.scrumFade ?? 0) > 0.001) this.applyScrumBind(inst);
     }
     /* THE FALLS. They run in their own loop, after every animated pose exists
      * and after `applyProcedural` has stood aside: two falling men push on each

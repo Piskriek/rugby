@@ -6,12 +6,18 @@
  */
 
 import { stepBall, touchBall } from './ballPhysics';
-import { Director, ScrumSlot, Input, MaulState } from '../director';
+import { Director, ScrumSlot, ScrumState, Input, MaulState } from '../director';
 import { DIFFICULTY_TABLE, REFEREE_CALLS } from '../data';
 import { R } from './rng';
 import { clamp } from './clamp';
-import { scrumBlock } from '../behaviour/setpiece-overrides';
-import { engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor, forwardMass } from './forwardPack';
+import {
+  scrumBlock, scrumCadencePose, scrumStageDuration, scrumHipY,
+  SCRUM_COLLAPSE, scrumRowDepth, scrumNineDepth,
+} from '../behaviour/setpiece-overrides';
+import {
+  engineRoomFactor, stabilisedCollapseRisk, eightPicksFromScrum, liftersFor, forwardMass,
+  packDriveVector, driveShearDeg, shearedToCollapse,
+} from './forwardPack';
 import {
   judgeLineoutThrow, stepMaulStall, maulUseItRemaining, maulCollapseHazard,
   type MaulStallFrame,
@@ -103,10 +109,39 @@ export function scrumTunnelVelocity(net: number): number {
   return net * 0.42;
 }
 
+/**
+ * Put a pack on the deck. One entry point for every cause, so the fold, the
+ * `collapseSeen` flag the probes assert, and the referee's teardown cannot be
+ * wired to one trigger and missed by another.
+ */
+function collapseScrum(
+  d: Director, s: ScrumState, team: 'A' | 'B', why: string, shearDeg: number, hipY: number,
+) {
+  s.stage = 'COLLAPSE'; s.t = 0;
+  s.collapseBlend = 0;
+  s.collapseSeen = true;
+  /* the bind has gone: the pose weight falls back with the bodies */
+  s.bindPose = 0;
+  s.collapse = {
+    team, why, shearDeg, hipY,
+    /* a collapsed front row is a prop's bind failure: name him. Floor collapse
+     * is the hooker's height (he is the lowest man in the tunnel) unless the
+     * pack lost a prop to the bin, in which case the bin is the reason. */
+    offenderNum: why === 'HIP Y FLOOR' ? 2 : 1,
+  };
+  s.cadence = 'COLLAPSE';
+  d.shake(0.85);
+}
+
 export function upScrum(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
   const s = d.scrim!;
   s.t += dt;
+  /* THE ONE CLOCK. The pose weight is a function of where the pack stands in
+   * the authored cadence, read from the same table the stage timers below walk,
+   * so a bind can never be fully committed on screen a frame before the
+   * referee has called SET (or a half-second after). */
+  if (s.stage !== 'COLLAPSE') s.bindPose = scrumCadencePose(s.stage, s.t);
   const ax = d.scrumAnchor;
   const feed = s.feed;
   const dTeam: 'A' | 'B' = feed === 'A' ? 'B' : 'A';
@@ -130,19 +165,19 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
   switch (s.stage) {
     case 'MARK':
       s.cadence = 'MARK SET';
-      if (s.t > 0.2) { s.stage = 'FORM'; s.t = 0; }
+      if (s.t > scrumStageDuration('MARK')) { s.stage = 'FORM'; s.t = 0; }
       break;
     case 'FORM':
       s.cadence = 'CROUCH';
-      if (s.t > 0.25) { s.stage = 'CROUCH'; s.t = 0; }
+      if (s.t > scrumStageDuration('FORM')) { s.stage = 'CROUCH'; s.t = 0; }
       break;
     case 'CROUCH':
       s.cadence = 'TOUCH';
-      if (s.t > 0.35) { s.stage = 'BIND'; s.t = 0; }
+      if (s.t > scrumStageDuration('CROUCH')) { s.stage = 'BIND'; s.t = 0; }
       break;
     case 'BIND':
       s.cadence = 'PAUSE';
-      if (s.t > 0.35) {
+      if (s.t > scrumStageDuration('BIND')) {
         s.stage = 'SET'; s.t = 0; s.cadence = 'SET';
         /* T-16 FREEZE. The reset counter was incremented *after* the ceiling
          * test on the previous line ran, so a scrum could re-enter FORM
@@ -163,19 +198,19 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
       break;
     case 'SET':
       s.cadence = 'ENGAGE';
-      if (s.t > 0.25) { s.stage = 'ENGAGE'; s.t = 0; d.shake(0.55); }
+      if (s.t > scrumStageDuration('SET')) { s.stage = 'ENGAGE'; s.t = 0; d.shake(0.55); }
       break;
     case 'ENGAGE':
       s.cadence = 'SETTLED';
-      if (s.t > 0.2) { s.stage = 'STEADY'; s.t = 0; }
+      if (s.t > scrumStageDuration('ENGAGE')) { s.stage = 'STEADY'; s.t = 0; }
       break;
     case 'STEADY':
       s.cadence = 'BALL IN';
-      if (s.t > 0.2) { s.stage = 'FEED'; s.t = 0; s.ball = { x: 0, y: 0.16, z: 0.2, state: 'LIVE' }; }
+      if (s.t > scrumStageDuration('STEADY')) { s.stage = 'FEED'; s.t = 0; s.ball = { x: 0, y: 0.16, z: 0.2, state: 'LIVE' }; }
       break;
     case 'FEED': {
       s.cadence = 'BALL IN';
-      if (s.t > 0.3) {
+      if (s.t > scrumStageDuration('FEED')) {
         s.stage = 'STRIKE'; s.t = 0; s.cadence = 'STRIKE';
         const sq = d.options.scrumFeed ?? 1;
         if (sq === 0 && R() < 0.32) { d.beginPenalty(dTeam, 'FREE KICK — FEED NOT STRAIGHT', 2, true); return; }
@@ -219,21 +254,27 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
          * their props are worth up to 6% either way. */
         const eng = engineRoomFactor([d.L(t, 4), d.L(t, 5)].filter((p) => p.sinbin <= 0).map((p) => p.attrs.PWR));
         /* the drive vector: the shove summed over the eight, each man at
-         * his share of the work and his own power. */
+         * his share of the work and his own power. The per-man terms are kept,
+         * not folded away: the same eight men are the pack's LATERAL balance as
+         * well as its forward force, and a sum cannot tell you the difference. */
         let F = 0;
+        const men: { num: number; x: number; drive: number }[] = [];
         for (const slot of s.players) {
           if (slot.team !== t) continue;
           const p = d.L(slot.team, slot.num);
           if (p.sinbin > 0) continue;
-          F += base * (0.72 + (w / 60) * 0.34) * eng * (PACK_DRIVE_SHARE[slot.num] ?? 0) * (0.9 + 0.2 * p.attrs.PWR / 100);
+          const f = base * (0.72 + (w / 60) * 0.34) * eng * (PACK_DRIVE_SHARE[slot.num] ?? 0) * (0.9 + 0.2 * p.attrs.PWR / 100);
+          F += f;
+          men.push({ num: slot.num, x: slot.x, drive: f });
         }
-        return F;
+        return { F, men };
       };
-      s.packs.A.forceTransmitted = driveOf('A');
-      s.packs.B.forceTransmitted = driveOf('B');
+      const drvA = driveOf('A'), drvB = driveOf('B');
+      s.packs.A.forceTransmitted = drvA.F;
+      s.packs.B.forceTransmitted = drvB.F;
       const net = scrumShoveNet(
-        { mass: mass.A, drive: driveOf('A'), stability: s.frontRowStability ?? 0 },
-        { mass: mass.B, drive: driveOf('B'), stability: s.frontRowStability ?? 0 },
+        { mass: mass.A, drive: drvA.F, stability: s.frontRowStability ?? 0 },
+        { mass: mass.B, drive: drvB.F, stability: s.frontRowStability ?? 0 },
         feed,
       );
       s.tunnelV = approach(s.tunnelV, scrumTunnelVelocity(net), 3.5, dt);
@@ -255,12 +296,53 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
         d.beginPenalty(dTeam, 'PENALTY — WHEELED PAST 90°', 3);
         return;
       }
-      if (R() < dt * s.collapseRisk * 0.1) {
-        d.lawCall('COLLAPSE', REFEREE_CALLS.COLLAPSE, s.feed === 'A' ? 'B' : 'A');
-        d.beginPenalty(dTeam, REFEREE_CALLS.COLLAPSE, 3);
+      /* THE COLLAPSE. A scrum comes down for one of three reasons and the
+       * engine now knows two of them: the drive vector shearing across the
+       * tunnel, and a front row whose bind is not holding their hips up. The
+       * contest roll is kept — a pack that is being pushed over the top of
+       * them does come up — but it rolls through the SAME fold as the two
+       * measured causes, so there is one collapse to render and one teardown
+       * to referee, not a whistle with no bodies. */
+      const dvA = packDriveVector(drvA.men), dvB = packDriveVector(drvB.men);
+      const shA = driveShearDeg(dvA), shB = driveShearDeg(dvB);
+      s.shearDeg = Math.max(shA, shB);
+      /* the shear has to be held to count: see `shearedToCollapse` */
+      if (Math.max(shA, shB) > SCRUM_COLLAPSE.SHEAR_DEG) s.shearT += dt; else s.shearT = 0;
+      const rolled = R() < dt * s.collapseRisk * 0.1;
+      const lowHip = s.frontRowHipY !== undefined && s.frontRowHipY < SCRUM_COLLAPSE.HIP_Y_FLOOR;
+      /* the floor has to be held, for the same reason the shear does: a pack
+       * that dips one frame is settling into its bind, not coming down */
+      if (lowHip) s.hipT += dt; else s.hipT = 0;
+      if ((lowHip && s.hipT >= SCRUM_COLLAPSE.HIP_HOLD_S)
+        || shearedToCollapse(shA, s.shearT) || shearedToCollapse(shB, s.shearT) || rolled) {
+        /* who is at fault: the pack that sheared, and if neither sheared the
+         * pack that was being driven backwards. */
+        const off: 'A' | 'B' = shA > shB ? 'A' : shB > shA ? 'B' : (net > 0 ? 'B' : 'A');
+        collapseScrum(d, s, off, lowHip ? 'HIP Y FLOOR' : 'DRIVE SHEAR', Math.max(shA, shB),
+          s.frontRowHipY ?? scrumHipY(1, 1));
         return;
       }
-      if (s.t > 0.9) { s.stage = 'BASE'; s.t = 0; }
+      if (s.t > scrumStageDuration('DRIVE')) { s.stage = 'BASE'; s.t = 0; }
+      break;
+    }
+    case 'COLLAPSE': {
+      /* THE FOLD. The pack is going down and the whistle follows it: the
+       * teardown is deliberately AFTER the bodies have landed, because a
+       * penalty awarded the frame a scrum collapses is a scrum that vanishes.
+       * The shove stops, the ball is dead in the tunnel, and the renderer owns
+       * nothing but `collapseBlend` — one number, so a stalled frame cannot
+       * leave a pack half-folded. */
+      s.cadence = 'COLLAPSE';
+      s.collapseBlend = clamp(s.t / SCRUM_COLLAPSE.FOLD_S, 0, 1);
+      s.tunnelV = 0;
+      s.shearT = 0;
+      s.hipT = 0;
+      if (s.t > SCRUM_COLLAPSE.WHISTLE_S) {
+        const off = s.collapse?.team ?? dTeam;
+        d.lawCall('COLLAPSE', REFEREE_CALLS.COLLAPSE, off);
+        d.beginPenalty(off === 'A' ? 'B' : 'A', REFEREE_CALLS.COLLAPSE, s.collapse?.offenderNum ?? 3);
+        return;
+      }
       break;
     }
     case 'BASE':
@@ -292,13 +374,13 @@ export function upScrum(d: Director, dt: number, input: Input, pressed: Set<stri
          * would pick up where the scrum STARTED, not where it ended. */
         if (pick) {
           d.say('EIGHT PICKS FROM THE BASE');
-          d.startOpen(winner, ax.x, ax.z + (winner === 'A' ? -1.94 : 1.94) + s.netDrive, 8, 1, 0, 0.55);
+          d.startOpen(winner, ax.x, ax.z + (winner === 'A' ? -1 : 1) * scrumRowDepth(3) + s.netDrive, 8, 1, 0, 0.55);
           break;
         }
         /* PLAYTEST 4: the mark is the nine's own base slot (2.95) — he has
          * stood there through the drive, so the hand-off reads as a pick-up
          * at the back of the scrum, not a teleport to the tunnel. */
-        d.startOpen(winner, ax.x + (winner === 'A' ? -0.3 : 0.3), ax.z + (winner === 'A' ? -2.95 : 2.95) + s.netDrive, 9, 1, 0, 0.55);
+        d.startOpen(winner, ax.x + (winner === 'A' ? -0.3 : 0.3), ax.z + (winner === 'A' ? -1 : 1) * scrumNineDepth() + s.netDrive, 9, 1, 0, 0.55);
       }
       break;
     default: break;

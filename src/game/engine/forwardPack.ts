@@ -63,6 +63,9 @@ import {
   RuckGateGeometry, RuckGate, BreakdownVolume, GatePoint,
   insideVolume, inCorridor, gatePenetration, GATE_LINE_EPS_M,
 } from './gates';
+import {
+  scrumCrouchScale, scrumHipY, SCRUM_COLLAPSE,
+} from '../behaviour/setpiece-overrides';
 
 /* ================================ TYPES ================================ */
 
@@ -735,9 +738,15 @@ export interface ScrumBindProfile {
 }
 
 export function scrumBindProfile(row: number, num: number): ScrumBindProfile {
+  /* The crouch fraction is NOT authored here any more. It is the published hip
+   * height the renderer has to reach (`scrumHipY`), so the number that prices
+   * the collapse risk and the number that grounds the pelvis are now one
+   * number: a pack that is "low" to the referee is also a pack that is low on
+   * screen, which is the whole point of putting it in `behaviour/`. */
+  const crouch = scrumCrouchScale(row, num);
   if (row === 1) {
     return {
-      bindTolerance: 0.7, crouch: num === 2 ? 0.62 : 0.66, settleSpeed: 2.0,
+      bindTolerance: 0.7, crouch, settleSpeed: 2.0,
       job: num === 2 ? 'HOOKER — BIND ON BOTH PROPS, LOW, STRIKE ON THE FEED'
         : num === 1 ? 'LOOSEHEAD — BIND LONG, SPINE IN LINE, LIFT THE TIGHTHEAD'
           : 'TIGHTHEAD — BIND SHORT, CHIN OFF THE CHEST, HOLD THE HIT',
@@ -745,16 +754,116 @@ export function scrumBindProfile(row: number, num: number): ScrumBindProfile {
   }
   if (row === 2) {
     return {
-      bindTolerance: 0.95, crouch: 0.72, settleSpeed: 2.4,
+      bindTolerance: 0.95, crouch, settleSpeed: 2.4,
       job: num === 4 || num === 5 ? 'LOCK — ENGINE ROOM, DRIVE THROUGH THE HIPS OF YOUR PROP'
         : num === 6 ? 'BLINDSIDE — BIND ON THE LOCK, PUSH SQUARE, BREAK LATE'
           : 'OPENSIDE — BIND ON THE LOCK, PUSH, FIRST OFF ON THE BALL',
     };
   }
   return {
-    bindTolerance: 1.15, crouch: 0.8, settleSpeed: 2.6,
+    bindTolerance: 1.15, crouch, settleSpeed: 2.6,
     job: 'EIGHT — CONTROL THE BALL AT THE BASE, PICK OR RELEASE TO 9',
   };
+}
+
+/* ------------------- THE BIND SAG AND THE DRIVE VECTOR ------------------- *
+ *
+ * Two numbers the engine has never had, and both are needed for a scrum that
+ * collapses for a REASON rather than on a roll of the dice:
+ *
+ *   `bindSag` — how far a man's bind has failed him, 0..1. A front-rower who
+ *      is seated on his mark holds his published hip height; one who is still
+ *      reaching for it cannot hold his height at all, and his hips drop toward
+ *      the collapse floor. This is the mechanism the engine was missing: it
+ *      already scored how bound a front row was (`frontRowStability`) but never
+ *      let that score change the body.
+ *
+ *   `packDriveVector` — the shove as a VECTOR, not a scalar. The contest has
+ *      always summed the eight men into one number along the tunnel axis; the
+ *      same eight pushing unevenly across the shoulder line produce a LATERAL
+ *      component, and a pack being driven sideways is a pack about to come
+ *      down. Law 19 has no degrees in it, but a simulation has to decide when a
+ *      scrum has sheared, and this is the decision, made from mass and angle
+ *      instead of from a random number.
+ * ------------------------------------------------------------------------- */
+
+/** How far off his seat a man is, as a fraction of the bind tolerance, clamped.
+ *  0 = seated, 1 = at the edge of bound or past it. */
+export function bindSag(offM: number, bindToleranceM: number): number {
+  if (!(bindToleranceM > 0)) return 0;
+  /* Measured, not guessed: a bound pack sits 0.05-0.45 m off its seat while
+   * the tunnel is moving under it, so a sag that reached 1 inside the bind
+   * tolerance made an ordinary scrum look collapsed. The scale is therefore TWO
+   * tolerances wide — a man AT the edge of bound has lost half his height, and
+   * only a man who is not in the scrum at all (twice the tolerance out) has lost
+   * all of it and gone through the collapse floor. */
+  return clamp(offM / (bindToleranceM * 2), 0, 1);
+}
+
+/** The hip height a sagging bind has left a man holding, metres above the turf. */
+export function saggingHipY(row: number, num: number, offM: number): number {
+  return scrumHipY(row, num, bindSag(offM, scrumBindProfile(row, num).bindTolerance));
+}
+
+export interface PackDriveVector {
+  /** newtons along the engagement axis (the number the shove contest uses) */
+  axial: number;
+  /** newtons across it — the signed shear the tunnel must resist */
+  lateral: number;
+}
+
+/**
+ * Sum a pack's drive as a vector from its men.
+ *
+ * `men` is one team's bound eight: each with his shirt, his pitch x, and the
+ * newtons he is contributing (the caller owns the force model — `driveOf` in
+ * upScrum already computes it per man, and this must not quietly re-price it).
+ *
+ * The lateral component weights each man by where he stands ACROSS the shoulder
+ * line, measured against the pack's own centre, and normalised by half a
+ * shoulder width so a man one body out of true counts as a full lever. A pack
+ * that is symmetric in strength produces a lateral of exactly zero, whatever
+ * its absolute force — that is the property that makes this safe to drive a
+ * penalty from.
+ */
+export function packDriveVector(
+  men: { num: number; x: number; drive: number }[],
+): PackDriveVector {
+  let axial = 0, lateral = 0, cx = 0, live = 0;
+  for (const m of men) {
+    if (!(m.drive > 0)) continue;
+    axial += m.drive;
+    cx += m.x;
+    live++;
+  }
+  if (live === 0) return { axial: 0, lateral: 0 };
+  cx /= live;
+  /* Half a shoulder line is one man's leverage. A front row is 2.04 m across
+   * (three men at 0.68 m centres), so a prop at the edge of his own pack is a
+   * lever of ~1.5; dividing by 1.0 m keeps a one-sided pack under about 45 deg
+   * of shear rather than saturating it at the first attribute difference. */
+  const lever = 1.0;
+  for (const m of men) {
+    if (!(m.drive > 0)) continue;
+    lateral += m.drive * ((m.x - cx) / lever);
+  }
+  return { axial, lateral };
+}
+
+/** The angle a drive vector makes with the tunnel axis, degrees. 0 = square. */
+export function driveShearDeg(v: PackDriveVector): number {
+  if (v.axial <= 0) return 0;
+  return (Math.atan2(Math.abs(v.lateral), v.axial) * 180) / Math.PI;
+}
+
+/**
+ * Is this shear a collapse? Only a SUSTAINED one. A pack leans as its eight
+ * shift their feet and as the hooker strikes; that is a scrum, and whistling it
+ * would be worse than the collapse. `holdT` is how long this pack has been over
+ * the angle, and the law fires past the authored window.
+ */
+export function shearedToCollapse(shearDeg: number, holdT: number): boolean {
+  return shearDeg > SCRUM_COLLAPSE.SHEAR_DEG && holdT >= SCRUM_COLLAPSE.SHEAR_HOLD_S;
 }
 
 /**
