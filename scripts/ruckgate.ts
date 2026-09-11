@@ -93,7 +93,7 @@ for (let i = 0; i < 70; i++) {
     /* Behind the nine, in his channel: they sprinted through the pile. */
     const behind = (nine.z - p.z) * 1 > 2.2;
     const channel = Math.abs(p.x - nine.x) < 2.4;
-    if (behind && channel && (p.recoverT ?? 0) <= 0) throughNine++;
+    if (peeling && behind && channel && (p.recoverT ?? 0) <= 0) throughNine++;
   }
   if (i === 12 || i === 30 || i === 55) {
     const b6 = d.L('B', pile.find((q) => q.team === 'B')?.num ?? 6);

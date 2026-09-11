@@ -734,11 +734,12 @@ export function passOptions(
     const side: -1 | 1 = rel >= 0 ? 1 : -1;
     const absRel = Math.abs(rel);
     if (absRel < 0.4) continue;
-    // a pass is only offered to a man who is roughly level or ahead
+    // a pass is only offered to a man who is roughly level or behind
     // T-18: support legitimately trails the carrier by up to 10 m (that is
     // what depth IS) — the old 6 m cutoff removed the receivers a moving
     // attack actually has, and the CPU had nobody to pass to.
-    if ((m.z - carrier.z) * atkDir < -10) continue;
+    const recAlong = (m.z - carrier.z) * atkDir;
+    if (recAlong < -10) continue;
     const dist = Math.hypot(m.x - carrier.x, m.z - carrier.z);
     // HARD CLAMP: a pass can never exceed the widest eligible receiver
     if (dist > 26) continue;
@@ -775,8 +776,13 @@ export function passOptions(
      * law he cannot learn, and a referee who never blows is not a referee.
      * `forwardContext` is exactly the CPU flag — it is only passed for a
      * CPU-driven side — so the two behaviours fall out of the existing
-     * structure rather than a second option. */
-    if (forwardContext?.enabled && aimRel > PASS_FORWARD_EPSILON) {
+     * structure rather than a second option.
+     *
+     * A man clearly in front of the thrower is a forward pass on the grass
+     * even when the thrower's own sprint makes the relative-velocity test
+     * legal — that is the "massive forward" the player sees. */
+    const aimAlong = (aim.z - carrier.z) * atkDir;
+    if (forwardContext?.enabled && (aimRel > PASS_FORWARD_EPSILON || recAlong > 0.75 || aimAlong > 1.2)) {
       forwardContext?.noteRejection?.(m.num, aimRel);
       continue;
     }

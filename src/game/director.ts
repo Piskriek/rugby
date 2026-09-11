@@ -2749,7 +2749,7 @@ export class Director {
 
   shape( /* T-03: engine-internal */): ShapeInput {
     const atk = this.possession;
-    const f = this.focusPoint();
+    const f = this.formationAnchor();
     const form = FORMATION_BY_ID(this.teams[atk].backline);
     const dForm = FORMATION_BY_ID(this.teams[this.defending()].defence);
     const op = this.op;
@@ -2793,6 +2793,18 @@ export class Director {
    */
   cameraFocus(): { x: number; z: number } {
     if (this.op && this.op.ball.live) return { x: this.op.ball.x, z: this.op.ball.z };
+    return this.focusPoint();
+  }
+
+  /**
+   * Where the attacking (and defending) shape is drawn from. focusPoint()
+   * stays on the passer while the ball is in the air so the formation-integrity
+   * sample has a stable carrier; using that same point as the live mark
+   * collapsed the whole line onto him, then lurched them to the catcher.
+   * During flight the line reforms on where the ball is GOING.
+   */
+  private formationAnchor(): { x: number; z: number } {
+    if (this.op?.ball.live) return { x: this.op.passTargetX, z: this.op.passTargetZ };
     return this.focusPoint();
   }
 
@@ -3029,7 +3041,7 @@ export class Director {
     const diff = DIFFICULTY_TABLE[clamp(this.difficulty, 0, 9)];
     const atkShape = this.shapeOf(atk);
     const defSys = this.defenceOf(def);
-    const f = this.focusPoint();
+    const f = this.formationAnchor();
 
     /* Off-the-top: the defence (and the unused backs) stay on the Law 18
      * ten-metre line until the pass to the fly-half is halfway there. */
@@ -3529,14 +3541,31 @@ export class Director {
             }
             /* D11-b: never past the dead-ball line, never through the posts. */
             const mark = this.boundMark(targetX, targetZ);
+            /* Dataset `continue`s before the loop-footer echelon, so 10/12/13
+             * sat flat on the slot and the line looked unsettled. Apply the
+             * same depth relationship here, then jog to the mark — a full
+             * sprint every frame was idle→sprint with no walk/jog in between. */
+            let tz = mark.z;
+            if (inEchelon(p.num) && !(this.op?.ball.live && p.num === this.op.pendingReceiver)) {
+              const tenSlot = atkShape.slots.find((q) => q.num === 10);
+              if (tenSlot) {
+                const tempo10 = this.slider(atk, 'tempo') / 100;
+                const tenDepth = tenSlot.depth * atkShape.depthBias * (0.7 + tempo10 * 0.5);
+                const tenZ = this.anchorDepth(f, atkSigma, -tenDepth);
+                tz = this.boundMark(mark.x, echelonTargetZ(p.num, tenZ, atkSigma)).z;
+              }
+            }
+            const gap = Math.hypot(mark.x - p.x, tz - p.z);
             this.writeThinkPlayer(gate, `think:dataset-mark:${p.team}${p.num}:${sit}`, p,
               ['tx', 'tz', 'job', 'urgency'] as const, () => {
                 p.tx = clamp(mark.x, -33, 33);
-                p.tz = clamp(mark.z, -59, 59);
-                p.job = dsm.job;
-                p.urgency = 0.9;
+                p.tz = clamp(tz, -59, 59);
+                p.job = inEchelon(p.num) && p.num !== 10
+                  ? `${dsm.job} — ${echelonDepthBehindTen(p.num)} m BEHIND THE TEN, ON THE ANGLE`
+                  : dsm.job;
+                p.urgency = gap > 14 ? 0.88 : 0.66;
               });
-            steer(p, dt, true, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
+            steer(p, dt, gap > 8, gate, `think:dataset-steer:${p.team}${p.num}:${sit}`);
             continue;
           }
         }

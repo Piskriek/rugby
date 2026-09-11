@@ -162,8 +162,13 @@ export function passIntersection(
   const dx = ballAim.x - mark.x, dz = ballAim.z - mark.z;
   const d = Math.max(0.01, Math.hypot(dx, dz));
   const travel = Math.min(d, runnerSpeed * Math.max(0, flightT));
+  /* `dir` used to add a quarter-sprint of extra forward travel so the
+   * outside backs crossed the gain line as they met the ball. That extra
+   * shoved 12 and 13 past the aim and they took the pass in front of the
+   * thrower. Meet the aim; the echelon already puts them running forward. */
+  void dir;
   return {
     x: mark.x + (dx / d) * travel,
-    z: mark.z + (dz / d) * travel + dir * runnerSpeed * Math.max(0, flightT) * 0.25,
+    z: mark.z + (dz / d) * travel,
   };
 }

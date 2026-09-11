@@ -87,7 +87,17 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * a ball that jumped forward at the moment of the catch. */
     const toRec = Math.hypot(rec.x - s.ball.x, rec.z - s.ball.z);
     const arrived = dd <= step;
-    if (toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) || arrived || s.passT >= 1.35) {
+    /* A receiver who has sprinted PAST the aim toward the try must not
+     * snatch the ball mid-flight in front of the thrower — that is the
+     * massive forward the player sees even when the release was legal.
+     * Keep flying to the aim; he comes back, or the timeout hands it over. */
+    const recPastAim = (rec.z - s.passTargetZ) * s.dir > 1.4;
+    const recOnAim = Math.hypot(rec.x - s.passTargetX, rec.z - s.passTargetZ) < 2.2;
+    const nearRec = toRec <= Math.max(0.55, PASS_SPEED * dt * 1.05) && !recPastAim;
+    /* Do not complete on "ball arrived" if the receiver has already run past
+     * the aim — snapping the ball to him there is the massive forward. He
+     * comes back onto the mark, or the timeout hands it over. */
+    if (nearRec || (arrived && recOnAim && !recPastAim) || s.passT >= 1.35) {
       s.ball.live = false;
       s.carrierNum = s.pendingReceiver;
       /* SPEC_11: `focusPoint()` is Formation's anchor, and it reads
@@ -738,18 +748,12 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
    * absolute rate is calibrated to the real thing. */
   const errorChance = clamp(opt.risk * 0.45 * (1 - d.assists.pass * 0.5), 0.008, 0.18);
   if (R() < errorChance) {
-    /* A spilled pass is a turnover in any box score — the ball changed
-     * hands through an error, which is exactly the "in the tackle and from
-     * errors" family the realism ranges measure alongside steals. */
+    /* A spilled pass is a knock-on, not a throw-forward. Labelling half of
+     * them FWD_PASS is why the referee seemed to pick up forwards only
+     * "sometimes" — the real Law 11 test never ran on these, a coin did. */
     d.teams[d.defending()].stats.turnovers++;
-    const strict = d.options.fwdPass ?? 1;
-    if (strict < 2 && R() < 0.5) {
-      d.lawCall('FWD_PASS', REFEREE_CALLS.FWD_PASS, s.attacking);
-      d.startScrum(d.defending(), car.x, car.z);
-    } else {
-      d.commentate('MISSED');
-      d.startScrum(d.defending(), car.x, car.z);
-    }
+    d.lawCall('KNOCK_ON', REFEREE_CALLS.KNOCK_ON, s.attacking);
+    d.startScrum(d.defending(), car.x, car.z);
     return;
   }
 
@@ -780,12 +784,29 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
     ? clampAimLegal(car, solvedAim, car.vz, dir, fwdProf.tol)
     : null;
   if (clamped) d.notePassClamped();
-  const aim = clamped ?? solvedAim;
-  /* Ordering matters for the ledger: a corrected pass is not a whistled one,
-   * and counting it as both would flatter the referee and hide the CPU's
-   * debt. The rate is counted before the verdict, the whistle after it. */
-  const whistled = blown && !clamped && fwdProf.blows;
-  d.notePassRelease(rel, forwardMetres(rel, solvedAim.flight), whistled);
+  let aim = clamped ?? solvedAim;
+  /* Even a Law-11-legal release can land metres in front of the thrower when
+   * the receiver is sprinting and the solve leads him — that is the massive
+   * ground-forward the player sees. CPU throws stay within a stride. */
+  if (!d.isHuman(s.attacking)) {
+    const along = (aim.z - car.z) * dir;
+    if (along > 1.2) {
+      const z = car.z + dir * 1.2;
+      const dist = Math.hypot(aim.x - car.x, z - car.z);
+      aim = { x: aim.x, z, dist, flight: Math.max(0.08, dist / PASS_SPEED) };
+    }
+  }
+  /* Re-test the throw that will actually fly. A clamp that still leaves the
+   * ball travelling forward is not a correction — it is a forward pass, and
+   * the referee blows it for the CPU the same as for the human. The old
+   * `blown && !clamped` test meant ANY clamp, even a failed one, never
+   * scrummed, so massive forwards sailed. */
+  const relAfter = passReleaseRel(car, aim, car.vz, dir);
+  const stillIllegal = relAfter > fwdProf.tol;
+  /* Clamp is a correction. Whistle only if the throw that actually flies is
+   * still a throw-forward — human and CPU alike. */
+  const whistled = fwdProf.blows && stillIllegal;
+  d.notePassRelease(relAfter, forwardMetres(relAfter, aim.flight), whistled);
   if (whistled) {
     /* Scrum WHERE THE BALL WAS THROWN, not where it was caught — that is the
      * law, and it is also what the old error branch already did. */
@@ -797,12 +818,21 @@ export function doPass(d: Director, side: -1 | 1, cutOut: boolean) {
   // T-35. The receiver is already moving; the ball flies to him instead of
   // teleporting. Launch the flight — upOpen carries it to the target.
   const receiverBefore = gate ? snapshotForwardAttackPlayer(opt.player) : undefined;
-  opt.player.vz = s.dir * maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
-  opt.player.face = s.dir >= 0 ? 1 : -1;
+  /* Run ONTO the aim, not blindly upfield. Injecting try-line velocity
+   * sent the receiver past a legal (behind/flat) aim and he caught the
+   * ball in front of the thrower. */
+  {
+    const toAx = aim.x - opt.player.x, toAz = aim.z - opt.player.z;
+    const toA = Math.hypot(toAx, toAz) || 1;
+    const run = maxSpeed(opt.player, false, false, opt.player.stamina) * 0.8;
+    opt.player.vx = (toAx / toA) * run;
+    opt.player.vz = (toAz / toA) * run;
+  }
+  if (Math.abs(opt.player.vz) > 0.3) opt.player.face = opt.player.vz > 0 ? 1 : -1;
   if (gate && receiverBefore) {
     for (const failure of forwardAttackPlayerWriteFailures(
       `open:pass-launch-receiver:${opt.player.team}${opt.player.num}`, receiverBefore,
-      snapshotForwardAttackPlayer(opt.player), ['vz', 'face'] as const,
+      snapshotForwardAttackPlayer(opt.player), ['vx', 'vz', 'face'] as const,
     )) gate(failure);
   }
 
