@@ -32,7 +32,8 @@
  * The ball's ground speed in flight. `upOpen` flies it at a constant rate;
  * this is that rate, and it is what turns a direction into a velocity.
  */
-export const PASS_SPEED = 13;
+/** 10.4 m/s is 13 m/s with 25% more airtime — a slower, loftier throw. */
+export const PASS_SPEED = 10.4;
 
 /**
  * How much of the receiver's run-on the throw is led by. This is the engine's

@@ -6,6 +6,7 @@
  */
 
 import { Director, Input, OpenPlayState } from '../director';
+import { lineoutBacklineMark } from '../behaviour/setpiece-overrides';
 import { FIELD } from '../../render/retro';
 import { DIFFICULTY_TABLE } from '../data';
 import { contractFor } from '../jlr';
@@ -46,10 +47,10 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
    * while it flies — the pass is a commitment. */
   if (s.ball.live) {
     const rec = d.L(s.attacking, s.pendingReceiver);
-    /* Playtest 3: a throw flies at ~13 m/s OVER ITS OWN LENGTH — a 6 m pop
-     * takes 0.46 s, a 20 m cut-out 1.5 s. The old fixed half-second homing
-     * made every pass feel like a teleport. */
-    s.passT += dt * (13 / s.passDist);
+    /* Playtest 3: a throw flies at PASS_SPEED over its own length — a 6 m
+     * pop takes ~0.6 s, a 20 m cut-out ~1.9 s. The old fixed half-second
+     * homing made every pass feel like a teleport. */
+    s.passT += dt * (PASS_SPEED / s.passDist);
     /* T-40, REWRITTEN BY SPEC_13.
      *
      * The receiver was steered to `ball.z + dir * 1.0` — a point one metre in
@@ -70,16 +71,15 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
     rec.job = 'TAKE THE PASS';
     steer(rec, dt, true);
 
-    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at its TRUE 13 m/s
-     * ground speed over its own length — a 6 m pop takes 0.46 s, a 20 m
-     * cut-out 1.5 s. The difference is WHAT it flies at: a fixed point
+    /* PLAYTEST 4: THE FLASH, preserved. The ball flies at PASS_SPEED over
+     * its own length. The difference is WHAT it flies at: a fixed point
      * solved at release, not a man who is being pushed forward to meet it. */
     const dx = s.passTargetX - s.ball.x, dz = s.passTargetZ - s.ball.z;
     const dd = Math.max(0.01, Math.hypot(dx, dz));
     const step = Math.min(dd, PASS_SPEED * dt);
     s.ball.x += (dx / dd) * step;
     s.ball.z += (dz / dd) * step;
-    s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 0.8;
+    s.ball.y = 1.05 + Math.sin(Math.min(1, s.passT) * Math.PI) * 1.0;
     /* SPEC_13: the catch is PROXIMITY TO THE RECEIVER, not arrival at the
      * target. Flying to a fixed point means the ball can reach the aim with
      * the receiver two metres away, and snapping it to him there is the
@@ -123,6 +123,26 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
       d.setCtrl(s.attacking, s.carrierNum);
       d.run(s.attacking, s.carrierNum).carries++;
       d.refreshPassOptions();
+      /* Off-the-top: 9 takes the tap and fires it to 10 in one motion.
+       * The ball stays in the air — it never sits on the fly-half's chest
+       * the frame the jumper won it. */
+      if (s.lineoutTap === 'TO_NINE') {
+        s.lineoutTap = 'TO_TEN';
+        const ten = d.L(s.attacking, 10);
+        if (ten && ten.sinbin <= 0 && !ten.down) {
+          /* Aim at the Law 18 first-receiver mark, not at 10's body — he
+           * may still be walking onto it. He is steered to the aim. */
+          const h = s.lineoutHold;
+          const mark = h
+            ? lineoutBacklineMark(10, s.attacking, h.markZ, h.side)
+            : { x: ten.x, z: ten.z };
+          d.launchPassFlight(rec.x, rec.z, 1.05, mark.x, mark.z, 10);
+        } else {
+          s.lineoutTap = undefined;
+        }
+      } else if (s.lineoutTap) {
+        s.lineoutTap = undefined;
+      }
     }
     return;
   }

@@ -22,6 +22,44 @@ import type { MaulExitState } from '../maulRegate';
  * the attacking 22, where a five-metre lineout is a try invitation. */
 const LO_DRIVE_CALLS = [1, 3, 1, 2];
 
+/** Closest jumper to the ball at the catch — he has it, then he taps it. */
+function nearestLineoutJumper(s: { ball: { x: number }; players: { team: 'A' | 'B'; role: string; num: number; x: number }[] }, team: 'A' | 'B'): number {
+  const js = s.players.filter((q) => q.team === team && q.role === 'JUMPER');
+  if (!js.length) return 4;
+  js.sort((a, b) => Math.abs(a.x - s.ball.x) - Math.abs(b.x - s.ball.x));
+  return js[0].num;
+}
+
+/**
+ * Off-the-top: the jumper has the ball at the catch, then it FLIES to 9
+ * and 9 fires it to 10. Defence stays on the Law 18 ten-metre line until
+ * that pass is halfway to the fly-half. Drive/maul never comes through here.
+ */
+function beginLineoutOpen(
+  d: Director,
+  team: 'A' | 'B',
+  bx: number,
+  bz: number,
+  jumperNum: number,
+  markZ: number,
+  side: number,
+) {
+  for (const p of d.live) { p.bound = false; p.down = false; }
+  d.startOpen(team, bx, bz, jumperNum, 1, 0, 0.45);
+  const s = d.op;
+  if (!s) return;
+  s.lineoutHold = { markZ, side, firstNum: 10, released: false };
+  const nine = d.L(team, 9);
+  if (nine && nine.sinbin <= 0 && !nine.down) {
+    s.lineoutTap = 'TO_NINE';
+    d.launchPassFlight(bx, bz, 2.2, nine.x, nine.z, 9);
+  } else {
+    const ten = d.L(team, 10);
+    s.lineoutTap = 'TO_TEN';
+    d.launchPassFlight(bx, bz, 2.2, ten.x, ten.z, 10);
+  }
+}
+
 export function upScrum(d: Director, dt: number, input: Input, pressed: Set<string>) {
 
   const s = d.scrim!;
@@ -318,8 +356,10 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       if (!won) {
         d.recordSetPieceOutcome('lineouts', dTeam, thrower);
         d.commentate('LINEOUT', '— STOLEN AT THE TAIL');
+        const jumperNum = nearestLineoutJumper(s, dTeam);
+        const markZ = s.markZ, side = s.side;
         d.lo = undefined;
-        d.startOpen(dTeam, bx, bz, 9, 1, 0, 0.45);
+        beginLineoutOpen(d, dTeam, bx, bz, jumperNum, markZ, side);
         return;
       }
 
@@ -327,9 +367,11 @@ export function upLineout(d: Director, dt: number, input: Input, pressed: Set<st
       s.ball.state = 'HELD';
       const jumper = s.players.find((p) => p.team === thrower && p.role === 'JUMPER');
       if (jumper) { s.ball.heldBy = jumper.id; jumper.handY = 2.6; }
+      const jumperNum = nearestLineoutJumper(s, thrower);
+      const markZ = s.markZ, side = s.side;
       d.lo = undefined;
       if (drive) { d.startMaul(thrower, bx, bz, 5, true); return; }
-      d.startOpen(thrower, bx, bz, 10, 1, 0, 0.45);
+      beginLineoutOpen(d, thrower, bx, bz, jumperNum, markZ, side);
       return;
     }
   }
@@ -359,7 +401,8 @@ export function releaseThrow(d: Director, ) {
   s.stage = 'CONTEST'; s.t = 0;
   const from = s.players.find((p) => p.role === 'THROWER')!;
   const dx = s.call.targetX - from.x;
-  const flight = 1.15;
+  /* 1.15 s plus 25% hang — the throw sits up for the jump. */
+  const flight = 1.15 * 1.25;
   s.ball.vx = dx / flight;
   s.ball.vy = (4.4 - 1.6) / flight + 0.5 * 9.81 * flight;
   s.ball.apexY = 1.6;

@@ -238,10 +238,18 @@ export interface OpenPlayState {
    * other and the flight cannot manufacture forward travel. */
   passTargetX: number;
   passTargetZ: number;
-  /** Playtest 3: the length of the current throw — the flight rate is a
-   * real 13 m/s over this distance, not a fixed half-second homing. */
+  /** Playtest 3: the length of the current throw — the flight rate is
+   * PASS_SPEED over this distance, not a fixed half-second homing. */
   passDist: number;
   passT: number;
+  /**
+   * Off-the-top lineout: Law 18's ten-metre line holds until the first
+   * pass is halfway to `firstNum` (the fly-half). Drive/maul takes never
+   * set this — they stay a maul.
+   */
+  lineoutHold?: { markZ: number; side: number; firstNum: number; released: boolean };
+  /** Orchestrated tap: jumper → 9, then 9 → 10. Cleared on the last catch. */
+  lineoutTap?: 'TO_NINE' | 'TO_TEN';
 }
 
 export interface MaulState {
@@ -2115,9 +2123,15 @@ export class Director {
 
     // D. Nobody has moved for two full seconds while the ball is live.
     if (this.phase === 'OPEN_PLAY') {
-      const movers = this.live.filter((p) => Math.hypot(p.vx, p.vz) > 0.6).length;
-      if (movers < 3) { this.stillFor += dt; } else this.stillFor = 0;
-      if (this.stillFor > 2) { this.trip('play stopped moving with the ball live'); return; }
+      /* A pass in the air, or the off-the-top hold, is play — men on the
+       * ten-metre line are supposed to stand. Do not trip the freeze net. */
+      if (this.op?.ball.live || (this.op?.lineoutHold && !this.op.lineoutHold.released)) {
+        this.stillFor = 0;
+      } else {
+        const movers = this.live.filter((p) => Math.hypot(p.vx, p.vz) > 0.6).length;
+        if (movers < 3) { this.stillFor += dt; } else this.stillFor = 0;
+        if (this.stillFor > 2) { this.trip('play stopped moving with the ball live'); return; }
+      }
     } else this.stillFor = 0;
   }
 
@@ -2976,6 +2990,16 @@ export class Director {
     const defSys = this.defenceOf(def);
     const f = this.focusPoint();
 
+    /* Off-the-top: the defence (and the unused backs) stay on the Law 18
+     * ten-metre line until the pass to the fly-half is halfway there. */
+    if (this.op?.lineoutHold && !this.op.lineoutHold.released) {
+      const h = this.op.lineoutHold;
+      const s0 = this.op;
+      const halfway = s0.ball.live && s0.pendingReceiver === h.firstNum && s0.passT >= 0.5;
+      const caught = !s0.ball.live && s0.carrierNum === h.firstNum;
+      if (halfway || caught || s0.t > 4) h.released = true;
+    }
+
     /* SPEC_11. The single live openside sign. `s.open * flip` was identically
      * +1 — `open` is ±1 and `flip` was its own sign — so the attacking shape
      * was never mirrored to the openside. */
@@ -3253,6 +3277,30 @@ export class Director {
         continue;
       }
       this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
+
+      /* Off-the-top hold. `lo` is already torn down, so the LINEOUT branch
+       * below cannot keep them 10 m back — without this they rush the 10
+       * the frame the jumper takes it. Skip the carrier and the man the
+       * ball is flying to. */
+      if (this.op?.lineoutHold && !this.op.lineoutHold.released) {
+        const skipHold = p.team === this.op.attacking
+          && (p.num === this.op.carrierNum
+            || (this.op.ball.live && p.num === this.op.pendingReceiver));
+        if (!skipHold) {
+          const h = this.op.lineoutHold;
+          const loMark = lineoutBacklineMark(p.num, p.team, h.markZ, h.side);
+          const loGap = Math.hypot(loMark.x - p.x, loMark.z - p.z);
+          this.writeThinkPlayer(gate, `think:lineout-hold:${p.team}${p.num}`, p,
+            ['tx', 'tz', 'job', 'urgency'] as const, () => {
+              p.tx = clamp(loMark.x, -33, 33);
+              p.tz = clamp(loMark.z, -59, 59);
+              p.job = loMark.job;
+              p.urgency = loGap > 14 ? 1 : 0.55;
+            });
+          steer(p, dt, loGap > 10, gate, `think:lineout-hold-steer:${p.team}${p.num}`);
+          continue;
+        }
+      }
 
       /* LINEOUT BACKLINE — Law 18. Unbound players are not in the line; they
        * stand ten metres from the line of touch, spread across the rest of the
@@ -4065,6 +4113,22 @@ export class Director {
    * and always into the path of a man who is already moving.
    */
   doPass(side: -1 | 1, cutOut: boolean) { /* T-03: engine/open */ return doPass(this, side, cutOut); }
+
+  /** Put the ball in the air toward a named shirt. The lineout tap uses this
+   * so custody flies jumper → 9 → 10 instead of snapping to the fly-half. */
+  launchPassFlight(fromX: number, fromZ: number, fromY: number, toX: number, toZ: number, toNum: number) {
+    const s = this.op;
+    if (!s) return;
+    s.ball.live = true;
+    s.ball.x = fromX;
+    s.ball.z = fromZ;
+    s.ball.y = fromY;
+    s.pendingReceiver = toNum;
+    s.passTargetX = toX;
+    s.passTargetZ = toZ;
+    s.passDist = Math.max(3.5, Math.hypot(toX - fromX, toZ - fromZ));
+    s.passT = 0;
+  }
 
 
   lastCall: PlayCall | null = null;
