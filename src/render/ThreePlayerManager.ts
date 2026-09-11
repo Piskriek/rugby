@@ -29,13 +29,47 @@ import { RECOVER_SECONDS } from '../game/director';
 import { RENDER_SCALE, Camera, View } from './retro';
 import { scrumFacing } from '../game/behaviour/setpiece-overrides';
 
-const MODEL_URL = 'assets/models/player.glb';
+const MODEL_URL = '/assets/models/player.glb';
 /** Authored standing height of the packed mesh, metres. Used to fit whatever
  *  unit the FBX was exported in (the 2017 Quaternius human is ~526 units). */
 const MODEL_HEIGHT_M = 1.80;
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
  * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
-const TACKLE_PAIR_URL = 'assets/models/tackle_pair.glb';
+const TACKLE_PAIR_URL = '/assets/models/tackle_pair.glb';
+
+/** Arena's preview proxy 502s a 4.2 MB GLB as one response. Fetch N slices
+ *  (~500 KB) and concatenate. Falls back to a single GET if parts fail. */
+const GLB_PARTS = 8;
+
+async function fetchGlb(url: string, parts = 1): Promise<ArrayBuffer> {
+  const pull = async (u: string) => {
+    let last: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch(u, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`${u} ${r.status}`);
+        return await r.arrayBuffer();
+      } catch (e) {
+        last = e instanceof Error ? e : new Error(String(e));
+        await new Promise((ok) => setTimeout(ok, 180 * (attempt + 1)));
+      }
+    }
+    throw last ?? new Error(u);
+  };
+  if (parts <= 1) return pull(url);
+  try {
+    const bufs = await Promise.all(
+      Array.from({ length: parts }, (_, i) => pull(`${url}.p/${i}/${parts}`)),
+    );
+    const total = bufs.reduce((n, b) => n + b.byteLength, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const b of bufs) { out.set(new Uint8Array(b), o); o += b.byteLength; }
+    return out.buffer;
+  } catch {
+    return pull(url);
+  }
+}
 
 /* ---------------------------------------------------------------- kits --- */
 export type KitTeam = 'A' | 'B' | 'REF';
@@ -387,48 +421,43 @@ export class ThreePlayerManager {
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
     const loader = new GLTFLoader();
-    const one = (url: string) => new Promise<THREE.AnimationClip[] | null>((res) => {
-      loader.load(url, (g) => res(g.animations),
-        undefined, () => res(null));   // optional asset: absent = fall back
+    const parse = (data: ArrayBuffer) => new Promise<import('three/examples/jsm/loaders/GLTFLoader.js').GLTF>((ok, bad) => {
+      loader.parse(data, '', ok, bad);
     });
-    return new Promise((resolve, reject) => {
-      loader.load(MODEL_URL, async (gltf) => {
-        /* An `async` success callback that throws rejects an INNER promise
-         * nobody holds, so the outer load() never settles and the match
-         * hangs at "BRINGING OUT THE TEAMS". Catch and reject the outer. */
-        try {
-          this.template = gltf.scene;
-          this.template.updateMatrixWorld(true);
-          const box = new THREE.Box3().setFromObject(this.template);
-          const h = Math.max(0.01, box.max.y - box.min.y);
-          this.unitPerM = h / MODEL_HEIGHT_M;
-          this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
-          this.armatureScale = 1;
-          this.template.traverse((o) => {
-            if (o.name === 'Human_Armature' || o.name === 'Armature') {
-              const sx = Math.abs(o.scale.x);
-              if (sx > 1.01) this.armatureScale = sx;
-            }
-          });
-          const base = gltf.animations.map(stripRootMotion);
-          /* tackle_pair.glb is Unreal-boned (pelvis/spine_01). Concatenating it
-           * would make pick('MX_StandUp', 'GetUp') prefer a clip that cannot
-           * drive this Mixamo Hips rig. Only keep clips whose tracks bind. */
-          const extra = await one(TACKLE_PAIR_URL);
-          const bound = extra?.filter((c) => c.tracks.some((t) => {
-            const bone = t.name.split('.')[0];
-            return !!this.template!.getObjectByName(bone);
-          })) ?? [];
-          this.templateClips = bound.length ? base.concat(bound) : base;
-          this.prepareTemplate();
-          this.checkRecoverSeconds();
-          this.ready = true;
-          resolve();
-        } catch (err) {
-          this.ready = false;
-          reject(err);
+    const one = (url: string) => fetchGlb(url, 1)
+      .then((buf) => parse(buf).then((g) => g.animations))
+      .catch(() => null);   // optional asset: absent = fall back
+    return (async () => {
+      const gltf = await parse(await fetchGlb(MODEL_URL, GLB_PARTS));
+      this.template = gltf.scene;
+      this.template.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(this.template);
+      const h = Math.max(0.01, box.max.y - box.min.y);
+      this.unitPerM = h / MODEL_HEIGHT_M;
+      this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
+      this.armatureScale = 1;
+      this.template.traverse((o) => {
+        if (o.name === 'Human_Armature' || o.name === 'Armature') {
+          const sx = Math.abs(o.scale.x);
+          if (sx > 1.01) this.armatureScale = sx;
         }
-      }, undefined, reject);
+      });
+      const base = gltf.animations.map(stripRootMotion);
+      /* tackle_pair.glb is Unreal-boned (pelvis/spine_01). Concatenating it
+       * would make pick('MX_StandUp', 'GetUp') prefer a clip that cannot
+       * drive this Mixamo Hips rig. Only keep clips whose tracks bind. */
+      const extra = await one(TACKLE_PAIR_URL);
+      const bound = extra?.filter((c) => c.tracks.some((t) => {
+        const bone = t.name.split('.')[0];
+        return !!this.template!.getObjectByName(bone);
+      })) ?? [];
+      this.templateClips = bound.length ? base.concat(bound) : base;
+      this.prepareTemplate();
+      this.checkRecoverSeconds();
+      this.ready = true;
+    })().catch((err) => {
+      this.ready = false;
+      throw err;
     });
   }
 
