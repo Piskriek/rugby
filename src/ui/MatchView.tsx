@@ -105,9 +105,11 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
     let raf = 0;
     let last = performance.now();
     const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
       const d = dirRef.current!;
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
+      try {
 
       const inp: Input = { ...NO_INPUT };
       for (const raw of keys.current) {
@@ -220,7 +222,9 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         }
         if (d.paused) drawWipe(ctx, view, 0.5);
       }
-      raf = requestAnimationFrame(loop);
+      } catch (err) {
+        console.error('[match] frame', err);
+      }
     };
     raf = requestAnimationFrame(loop);
     const ui = setInterval(() => setTick((t) => t + 1), 110);

@@ -87,7 +87,8 @@ function boneRegion(boneName: string, restY: number): Slot {
 /* ------------------------------------------------------------- lighting -- */
 function makeToonGradient(): THREE.DataTexture {
   // Two hard bands: flat cel look matching the 2D pitch's flat fills.
-  const data = new Uint8Array([148, 148, 148, 255, 255, 255]);
+  // RGBA × 2 pixels = 8 bytes (a 6-byte RGB buffer under-ran texSubImage2D).
+  const data = new Uint8Array([148, 148, 148, 255, 255, 255, 255, 255]);
   const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;

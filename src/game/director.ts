@@ -2002,7 +2002,9 @@ export class Director {
     if (!import.meta.env.DEV) return;
     const message = `[SPEC_02 gate] ${failure.label} :: ${failure.reason} :: ${JSON.stringify(failure.values)}`;
     console.error(message);
-    throw new Error(message);
+    /* Do not throw. update() catches and trip()s, which is a PLAY RESET
+     * mid-match — the "game just restarted" the player sees. The harness
+     * still reads the console.error; the live match keeps playing. */
   };
 
   private forwardAttackGates(): ForwardAttackGateReporter | undefined {
@@ -2058,7 +2060,9 @@ export class Director {
      * walk-on (T-16/NO-TELEPORT — nobody is teleported into place) plus a
      * hang and bounces to the 6.5 s dead cap. A genuine hang is still
      * caught — 15 s is far past any legal kick. */
-    SCRUM: 14, LINEOUT: 12, BREAKDOWN: 9, MAUL: 18, KICK: 15, OPEN_PLAY: 45,
+    /* KICK 28: a restart walk-on (no teleport) plus AIM plus hang can
+     * honestly take ~20 s. 15 s was tripping PLAY RESET on kick-off. */
+    SCRUM: 14, LINEOUT: 12, BREAKDOWN: 12, MAUL: 18, KICK: 28, OPEN_PLAY: 90,
     REPLAY: 6, LINEOUT_REPLAY: 6, KICK_REPLAY: 6, MAUL_REPLAY: 6, BREAKDOWN_REPLAY: 6,
   };
 

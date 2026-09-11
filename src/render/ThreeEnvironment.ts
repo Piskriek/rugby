@@ -40,7 +40,9 @@ const POST_RADIUS = 0.06;
 export type AdBoardFlash = 'TRY' | 'PENALTY' | 'NORMAL';
 
 function toonGradient(): THREE.DataTexture {
-  const data = new Uint8Array([168, 168, 168, 255, 255, 255]);
+  /* 2×1 RGBA — 8 bytes. The old 6-byte buffer (RGB×2) under-ran
+   * texSubImage2D and WebGL INVALID_OPERATIONed the toon gradient. */
+  const data = new Uint8Array([168, 168, 168, 255, 255, 255, 255, 255]);
   const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
@@ -127,7 +129,7 @@ export class ThreeEnvironment {
 
   private mat(color: number, map?: THREE.Texture): THREE.MeshToonMaterial {
     return new THREE.MeshToonMaterial({
-      color, map, gradientMap: this.gradient, depthWrite: true,
+      color, ...(map ? { map } : {}), gradientMap: this.gradient, depthWrite: true,
     });
   }
 
