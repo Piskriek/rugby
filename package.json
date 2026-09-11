@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "test:env": "node tools/_verify_env.mjs",
     "assetverify": "vite-node scripts/assetverify.ts",
+    "bootcheck": "vite-node scripts/bootcheck.ts",
+    "renderverify": "vite-node scripts/renderverify.ts",
     "build:player": "node tools/build_player_glb.mjs"
   },
   "dependencies": {

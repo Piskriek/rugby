@@ -1,0 +1,53 @@
+/**
+ * renderverify — guards render-pipeline mistakes that produce a broken
+ * frame with no error in the console.
+ *
+ *   npx vite-node scripts/renderverify.ts
+ */
+import fs from 'node:fs';
+
+let ok = true;
+function check(name: string, pass: boolean, detail: string): void {
+  if (!pass) ok = false;
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ${name.padEnd(48)} ${detail}`);
+}
+
+const env = fs.readFileSync('src/render/ThreeEnvironment.ts', 'utf8');
+const canvas = fs.readFileSync('src/render/ThreeCanvas.ts', 'utf8');
+const players = fs.readFileSync('src/render/ThreePlayerManager.ts', 'utf8');
+
+/* Pitch planes are laid flat. A missing -PI/2 leaves the turf standing
+ * upright in world XZ and the 3D players hover beside a wall of grass. */
+{
+  const innerFlat = /inner\.rotation\.x = -Math\.PI \/ 2/.test(env);
+  const outerFlat = /outer\.rotation\.x = -Math\.PI \/ 2/.test(env);
+  check('inner pitch is laid flat', innerFlat, innerFlat ? 'rotation.x = -PI/2' : 'MISSING');
+  check('outer ground is laid flat', outerFlat, outerFlat ? 'rotation.x = -PI/2' : 'MISSING');
+  const innerY = /inner\.position\.y = 0/.test(env);
+  const outerBelow = /outer\.position\.y = -0\.05/.test(env);
+  check('inner pitch sits at y=0', innerY, innerY ? 'players stand on the markings' : 'pitch height drifted');
+  check('outer ground is under the pitch', outerBelow, outerBelow ? 'y = -0.05' : 'may z-fight the inner plane');
+}
+
+/* Cel shading + no shadow maps — the look the 2D pitch already has. */
+{
+  const toon = /new THREE\.MeshToonMaterial/.test(env) && /new THREE\.MeshToonMaterial/.test(players);
+  check('MeshToonMaterial on pitch and players', toon, toon ? 'toon kits + toon turf' : 'material drifted');
+  const noShadows = /shadowMap\.enabled = false/.test(canvas);
+  check('shadow maps stay off', noShadows, noShadows ? 'shadowMap.enabled = false' : 'shadows would flatten the toon look');
+}
+
+/* New pack wiring. */
+{
+  const url = /const MODEL_URL = 'assets\/models\/player\.glb'/.test(players);
+  check('players load player.glb', url, url ? 'Quaternius 2017 pack' : 'still rugby_player.glb');
+  const noPass = !/name: 'Pass'/.test(players);
+  check('no baseball Pass clip mapping', noPass, noPass ? 'pass → LineoutThrow' : 'Pass still mapped');
+  const jog = /case 'jog':/.test(players) && /spd < 2\.2/.test(players) && /spd < 4\.2/.test(players);
+  check('locomotion has Idle/Walk/Jog/Run/Sprint', jog, jog ? 'in-betweens present' : 'idle still jumps to run/sprint');
+  const lineout = /case 'lineoutThrow':/.test(players) && /case 'lineoutJump':/.test(players);
+  check('lineout throw/jump have their own states', lineout, lineout ? 'wired' : 'still folded into pass/jump');
+}
+
+console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');
+if (!ok) process.exit(1);

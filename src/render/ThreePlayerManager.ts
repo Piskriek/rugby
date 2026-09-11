@@ -370,31 +370,39 @@ export class ThreePlayerManager {
     });
     return new Promise((resolve, reject) => {
       loader.load(MODEL_URL, async (gltf) => {
-        this.template = gltf.scene;
-        this.template.updateMatrixWorld(true);
-        const box = new THREE.Box3().setFromObject(this.template);
-        const h = Math.max(0.01, box.max.y - box.min.y);
-        this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
-        const base = gltf.animations.map(stripRootMotion);
-        /* The retargeted pair is already in-place (the tool drops the source's
-         * horizontal channel) so it does NOT go through stripRootMotion again;
-         * doing so would be harmless but pointless. It is loaded second and
-         * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
-         * more entries in the same clip table. */
-        const extra = await one(TACKLE_PAIR_URL);
-        if (extra && extra.length) {
-          this.templateClips = base.concat(extra);
-        } else {
-          this.templateClips = base;
-          if (import.meta.env?.DEV) {
-            console.warn('[players] tackle_pair.glb missing — falling back to the '
-              + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
+        /* An `async` success callback that throws rejects an INNER promise
+         * nobody holds, so the outer load() never settles and the match
+         * hangs at "BRINGING OUT THE TEAMS". Catch and reject the outer. */
+        try {
+          this.template = gltf.scene;
+          this.template.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(this.template);
+          const h = Math.max(0.01, box.max.y - box.min.y);
+          this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
+          const base = gltf.animations.map(stripRootMotion);
+          /* The retargeted pair is already in-place (the tool drops the source's
+           * horizontal channel) so it does NOT go through stripRootMotion again;
+           * doing so would be harmless but pointless. It is loaded second and
+           * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
+           * more entries in the same clip table. */
+          const extra = await one(TACKLE_PAIR_URL);
+          if (extra && extra.length) {
+            this.templateClips = base.concat(extra);
+          } else {
+            this.templateClips = base;
+            if (import.meta.env?.DEV) {
+              console.warn('[players] tackle_pair.glb missing — falling back to the '
+                + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
+            }
           }
+          this.prepareTemplate();
+          this.checkRecoverSeconds();
+          this.ready = true;
+          resolve();
+        } catch (err) {
+          this.ready = false;
+          reject(err);
         }
-        this.prepareTemplate();
-        this.checkRecoverSeconds();
-        this.ready = true;
-        resolve();
       }, undefined, reject);
     });
   }
@@ -1572,7 +1580,7 @@ export class ThreePlayerManager {
         }
         st.lie = true;
         if (desired === 'grounded') { st.oneShot = 'grounded'; st.lock = 0; }
-      } else if (['bind', 'ruck', 'jump', 'crouch'].includes(desired)) {
+      } else if (['bind', 'ruck', 'jump', 'crouch', 'lineoutJump', 'catch'].includes(desired)) {
         st.oneShot = null;
         if (inst.active?.name !== desired) this.play(inst, desired, 0.18, 1);
       } else if (locomoting) {
