@@ -14,7 +14,8 @@
  * painted with a 128x128 canvas texture.
  *
  * Animation is a small state machine over the clips the GLB ships:
- *   idle Idle · walk Walk · jog Jog · run Run · sprint Sprint
+ *   idle Idle · walk Walk · jog Jog · run Run · sprint Run (forward)
+ *   lookAside BackpedalDiag — a few seconds of glance-sideways into sprint
  *   pass/lineoutThrow LineoutThrow · tackle DoubleLegTackle / SideDive
  *   dive SideDive · try Dive · kick Kick · maul/scrum ScrumDrive
  *   crouch ScrumCrouch · jump LineoutJump · getup GetUp · grounded Death.
@@ -291,6 +292,11 @@ export const TACKLE_GROUND_END = 0.40;
  * motion. */
 export const LATCH_CHURN_RATE = 0.72;
 
+/** Glance-sideways into a sprint (`Jog Backward Diagonal` / Mixamo lead-run).
+ *  A few seconds, then the looping forward Run takes over — never the default
+ *  gait. If pace drops while it is playing, locomotion falls back to jog. */
+const LOOK_ASIDE_SECONDS = 1.6;
+
 /* ================================================================== */
 /**
  * IN-PLACE CONVERSION — strip horizontal root motion from every clip.
@@ -333,9 +339,12 @@ export class ThreePlayerManager {
   /** World scale applied to the packed mesh so it stands MODEL_HEIGHT_M tall. */
   private modelScale = RENDER_SCALE;
   /** Packed-mesh local units per authored metre. The 2017 FBX is ~526 units
-   *  tall (Human_Armature scale ~69); metre-authored attachments (badge,
-   *  shadow, carried ball) multiply by this so they survive root.scale. */
+   *  tall (Human_Armature scale ~69); metre-authored ROOT children (shadow,
+   *  free ball) multiply by this so they survive root.scale. Bone-parented
+   *  attachments must NOT — they inherit the armature scale a second time. */
   private unitPerM = 1;
+  /** Local scale on `Human_Armature` (≈69 on the 2017 FBX). 1 if baked. */
+  private armatureScale = 1;
   private gradient = makeToonGradient();
   private pool = new Map<string, PlayerInstance>();
   private readonly scene: THREE.Scene;
@@ -365,8 +374,16 @@ export class ThreePlayerManager {
     this.scene.add(this.ball);
   }
 
-  /** Authored metres → packed-mesh local units. */
+  /** Authored metres → packed-mesh local units (root children). */
   private u(metres: number): number { return metres * this.unitPerM; }
+
+  /** Authored metres → bone-local units. The badge and carried ball parent
+   *  under Spine2 / RightHand, which already carry Human_Armature ×~69, so
+   *  multiplying by unitPerM (nativeH/1.80, which INCLUDES that 69) made a
+   *  0.55 m number ~38 m and a rugby ball ~11 m — they ate the camera. */
+  private boneU(metres: number): number {
+    return metres * this.unitPerM / Math.max(this.armatureScale, 1e-6);
+  }
 
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
@@ -387,6 +404,13 @@ export class ThreePlayerManager {
           const h = Math.max(0.01, box.max.y - box.min.y);
           this.unitPerM = h / MODEL_HEIGHT_M;
           this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
+          this.armatureScale = 1;
+          this.template.traverse((o) => {
+            if (o.name === 'Human_Armature' || o.name === 'Armature') {
+              const sx = Math.abs(o.scale.x);
+              if (sx > 1.01) this.armatureScale = sx;
+            }
+          });
           const base = gltf.animations.map(stripRootMotion);
           /* tackle_pair.glb is Unreal-boned (pelvis/spine_01). Concatenating it
            * would make pick('MX_StandUp', 'GetUp') prefer a clip that cannot
@@ -578,7 +602,7 @@ export class ThreePlayerManager {
       ?? root.getObjectByName('spine_02')
       ?? root.getObjectByName('Spine1');
     if (spine) {
-      const badgeGeo = new THREE.PlaneGeometry(this.u(0.55), this.u(0.65));
+      const badgeGeo = new THREE.PlaneGeometry(this.boneU(0.22), this.boneU(0.26));
       const badgeMat = new THREE.MeshBasicMaterial({
         map: this.makeBadgeTexture('', '#cccccc'),
         color: 0xffffff,
@@ -589,9 +613,8 @@ export class ThreePlayerManager {
       const badge = new THREE.Mesh(badgeGeo, badgeMat);
       badge.name = 'NumberBadge';
       // back is -Z; place just behind the spine and flip to face backward.
-      // Offsets are authored metres, converted into FBX units so root.scale
-      // lands them at 0.55 m × RENDER_SCALE in world space.
-      badge.position.set(0, this.u(0.15), this.u(-0.38));
+      // Bone-local metres (see boneU) — a rugby shirt number is ~22×26 cm.
+      badge.position.set(0, this.boneU(0.06), this.boneU(-0.10));
       badge.rotation.y = Math.PI;
       spine.add(badge);
     }
@@ -890,7 +913,12 @@ export class ThreePlayerManager {
       case 'walk': return { name: 'Walk', loop: true };
       case 'jog': return { name: this.pick('Jog', 'Run'), loop: true };
       case 'run': return { name: 'Run', loop: true };
-      case 'sprint': return { name: this.pick('Sprint', 'Run'), loop: true };
+      /* Sprint loops the FORWARD Run. `Sprint` in the GLB is Mixamo
+       * leadingTargetRun and `BackpedalDiag` is Jog Backward Diagonal —
+       * both look sideways. Those play only as the brief lookAside into
+       * a sprint, never as the default gait. */
+      case 'sprint': return { name: 'Run', loop: true };
+      case 'lookAside': return { name: this.pick('BackpedalDiag', 'Sprint', 'Sidestep'), loop: false };
       case 'crouch': return { name: this.pick('ScrumCrouch', 'Crouch', 'Jackal'), loop: true };
       case 'bind': return { name: this.pick('ScrumDrive', 'ScrumBind', 'Push'), loop: true };
       case 'ruck': return { name: this.pick('Jackal', 'RuckDive', 'Push'), loop: true };
@@ -1590,15 +1618,26 @@ export class ThreePlayerManager {
       } else if (locomoting) {
         // stood back up -> let the GetUp one-shot finish, then locomotion takes over
         if (st.oneShot === 'getup') { /* held until lock expires */ }
-        else {
-          if (st.lie && st.oneShot !== 'getup') {
-            this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
-            st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
-          } else {
-            st.oneShot = null;
+        else if (st.oneShot === 'lookAside') {
+          /* Dropping out of sprint while glancing sideways → back to jog. */
+          if (desired !== 'sprint') {
+            st.oneShot = null; st.lock = 0;
             st.lie = false;
             this.setLocomotion(inst, desired, st.spd);
           }
+        } else if (st.lie && st.oneShot !== 'getup') {
+          this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+          st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
+        } else if (desired === 'sprint' && inst.active?.name !== 'sprint' && inst.active?.name !== 'lookAside') {
+          /* A few seconds of look-sideways, then the looping forward Run. */
+          this.play(inst, 'lookAside', 0.12, 1.05);
+          st.oneShot = 'lookAside';
+          st.lock = LOOK_ASIDE_SECONDS;
+          st.lie = false;
+        } else {
+          st.oneShot = null;
+          st.lie = false;
+          this.setLocomotion(inst, desired, st.spd);
         }
       }
 
@@ -1701,9 +1740,9 @@ export class ThreePlayerManager {
       const hand = this.carryBone(carrier);
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
-        this.ball.position.set(0, this.u(0.05), this.u(0.03));
+        this.ball.position.set(0, this.boneU(0.05), this.boneU(0.03));
         this.ball.rotation.set(0.2, 0, Math.PI / 2.4);
-        this.ball.scale.setScalar(this.unitPerM);
+        this.ball.scale.setScalar(this.boneU(1));
       }
     } else if (free.visible) {
       if (this.ball.parent !== this.scene) {

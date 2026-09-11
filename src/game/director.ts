@@ -26,7 +26,7 @@ import {
 } from './shapes';
 import {
   Nation, TEAM_BY_ID, KITS, FORMATION_BY_ID, DIFFICULTY_TABLE, AI_ARCHETYPES,
-  POINTS, SquadPlayer, REFEREE_CALLS,
+  POINTS, SquadPlayer, REFEREE_CALLS, DEFAULT_SLIDERS, OPTION_ITEMS,
 } from './data';
 import {
   contractFor, PhaseName, RoleContract,
@@ -368,6 +368,32 @@ export interface MatchConfig {
   kickerA?: number; kickerB?: number;
   assists?: { pass: number; tackle: number; kick: number };
   speed?: number;             // 1.0 normal, 0.75 / 0.5 / 0.35 learning
+}
+
+/**
+ * QUICK START (15v15) — the single config the main-menu "QUICK START
+ * (15v15)" button launches straight into. No team customization, no kit
+ * selection, no coin toss: two default nations (ENG v NZL) with their full
+ * fifteen shirts, the default tactics board and factory options. Copied
+ * onto this branch from the 15v15 Quick Start work; do not merge v2-arch.
+ */
+export function quickStartConfig(overrides?: Partial<MatchConfig>): MatchConfig {
+  const options: Record<string, number> = {};
+  for (const i of OPTION_ITEMS) options[i.id] = i.def;
+  const sliders = () => DEFAULT_SLIDERS.map((s) => ({ ...s }));
+  return {
+    homeId: 'ENG', awayId: 'NZL', kitA: 0, kitB: 0,
+    difficulty: options.difficulty ?? 3,
+    halfLength: 5,
+    options,
+    slidersA: sliders(), slidersB: sliders(),
+    backlineA: 'BL-SPLIT', defenceA: 'DF-UMBRELLA', lineoutA: 'LO-5', scrumA: 'SC-8-3',
+    backlineB: 'BL-SPLIT', defenceB: 'DF-UMBRELLA', lineoutB: 'LO-5', scrumB: 'SC-8-3',
+    cpuA: false, cpuB: true, kickerA: 10, kickerB: 10,
+    assists: { pass: 0.7, tackle: 0.7, kick: 0.7 },
+    speed: 1,
+    ...overrides,
+  };
 }
 
 export interface MatchStats {
