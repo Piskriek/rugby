@@ -329,10 +329,7 @@ export interface BreakdownState {
  */
 export const RECOVER_SECONDS = 1.53;
 
-/** How far a recovering man may be displaced before his anchor follows him.
- *  Below this he is planted; above it something with a real reason to move
- *  him (a retreat, a shove) wins and the anchor re-seats. */
-const RECOVER_ANCHOR_SLACK = 0.06;
+
 
 /**
  * WHY NOT THE FULL 1.53 s CLIP LENGTH.
@@ -1465,10 +1462,14 @@ export class Director {
     this.tickDive(dt);
     this.tickRecovery(dt);
     this.think(dt, input);
+    /* Re-plant after think()/separate() so a shove or leftover human input
+     * cannot slide a man whose clip is still GetUp. */
+    this.holdRecovering();
     /* SPEC_04: the formation target has now been freshly assigned by `think()`;
      * capture target-slot drift before a phase-bound writer can take control. */
     this.samplePendingTargetSlots();
     this.placeBound(dt);
+    this.holdRecovering();
     /* T-08/T-09: the bus is drained once per frame, after the phase updaters
      * have spoken and before the presentation reacts. Camera, commentary and
      * audio all read the same frameEvents. */
@@ -2404,13 +2405,16 @@ export class Director {
         if (q.role === 'CARRIER') clip(p, 'grounded');
         else if (q.role === 'JACKAL') clip(p, 'jackal');
         else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');
-        else if (q.role === 'CLEANER') clip(p, s.stage === 'PLACE' ? 'cleanout' : 'maulBind');
+        else if (q.role === 'CLEANER') clip(p, 'cleanout');
         /* PART 2: the tackler wears 'tackle' from the impact frame. The
          * renderer's tackle timeline (impact / grounding / roll-away) is what
          * gives the hit its beat now, so holding the old dive one-shot for
          * 0.45 s here would only delay the first stage of it. */
         else if (q.role === 'TACKLER') clip(p, 'tackle');
-        else if (q.role !== 'TACKLER') clip(p, s.ruckFormed ? 'maulBind' : 'ready');
+        /* COUNTER (and any other named ruck man) must GRAB, never stand in
+         * idle-ready while the fight plays. jackal maps to Jackal — arms
+         * out, on the ball. The maul pack stays on bind via maulBind. */
+        else clip(p, 'jackal');
         p.job = q.role === 'CARRIER' ? 'PRESENT THE BALL BACK TO YOUR NINE'
           : q.role === 'JACKAL' ? 'GET YOUR HANDS ON THE BALL, LEGALLY'
             : q.role === 'TACKLER' ? 'ROLL AWAY AND GET BACK ON SIDE'
@@ -2956,15 +2960,19 @@ export class Director {
      * and it is applied exactly once. */
     const atkSigma: -1 | 1 = atk === 'A' ? 1 : -1;
     const defSigma: -1 | 1 = def === 'A' ? 1 : -1;
-    const atkSit = atk === 'A' ? sitA : sitB;
     const defSit = def === 'A' ? sitA : sitB;
     /* D11-a: one squeeze factor per formation per frame, so the whole shape
      * narrows together rather than clipping only the men who reached touch. */
-    const atkDatasetLat = atkSit ? this.lateralScale(f.x, atkSigma, SITUATION_LATERAL[atkSit].min, SITUATION_LATERAL[atkSit].max) : 1;
     const defDatasetLat = defSit ? this.lateralScale(f.x, defSigma, SITUATION_LATERAL[defSit].min, SITUATION_LATERAL[defSit].max) : 1;
+    /* Authored 1-3-3-1 laterals are ±11 / ±24 / wings ±26. The old
+     * 0.62+slider*0.62 factor squeezed a 50% width board down to 0.93× and
+     * then the dataset's ±2–8 m offsets overwrote it entirely — everyone
+     * lived inside ~10 m of the ball. Hold the authored spread; squeeze
+     * only at the touchline via lateralScale. */
+    const widthMul = 0.88 + this.slider(atk, 'width') / 100 * 0.45;
     let shapeMin = 0, shapeMax = 0;
     for (const q of atkShape.slots) {
-      const l = q.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width;
+      const l = q.lat * widthMul * atkShape.width;
       if (l < shapeMin) shapeMin = l;
       if (l > shapeMax) shapeMax = l;
     }
@@ -3109,7 +3117,8 @@ export class Director {
     // ---- the controlled player is driven by input, not by a target ----
     const ctrlHuman = this.ctrlPlayer;
     const human = !!ctrlHuman && this.isHuman(ctrlHuman.team);
-    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down) {
+    if (ctrlHuman && human && !isBound(ctrlHuman) && !ctrlHuman.down
+      && (ctrlHuman.recoverT ?? 0) <= 0 && (ctrlHuman.diveT ?? 0) <= 0) {
       this.writeThinkPlayer(gate, `think:human-input:${ctrlHuman.team}${ctrlHuman.num}`, ctrlHuman,
         ['controlled', 'vx', 'vz', 'x', 'z', 'movedBy', 'face', 'lastFace', 'turnT', 'clip', 'clipT', 'stamina'] as const, () => {
           ctrlHuman.controlled = true;
@@ -3250,7 +3259,10 @@ export class Director {
         const slot = atkShape.slots.find((q) => q.num === p.num);
         const hipMan = p.num === 7 || p.num === 8;
         const podFar = slot ? Math.abs(slot.lat) > 14 : false;
-        if (this.op && hipMan && !podFar) {
+        /* Hip-trail is the offload lane through a BROKEN line. In structured
+         * play those two shirts belong in the 1-3-3-1 pods, not glued to the
+         * carrier — that glue was half the 10 m ball-cluster. */
+        if (this.op && this.op.lineBreak && hipMan && !podFar) {
           const car = this.L(atk, this.op.carrierNum);
           const off = p.num === 7 ? 1.9 : -1.4;
           this.writeThinkPlayer(gate, `think:hip-support:${p.team}${p.num}`, p,
@@ -3302,9 +3314,21 @@ export class Director {
               const toLine = o.dir > 0 ? FIELD.tryZFar - o.carrierZ : o.carrierZ - FIELD.tryZ;
               if (toLine < 20) along = Math.max(along, -(0.5 + toLine * 0.08));
             }
+            /* WIDTH FROM THE SHAPE, JOB FROM THE DATASET.
+             * The behaviour dataset is authored as a tight cluster around one
+             * ball (wings ~20 m, 10/12 inside 9 m, pods inside 8 m). Using
+             * dsm.across as the mark collapsed the whole XV into a 10 m
+             * radius. The 1-3-3-1 laterals are the real pitch geometry;
+             * dataset still owns the job string and the along-axis beat. */
+            const shapeAcross = slot.lat * widthMul * atkShape.width * shapeLat * openSign;
+            /* Kick-cover: 10/12/13 stay behind the gain line, 15 is the last
+             * man. Dataset along is often only 4–8 m — not enough to field
+             * a box kick. */
+            if (p.num === 15) along = Math.min(along, -Math.max(slot.depth, 14));
+            else if (p.num === 10 || p.num === 12 || p.num === 13) along = Math.min(along, -slot.depth);
             /* D11-a: spread from the ball's own lateral position, squeezed
              * when the formation would run into touch. */
-            const across = sigma * dsm.across * atkDatasetLat;
+            const across = shapeAcross;
             let targetX = clamp(f.x + across, -33, 33);
             let targetZ = this.anchorDepth(f, sigma, along);
 
@@ -3353,7 +3377,7 @@ export class Director {
         if (slot) {
           /* D11-a: the touchline squeeze multiplies the offset itself, so both
            * the planner path (CPU) and the direct path below inherit it. */
-          const lateral = slot.lat * (0.62 + this.slider(atk, 'width') / 100 * 0.62) * atkShape.width * shapeLat;
+          const lateral = slot.lat * widthMul * atkShape.width * shapeLat;
           const tempo = this.slider(atk, 'tempo') / 100;
           const toLine = Math.max(0, dir > 0 ? FIELD.tryZFar - f.z : f.z - FIELD.tryZ);
           let targetX: number;
@@ -3482,9 +3506,19 @@ export class Director {
         const dsm = sitD ? datasetOffset(p.num, sitD, beat) : null;
         if (dsm) {
           const sigma = p.team === 'A' ? 1 : -1;
+          /* Same width story as attack: dataset laterals sit inside 10 m.
+             Hold the authored defensive channels; 15 is the sweeper (not in
+             DEFENCE_CHANNELS) and stays on the axis at sweeperDepth. */
+          const ch = DEFENCE_CHANNELS.find((q) => q.num === p.num);
+          const lat = ch
+            ? ch.lat * defLineFactor * defLineLat
+            : (p.num === 15 ? 0 : sigma * dsm.across * defDatasetLat);
+          let along = dsm.along;
+          if (p.num === 15) along = Math.min(along, -defSys.sweeperDepth);
+          else if (p.num === 10 || p.num === 12 || p.num === 13) along = Math.min(along, -8);
           const mark = this.boundMark(
-            clamp(f.x + sigma * dsm.across * defDatasetLat, -33, 33),
-            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, dsm.along), p, sitD ?? 'dataset'),
+            clamp(f.x + lat, -33, 33),
+            this.defensiveDepth(f, dir, this.anchorDepth(f, sigma, along), p, sitD ?? 'dataset'),
           );
           this.writeThinkPlayer(gate, `think:defence-dataset:${p.team}${p.num}:${sitD}`, p,
             ['tx', 'tz', 'job', 'urgency'] as const, () => {
@@ -4154,27 +4188,29 @@ export class Director {
       }
       p.recoverT = left;
       p.vx = 0; p.vz = 0;
-      /* ANCHOR THE MARK, not just the velocity.
-       *
-       * Zeroing vx/vz only stops the integrator. Any code that writes p.x/p.z
-       * DIRECTLY — the release retreat, a separation push, a set-piece slot
-       * write — moves him anyway, and the probe found 581 m of drift on men
-       * whose clip said 'getup' with no owning writer at all. Latching the
-       * spot he went down on and restoring it every frame makes the lock mean
-       * "he is HERE until he is up", which is what the animation shows. */
-      /* Anchor him to the spot he went down on, but let the anchor itself be
-       * DRAGGED by anything that legitimately needs him elsewhere. A hard pin
-       * stopped the retreat entirely and offside episodes rose 105 -> 154 a
-       * match, because a man frozen in front of the mark keeps his whole side
-       * offside while the line tries to reset around him. Re-seating the
-       * anchor on whatever position survived the frame keeps the foot-plant
-       * (he is not being flung about) while still allowing the slow correction
-       * a referee would expect him to make. */
+      /* HARD PIN. The GetUp clip is a plant: no translation, no turn. The
+       * previous 0.06 m slack re-seated on every separate() shove and the
+       * renderer yawed him because it still saw residual speed. He stays on
+       * the exact turf he went down on until recoverT expires. (open.ts
+       * already skips recovering men on the release retreat; offside
+       * candidates already exclude recoverT.) */
       if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
-      const ax = p.recoverX, az = p.recoverZ ?? p.z;
-      const drift = Math.hypot(p.x - ax, p.z - az);
-      if (drift <= RECOVER_ANCHOR_SLACK) { p.x = ax; p.z = az; }
-      else { p.recoverX = p.x; p.recoverZ = p.z; }
+      p.x = p.recoverX;
+      p.z = p.recoverZ ?? p.z;
+      if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+    }
+  }
+
+  /** Restore recovering men after any writer that might have moved them. */
+  private holdRecovering() {
+    if (this.phase !== 'OPEN_PLAY') return;
+    for (const p of this.live) {
+      if ((p.recoverT ?? 0) <= 0) continue;
+      p.vx = 0; p.vz = 0;
+      if (p.recoverX !== undefined) {
+        p.x = p.recoverX;
+        p.z = p.recoverZ ?? p.z;
+      }
       if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
     }
   }

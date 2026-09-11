@@ -859,7 +859,8 @@ export class ThreePlayerManager {
       case 'dive': return 'dive';
       case 'try': case 'slide': return 'try';
       case 'getup': return 'getup';
-      case 'maul': case 'scrumBind': case 'scrumShove': return 'bind';
+      case 'maul': case 'maulBind': case 'maulDrive': case 'maulPush':
+      case 'scrumBind': case 'scrumShove': return 'bind';
       case 'ruck': case 'jackal': case 'cleanout': return 'ruck';
       case 'lineoutJump': case 'lift': case 'lineoutLift': return 'lineoutJump';
       case 'catch': case 'catchHigh': case 'lineoutCatch': return 'catch';
@@ -1414,8 +1415,10 @@ export class ThreePlayerManager {
       st.spd = Math.hypot(vx, vz);
 
       // heading: a moving man walks where he is going (smoothed); a slow man
-      // holds his last facing.
-      if (st.spd > 2.2) {
+      // holds his last facing. GET-UP is a plant — leftover slide from the
+      // tackle frame used to yaw him because spd still crossed 2.2.
+      const planted = a.renderClip === 'getup' || st.oneShot === 'getup' || st.lie;
+      if (!planted && st.spd > 2.2) {
         const target = Math.atan2(vx, vz);
         let dy = target - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;

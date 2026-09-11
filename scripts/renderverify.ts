@@ -59,6 +59,12 @@ const players = fs.readFileSync('src/render/ThreePlayerManager.ts', 'utf8');
     && /case 'sprint': return \{ name: 'Run'/.test(players);
   check('look-aside is a one-shot into sprint', lookAside,
     lookAside ? 'BackpedalDiag then forward Run' : 'Sprint/BackpedalDiag still looping as gait');
+  const maulBind = /case 'maulBind'/.test(players) && /case 'maulDrive'/.test(players);
+  check('maulBind/maulDrive map to bind, not locomotion', maulBind,
+    maulBind ? 'arms-out bind/drive' : 'maulBind falls through to idle/jog');
+  const getupYaw = /renderClip === 'getup'/.test(players) && /oneShot === 'getup'/.test(players);
+  check('get-up freezes heading', getupYaw,
+    getupYaw ? 'no yaw while GetUp plays' : 'spd>2.2 still turns a rising man');
 }
 
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');

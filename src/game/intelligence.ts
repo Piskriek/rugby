@@ -151,6 +151,20 @@ export function steer(
    * invoked from Director.think(). Other phase callers retain the zero-cost
    * three-argument path. */
   const gateBefore = reportGate ? snapshotForwardAttackPlayer(p) : undefined;
+  if ((p.recoverT ?? 0) > 0) {
+    /* GET-UP LOCK. Zero velocity, hold xz, keep GetUp, do not turn, do not
+     * integrate. think() already continues recovering men; this is the
+     * belt for placeBound/open callers that still invoke steer. */
+    p.vx = 0; p.vz = 0;
+    if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+    else p.clipT += dt;
+    if (reportGate && gateBefore) {
+      for (const gate of forwardAttackPlayerWriteFailures(gateLabel, gateBefore, snapshotForwardAttackPlayer(p), [
+        'vx', 'vz', 'clip', 'clipT',
+      ] as const)) reportGate(gate);
+    }
+    return;
+  }
   const dx = p.tx - p.x, dz = p.tz - p.z;
   const dist = Math.hypot(dx, dz);
   const want = maxSpeed(p, p.carrier, sprint, p.stamina) * p.urgency;
@@ -215,7 +229,9 @@ export function steer(
   let clip = p.clip;
   let clipSpeed = 0;
   if (p.down) clip = 'grounded';
-  else if (p.clip === 'dive' && p.clipT < 0.5) {
+  else if ((p.recoverT ?? 0) > 0) {
+    clip = 'getup';
+  } else if (p.clip === 'dive' && p.clipT < 0.5) {
     /* LATCH-AND-DRAG (Part 3): the committed dive is a one-shot and the gait
      * picker must not stomp it. It used to be overwritten on the very next
      * frame — the human-input branch in Director had its own guard for
@@ -324,6 +340,10 @@ export function separate(
       if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
         || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
+      /* GET-UP LOCK. A shove on a man climbing off the turf both slides him
+       * and (via the renderer's spd>2.2 heading) turns him mid-rise. */
+      if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+
       /* T-04. Opposing players must not run through one another. Two cases:
        *
        * TEAM-MATES — the existing rule. The carrier has right of way; his own
@@ -411,10 +431,10 @@ export function attackMark(num: number, s: ShapeInput): { x: number; z: number; 
   const c = contractFor(num);
   const lat = (c.lateral[s.phase] ?? 0);
   const dep = (c.depth[s.phase] ?? 4);
-  const wide = 0.55 + s.width * 0.7;
+  const wide = 0.85 + s.width * 0.5;
   let x = s.ballX + lat * s.open * wide;
   // hard channel clamps per unit — the fix for props at fly-half
-  if (FORWARDS.includes(num)) x = s.ballX + clamp(x - s.ballX, -8, 8);
+  if (FORWARDS.includes(num)) x = s.ballX + clamp(x - s.ballX, -24, 24);
   else if (num !== 15) x = s.ballX + clamp(x - s.ballX, -25, 25);
   else x = s.ballX + clamp(x - s.ballX, -18, 18);
   x = clamp(x, -33, 33);
