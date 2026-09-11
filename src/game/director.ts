@@ -2392,16 +2392,37 @@ export class Director {
         } else if (q.role === 'TACKLER' && inKineticImpact(s)) {
           /* he is riding the carrier down — breakdown.ts moved him. */
         } else {
+          const gap = Math.hypot(q.x - p.x, q.z - p.z);
+          const atkDir = s.attacking === 'A' ? 1 : -1;
+          /* RUN IN, THEN GRAB. Playing jackal/cleanout from 15 m out made
+           * arriving men look like they were fighting the air, facing the
+           * touchline, never reaching the ball. Sprint to the slot; the
+           * arms-out clip starts when he is actually over it. */
+          if (gap > 1.2 && !p.down && q.role !== 'TACKLER') {
+            p.tx = q.x; p.tz = q.z; p.urgency = 1;
+            p.job = q.role === 'JACKAL' ? 'GET OVER THE BALL'
+              : q.team === s.attacking ? 'RUN INTO THE RUCK' : 'COUNTER-RUCK THROUGH THE GATE';
+            steer(p, dt, true);
+            p.face = q.team === s.attacking ? atkDir : -atkDir;
+            /* steer() already advanced clipT but skipped gait (p.bound). */
+            const sp = Math.hypot(p.vx, p.vz);
+            const gait = sp > 6.2 ? 'sprint' : sp > 0.7 ? 'jog' : 'ready';
+            if (p.clip !== gait) { p.clip = gait; p.clipT = 0; }
+            continue;
+          }
           /* NO-TELEPORT: the ease is proportional to the WHOLE remaining gap,
            * so a man 20 m from his slot took a 2.5 m first step. Cap the step
            * at a sprint per frame — he runs in, he does not lurch. */
-          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, Math.hypot(q.x - p.x, q.z - p.z)));
+          const k = Math.min(1 - Math.exp(-dt * 8), 0.16 / Math.max(0.01, gap));
           p.x += (q.x - p.x) * k;
           p.z += (q.z - p.z) * k;
           p.movedBy = 'bound';   // T-02: the ease is a writer too — own it
           if (Math.hypot(q.x - p.x, q.z - p.z) < 0.5) { p.vx *= 0.5; p.vz *= 0.5; }
         }
-        p.face = q.team === s.attacking ? 1 : -1;
+        {
+          const atkDir = s.attacking === 'A' ? 1 : -1;
+          p.face = q.team === s.attacking ? atkDir : -atkDir;
+        }
         if (q.role === 'CARRIER') clip(p, 'grounded');
         else if (q.role === 'JACKAL') clip(p, 'jackal');
         else if (q.role === 'FIRST CLEARER') clip(p, 'cleanout');

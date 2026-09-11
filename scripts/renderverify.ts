@@ -65,6 +65,27 @@ const players = fs.readFileSync('src/render/ThreePlayerManager.ts', 'utf8');
   const getupYaw = /renderClip === 'getup'/.test(players) && /oneShot === 'getup'/.test(players);
   check('get-up freezes heading', getupYaw,
     getupYaw ? 'no yaw while GetUp plays' : 'spd>2.2 still turns a rising man');
+  const ruckFace = /renderClip === 'jackal'/.test(players)
+    && /renderClip === 'cleanout'/.test(players)
+    && /a\.rf > 0 \? 0 : Math\.PI/.test(players);
+  check('ruck grab faces the contest, not velocity', ruckFace,
+    ruckFace ? 'jackal/cleanout lock to engine face' : 'grab clip still yaws from lateral ease');
+}
+
+{
+  const director = fs.readFileSync('src/game/director.ts', 'utf8');
+  const breakdown = fs.readFileSync('src/game/engine/breakdown.ts', 'utf8');
+  const intel = fs.readFileSync('src/game/intelligence.ts', 'utf8');
+  const runIn = /gap > 1\.2 && !p\.down && q\.role !== 'TACKLER'/.test(director)
+    && /steer\(p, dt, true\)/.test(director);
+  check('ruck men run in before the grab clip', runIn,
+    runIn ? 'sprint to slot, then jackal/cleanout' : 'grab still plays metres from the ball');
+  const noRetreatCrew = /p\.sinbin > 0 \|\| p\.down \|\| p\.bound/.test(breakdown);
+  check('offside retreat skips the ruck pack', noRetreatCrew,
+    noRetreatCrew ? 'bound men stay on the ball' : 'retreat still walks jackals to 3 m');
+  const noShoveBound = /if \(a\.bound \|\| b\.bound\) continue;/.test(intel);
+  check('separation does not shove bound ruck men', noShoveBound,
+    noShoveBound ? 'placeBound owns the contest' : 'separate still jitters the jackal');
 }
 
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');

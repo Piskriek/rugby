@@ -364,8 +364,12 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
      * backwards out of the red zone. */
     const defLine = s.contactZ + fwd * 3.0;
     const RETREAT = 8 * dt;   // m per frame — a hard back-pedal
+    /* The jackal / counters / cleaners ARE the ruck. Walking them back to the
+     * 3 m line fought placeBound every frame: they jittered in place, a couple
+     * of metres off the ball, facing the touchline. The line is for everyone
+     * else. */
     for (const p of d.live) {
-      if (p.sinbin > 0 || p.down) continue;
+      if (p.sinbin > 0 || p.down || p.bound) continue;
       if (p.team === s.attacking) {
         if ((p.z - atkLine) * fwd > 0) p.z -= Math.min(RETREAT, Math.abs(p.z - (atkLine - fwd * 0.3))) * fwd;
       } else if ((defLine - p.z) * fwd > 0) p.z += Math.min(RETREAT, Math.abs((defLine + fwd * 0.3) - p.z)) * fwd;

@@ -1418,7 +1418,21 @@ export class ThreePlayerManager {
       // holds his last facing. GET-UP is a plant — leftover slide from the
       // tackle frame used to yaw him because spd still crossed 2.2.
       const planted = a.renderClip === 'getup' || st.oneShot === 'getup' || st.lie;
-      if (!planted && st.spd > 2.2) {
+      const contesting = a.renderClip === 'jackal' || a.renderClip === 'cleanout'
+        || a.renderClip === 'ruck' || a.renderClip === 'maulBind'
+        || a.renderClip === 'maulDrive' || a.renderClip === 'maul'
+        || a.renderClip === 'maulPush';
+      if (contesting) {
+        /* Over the ball they face the engagement axis (engine ±1), not the
+         * leftover lateral ease — that yaw is why jackals stood square to
+         * touch. Arriving men keep the velocity heading so they run at the
+         * ruck, then lock once the grab clip starts. */
+        const want = a.rf > 0 ? 0 : Math.PI;
+        let dy = want - st.face;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        st.face += dy * (1 - Math.exp(-step * 12));
+      } else if (!planted && st.spd > 2.2) {
         const target = Math.atan2(vx, vz);
         let dy = target - st.face;
         while (dy > Math.PI) dy -= Math.PI * 2;

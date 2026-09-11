@@ -343,6 +343,9 @@ export function separate(
       /* GET-UP LOCK. A shove on a man climbing off the turf both slides him
        * and (via the renderer's spd>2.2 heading) turns him mid-rise. */
       if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+      /* Bound ruck/set-piece men are owned by placeBound. Shoving a jackal
+       * off the ball (or a cleaner off the gate) is the in-place jitter. */
+      if (a.bound || b.bound) continue;
 
       /* T-04. Opposing players must not run through one another. Two cases:
        *
