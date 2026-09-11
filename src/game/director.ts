@@ -2232,7 +2232,7 @@ export class Director {
        * actually at their slot. */
       for (const slot of s.players) {
         const p = this.L(slot.team, slot.num);
-        if (p.sinbin > 0) continue;
+        if (p.sinbin > 0 || (p.recoverT ?? 0) > 0) continue;
         const dx = slot.x - ax.x, dz = slot.z - ax.z + s.netDrive;
         const wx = ax.x + dx * cosY - dz * sinY;
         const wz = ax.z + dx * sinY + dz * cosY;
@@ -2299,6 +2299,7 @@ export class Director {
         const p = this.L(slot.team, slot.num);
         if (p.sinbin > 0) continue;
         const off = Math.hypot(slot.x - p.x, slot.z - p.z);
+        if ((p.recoverT ?? 0) > 0) continue;
         if (off > 0.9) {
           p.tx = slot.x; p.tz = slot.z;
           p.urgency = 1;
@@ -2348,6 +2349,7 @@ export class Director {
         const lx = -1.4 + col * 1.1 + (rank - 1) * 0.5;
         const lz = -s.dir * (i * 0.72);
         const a = this.L(s.attacking, i);
+        if ((a.recoverT ?? 0) <= 0) {
         settle(a,
           s.x + lx * Math.cos(yawR) - lz * Math.sin(yawR) * 0.2,
           s.z + lz,
@@ -2357,16 +2359,19 @@ export class Director {
         a.job = runnerLeaving ? 'PEEL FROM THE MAUL AND CARRY' : attackDriving
           ? 'KEEP THE LEGS GOING, STAY BOUND'
           : 'BIND TIGHT AND HOLD THE MAUL';
+        }
         /* T-16 #3 — the maul's defensive side comes from the maul's own
          * `attacking` field, never from `possession`: a penalty can flip
          * possession mid-drive, after which both ranks were fed from the same
          * team. */
         const dTeam: 'A' | 'B' = s.attacking === 'A' ? 'B' : 'A';
         const d = this.L(dTeam, i);
+        if ((d.recoverT ?? 0) <= 0) {
         const dlx = 1.4 - (i % 2) * 2.2;
         settle(d, s.x + dlx, s.z + s.dir * (1.2 + i * 0.7), -s.dir);
         clip(d, 'maulBind');
         d.job = s.contest === 'DEFENCE_CONTROL' ? 'HOLD THE MAUL UP AND WAIT FOR USE IT' : 'BIND AND RESIST THE DRIVE';
+        }
       }
       /* The nine has a fixed base behind the maul. It is marked bound by
        * think(), then placed here, so TRANSFER_TO_9 can show existing idle
@@ -2385,7 +2390,7 @@ export class Director {
       const s = this.bd;
       for (const q of s.players) {
         const p = this.L(q.team, q.num);
-        if (p.sinbin > 0) continue;
+        if (p.sinbin > 0 || (p.recoverT ?? 0) > 0) continue;
         /* T-29. The carrier and tackler are already at the contact point, so they
          * pin there. The arriving crew used to be snapped to their ruck slots too,
          * which read as players teleporting into the breakdown. They now close the
@@ -2647,7 +2652,7 @@ export class Director {
           let arrived = 0, count = 0;
           for (const f of s.form) {
             const p = this.L(f.team, f.num);
-            if (p.sinbin > 0 || p === k) continue;
+            if (p.sinbin > 0 || p === k || (p.recoverT ?? 0) > 0) continue;
             count++;
             const off = Math.hypot(f.x - p.x, f.z - p.z);
             if (off > 0.8) {
@@ -2851,7 +2856,7 @@ export class Director {
     const recTeam = this.receivingSide();
     const rec = assignReceiver(this.live, recTeam, tgt.x, tgt.z);
     const deep = s.dir;
-    if (rec && rec.sinbin <= 0) {
+    if (rec && rec.sinbin <= 0 && (rec.recoverT ?? 0) <= 0) {
       rec.tx = clamp(tgt.x, -33, 33);
       rec.tz = clamp(tgt.z, -58, 58);
       rec.urgency = 1;
@@ -2859,7 +2864,8 @@ export class Director {
       steer(rec, dt, true);
     }
     const cleaners = this.live
-      .filter((p) => p.team === recTeam && p !== rec && p.sinbin <= 0 && !p.down && FORWARDS.includes(p.num))
+      .filter((p) => p.team === recTeam && p !== rec && p.sinbin <= 0 && !p.down
+        && (p.recoverT ?? 0) <= 0 && FORWARDS.includes(p.num))
       .sort((a, b) => Math.hypot(a.x - tgt.x, a.z - tgt.z) - Math.hypot(b.x - tgt.x, b.z - tgt.z))
       .slice(0, 2);
     cleaners.forEach((p, i) => {
@@ -2873,7 +2879,8 @@ export class Director {
     });
     const busy = new Set(cleaners);
     if (rec) busy.add(rec);
-    const others = this.live.filter((p) => p.team === recTeam && !busy.has(p) && p.sinbin <= 0);
+    const others = this.live.filter((p) => p.team === recTeam && !busy.has(p)
+      && p.sinbin <= 0 && (p.recoverT ?? 0) <= 0);
     others.sort((a, b) => a.x - b.x);
     const n = others.length;
     const lineZ = clamp(tgt.z + deep * 8.0, -58, 58);
@@ -2925,6 +2932,9 @@ export class Director {
    * radius; a real double-write shoves a man that far and reads on screen.
    */
   place(p: Live, x: number, z: number, who: string) {
+    /* A man climbing off the turf does not get placed onto a lineout slot.
+     * The get-up lock owns xz until recoverT expires. */
+    if ((p.recoverT ?? 0) > 0) return;
     const ddx = x - p.x, ddz = z - p.z;
     if (import.meta.env.DEV && p.movedBy && p.movedBy !== who && ddx * ddx + ddz * ddz > 0.25) {
       console.warn(`[T-02] shirt ${p.num} (${p.team}) moved by ${p.movedBy}, then ${who} in one frame (phase ${this.phase})`);
@@ -3079,7 +3089,7 @@ export class Director {
       if (l > shapeMax) shapeMax = l;
     }
     const shapeLat = this.lateralScale(f.x, openSign, shapeMin, shapeMax);
-    const defLineFactor = 0.72 + this.slider(def, 'lineSpeed') / 100 * 0.4;
+    const defLineFactor = 0.88 + this.slider(def, 'lineSpeed') / 100 * 0.28;
     const defLineLat = this.lateralScale(f.x, 1, DEFENCE_LAT_MIN * defLineFactor, DEFENCE_LAT_MAX * defLineFactor);
 
     /* SPEC_12 — FORCE AI CLEAN. One projection, applied to every CPU mark
@@ -3722,7 +3732,10 @@ export class Director {
               p.tx = clamp(mark.x, -33, 33);
               p.tz = clamp(mark.z, -59, 59);
               p.job = dsm.job;
-              p.urgency = 0.85;
+              const gap = Math.hypot(p.tx - p.x, p.tz - p.z);
+              /* On the mark they HOLD. A 0.85 jog into a 1 m slot is the
+               * in-place jiggle behind the ruck. */
+              p.urgency = gap > 10 ? 0.88 : gap > 3 ? 0.48 : 0.18;
             });
         } else {
         // HOLD THE LINE. Everyone else keeps the shape connected so a hole wider
@@ -3761,8 +3774,10 @@ export class Director {
          * defences get it equally, and it resets the moment possession
          * turns over. */
         const defFatigue = 1 - Math.min(0.15, Math.max(0, this.phasesGained - 3) * 0.03);
-        const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue;
         const line = this.boundMark(tx, this.defensiveDepth(f, dir, tz, p, 'channel-map'));
+        const lineGap = Math.hypot(line.x - p.x, line.z - p.z);
+        const hold = lineGap > 10 ? 1 : lineGap > 3 ? 0.55 : 0.22;
+        const urgency = clamp((0.45 + defSys.lineSpeed / 12) * react, 0.28, 1) * defFatigue * hold;
         this.writeThinkPlayer(gate, `think:defence-line:${p.team}${p.num}`, p,
           ['tx', 'tz', 'job', 'urgency'] as const, () => {
             p.tx = clamp(line.x, -33, 33);
@@ -4323,7 +4338,11 @@ export class Director {
     for (const p of this.live) {
       /* only a man who was actually ON THE GROUND has to get up; the rest of
        * the ruck were on their feet and can go straight back to work. */
-      if (p.down) p.recoverT = RECOVER_SECONDS;   // cleared by releaseAll on a whistle
+      if (p.down) {
+        p.recoverT = RECOVER_SECONDS;
+        if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
+        if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+      }
       p.down = false; p.bound = false;
     }
     this.bd = undefined;
@@ -4378,6 +4397,7 @@ export class Director {
        * a free action. Reuses the get-up lock so there is ONE way to be down
        * and getting up, rather than two subtly different ones. */
       p.recoverT = DIVE_MISS_RECOVERY;
+      p.recoverX = p.x; p.recoverZ = p.z;
       p.vx = 0; p.vz = 0;
       p.clip = 'getup'; p.clipT = 0;
       p.beatenT = Math.max(p.beatenT, 0.4);   // cannot instantly re-tackle
@@ -4385,22 +4405,11 @@ export class Director {
   }
 
   tickRecovery(dt: number) {
-    /* The lock is an OPEN-PLAY concept. Every other phase either pins players
-     * itself (scrum, lineout, kick, maul) or is walking them to a mark, and a
-     * man frozen on the turf would stall it. Rather than trust every teardown
-     * path to have called releaseAll — several do not, which showed up as
-     * 4134 frames of a recovering man being steered — the invariant is
-     * enforced here, in the one place the timer is read. */
-    if (this.phase !== 'OPEN_PLAY') {
-      for (const p of this.live) {
-        if ((p.recoverT ?? 0) > 0) {
-          p.recoverT = 0;
-          p.recoverX = undefined; p.recoverZ = undefined;
-          if (p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
-        }
-      }
-      return;
-    }
+    /* GET UP, THEN WALK. Cancelling the lock the moment a kick or lineout
+     * started is why men slid across the park on their backs: the renderer
+     * was still playing GetUp while placeBound steered them to the throw-in.
+     * A set piece waits two seconds to assemble; a 1.5 s stand-up fits, and
+     * the man jogs the rest of the way on his feet. */
     for (const p of this.live) {
       const t = p.recoverT ?? 0;
       if (t <= 0) continue;
@@ -4428,7 +4437,6 @@ export class Director {
 
   /** Restore recovering men after any writer that might have moved them. */
   private holdRecovering() {
-    if (this.phase !== 'OPEN_PLAY') return;
     for (const p of this.live) {
       if ((p.recoverT ?? 0) <= 0) continue;
       p.vx = 0; p.vz = 0;
@@ -4447,18 +4455,19 @@ export class Director {
    */
   releaseAll() {
     for (const p of this.live) {
+      const wasFloor = p.down || p.clip === 'grounded' || (p.recoverT ?? 0) > 0;
       p.down = false;
       p.bound = false;
       p.carrier = false;
       p.urgency = 0.6;
-      /* A whistle outranks the get-up lock: the man has to walk to a scrum or
-       * a lineout mark now, and holding him on the floor would stall the set
-       * piece. Cancelling here (rather than letting `steer` fight the lock)
-       * keeps the ownership contract honest — measured 4134 frames of a
-       * recovering man being steered before this was added. */
-      p.recoverT = 0;
-      p.recoverX = undefined; p.recoverZ = undefined;
-      if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
+      /* A whistle still needs him at the next mark — but on his FEET. Keep
+       * the get-up lock so he plants, stands, then jogs to the lineout
+       * instead of sliding there while the clip plays. */
+      if (wasFloor) {
+        if ((p.recoverT ?? 0) <= 0) p.recoverT = RECOVER_SECONDS;
+        if (p.recoverX === undefined) { p.recoverX = p.x; p.recoverZ = p.z; }
+        if (p.clip !== 'getup') { p.clip = 'getup'; p.clipT = 0; }
+      }
     }
     this.ruckPeel = null;
     this.bd = undefined;
