@@ -313,10 +313,19 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
      * directly and did not consult the get-up lock, so it dragged recovering
      * players 627 m across three matches while their clip said 'getup' —
      * the single largest source of foot-sliding on a planted animation. */
+    if (d.ruckPeel && d.t < d.ruckPeel.until && d.ruckPeel.nums.has(`${p.team}:${p.num}`)) {
+      /* think() owns the peel — do not chase the nine through the pile. */
+      continue;
+    }
     if (beatOn && (!d.isHuman(p.team) || p !== d.ctrlPlayer) && (p.recoverT ?? 0) <= 0) {
-      const gap = (p.z - rb!.z) * rb!.dir;
-      if (gap < 2.0) {
-        p.z -= Math.min(2.0 - gap, 8 * dt) * rb!.dir;
+      /* The 3 m line is IN FRONT of the ruck (toward the try). The old
+       * write subtracted dir and marched them THROUGH the pile, past the
+       * nine. Jog to the line; never through the gate. */
+      const line = rb!.z + rb!.dir * 3.0;
+      const toLine = (line - p.z) * rb!.dir;
+      if (toLine > 0.25) {
+        p.z += Math.min(toLine, 5.2 * dt) * rb!.dir;
+        p.vx *= Math.exp(-6 * dt);
         p.movedBy = 'release';
         p.job = 'RELEASE AND RETREAT';
         continue;   // the retreat owns this frame — no steer on top

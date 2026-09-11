@@ -1537,6 +1537,12 @@ export class Director {
    * the beat, instead of letting them tackle the nine on the frame the
    * ball is out. */
   releaseBeat: { z: number; dir: number; until: number } | null = null;
+  /** The pile peels SIDEWAYS off the gate when the ball comes out. Without
+   * this the contestants sprint through the ruck (it reads as a jump) and
+   * overshoot behind the nine, who then snipes the empty channel. */
+  ruckPeel: {
+    until: number; x: number; z: number; dir: number; atk: 'A' | 'B'; nums: Set<string>;
+  } | null = null;
 
   /**
    * Snapshot the sample ledger rather than exposing its mutable arrays. P50/P90
@@ -2729,25 +2735,10 @@ export class Director {
         steer(p, dt, true);
       });
 
-      // The receiving side: the designated fielder goes to the ball, the rest
-      // come across to support him rather than standing where they started.
-      const rec = assignReceiver(this.live, this.receivingSide(), tgt.x, tgt.z);
-      if (rec) {
-        rec.tx = clamp(tgt.x, -33, 33);
-        rec.tz = clamp(tgt.z, -58, 58);
-        rec.urgency = 1;
-        rec.job = 'FIELD THE BALL — CALL FOR IT LOUD';
-        steer(rec, dt, true);
-      }
-      for (const p of this.live) {
-        if (p.team !== this.receivingSide() || p === rec || p.sinbin > 0) continue;
-        if (s.chasers.some((c) => c.num === p.num && s.kicker === p.team)) continue;
-        p.tx = clamp(tgt.x + (p.x > tgt.x ? 5 : -5), -33, 33);
-        p.tz = clamp(tgt.z - s.dir * 8, -58, 58);
-        p.urgency = 0.75;
-        p.job = 'COME ACROSS AND SUPPORT THE FIELDER';
-        steer(p, dt, false);
-      }
+      /* Receiving side: one man contests the catch, two forwards bind for
+       * the coming ruck, everyone else forms a LINE behind the landing —
+       * they do not stay on the kick-off dots. */
+      this.steerKickReceive(dt, tgt);
       return;
     }
   }
@@ -2834,6 +2825,55 @@ export class Director {
   /** The side about to receive a kick that is in the air. */
   receivingSide(): 'A' | 'B' {
     return this.kk ? (this.kk.kicker === 'A' ? 'B' : 'A') : this.defending();
+  }
+
+  /**
+   * Under a kick: the fielder contests the landing, two forwards sit on
+   * his hips ready to clear the ruck, and the rest run onto a defensive
+   * line ~8 m behind the catch (toward their own try). Kick-off dots are
+   * abandoned the moment the ball is struck.
+   */
+  private steerKickReceive(dt: number, tgt: { x: number; z: number }) {
+    const s = this.kk;
+    if (!s) return;
+    const recTeam = this.receivingSide();
+    const rec = assignReceiver(this.live, recTeam, tgt.x, tgt.z);
+    const deep = s.dir;
+    if (rec && rec.sinbin <= 0) {
+      rec.tx = clamp(tgt.x, -33, 33);
+      rec.tz = clamp(tgt.z, -58, 58);
+      rec.urgency = 1;
+      rec.job = 'FIELD THE BALL — CALL FOR IT LOUD';
+      steer(rec, dt, true);
+    }
+    const cleaners = this.live
+      .filter((p) => p.team === recTeam && p !== rec && p.sinbin <= 0 && !p.down && FORWARDS.includes(p.num))
+      .sort((a, b) => Math.hypot(a.x - tgt.x, a.z - tgt.z) - Math.hypot(b.x - tgt.x, b.z - tgt.z))
+      .slice(0, 2);
+    cleaners.forEach((p, i) => {
+      p.tx = clamp(tgt.x + (i === 0 ? -1.8 : 1.8), -33, 33);
+      p.tz = clamp(tgt.z + deep * 2.6, -58, 58);
+      p.urgency = 1;
+      p.job = i === 0
+        ? 'FIRST CLEANER — HIT THE RUCK ON THE CATCH'
+        : 'SECOND CLEANER — BIND ON THE CATCH';
+      steer(p, dt, true);
+    });
+    const busy = new Set(cleaners);
+    if (rec) busy.add(rec);
+    const others = this.live.filter((p) => p.team === recTeam && !busy.has(p) && p.sinbin <= 0);
+    others.sort((a, b) => a.x - b.x);
+    const n = others.length;
+    const lineZ = clamp(tgt.z + deep * 8.0, -58, 58);
+    others.forEach((p, i) => {
+      const lat = n <= 1 ? 0 : ((i / Math.max(1, n - 1)) - 0.5) * 44;
+      p.tx = clamp(tgt.x + lat, -33, 33);
+      p.tz = lineZ;
+      const gap = Math.hypot(p.tx - p.x, p.tz - p.z);
+      p.urgency = gap > 10 ? 1 : 0.88;
+      p.job = 'LINE BEHIND THE CATCH — ANTICIPATE THE TACKLE';
+      steer(p, dt, gap > 5);
+    });
   }
 
   /* ======================== SPEC_09 — THE PLAY-ACTIVE GATE ========================
@@ -2976,6 +3016,7 @@ export class Director {
 
   private think(dt: number, input: Input) {
     const gate = this.forwardAttackGates();
+    if (this.ruckPeel && this.t >= this.ruckPeel.until) this.ruckPeel = null;
     const s = this.shape();
     const atk = this.possession;
     /* T-13 — the behaviour dataset is the most specific source of positional
@@ -3098,6 +3139,16 @@ export class Director {
          * the carrier — half the line turning and sprinting at a man they had
          * not been beaten by. */
         if ((carC.z - q.z) * dir > 0.5 && Math.hypot(q.x - carC.x, q.z - carC.z) < 16) coverChase.add(q.num);
+      }
+      /* A man peeling off the last ruck is not cover — he is still getting
+       * off the pile. Leave him out of the chase so he cannot sprint through
+       * the nine. */
+      if (this.ruckPeel && this.t < this.ruckPeel.until) {
+        for (const key of this.ruckPeel.nums) {
+          const num = Number(key.split(':')[1]);
+          coverChase.delete(num);
+          convergers.delete(num);
+        }
       }
       /* THE CHASE IS NOT THE WHOLE TEAM.
        *
@@ -3277,6 +3328,32 @@ export class Director {
         continue;
       }
       this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
+
+      /* PEEL OFF THE GATE. Contestants sprinting from the pile ran through
+       * the ruck (it reads as a jump) and overshot behind the nine. For a
+       * beat they jog SIDEWAYS off the contact — attackers stay on their
+       * own side, defenders walk to the 3 m line. */
+      if (this.ruckPeel && this.t < this.ruckPeel.until
+        && this.ruckPeel.nums.has(`${p.team}:${p.num}`)
+        && !(this.op && p.team === this.op.attacking && p.num === this.op.carrierNum)) {
+        const peel = this.ruckPeel;
+        const away = p.x >= peel.x ? 1 : -1;
+        this.writeThinkPlayer(gate, `think:ruck-peel:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(peel.x + away * 3.6, -33, 33);
+            p.tz = clamp(p.team === peel.atk
+              ? peel.z - peel.dir * 1.6
+              : peel.z + peel.dir * 3.2, -58, 58);
+            p.urgency = 0.42;
+            p.job = 'PEEL OFF THE GATE — DO NOT CROSS THE NINE';
+          });
+        steer(p, dt, false, gate, `think:ruck-peel-steer:${p.team}${p.num}`);
+        {
+          const sp = Math.hypot(p.vx, p.vz);
+          if (sp > 4.5) { const k = 4.5 / sp; p.vx *= k; p.vz *= k; }
+        }
+        continue;
+      }
 
       /* Off-the-top hold. `lo` is already torn down, so the LINEOUT branch
        * below cannot keep them 10 m back — without this they rush the 10
@@ -4202,6 +4279,18 @@ export class Director {
 
 
   clearRuck() { /* T-03: engine-internal */
+    if (this.bd) {
+      const s = this.bd;
+      const nums = new Set<string>();
+      for (const q of s.players) nums.add(`${q.team}:${q.num}`);
+      this.ruckPeel = {
+        until: this.t + 0.95,
+        x: s.contactX, z: s.contactZ,
+        dir: s.attacking === 'A' ? 1 : -1,
+        atk: s.attacking,
+        nums,
+      };
+    }
     for (const p of this.live) {
       /* only a man who was actually ON THE GROUND has to get up; the rest of
        * the ruck were on their feet and can go straight back to work. */
@@ -4342,6 +4431,7 @@ export class Director {
       p.recoverX = undefined; p.recoverZ = undefined;
       if (p.clip === 'grounded' || p.clip === 'tackle' || p.clip === 'getup') { p.clip = 'ready'; p.clipT = 0; }
     }
+    this.ruckPeel = null;
     this.bd = undefined;
     this.ml = undefined;
     this.scrim = undefined;
