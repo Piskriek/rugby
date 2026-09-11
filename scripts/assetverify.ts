@@ -102,6 +102,43 @@ for (const clip of gltf.animations) {
   check(`in-place ${clip.name}`, maxXZ < MAX_XZ_M, `Δxz=${maxXZ.toFixed(4)} m`);
 }
 
+/* World-space sample. Local hip Δ × (1.8/bbox.h) ignores Human_Armature's
+ * ~69× scale; mixer-sampling Hips after fitting height to 1.80 m is the
+ * displacement the 2D engine would double-apply. */
+{
+  const hips = gltf.scene.getObjectByName('Hips') as THREE.Object3D | undefined;
+  check('Hips for mixer sample', !!hips, hips ? 'Hips' : 'MISSING');
+  if (hips) {
+    gltf.scene.scale.setScalar(toM);
+    const mixer = new THREE.AnimationMixer(gltf.scene);
+    const p = new THREE.Vector3();
+    for (const name of LOCO) {
+      const clip = gltf.animations.find((c) => c.name === name);
+      if (!clip) continue;
+      mixer.stopAllAction();
+      gltf.scene.traverse((o) => {
+        const m = o as THREE.SkinnedMesh;
+        if (m.isSkinnedMesh && m.skeleton) m.skeleton.pose();
+      });
+      const act = mixer.clipAction(clip);
+      act.play();
+      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      const n = Math.max(2, Math.ceil(clip.duration * 30));
+      for (let i = 0; i <= n; i++) {
+        mixer.setTime(Math.min(clip.duration, i / 30));
+        gltf.scene.updateMatrixWorld(true);
+        hips.getWorldPosition(p);
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+      }
+      const dxz = Math.hypot(maxX - minX, maxZ - minZ);
+      check(`world in-place ${name}`, dxz < MAX_XZ_M, `Δxz=${dxz.toFixed(4)} m`);
+      act.stop();
+      mixer.uncacheAction(clip);
+    }
+  }
+}
+
 if (!ok) {
   console.error('\nassetverify FAILED');
   process.exit(1);

@@ -332,6 +332,10 @@ export class ThreePlayerManager {
   private templateClips: THREE.AnimationClip[] = [];
   /** World scale applied to the packed mesh so it stands MODEL_HEIGHT_M tall. */
   private modelScale = RENDER_SCALE;
+  /** Packed-mesh local units per authored metre. The 2017 FBX is ~526 units
+   *  tall (Human_Armature scale ~69); metre-authored attachments (badge,
+   *  shadow, carried ball) multiply by this so they survive root.scale. */
+  private unitPerM = 1;
   private gradient = makeToonGradient();
   private pool = new Map<string, PlayerInstance>();
   private readonly scene: THREE.Scene;
@@ -361,6 +365,9 @@ export class ThreePlayerManager {
     this.scene.add(this.ball);
   }
 
+  /** Authored metres → packed-mesh local units. */
+  private u(metres: number): number { return metres * this.unitPerM; }
+
   /* ------------------------------------------------------------ loading -- */
   load(): Promise<void> {
     const loader = new GLTFLoader();
@@ -378,23 +385,18 @@ export class ThreePlayerManager {
           this.template.updateMatrixWorld(true);
           const box = new THREE.Box3().setFromObject(this.template);
           const h = Math.max(0.01, box.max.y - box.min.y);
+          this.unitPerM = h / MODEL_HEIGHT_M;
           this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
           const base = gltf.animations.map(stripRootMotion);
-          /* The retargeted pair is already in-place (the tool drops the source's
-           * horizontal channel) so it does NOT go through stripRootMotion again;
-           * doing so would be harmless but pointless. It is loaded second and
-           * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
-           * more entries in the same clip table. */
+          /* tackle_pair.glb is Unreal-boned (pelvis/spine_01). Concatenating it
+           * would make pick('MX_StandUp', 'GetUp') prefer a clip that cannot
+           * drive this Mixamo Hips rig. Only keep clips whose tracks bind. */
           const extra = await one(TACKLE_PAIR_URL);
-          if (extra && extra.length) {
-            this.templateClips = base.concat(extra);
-          } else {
-            this.templateClips = base;
-            if (import.meta.env?.DEV) {
-              console.warn('[players] tackle_pair.glb missing — falling back to the '
-                + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
-            }
-          }
+          const bound = extra?.filter((c) => c.tracks.some((t) => {
+            const bone = t.name.split('.')[0];
+            return !!this.template!.getObjectByName(bone);
+          })) ?? [];
+          this.templateClips = bound.length ? base.concat(bound) : base;
           this.prepareTemplate();
           this.checkRecoverSeconds();
           this.ready = true;
@@ -576,7 +578,7 @@ export class ThreePlayerManager {
       ?? root.getObjectByName('spine_02')
       ?? root.getObjectByName('Spine1');
     if (spine) {
-      const badgeGeo = new THREE.PlaneGeometry(0.55, 0.65);
+      const badgeGeo = new THREE.PlaneGeometry(this.u(0.55), this.u(0.65));
       const badgeMat = new THREE.MeshBasicMaterial({
         map: this.makeBadgeTexture('', '#cccccc'),
         color: 0xffffff,
@@ -587,7 +589,9 @@ export class ThreePlayerManager {
       const badge = new THREE.Mesh(badgeGeo, badgeMat);
       badge.name = 'NumberBadge';
       // back is -Z; place just behind the spine and flip to face backward.
-      badge.position.set(0, 0.15, -0.38);
+      // Offsets are authored metres, converted into FBX units so root.scale
+      // lands them at 0.55 m × RENDER_SCALE in world space.
+      badge.position.set(0, this.u(0.15), this.u(-0.38));
       badge.rotation.y = Math.PI;
       spine.add(badge);
     }
@@ -753,8 +757,8 @@ export class ThreePlayerManager {
     // Soft contact shadow at the feet (child of root so it tracks the actor).
     const shadow = new THREE.Mesh(this.shadowGeo, this.shadowMat);
     shadow.rotation.x = -Math.PI / 2;
-    shadow.position.y = 0.02;
-    shadow.scale.set(0.95, 0.42, 1);
+    shadow.position.y = this.u(0.02);
+    shadow.scale.set(0.95 * this.unitPerM, 0.42 * this.unitPerM, this.unitPerM);
     shadow.renderOrder = -1;
     root.add(shadow);
     // kept so the procedural body tilt can counter-rotate it flat (below)
@@ -858,7 +862,7 @@ export class ThreePlayerManager {
    */
   private checkRecoverSeconds() {
     if (!import.meta.env?.DEV) return;
-    const name = this.pick('MX_StandUp', 'GetUp');
+    const name = this.pick('GetUp', 'MX_StandUp');
     const clip = this.templateClips.find(c => c.name === name);
     if (!clip) return;
     /* The lock is deliberately SHORTER than the clip (see RECOVER_SECONDS):
@@ -1123,7 +1127,7 @@ export class ThreePlayerManager {
       p.tilt = 0;
       inst.root.rotation.x = 0;
       inst.root.position.y = 0;
-      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
+      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = this.u(0.02); }
       return;
     }
     /* rotate about the model's own left-right axis. The root already carries
@@ -1145,7 +1149,7 @@ export class ThreePlayerManager {
       /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
        * on the turf under the man. */
       inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
-      inst.shadow.position.y = 0.02 - rise;
+      inst.shadow.position.y = this.u(0.02 - rise);
     }
   }
 
@@ -1690,20 +1694,16 @@ export class ThreePlayerManager {
 
     this.ball.visible = free.visible || !!carrier;
     if (carrier) {
-      /* PART 2 (BALL SOCKETING). The ball used to be synced to the 2D
-       * simulation's ground coordinates even while a man was carrying it, so
-       * it slid along the floor beside him. A carried ball is not a simulated
-       * body: its world matrix is OVERRIDDEN by the carrying hand's. Parent
-       * it to the hand bone (Quaternius rig: hand_r, with the forearm and the
-       * left hand as fallbacks) and let the skeleton drive it; the parent
-       * root already carries RENDER_SCALE, so the socket offsets below are in
-       * model metres. */
+      /* PART 2 (BALL SOCKETING). A carried ball is parented to the wrist
+       * (Mixamo RightHand, Unreal hand_r as fallback). Offsets/scale are
+       * authored metres converted into the packed mesh's FBX units so
+       * root.scale lands them at rugby size. */
       const hand = this.carryBone(carrier);
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
-        this.ball.position.set(0, 0.05, 0.03);
+        this.ball.position.set(0, this.u(0.05), this.u(0.03));
         this.ball.rotation.set(0.2, 0, Math.PI / 2.4);
-        this.ball.scale.setScalar(1);
+        this.ball.scale.setScalar(this.unitPerM);
       }
     } else if (free.visible) {
       if (this.ball.parent !== this.scene) {

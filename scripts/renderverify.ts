@@ -47,6 +47,9 @@ const players = fs.readFileSync('src/render/ThreePlayerManager.ts', 'utf8');
   check('locomotion has Idle/Walk/Jog/Run/Sprint', jog, jog ? 'in-betweens present' : 'idle still jumps to run/sprint');
   const lineout = /case 'lineoutThrow':/.test(players) && /case 'lineoutJump':/.test(players);
   check('lineout throw/jump have their own states', lineout, lineout ? 'wired' : 'still folded into pass/jump');
+  const units = /unitPerM/.test(players) && /this\.u\(0\.55\)/.test(players) && /scale\.setScalar\(this\.unitPerM\)/.test(players);
+  check('metre attachments survive FBX units', units,
+    units ? 'badge/shadow/ball × unitPerM' : 'badge still 0.55 on a 526-unit mesh');
 }
 
 console.log(ok ? '\nALL PASS' : '\nFAILURES PRESENT');
