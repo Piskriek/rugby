@@ -67,7 +67,7 @@ import { upKick, launch, kickLanded } from './engine/kick';
 import { upBreakdown, startBreakdown, inKineticImpact } from './engine/breakdown';
 import type { LatchState } from './engine/latch';
 import { inLatch, isLatching, clearLatch, DIVE_MISS_RECOVERY } from './engine/latch';
-import { isGoalKickState, goalKickMark, scrumFaceSign } from './behaviour/setpiece-overrides';
+import { isGoalKickState, goalKickMark, scrumFaceSign, lineoutBacklineMark } from './behaviour/setpiece-overrides';
 import { inEchelon, echelonTargetZ, echelonDepthBehindTen } from './behaviour/backline-echelon';
 import { upOpen, contextLabel, doStep, doFend, doDummy, doDive, doPass, cpuCarrier } from './engine/open';
 
@@ -995,7 +995,7 @@ export class Director {
       const k = this.kk;
       if (k.stage === 'FANFARE') return { now: 'TRY! The crowd is on its feet', next: `${k.kickerName} will take the conversion`, clock: 0, danger: false };
       if (k.stage === 'WALKUP') return { now: `${k.kickerName} is walking to the tee`, next: 'The kick goes live once the ball is set', clock: 0, danger: false };
-      if (k.stage === 'AIM') return { now: `${k.kickerName} is lining up a ${k.profile.label.toLowerCase()}`, next: 'Hold SPACE to build power, release to strike', clock: 0, danger: false };
+      if (k.stage === 'AIM') return { now: `${k.kickerName} is lining up aLowerCase()}`, next: 'Hold SPACE to build power, release to strike', clock: 0, danger: false };
       if (k.stage === 'METER') return { now: `Charging — ${(k.power * 100).toFixed(0)}% power, ${this.kickReach(k, k.power).toFixed(0)} m`, next: 'Release SPACE to kick', clock: 0, danger: false };
       if (k.stage === 'FLIGHT') {
         const lp = this.landingPrediction();
@@ -3254,6 +3254,24 @@ export class Director {
       }
       this.writeThinkPlayer(gate, `think:unbound:${p.team}${p.num}`, p, ['bound'] as const, () => { p.bound = false; });
 
+      /* LINEOUT BACKLINE — Law 18. Unbound players are not in the line; they
+       * stand ten metres from the line of touch, spread across the rest of the
+       * pitch. Open-play shape would re-anchor on the thrower at ±33.5 and
+       * squeeze the whole XV onto the touchline. Walk on — do not teleport. */
+      if (this.lo && (this.phase === 'LINEOUT' || this.phase === 'LINEOUT_REPLAY')) {
+        const loMark = lineoutBacklineMark(p.num, p.team, this.lo.markZ, this.lo.side);
+        const loGap = Math.hypot(loMark.x - p.x, loMark.z - p.z);
+        this.writeThinkPlayer(gate, `think:lineout-back:${p.team}${p.num}`, p,
+          ['tx', 'tz', 'job', 'urgency'] as const, () => {
+            p.tx = clamp(loMark.x, -33, 33);
+            p.tz = clamp(loMark.z, -59, 59);
+            p.job = loMark.job;
+            p.urgency = loGap > 14 ? 1 : 0.82;
+          });
+        steer(p, dt, loGap > 10, gate, `think:lineout-back-steer:${p.team}${p.num}`);
+        continue;
+      }
+
       const onAtk = p.team === atk;
       const c: RoleContract = contractFor(p.num);
 
@@ -4418,6 +4436,7 @@ export class Director {
     };
     this.clearRuck();
     this.scrim = undefined; this.ml = undefined; this.op = undefined;
+    this.kk = undefined;
     this.phase = 'LINEOUT';
     this.say(`LINEOUT TO ${this.teams[thrower].nation.short}`);
     if (this.isHuman(thrower)) this.showHint('A/D CHOOSE THE CALL · SPACE TO THROW · STOP THE BAR IN THE BAND', 3.4);
