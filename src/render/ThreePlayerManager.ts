@@ -1,11 +1,12 @@
 /**
  * ThreePlayerManager — loads, pools, skins and animates the 3D rugby squad.
  *
- * One GLB (public/assets/models/rugby_player.glb) is built from Quaternius'
- * CC0 *Universal Base Characters* male mesh plus the *Universal Animation
- * Library* clips (see tools/build_player_glb.py + CREDITS.txt). It loads once;
- * every one of the 30 players (plus the referee) is a SkeletonUtils.clone()
- * with its own AnimationMixer, kit colours and squad-number badge.
+ * One GLB (public/assets/models/player.glb) is built from Quaternius'
+ * CC0 *Animated Human* (Oct 2017) low-poly mesh plus Mixamo locomotion and
+ * the rugby-named clips in AnimationRef/ (see tools/build_player_glb.mjs +
+ * CREDITS.txt). It loads once; every one of the 30 players (plus the referee)
+ * is a SkeletonUtils.clone() with its own AnimationMixer, kit colours and
+ * squad-number badge.
  *
  * The body SkinnedMesh is split into five material regions (Jersey, Shorts,
  * Socks, Skin, Boots) by skinning-weight analysis so kits can be recoloured;
@@ -13,15 +14,15 @@
  * painted with a 128x128 canvas texture.
  *
  * Animation is a small state machine over the clips the GLB ships:
- *   idle Idle · walk Walk · run Run · sprint Sprint · pass Pass(OverhandThrow)
- *   tackle Tackle(Hit_Knockback) · grounded Death · getup GetUp(LayToIdle)
- *   try Slide(Start+Loop) · dive SlideStart · kick Kick(Interact)
- *   maul/scrum/ruck Push · crouch Crouch · jump JumpLand.
+ *   idle Idle · walk Walk · jog Jog · run Run · sprint Run (forward)
+ *   pass/lineoutThrow LineoutThrow · tackle DoubleLegTackle / SideDive
+ *   dive SideDive · try Dive · kick Kick · maul/scrum ScrumDrive
+ *   crouch ScrumCrouch · jump LineoutJump · getup GetUp · grounded Death.
  * Locomotion speed scales the mixer timeScale; one-shots crossFade back.
+ * There is no baseball OverhandThrow — passes use the rugby lineout throw.
  */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Director, Actor } from '../game/director';
 import type { ElbowHand as BallCraftArm } from '../game/engine/ballcraft';
@@ -40,47 +41,47 @@ import { renderHealth, noteRenderFault } from './ThreeCanvas';
 import { turfRiseM, buildRugbyBallMesh } from './ThreeEnvironment';
 import { BALL_MINOR, ballContact, type BallQuaternion } from '../game/engine/ballPhysics';
 
-/* Absolute path from the origin root. `public/assets/models/` is served by
- * Vite at `/assets/models/`, which is also the URL the preload link in
- * index.html warms, so the loader's own fetch reuses that cached response.
- * A root-relative URL (rather than a document-relative one) means the fetch
- * cannot resolve against a client-side route path and 404 — which is what
- * silently degraded a live match to shadow-and-number-only stand-in bodies. */
-const MODEL_URL = '/assets/models/rugby_player.glb';
-/* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
- * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
-/**
- * The rig's bytes, fetched once per page.
- *
- * Two things make this worth a module-level cache rather than a per-manager load.
- * React StrictMode mounts the match tree twice in dev, and the player model is 6.3 MB
- * — so the double boot downloaded the squad twice, through the dev proxy, before the
- * first frame. And a re-boot (a change on the options screen rebuilds the canvas) paid
- * it again, which is how a session that is "very slow" stays slow.
- *
- * A failed fetch is deliberately NOT cached: `rigBytes` is cleared on the way out so
- * the next boot tries again, because in a sandboxed preview a first request can fail
- * for a reason that has already gone away. What is cached is the success.
- */
+const MODEL_URL = 'assets/models/player.glb';
+/** Authored standing height of the packed mesh, metres. Used to fit whatever
+ *  unit the FBX was exported in (the 2017 Quaternius human is ~526 units). */
+const MODEL_HEIGHT_M = 1.80;
 /* Retargeted Mixamo tackle pair, baked by tools/fetch_mixamo.mjs. Animation
  * only (~90 KB, no meshes) — it rides on the player rig loaded above. */
 const TACKLE_PAIR_URL = '/assets/models/tackle_pair.glb';
 
-function cached(url: string): () => Promise<ArrayBuffer> {
-  let p: Promise<ArrayBuffer> | null = null;
-  return () => {
-    if (!p) {
-      p = (async () => {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`${url} — HTTP ${res.status}`);
-        return await res.arrayBuffer();
-      })().catch((e) => { p = null; throw e; });
+/** Arena's preview proxy 502s a 4.2 MB GLB as one response. Fetch N slices
+ *  (~500 KB) and concatenate. Falls back to a single GET if parts fail. */
+const GLB_PARTS = 8;
+
+async function fetchGlb(url: string, parts = 1): Promise<ArrayBuffer> {
+  const pull = async (u: string) => {
+    let last: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch(u, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`${u} ${r.status}`);
+        return await r.arrayBuffer();
+      } catch (e) {
+        last = e instanceof Error ? e : new Error(String(e));
+        await new Promise((ok) => setTimeout(ok, 180 * (attempt + 1)));
+      }
     }
-    return p;
+    throw last ?? new Error(u);
   };
+  if (parts <= 1) return pull(url);
+  try {
+    const bufs = await Promise.all(
+      Array.from({ length: parts }, (_, i) => pull(`${url}.p/${i}/${parts}`)),
+    );
+    const total = bufs.reduce((n, b) => n + b.byteLength, 0);
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const b of bufs) { out.set(new Uint8Array(b), o); o += b.byteLength; }
+    return out.buffer;
+  } catch {
+    return pull(url);
+  }
 }
-const rigBytes = cached(MODEL_URL);
-const pairBytes = cached(TACKLE_PAIR_URL);
 
 /* ---------------------------------------------------------------- kits --- */
 export type KitTeam = 'A' | 'B' | 'REF';
@@ -110,6 +111,36 @@ const TEMPLATE_SLOT_MAT: Record<Slot, string> = {
   skin: 'TPL_skin', boots: 'TPL_boots', hair: 'MI_Hair_1', eyes: 'MI_Eyes',
 };
 
+/** Region of a body vertex from its dominant skinning bone + rest height. */
+function boneRegion(boneName: string, restY: number): Slot {
+  const n = boneName.replace(/^mixamorig\d*:?/, '');
+  // foot + toe — Unreal `foot_`/`ball_*` and Mixamo `Foot`/`Toe`.
+  if (/^(foot_|ball_[lr]|toe)/i.test(n) || /^ball_leaf/.test(n) || /Foot|Toe/.test(n)) {
+    return restY < 0.20 ? 'boots' : 'socks';
+  }
+  // calf: Mixamo `LeftLeg`/`RightLeg` are the calves; Unreal uses `calf_`.
+  if (/^calf_/i.test(n) || /^(Left|Right)Leg$/.test(n)) return restY < 0.55 ? 'socks' : 'skin';
+  if (/^thigh_/i.test(n) || /UpLeg/.test(n)) return restY > 0.70 ? 'shorts' : 'skin';
+  if (/^(root|pelvis|spine|neck|Hips|Spine|Neck|Shoulder)/i.test(n)) return 'jersey';
+  if (/^(Head|index_|middle_|ring_|pinky_|thumb_|Hand)/i.test(n)) return 'skin';
+  if (/^(clavicle|upperarm|lowerarm|hand_|Arm|ForeArm)/i.test(n)) {
+    return /^(clavicle|Shoulder)/i.test(n) ? 'jersey' : 'skin';
+  }
+  return 'jersey';
+}
+
+/* ------------------------------------------------------------- lighting -- */
+function makeToonGradient(): THREE.DataTexture {
+  // Two hard bands: flat cel look matching the 2D pitch's flat fills.
+  // RGBA × 2 pixels = 8 bytes (a 6-byte RGB buffer under-ran texSubImage2D).
+  const data = new Uint8Array([148, 148, 148, 255, 255, 255, 255, 255]);
+  const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 
 /* ============ PROCEDURAL POSTURE LAYER (and where it hands over) ============
@@ -190,21 +221,21 @@ interface ProceduralRig {
 /** Unreal-convention bone names, with the Mixamo spellings as fallbacks so a
  *  future re-export against a Mixamo rig keeps working without a code change. */
 const BONE_NAMES = {
-  pelvis: ['pelvis', 'Hips', 'mixamorigHips'],
+  pelvis: ['Hips', 'pelvis', 'mixamorigHips'],
   spine: [
-    ['spine_01', 'Spine', 'mixamorigSpine'],
-    ['spine_02', 'Spine1', 'mixamorigSpine1'],
-    ['spine_03', 'Spine2', 'mixamorigSpine2'],
+    ['Spine', 'spine_01', 'mixamorigSpine'],
+    ['Spine1', 'spine_02', 'mixamorigSpine1'],
+    ['Spine2', 'spine_03', 'mixamorigSpine2'],
   ],
-  neck: ['neck_01', 'Neck', 'mixamorigNeck'],
+  neck: ['Neck', 'neck_01', 'mixamorigNeck'],
   head: ['Head', 'head', 'mixamorigHead'],
   upperArms: [
-    ['upperarm_r', 'RightArm', 'mixamorigRightArm'],
-    ['upperarm_l', 'LeftArm', 'mixamorigLeftArm'],
+    ['RightArm', 'upperarm_r', 'mixamorigRightArm'],
+    ['LeftArm', 'upperarm_l', 'mixamorigLeftArm'],
   ],
   foreArms: [
-    ['lowerarm_r', 'RightForeArm', 'mixamorigRightForeArm'],
-    ['lowerarm_l', 'LeftForeArm', 'mixamorigLeftForeArm'],
+    ['RightForeArm', 'lowerarm_r', 'mixamorigRightForeArm'],
+    ['LeftForeArm', 'lowerarm_l', 'mixamorigLeftForeArm'],
   ],
   hands: [
     ['hand_r', 'RightHand', 'mixamorigRightHand'],
@@ -375,7 +406,7 @@ interface PlayerInstance {
   shadow?: THREE.Mesh;
   /** Per-instance kit materials, so the shirt can be dirtied. The template's
    *  materials are shared; these are the clones made in `spawn`. */
-  kitMats: Partial<Record<Slot, THREE.MeshStandardMaterial>>;
+  kitMats: Partial<Record<Slot, THREE.MeshToonMaterial>>;
   /** Unsoiled kit colour and roughness — the base every soiling pass reads. */
   kitBase: Partial<Record<Slot, { color: THREE.Color; rough: number }>>;
   /** 0..1 accumulated ground staining. It never washes off: nothing does. */
@@ -468,6 +499,10 @@ interface PlayerInstance {
     lx: number; lz: number;
     spd: number;
     face: number;                // smoothed heading, radians
+    /* GET-UP PLANT. Where he started to rise. The engine pins xz while
+     * recoverT runs; the renderer also holds this so a leftover lie flag
+     * cannot slide him across the grass on a GetUp clip. */
+    plantX: number; plantZ: number;
     /* PART 1 — THE ONE-SHOT LATCH. A `pass` that is re-`play()`ed on the
      * frames after the first restarts the clip, which is what read as the
      * throw looping three times in a third of a second. Once the latch is
@@ -538,7 +573,7 @@ function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
     const [bone, prop] = track.name.split('.');
     if (prop !== 'position') continue;
     if (bone !== 'pelvis' && bone !== 'Hips' && bone !== 'mixamorigHips'
-      && bone !== 'root' && bone !== 'Armature') continue;
+      && bone !== 'root' && bone !== 'Armature' && bone !== 'Human_Armature') continue;
     const v = track.values;            // flat [x,y,z, x,y,z, ...]
     const x0 = v[0], z0 = v[2];
     for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
@@ -546,22 +581,7 @@ function stripRootMotion(clip: THREE.AnimationClip): THREE.AnimationClip {
   return out;
 }
 
-/** Region of a body vertex from its dominant skinning bone + rest height. */
-function boneRegion(boneName: string, restY: number): Slot {
-  // foot + toe ("ball_*") bones: boot over the foot, sock cuff at the ankle.
-  if (/^(foot_|ball_[lr]|toe)/.test(boneName) || /^ball_leaf/.test(boneName)) {
-    return restY < 0.20 ? 'boots' : 'socks';
-  }
-  // calf: sock up to the knee; calf bone origin sits at ~0.54 (knee).
-  if (/^calf_/.test(boneName)) return restY < 0.55 ? 'socks' : 'skin';
-  if (/^thigh_/.test(boneName)) return restY > 0.70 ? 'shorts' : 'skin';
-  if (/^(root|pelvis|spine|neck)/.test(boneName)) return 'jersey';
-  if (/^(Head|index_|middle_|ring_|pinky_|thumb_)/.test(boneName)) return 'skin';
-  if (/^(clavicle|upperarm|lowerarm|hand_)/.test(boneName)) {
-    return /^clavicle_/.test(boneName) ? 'jersey' : 'skin';
-  }
-  return 'jersey';
-}
+
 
 /* TURN RATES — human-gait turn math now lives in the shared headless module
  * src/game/gait.ts (WS14) so the sim and its probes share one ground truth
@@ -572,6 +592,16 @@ export class ThreePlayerManager {
   ready = false;
   private template: THREE.Group | null = null;
   private templateClips: THREE.AnimationClip[] = [];
+  /** World scale applied to the packed mesh so it stands MODEL_HEIGHT_M tall. */
+  private modelScale = RENDER_SCALE;
+  /** Packed-mesh local units per authored metre. The 2017 FBX is ~526 units
+   *  tall (Human_Armature scale ~69); metre-authored ROOT children (shadow,
+   *  free ball) multiply by this so they survive root.scale. Bone-parented
+   *  attachments must NOT — they inherit the armature scale a second time. */
+  private unitPerM = 1;
+  /** Local scale on `Human_Armature` (≈69 on the 2017 FBX). 1 if baked. */
+  private armatureScale = 1;
+  private gradient = makeToonGradient();
   private pool = new Map<string, PlayerInstance>();
   private readonly scene: THREE.Scene;
   private ball: THREE.Group;
@@ -625,6 +655,17 @@ export class ThreePlayerManager {
     this.scene.add(this.ball);
   }
 
+  /** Authored metres → packed-mesh local units (root children). */
+  private u(metres: number): number { return metres * this.unitPerM; }
+
+  /** Authored metres → bone-local units. The badge and carried ball parent
+   *  under Spine2 / RightHand, which already carry Human_Armature ×~69, so
+   *  multiplying by unitPerM (nativeH/1.80, which INCLUDES that 69) made a
+   *  0.55 m number ~38 m and a rugby ball ~11 m — they ate the camera. */
+  private boneU(metres: number): number {
+    return metres * this.unitPerM / Math.max(this.armatureScale, 1e-6);
+  }
+
   /* ------------------------------------------------------------ loading -- */
   /**
    * Load the squad rig, once per page, and let every kind of failure LOUD.
@@ -644,55 +685,62 @@ export class ThreePlayerManager {
    * must be unable to sit pending**, either by settling on every path or by being
    * raced by a caller with a budget.
    */
-  async load(): Promise<void> {
+  load(): Promise<void> {
     const loader = new GLTFLoader();
-    try {
-      /* The bytes come from a page-level cache (see `rigBytes`) and the parse is
-       * per-manager, because `prepareTemplate` mutates what it is given — a shared
-       * template would be split twice. So the network is paid once and the CPU
-       * twice, which is the right way round in a dev server where React StrictMode
-       * deliberately mounts this tree twice. */
-      const [buf, pairBuf] = await Promise.all([
-        rigBytes(),
-        // optional asset: absent means fall back to the stand-in tackle clips
-        pairBytes().catch(() => null),
-      ]);
-      const gltf: GLTF = await loader.parseAsync(buf, '');
-      this.template = gltf.scene;
-      const base = gltf.animations.map(stripRootMotion);
-      /* The retargeted pair is already in-place (the tool drops the source's
-       * horizontal channel) so it does NOT go through stripRootMotion again;
-       * doing so would be harmless but pointless. It is loaded second and
-       * concatenated, so `MX_Tackle` / `MX_TackleReact` simply become two
-       * more entries in the same clip table. */
-      let extra: THREE.AnimationClip[] | null = null;
-      if (pairBuf) extra = (await loader.parseAsync(pairBuf, '') as GLTF).animations;
-      if (extra && extra.length) {
-        this.templateClips = base.concat(extra);
-      } else {
-        this.templateClips = base;
-        if (import.meta.env?.DEV) {
-          console.warn('[players] tackle_pair.glb missing — falling back to the '
-            + 'stand-in tackle clips. Run: node tools/fetch_mixamo.mjs');
+    const parse = (data: ArrayBuffer) => new Promise<import('three/examples/jsm/loaders/GLTFLoader.js').GLTF>((ok, bad) => {
+      loader.parse(data, '', ok, bad);
+    });
+    const one = (url: string) => fetchGlb(url, 1)
+      .then((buf) => parse(buf).then((g) => g.animations))
+      .catch(() => null);   // optional asset: absent = fall back
+    return new Promise((resolve, reject) => {
+      loader.load(MODEL_URL, async (gltf) => {
+        try {
+          void gltf;
+          const buf = await fetchGlb(MODEL_URL, GLB_PARTS);
+          const parsed = await parse(buf);
+          this.template = parsed.scene;
+          this.template.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(this.template);
+          const h = Math.max(0.01, box.max.y - box.min.y);
+          this.unitPerM = h / MODEL_HEIGHT_M;
+          this.modelScale = RENDER_SCALE * (MODEL_HEIGHT_M / h);
+          this.armatureScale = 1;
+          this.template.traverse((o) => {
+            if (o.name === 'Human_Armature' || o.name === 'Armature') {
+              const sx = Math.abs(o.scale.x);
+              if (sx > 1.01) this.armatureScale = sx;
+            }
+          });
+          const base = parsed.animations.map(stripRootMotion);
+          /* tackle_pair.glb is Unreal-boned (pelvis/spine_01). Concatenating it
+           * would make pick('MX_StandUp', 'GetUp') prefer a clip that cannot
+           * drive this Mixamo Hips rig. Only keep clips whose tracks bind. */
+          const extra = await one(TACKLE_PAIR_URL);
+          const bound = extra?.filter((c) => c.tracks.some((t) => {
+            const bone = t.name.split('.')[0];
+            return !!this.template!.getObjectByName(bone);
+          })) ?? [];
+          this.templateClips = bound.length ? base.concat(bound) : base;
+          this.prepareTemplate();
+          this.checkRecoverSeconds();
+          this.ready = true;
+          renderHealth.bodies = 'glb';
+          /* The real rig is here: retire the boxes that were standing in for it,
+           * including the case where the fetch resolved after kick-off. */
+          this.clearStandIn();
+          resolve();
+        } catch (e) {
+          this.ready = false;
+          reject(e);
+          renderHealth.bodies = 'standin';
+          noteRenderFault('player GLB — procedural bodies standing in', e);
         }
-      }
-      this.prepareTemplate();
-      this.checkRecoverSeconds();
-      this.ready = true;
-      renderHealth.bodies = 'glb';
-      /* The real rig is here: retire the boxes that were standing in for it,
-       * including the case where the fetch resolved after kick-off. */
-      this.clearStandIn();
-    } catch (e) {
-      /* `ready` stays false, so `updateStandIn` owns the frame from here on.
-       * The match is playable and it is legible, and the reason is on screen
-       * as well as in the console. The rethrow is not for this class — it is so
-       * the boot can tell a lost asset from a stalled one, and so a caller with a
-       * budget can carry on either way. */
-      renderHealth.bodies = 'standin';
-      noteRenderFault('player GLB — procedural bodies standing in', e);
-      throw e;
-    }
+      }, undefined, (e) => {
+        this.ready = false;
+        reject(e);
+      });
+    });
   }
 
   /**
@@ -711,10 +759,10 @@ export class ThreePlayerManager {
       if (mesh.isSkinnedMesh && mesh.skeleton) mesh.skeleton.pose();
     });
 
-    root.scale.setScalar(RENDER_SCALE);
+    root.scale.setScalar(this.modelScale);
     root.updateMatrixWorld(true);
 
-    // Unscaled rest-pose height of every bone, for the shorts/socks cuts.
+    // Rest-pose height of every bone in metres, for the shorts/socks cuts.
     const restY = new Map<string, number>();
     const tmpV = new THREE.Vector3();
     root.traverse((o) => {
@@ -724,13 +772,14 @@ export class ThreePlayerManager {
       }
     });
 
-    const bodyMats: Record<Slot, THREE.MeshStandardMaterial> = {} as Record<Slot, THREE.MeshStandardMaterial>;
+    const bodyMats: Record<Slot, THREE.MeshToonMaterial> = {} as Record<Slot, THREE.MeshToonMaterial>;
     for (const slot of SLOTS) {
       // Bug-fix #1: fully opaque, front-face only, depth writes ON. Transparent
       // body materials made the renderer disable depth writes and sort limbs
       // inside-out (the "see-through / inverted depth" look).
-      const m = new THREE.MeshStandardMaterial({
-        color: 0xffffff, roughness: 0.78, metalness: 0.0,
+      const m = new THREE.MeshToonMaterial({
+        color: 0xffffff,
+        gradientMap: this.gradient,
         transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
       });
       m.name = TEMPLATE_SLOT_MAT[slot];
@@ -743,8 +792,13 @@ export class ThreePlayerManager {
       const mesh = o as THREE.SkinnedMesh;
       if (!mesh.isSkinnedMesh) return;
       const matName = (mesh.material as THREE.Material)?.name ?? '';
-      if (matName === 'MI_Superhero_Male') bodies.push(mesh);
-      else faces.push(mesh);
+      if (matName === 'MI_Superhero_Male' || matName === 'Human_Body' || mesh.name === 'Human_Mesh') {
+        bodies.push(mesh);
+      } else if (matName === 'MI_Hair_1' || matName === 'MI_Eyes') {
+        faces.push(mesh);
+      } else {
+        bodies.push(mesh);
+      }
     });
 
     for (const body of bodies) {
@@ -860,9 +914,12 @@ export class ThreePlayerManager {
     // Number badge — a plane on the UPPER BACK (the model's face/front is +Z,
     // confirmed by the eyes sitting at z>0), bone-bound so it follows the
     // spine through every clip. Opaque decal, front-facing outward.
-    const spine = root.getObjectByName('spine_03') ?? root.getObjectByName('spine_02');
+    const spine = root.getObjectByName('Spine2')
+      ?? root.getObjectByName('spine_03')
+      ?? root.getObjectByName('spine_02')
+      ?? root.getObjectByName('Spine1');
     if (spine) {
-      const badgeGeo = new THREE.PlaneGeometry(0.22, 0.26);
+      const badgeGeo = new THREE.PlaneGeometry(this.boneU(0.22), this.boneU(0.26));
       const badgeMat = new THREE.MeshBasicMaterial({
         map: this.makeBadgeTexture('', '#cccccc'),
         color: 0xffffff,
@@ -873,7 +930,8 @@ export class ThreePlayerManager {
       const badge = new THREE.Mesh(badgeGeo, badgeMat);
       badge.name = 'NumberBadge';
       // back is -Z; place just behind the spine and flip to face backward.
-      badge.position.set(0, 0.10, -0.165);
+      // Bone-local metres (see boneU) — a rugby shirt number is ~22×26 cm.
+      badge.position.set(0, this.boneU(0.06), this.boneU(-0.10));
       badge.rotation.y = Math.PI;
       spine.add(badge);
     }
@@ -901,6 +959,8 @@ export class ThreePlayerManager {
     const classify = (name: string): 'L' | 'R' | null => {
       if (/_(thigh|calf|foot|ball)_[lr]$/.test(name)) return name.endsWith('_l') ? 'L' : 'R';
       if (/^ball_leaf_[lr]$/.test(name)) return name.endsWith('_l') ? 'L' : 'R';
+      if (/Left(UpLeg|Leg|Foot|Toe)/.test(name)) return 'L';
+      if (/Right(UpLeg|Leg|Foot|Toe)/.test(name)) return 'R';
       return null;
     };
     skel.bones.forEach((b, i) => { legSide[i] = classify(b.name); });
@@ -1006,7 +1066,7 @@ export class ThreePlayerManager {
        * floodlights, which is the part a colour tint alone misses. */
       mat.color.copy(base.color).lerp(ThreePlayerManager.MUD, soil * 0.62)
         .multiplyScalar(1 - this.wetLevel * 0.20);
-      mat.roughness = Math.min(1, base.rough + soil * 0.22 - this.wetLevel * 0.06);
+      if ('roughness' in mat) (mat as any).roughness = Math.min(1, base.rough + soil * 0.22 - this.wetLevel * 0.06);
       mat.emissive.copy(ThreePlayerManager.SOAK).multiplyScalar(0.03 + this.wetLevel * 0.09);
     }
   }
@@ -1482,7 +1542,7 @@ export class ThreePlayerManager {
 
   private spawn(team: KitTeam, num: number, actor: Actor): PlayerInstance {
     const root = SkeletonUtils.clone(this.template!) as THREE.Group;
-    root.scale.setScalar(RENDER_SCALE);
+    root.scale.setScalar(this.modelScale);
     this.scene.add(root);
 
     const mixer = new THREE.AnimationMixer(root);
@@ -1497,7 +1557,7 @@ export class ThreePlayerManager {
     };
 
     let badgeMat: THREE.MeshBasicMaterial = null as unknown as THREE.MeshBasicMaterial;
-    const kitMats: Partial<Record<Slot, THREE.MeshStandardMaterial>> = {};
+    const kitMats: Partial<Record<Slot, THREE.MeshToonMaterial>> = {};
     const kitBase: Partial<Record<Slot, { color: THREE.Color; rough: number }>> = {};
     root.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -1530,15 +1590,14 @@ export class ThreePlayerManager {
            * players look grey" turns out to be. Skin and boots keep their own
            * response: boots are meant to clip. */
           const FABRIC = slot === 'jersey' ? 0.78 : slot === 'shorts' ? 0.80 : 0.82;
-          const km = new THREE.MeshStandardMaterial({
+          const km = new THREE.MeshToonMaterial({
             color: new THREE.Color(slotColour[slot]).multiplyScalar(FABRIC),
-            roughness: ROUGH[slot] ?? 0.75,
-            metalness: 0.0,
+            gradientMap: this.gradient,
             transparent: false, opacity: 1, depthWrite: true, depthTest: true, side: THREE.FrontSide,
           });
           km.name = `M_${slot}`;
           kitMats[slot] = km;
-          kitBase[slot] = { color: km.color.clone(), rough: km.roughness };
+          kitBase[slot] = { color: km.color.clone(), rough: ROUGH[slot] ?? 0.75 };
           out = km;
         } else if (name === 'TPL_NumberBadge') {
           if (team === 'REF') {
@@ -1563,8 +1622,8 @@ export class ThreePlayerManager {
     // Soft contact shadow at the feet (child of root so it tracks the actor).
     const shadow = new THREE.Mesh(this.shadowGeo, this.shadowMat);
     shadow.rotation.x = -Math.PI / 2;
-    shadow.position.y = 0.02;
-    shadow.scale.set(0.95, 0.50, 1);
+    shadow.position.y = this.u(0.02);
+    shadow.scale.set(0.95 * this.unitPerM, 0.42 * this.unitPerM, this.unitPerM);
     shadow.renderOrder = -1;
     root.add(shadow);
     // kept so the procedural body tilt can counter-rotate it flat (below)
@@ -1585,6 +1644,7 @@ export class ThreePlayerManager {
         oneShot: null, lock: 0, lie: false, jerk: 0, jx: 0, jz: 0,
         lx: actor.rx, lz: actor.rz, spd: 0,
         face: actor.rf > 0 ? 0 : Math.PI,
+        plantX: actor.rx, plantZ: actor.rz,
         passLatched: false,
         tackleT: -1, tackleRole: null, tackleClipT: 0, standingHit: false,
         hand: 0, strip: 0,
@@ -1625,7 +1685,8 @@ export class ThreePlayerManager {
   /* -------------------------------------------------------- state machine */
   private locomotion(spd: number): string {
     if (spd < 0.7) return 'idle';
-    if (spd < 3.0) return 'walk';
+    if (spd < 2.2) return 'walk';
+    if (spd < 4.2) return 'jog';
     if (spd < 6.4) return 'run';
     return 'sprint';
   }
@@ -1640,25 +1701,24 @@ export class ThreePlayerManager {
        * the drag would be invisible. */
       case 'latchCarry': return 'latchCarry';
       case 'latchHang': return 'latchHang';
-      case 'pass': case 'ninePass': case 'nineFeed': case 'lineoutThrow': return 'pass';
+      case 'pass': case 'ninePass': case 'nineFeed': return 'pass';
+      case 'lineoutThrow': return 'lineoutThrow';
       case 'kick': return 'kick';
       case 'tackle': return 'tackle';
       case 'grounded': return 'grounded';
       case 'dive': return 'dive';
       case 'try': case 'slide': return 'try';
       case 'getup': return 'getup';
-      /* THE SCRUM'S OWN GAITS. The engine publishes three names for a bound
-       * pack — scrumBind at the cadence, scrumCrouch at the engage, scrumDrive
-       * for the shove — and only one of them used to be mapped. The other two
-       * fell through to `default:` → `locomotion(0)` → the UPRIGHT IDLE, which is
-       * the real shape of the "pack floats / nobody is binding" defect: for
-       * DRIVE, the longest stage of a scrum, sixteen forwards were standing at
-       * rest in a line. `bindprobe` measures it and said so in metres. */
-      case 'maul': case 'scrumBind': case 'scrumShove': case 'scrumDrive': return 'bind';
+      case 'maul': case 'maulBind': case 'maulDrive': case 'maulPush':
+      case 'scrumBind': case 'scrumShove': case 'scrumDrive': return 'bind';
       case 'scrumCrouch': return 'crouch';
-      case 'ruck': case 'jackal': case 'cleanout': return 'ruck';
-      case 'jump': case 'lift': case 'lineoutJump': case 'lineoutLift':
-      case 'catch': case 'catchHigh': case 'lineoutCatch': return 'jump';
+      case 'ruck': case 'jackal': case 'cleanout':
+        /* A standing Jackal pose while xz is still translating is the
+         * floating grab. Keep locomotion until he has actually arrived. */
+        return spd > 2.2 ? this.locomotion(spd) : 'ruck';
+      case 'lineoutJump': case 'lift': case 'lineoutLift': return 'lineoutJump';
+      case 'catch': case 'catchHigh': case 'lineoutCatch': return 'catch';
+      case 'jump': return 'jump';
       // Bug-fix #3: 'ready' is the athletic standing idle before a set piece,
       // NOT a crouch — bind it to the upright Idle. Only the scrum-half's
       // authored bind squat (nineSquat/crouch) uses the low Crouch track.
@@ -1680,7 +1740,7 @@ export class ThreePlayerManager {
    */
   private checkRecoverSeconds() {
     if (!import.meta.env?.DEV) return;
-    const name = this.pick('MX_StandUp', 'GetUp');
+    const name = this.pick('GetUp', 'MX_StandUp');
     const clip = this.templateClips.find(c => c.name === name);
     if (!clip) return;
     /* The lock is deliberately SHORTER than the clip (see RECOVER_SECONDS):
@@ -1694,23 +1754,35 @@ export class ThreePlayerManager {
     }
   }
 
-  /** `want` if the retargeted pair was loaded, else the stand-in `fallback`. */
-  private pick(want: string, fallback: string): string {
-    return this.templateClips.some(c => c.name === want) ? want : fallback;
+  /** First clip name that exists on the packed rig. */
+  private pick(...names: string[]): string {
+    for (const n of names) {
+      if (this.templateClips.some(c => c.name === n)) return n;
+    }
+    return names[names.length - 1];
   }
 
   private clipForState(st: string): { name: string; loop: boolean } {
     switch (st) {
-      case 'idle': return { name: 'Idle', loop: true };
+      case 'idle': return { name: this.pick('Idle', 'IdleLook', 'IdleSubtle'), loop: true };
       case 'walk': return { name: 'Walk', loop: true };
+      case 'jog': return { name: this.pick('Jog', 'Run'), loop: true };
       case 'run': return { name: 'Run', loop: true };
-      case 'sprint': return { name: 'Sprint', loop: true };
-      case 'crouch': return { name: 'Crouch', loop: true };
-      case 'bind': case 'ruck': return { name: 'Push', loop: true };
-      case 'jump': return { name: 'JumpLand', loop: true };
-      case 'pass': return { name: 'Pass', loop: false };
-      case 'kick': return { name: 'Kick', loop: false };
-      case 'tackle': return { name: 'Tackle', loop: false };
+      /* Sprint loops the FORWARD Run. `Sprint` in the GLB is Mixamo
+       * leadingTargetRun and `BackpedalDiag` is Jog Backward Diagonal —
+       * both look sideways, so they are never the default gait. */
+      case 'lookAside': return { name: this.pick('BackpedalDiag', 'Run'), loop: false };
+      case 'sprint': return { name: 'Run', loop: true };
+      case 'crouch': return { name: this.pick('ScrumCrouch', 'Crouch', 'Jackal'), loop: true };
+      case 'bind': return { name: this.pick('ScrumDrive', 'ScrumBind', 'Push'), loop: true };
+      case 'ruck': return { name: this.pick('Jackal', 'RuckDive', 'Push'), loop: true };
+      case 'jump': return { name: this.pick('JumpLand', 'Jump', 'LineoutJump'), loop: false };
+      case 'lineoutJump': return { name: this.pick('LineoutJump', 'JumpLand', 'Jump'), loop: false };
+      case 'catch': return { name: this.pick('Catch', 'CatchHigh', 'LineoutJump'), loop: false };
+      case 'pass': return { name: this.pick('LineoutThrow', 'IdleCarry'), loop: false };
+      case 'lineoutThrow': return { name: this.pick('LineoutThrow', 'IdleCarry'), loop: false };
+      case 'kick': return { name: this.pick('Kick', 'DropKick'), loop: false };
+      case 'tackle': return { name: this.pick('DoubleLegTackle', 'DivingTackle', 'Tackle'), loop: false };
       /* PART 2 — the three stages of a tackle, mapped onto the clips this
        * rig actually ships (Quaternius UAL): Tackle is the drive/hit,
        * SlideStart the stumble off it, DiveRoll the grounding and the
@@ -1727,17 +1799,17 @@ export class ThreePlayerManager {
        * branch plays the SAME retargeted pair at a reduced time scale and
        * without the dive tilt, which reads as a grapple to ground rather
        * than a launch. `standingHit` is set per-frame from the engine. */
-      case 'tackleDrive': return { name: this.pick('MX_Tackle', 'Tackle'), loop: false };
-      case 'hitReact': return { name: this.pick('MX_TackleReact', 'SlideStart'), loop: false };
-      case 'tackleGround': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
-      case 'carrierFall': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
+      case 'tackleDrive': return { name: this.pick('DoubleLegTackle', 'DivingTackle', 'Tackle', 'MX_Tackle'), loop: false };
+      case 'hitReact': return { name: this.pick('HitReact', 'TackleVictim', 'HitSide', 'MX_TackleReact'), loop: false };
+      case 'tackleGround': return { name: this.pick('SideDive', 'Dive', 'DivingTackle', 'MX_Tackle'), loop: false };
+      case 'carrierFall': return { name: this.pick('TackleVictim', 'CatchFall', 'Death', 'MX_TackleReact'), loop: false };
       /* Stage 2 stays on the SAME clip as stages 0-1 when the retargeted pair
        * is present: MX_Tackle / MX_TackleReact each end with the man already
        * down, and clampWhenFinished holds that final grounded frame as the
        * prone hold. Cutting to Death/DiveRoll here truncated the fall at ~50%
        * and threw away the part where he actually lands. */
-      case 'present': return { name: this.pick('MX_TackleReact', 'Death'), loop: false };
-      case 'rollAway': return { name: this.pick('MX_Tackle', 'DiveRoll'), loop: false };
+      case 'present': return { name: this.pick('TackleVictim', 'Death', 'MX_TackleReact'), loop: false };
+      case 'rollAway': return { name: this.pick('SideDive', 'Dive', 'RuckDive', 'MX_Tackle'), loop: false };
       /* LATCH-AND-DRAG. The two halves of the struggle, before the takedown.
        * The rig ships no bespoke Struggle or Hang, so the illusion is built
        * out of what it has:
@@ -1749,8 +1821,13 @@ export class ThreePlayerManager {
        *               arms wrapped, held. His 2D coordinates are snapped to
        *               the carrier's hip by the engine, so a held pose is all
        *               that is needed to read as a man being towed. */
-      case 'latchCarry': return { name: 'Run', loop: true };
-      case 'latchHang': return { name: 'Tackle', loop: false };
+      case 'latchCarry': return { name: this.pick('JogCarry', 'Run'), loop: true };
+      /* Feet must cycle while he is towed. A clamped standing tackle pose
+       * with the engine snapping xz is the floating grab — a man in a
+       * statue pose sliding across the grass. Jog at the churn rate so
+       * the legs work; the procedural tilt and arm-reach still wrap him
+       * onto the carrier. */
+      case 'latchHang': return { name: this.pick('Jog', 'Run'), loop: true };
       /* ASSET NOTE — these tackle states are driven by STAND-IN clips
        * (Tackle, SlideStart, DiveRoll, Death — see the cases above) with the
        * procedural layer compensating for what they lack. The real fix
@@ -1771,10 +1848,10 @@ export class ThreePlayerManager {
        * than the SlideStart stand-in. A missed dive ends with the engine
        * setting clip='getup', which picks up MX_StandUp through the get-up
        * lock — the dive and the consequence are one continuous movement. */
-      case 'dive': return { name: this.pick('MX_Tackle', 'SlideStart'), loop: false };
-      case 'try': case 'tryLoop': return { name: 'Slide', loop: true };
-      case 'tryStart': return { name: 'SlideStart', loop: false };
-      case 'getup': return { name: this.pick('MX_StandUp', 'GetUp'), loop: false };
+      case 'dive': return { name: this.pick('SideDive', 'Dive', 'DivingTackle', 'SlideStart'), loop: false };
+      case 'try': case 'tryLoop': return { name: this.pick('Dive', 'SideDive', 'Slide'), loop: true };
+      case 'tryStart': return { name: this.pick('SideDive', 'Dive', 'SlideStart'), loop: false };
+      case 'getup': return { name: this.pick('GetUp', 'GetUpSit', 'CrouchStand', 'MX_StandUp'), loop: false };
       default: return { name: 'Idle', loop: true };
     }
   }
@@ -1840,9 +1917,14 @@ export class ThreePlayerManager {
     action.clampWhenFinished = false;
     // Playback rate scales with player velocity against the clip's authored
     // cadence (Run ~4.2 m/s, Sprint ~7.2, Walk ~1.3).
-    if (info.name === 'Idle') action.timeScale = 1;
-    else {
-      const base = info.name === 'Sprint' ? 7.2 : info.name === 'Run' ? 4.2 : 1.3;
+    if (info.name === 'Idle' || info.name === 'IdleLook' || info.name === 'IdleSubtle' || info.name === 'IdleReady') {
+      action.timeScale = 1;
+    } else {
+      const base = info.name === 'Sprint' ? 7.2
+        : info.name === 'Run' ? 5.2
+        : info.name === 'Jog' || info.name === 'JogCarry' ? 3.4
+        : info.name === 'Backpedal' ? 2.2
+        : 1.4;
       action.timeScale = Math.max(0.55, Math.min(2.3, spd / base));
     }
     if (inst.active?.name !== st) {
@@ -2075,7 +2157,7 @@ export class ThreePlayerManager {
       p.tilt = 0;
       inst.root.rotation.x = 0;
       inst.root.position.y = this.groundY(inst.actor.rx) + (inst.actor.ry ?? 0) * RENDER_SCALE;
-      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = 0.02; }
+      if (inst.shadow) { inst.shadow.rotation.set(-Math.PI / 2, 0, 0); inst.shadow.position.y = this.u(0.02); }
       return;
     }
     /* rotate about the model's own left-right axis. The root already carries
@@ -2097,7 +2179,7 @@ export class ThreePlayerManager {
       /* undo the body pitch (and the lift) so the shadow stays a flat ellipse
        * on the turf under the man. */
       inst.shadow.rotation.set(-Math.PI / 2 + p.tilt, 0, 0);
-      inst.shadow.position.y = 0.02 - rise;
+      inst.shadow.position.y = this.u(0.02 - rise);
     }
   }
 
@@ -2807,18 +2889,30 @@ export class ThreePlayerManager {
         st.jerk *= Math.exp(-2.8 * step);
       }
 
-      // heading: a moving man walks where he is going (smoothed); a slow man
-      // holds his last facing.
-      const watch = st.spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
-      if (st.spd > 2.2 || watch) {
-        const target = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
-        /* Bounded human turn (see TURN_* / stepTurn): a still man watching the
-         * ball pivots in place rather than spinning at clip speed; a running
-         * man turns toward his path at a rate a body with mass can actually
-         * make. This is the structural cure for the "models turn frantically
-         * while moving slow" defect. */
-        const rate = watch && st.spd < 0.7 ? TURN_PIVOT : turnRateFor(st.spd);
-        st.face = stepTurn(st.face, target, rate, step);
+      // holds his last facing. GET-UP is a plant — leftover slide from the
+      // tackle frame used to yaw him because spd still crossed 2.2.
+      const planted = a.renderClip === 'getup' || st.oneShot === 'getup' || st.lie;
+      const contesting = a.renderClip === 'jackal' || a.renderClip === 'cleanout'
+        || a.renderClip === 'ruck' || a.renderClip === 'maulBind'
+        || a.renderClip === 'maulDrive' || a.renderClip === 'maul'
+        || a.renderClip === 'maulPush';
+      if (contesting) {
+        /* Over the ball they face the engagement axis (engine ±1), not the
+         * leftover lateral ease — that yaw is why jackals stood square to
+         * touch. Arriving men keep the velocity heading so they run at the
+         * ruck, then lock once the grab clip starts. */
+        const want = a.rf > 0 ? 0 : Math.PI;
+        let dy = want - st.face;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        st.face += dy * (1 - Math.exp(-step * 12));
+      } else if (!planted) {
+        const watch = st.spd <= 2.2 && a.ballLookX !== undefined && a.ballLookZ !== undefined;
+        if (st.spd > 2.2 || watch) {
+          const target = watch ? Math.atan2(a.ballLookX! - a.rx, a.ballLookZ! - a.rz) : Math.atan2(vx, vz);
+          const rate = watch && st.spd < 0.7 ? TURN_PIVOT : turnRateFor(st.spd);
+          st.face = stepTurn(st.face, target, rate, step);
+        }
       }
 
       // Bug-fix #4: in a SCRUM the two packs must lock head-on down the
@@ -2843,7 +2937,7 @@ export class ThreePlayerManager {
       }
 
       const desired = this.mapState(a.renderClip, st.spd);
-      const locomoting = ['idle', 'walk', 'run', 'sprint'].includes(desired);
+      const locomoting = ['idle', 'walk', 'jog', 'run', 'sprint'].includes(desired);
 
       /* SOILING. A man on the ground, in a ruck, or bound into a maul puts the
        * pitch onto his shirt. `grounded` stains fastest, because that is the
@@ -2860,7 +2954,7 @@ export class ThreePlayerManager {
 
       /* PART 1 — release the pass latch the moment the engine leaves the
        * pass state, so the NEXT pass gets a fresh single shot. */
-      if (desired !== 'pass') st.passLatched = false;
+      if (desired !== 'pass' && desired !== 'lineoutThrow') st.passLatched = false;
 
       /* LATCH-AND-DRAG — THE STRUGGLE, BEFORE THE TAKEDOWN.
        *
@@ -2879,10 +2973,9 @@ export class ThreePlayerManager {
             const a = this.play(inst, 'latchCarry', 0.3, LATCH_CHURN_RATE);
             a?.setLoop(THREE.LoopRepeat, Infinity);
           } else {
-            /* the hanger holds the drive pose. LoopOnce + clampWhenFinished
-             * (set in play()) freezes him wrapped around the carrier's
-             * waist, and the engine's coordinate snap does the travelling. */
-            this.play(inst, 'latchHang', 0.12, 1.35);
+            /* Legs labour while the engine tows him — never a frozen pose. */
+            const hang = this.play(inst, 'latchHang', 0.12, LATCH_CHURN_RATE);
+            hang?.setLoop(THREE.LoopRepeat, Infinity);
           }
           st.oneShot = desired;
           st.lock = 0;
@@ -3028,12 +3121,12 @@ export class ThreePlayerManager {
       } else if (desired === 'try' && st.oneShot !== 'tryStart' && st.oneShot !== 'tryLoop') {
         this.play(inst, 'tryStart', 0.1, 1.05);
         st.oneShot = 'tryStart'; st.lock = 0.55;
-      } else if (desired === 'pass' && st.oneShot !== 'pass' && !st.passLatched) {
-        /* PART 1 — fire it once, latch it, hold the final frame. The latch is
-         * what stops a re-trigger on the frames the engine is still reporting
-         * `pass`; it clears above when the state leaves `pass`. */
-        this.play(inst, 'pass', 0.1, 1.1);
-        st.oneShot = 'pass'; st.lock = 0.45; st.passLatched = true;
+      } else if ((desired === 'pass' || desired === 'lineoutThrow')
+        && st.oneShot !== desired && !st.passLatched) {
+        /* Rugby lineout throw — two-handed overhead, never the baseball Pass. */
+        this.play(inst, desired, 0.1, 1.1);
+        st.oneShot = desired; st.lock = desired === 'lineoutThrow' ? 0.85 : 0.45;
+        st.passLatched = true;
       } else if (desired === 'kick' && st.oneShot !== 'kick') {
         this.play(inst, 'kick', 0.12, 1);
         st.oneShot = 'kick'; st.lock = 0.7;
@@ -3043,6 +3136,7 @@ export class ThreePlayerManager {
          * mid-rise and he snaps to a run from a crouch. */
         this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
         st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
+        st.plantX = a.rx; st.plantZ = a.rz;
       } else if (desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup')) {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
@@ -3051,21 +3145,23 @@ export class ThreePlayerManager {
         }
         st.lie = true;
         if (desired === 'grounded') { st.oneShot = 'grounded'; st.lock = 0; }
-      } else if (['bind', 'ruck', 'jump', 'crouch'].includes(desired)) {
+      } else if (['bind', 'ruck', 'jump', 'crouch', 'lineoutJump', 'catch'].includes(desired)) {
         st.oneShot = null;
         if (inst.active?.name !== desired) this.play(inst, desired, 0.18, 1);
       } else if (locomoting) {
         // stood back up -> let the GetUp one-shot finish, then locomotion takes over
         if (st.oneShot === 'getup') { /* held until lock expires */ }
-        else {
-          if (st.lie && st.oneShot !== 'getup') {
-            this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
-            st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
-          } else {
-            st.oneShot = null;
-            st.lie = false;
-            this.setLocomotion(inst, desired, st.spd);
-          }
+        else if (st.lie && st.oneShot !== 'getup') {
+          /* Engine is already locomoting — they are ON THEIR FEET in the
+           * sim. Playing GetUp while following engine xz is the "sliding
+           * on the ground" look. Drop the lie and run. */
+          st.lie = false;
+          st.oneShot = null;
+          this.setLocomotion(inst, desired, st.spd);
+        } else {
+          st.oneShot = null;
+          st.lie = false;
+          this.setLocomotion(inst, desired, st.spd);
         }
       }
 
@@ -3094,7 +3190,14 @@ export class ThreePlayerManager {
 
       // ---- transform: logical pitch -> scaled 3D world ----
       inst.proc.state = desired;
-      inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
+      /* GET-UP is a plant. Following engine xz during the one-shot is how
+       * a leftover lie (or a recoverT that expired a frame early) slid
+       * men across the grass on their backs. */
+      if (st.oneShot === 'getup') {
+        inst.root.position.set(st.plantX * s, this.groundY(st.plantX) + (a.ry ?? 0) * s, -st.plantZ * s);
+      } else {
+        inst.root.position.set(a.rx * s, this.groundY(a.rx) + (a.ry ?? 0) * s, -a.rz * s);
+      }
       // The rig faces +Z at rest; forward heading theta maps to rotation.y.
       inst.root.rotation.y = Math.PI - st.face;
 
@@ -3252,9 +3355,9 @@ export class ThreePlayerManager {
       const hand = carrier ? this.carryBone(carrier) : null;
       if (hand) {
         if (this.ball.parent !== hand) hand.add(this.ball);
-        this.ball.position.set(0, 0.05, 0.03);
+        this.ball.position.set(0, this.boneU(0.05), this.boneU(0.03));
         this.ball.rotation.set(0.2, 0, Math.PI / 2.4);
-        this.ball.scale.setScalar(1);
+        this.ball.scale.setScalar(this.boneU(1));
         this.ball.visible = true;
         return;
       }
@@ -3311,8 +3414,11 @@ export class ThreePlayerManager {
    */
   private carryBone(inst: PlayerInstance): THREE.Bone | null {
     if (inst.handBone !== undefined) return inst.handBone;
-    const bone = this.findBone(inst.root, 'hand_r')
+    const bone = this.findBone(inst.root, 'RightHand')
+      ?? this.findBone(inst.root, 'hand_r')
+      ?? this.findBone(inst.root, 'RightForeArm')
       ?? this.findBone(inst.root, 'lowerarm_r')
+      ?? this.findBone(inst.root, 'LeftHand')
       ?? this.findBone(inst.root, 'hand_l');
     inst.handBone = bone;
     return bone;

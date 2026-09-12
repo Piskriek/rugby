@@ -2,13 +2,14 @@
  * SET-PIECE LAW COMPLIANCE — GLOBAL BEHAVIOUR OVERRIDES.
  *
  * The dataset, the shapes and the role contracts all answer "where would a
- * player LIKE to stand?". At a place kick at goal and at a scrum the answer is
- * not a preference — it is the law, and it is the same for every shirt. These
- * overrides sit ABOVE every other source of positional truth: if one of them
- * answers, nothing else may write the mark that frame.
+ * player LIKE to stand?". At a place kick at goal, a lineout backline and a
+ * scrum the answer is not a preference — it is the law, and it is the same
+ * for every shirt. These overrides sit ABOVE every other source of positional
+ * truth: if one of them answers, nothing else may write the mark that frame.
  *
- * They are pure geometry. Nothing here reads or mutates Live state; the caller
- * (Director.placeBound) applies the marks and owns the writes, exactly as the
+ * They are pure geometry. Nothing here reads or mutates Live state; the
+ * caller (Director.placeBound for the kick/scrum, Director.think for the
+ * lineout backline) applies the marks and owns the writes, exactly as the
  * T-02 ownership contract requires.
  *
  * ── LAW 8.20 / 8.22 — CONVERSIONS AND PENALTY KICKS AT GOAL ────────────────
@@ -18,6 +19,13 @@
  * open-play marks throughout the ritual, which is both illegal and — with
  * thirty men drifting behind a stationary kicker — the single most obviously
  * wrong thing on screen during a conversion.
+ *
+ * ── LAW 18 — LINEOUT BACKLINE ─────────────────────────────────────────────
+ * Players not in the lineout (and not the thrower or the receiver) must stand
+ * at least ten metres from the line of touch, on their own side, or on their
+ * goal line if that is nearer. They occupy the rest of the pitch — they are
+ * not a cluster around the thrower. Open-play shape, anchored on the ball at
+ * ±33.5, squeezed the whole XV onto the touchline; this override is the law.
  *
  * ── LAW 19 — SCRUM ────────────────────────────────────────────────────────
  * The two packs bind head-on down the engagement axis, in a 3-4-1 block. The
@@ -92,6 +100,84 @@ export function goalKickMark(
     frozen: true,
     job: 'STAY BEHIND THE KICKER UNTIL THE BALL IS STRUCK',
   };
+}
+
+/* ============================ LINEOUT BACKLINE ============================ */
+
+/** Law 18: metres non-participants stand from the line of touch.
+ *  Half a metre past the ten so they sit outside the offside corridor, not on it. */
+export const LINEOUT_BACKLINE_METRES = 10.5;
+/** The fifteen is last man, a stride deeper than the tens line. */
+export const LINEOUT_FULLBACK_METRES = 16;
+
+export interface LineoutBacklineMark {
+  x: number;
+  z: number;
+  job: string;
+}
+
+/**
+ * Metres infield from the throwing touch, by shirt. The lineout itself occupies
+ * 5–15 m from touch; the backline starts just inside the 15 m and runs to the
+ * far five. 11 is the left wing, 14 the right — the near wing covers the short
+ * side, the far wing holds the open field.
+ */
+function lineoutInfieldFromTouch(num: number, side: number): number {
+  const nearWing = 8;
+  const farWing = 62;
+  if (num === 14) return side > 0 ? nearWing : farWing;
+  if (num === 11) return side > 0 ? farWing : nearWing;
+  switch (num) {
+    case 2: return 13;
+    case 1: return 16;
+    case 3: return 17;
+    case 4: case 5: case 6: case 7: case 8: return 18;
+    case 9: return 21;
+    case 10: return 26;
+    case 12: return 36;
+    case 13: return 48;
+    case 15: return 40;
+    default: return 30;
+  }
+}
+
+function lineoutJob(num: number): string {
+  if (num === 10) return 'FIRST RECEIVER — TEN METRES BACK';
+  if (num === 9) return 'COVER THEIR TEN — TEN METRES BACK';
+  if (num === 15) return 'LAST MAN — DEEP BEHIND THE LINEOUT';
+  if (num === 11 || num === 14) return 'HOLD THE WIDTH — TEN METRES BACK';
+  if (num >= 1 && num <= 8) return 'TEN METRES BACK — DO NOT ENTER THE LINE';
+  if (num === 12 || num === 13) return 'IN THE BACKLINE — TEN METRES BACK';
+  return 'TEN METRES BACK FROM THE LINE OF TOUCH';
+}
+
+/**
+ * The lawful mark for a player who is NOT in the lineout.
+ *
+ *  - z is 10.5 m (16 m for 15) on that team's own side of `markZ`, clamped
+ *    to their try line when the lineout is closer than that.
+ *  - x is spread across the remaining width, measured infield from the
+ *    throwing touch (`side` +1 = right touch, −1 = left).
+ *
+ * Pure geometry. The caller (Director.think) applies the mark and steers;
+ * nothing here teleports a body.
+ */
+export function lineoutBacklineMark(
+  num: number,
+  team: 'A' | 'B',
+  markZ: number,
+  side: number,
+): LineoutBacklineMark {
+  const sigma: 1 | -1 = team === 'A' ? 1 : -1;
+  const back = num === 15 ? LINEOUT_FULLBACK_METRES : LINEOUT_BACKLINE_METRES;
+  let z = markZ - sigma * back;
+  const ownTry = sigma > 0 ? FIELD.tryZ : FIELD.tryZFar;
+  if (sigma > 0) z = Math.max(z, ownTry);
+  else z = Math.min(z, ownTry);
+
+  const infield = lineoutInfieldFromTouch(num, side);
+  const x = Math.max(FIELD.minX + 2, Math.min(FIELD.maxX - 2, side * (FIELD.maxX - infield)));
+  return { x, z, job: lineoutJob(num) };
 }
 
 /* ============================== SCRUM =============================== */

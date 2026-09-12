@@ -439,8 +439,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
          * why the discard-catch below matters: after the timeout nobody is awaiting
          * this promise, and a late failure must not become an unhandled rejection. */
         let rigTimer = 0;
-        const boot = players.load();
-        boot.catch(() => { /* the manager has already said why, in renderHealth */ });
+        const boot = players.load().catch(() => { /* the manager has already said why, in renderHealth */ });
         try {
           await Promise.race([
             boot,
@@ -986,6 +985,7 @@ export function MatchView({ cfg, onExit, onFinish, clinic, objective, tutorial }
         frameFaults = 0;
       } catch (e) {
         frameFaults++;
+        console.error('[match] frame', e);
         noteRenderFault(`frame ${frameFaults}`, e);
         /* Three bad frames in a row is not a transient: step back from the 3D
          * world entirely and let the 2D stadium carry the match. */

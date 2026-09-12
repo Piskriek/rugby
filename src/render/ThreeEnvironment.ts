@@ -77,10 +77,10 @@ export type AdBoardFlash = 'TRY' | 'PENALTY' | 'NORMAL';
  * ThreeCanvas.updateMatchDay.
  */
 function toonGradient(): THREE.DataTexture {
-  const tex = new THREE.DataTexture(
-    new Uint8Array([80, 80, 80, 255, 176, 176, 176, 255, 255, 255, 255, 255]),
-    3, 1, THREE.RGBAFormat,
-  );
+  /* 2×1 RGBA — 8 bytes. The old 6-byte buffer (RGB×2) under-ran
+   * texSubImage2D and WebGL INVALID_OPERATIONed the toon gradient. */
+  const data = new Uint8Array([168, 168, 168, 255, 255, 255, 255, 255]);
+  const tex = new THREE.DataTexture(data, 2, 1, THREE.RGBAFormat);
   tex.minFilter = THREE.NearestFilter;
   tex.magFilter = THREE.NearestFilter;
   tex.generateMipmaps = false;
@@ -260,7 +260,6 @@ export class ThreeEnvironment {
       this.adLevel = level;
     }
   }
-
   private adLevel = 1;
 
   /**
@@ -359,13 +358,9 @@ export class ThreeEnvironment {
   }
 
   private mat(color: number, map?: THREE.Texture, _rough = 0.85, _metal = 0): THREE.MeshToonMaterial {
-    /* `map` is only handed over when there is one: three warns on every
-     * material built with an explicit `map: undefined`. Roughness/metalness
-     * are accepted for call-site compatibility but unused — toon shading has
-     * no PBR terms. */
-    return new THREE.MeshToonMaterial(map
-      ? { color, map, gradientMap: this.gradient, depthWrite: true }
-      : { color, gradientMap: this.gradient, depthWrite: true });
+    return new THREE.MeshToonMaterial({
+      color, ...(map ? { map } : {}), gradientMap: this.gradient, depthWrite: true,
+    });
   }
 
   private addMesh(geo: THREE.BufferGeometry, material: THREE.Material, name: string): THREE.Mesh {

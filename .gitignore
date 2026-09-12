@@ -5,4 +5,5 @@ dist/
 .cache/
 .arena/
 scripts/out/
+*.patch
 

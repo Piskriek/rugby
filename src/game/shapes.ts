@@ -405,11 +405,14 @@ export const defenceById = (id: string) => DEFENCE_SYSTEMS.find((d) => d.id === 
 
 /** Defenders' lateral channels, in metres from the ruck, openside positive. */
 export const DEFENCE_CHANNELS = [
-  { num: 6, lat: -4.6, depth: 2.2 }, { num: 7, lat: 2.8, depth: 1.8 }, { num: 8, lat: 5.0, depth: 2.6 },
-  { num: 9, lat: -1.6, depth: 1.2 }, { num: 10, lat: 8.0, depth: 3.0 }, { num: 12, lat: 12.4, depth: 3.4 },
-  { num: 11, lat: -16.5, depth: 4.6 }, { num: 13, lat: 16.4, depth: 3.8 }, { num: 14, lat: 20.5, depth: 4.8 },
-  { num: 1, lat: -7.4, depth: 2.0 }, { num: 3, lat: 7.6, depth: 2.0 }, { num: 4, lat: -10.4, depth: 2.4 },
-  { num: 5, lat: 10.6, depth: 2.4 }, { num: 2, lat: -13.0, depth: 2.2 },
+  /* Pillars stay on the gate; the rest of the pack FANS across the park.
+   * 1–8 used to live inside ±13 m of the ruck, which read as a huddle that
+   * jiggled as separate() shoved overlapping marks. */
+  { num: 6, lat: -5.4, depth: 2.6 }, { num: 7, lat: 3.6, depth: 2.2 }, { num: 8, lat: 11.0, depth: 3.6 },
+  { num: 9, lat: -1.8, depth: 1.4 }, { num: 10, lat: 9.5, depth: 3.6 }, { num: 12, lat: 15.0, depth: 4.0 },
+  { num: 11, lat: -22.0, depth: 5.2 }, { num: 13, lat: 20.5, depth: 4.6 }, { num: 14, lat: 26.0, depth: 5.4 },
+  { num: 1, lat: -12.5, depth: 3.4 }, { num: 3, lat: 16.5, depth: 3.4 }, { num: 4, lat: -18.5, depth: 4.0 },
+  { num: 5, lat: 22.5, depth: 4.0 }, { num: 2, lat: -25.0, depth: 3.8 },
 ];
 
 /* ============================ PHASE PLANS ============================

@@ -1,22 +1,9 @@
 @import "tailwindcss";
-
 /*
- * THE SCANNER MUST NOT WALK THE BINARY ASSETS.
- *
- * Tailwind v4's auto-detected source is the whole project root, and its
- * oxide scanner chokes on the 6.3 MB `rugby_player.glb` (and its twin in
- * the frozen `rugby-2026/` reference copy): each GLB balloons the process
- * to ~2 GB of RSS while it extracts "candidates" from the binary at
- * ~0.4 MB/s. One copy spikes the build close to the RAM ceiling; both
- * copies push a 4 GB machine past it and the kernel OOM-kills `vite build`
- * mid-"transforming" — which looked exactly like a bundler out of memory.
- *
- * Neither directory can contribute class names: `public/` is static
- * binaries (GLB/bin) copied verbatim into dist, and `rugby-2026/` is the
- * archived previous app, which nothing in this build imports. Every class
- * the current app uses lives in `src/`, so scoping the scan out of these
- * two trees is lossless — measured 0.1 s / ~60 MB instead of a 3.8 GB
- * climb into the OOM killer.
+ * Exclude heavy binary and non-source asset folders from Tailwind v4 content scan.
  */
+@source not "../AnimationRef";
+@source not "../.cache";
 @source not "../public";
+@source not "../dist";
 @source not "../rugby-2026";

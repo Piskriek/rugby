@@ -604,7 +604,7 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       d.clearRuck();
       const dirR = dTeam === 'A' ? 1 : -1;
       d.startOpen(dTeam, s.contactX, s.contactZ - dirR * 1.5, s.defCrew[0], 1, 0, 1.1);
-      d.releaseBeat = { z: s.contactZ, dir: -dirR, until: d.t + 0.9 };
+      d.releaseBeat = { z: s.contactZ, dir: dirR, until: d.t + 0.9 };
       return;
     }
     if (s.stealWarned) {
@@ -1040,7 +1040,9 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
             + ` No.${holder} HANDS ON IT ${held.toFixed(2)}S, FORCE ${(defF / 100).toFixed(1)} v ${(atkF / 100).toFixed(1)} kN`;
           h.lastStripAt = s.t;
           d.clearRuck();
-          d.startOpen(dTeam, s.contactX, s.contactZ - (atk === 'A' ? 1 : -1), 9, 1, 0, 0.75);
+          const stealDir = dTeam === 'A' ? 1 : -1;
+          d.startOpen(dTeam, s.contactX, s.contactZ - stealDir * 1.5, 9, 1, 0, 0.75);
+          d.releaseBeat = { z: s.contactZ, dir: stealDir, until: d.t + 0.9 };
           return;
         }
         /* The strip failed with the hands still on it — and the attempt is
@@ -1128,15 +1130,12 @@ export function upBreakdown(d: Director, dt: number, _input: Input, pressed: Set
       if ((target - p.x) * (target - cx) < 0) return;
       p.x += Math.sign(target - p.x) * Math.min(RETREAT, Math.abs(target - p.x));
     };
+    /* The jackal / counters / cleaners ARE the ruck. Walking them back to the
+     * 3 m line fought placeBound every frame: they jittered in place, a couple
+     * of metres off the ball, facing the touchline. The line is for everyone
+     * else. */
     for (const p of d.live) {
-      if (p.sinbin > 0 || p.down) continue;
-      if (s.players.some((q) => q.team === p.team && q.num === p.num)) {
-        /* the roster is the pile: the old rule, untouched */
-        if (p.team === s.attacking) {
-          if ((p.z - atkLine) * fwd > 0) p.z -= Math.min(RETREAT, Math.abs(p.z - (atkLine - fwd * 0.3))) * fwd;
-        } else if ((defLine - p.z) * fwd > 0) p.z += Math.min(RETREAT, Math.abs((defLine + fwd * 0.3) - p.z)) * fwd;
-        continue;
-      }
+      if (p.sinbin > 0 || p.down || p.bound) continue;
       if (p.team === s.attacking) {
         if ((p.z - atkLine) * fwd > 0) {
           if (inside(p)) continue;
@@ -1416,9 +1415,15 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
   crew.forEach((p, i) => {
     if (p.num === s.carrierNum || (tackler && p.num === tackler.num)) return;
     p.down = i < 1;
+    /* A ruck is a CLUSTER over the ball, not a queue stretching back from
+     * it. Alternate shoulders, stack a second ring if more than two arrive. */
+    const side = i % 2 === 0 ? -1 : 1;
+    const ring = Math.floor(i / 2);
     players.push({
       role: i === 0 ? 'FIRST CLEARER' : 'CLEANER', num: p.num, team: atk,
-      x: cx - 0.8 - i * 0.5, z: cz - dir * (1.3 + i * 0.4), down: i < 1,
+      x: cx + side * (0.55 + ring * 0.35),
+      z: cz - dir * (0.85 + ring * 0.5),
+      down: i < 1,
     });
   });
   /* T-24c. The first defender to a breakdown ALWAYS contests the ball. The old
@@ -1427,9 +1432,16 @@ export function startBreakdown(d: Director, tacklerNum?: number) {
    * is the default, not the exception. */
   defCrew.forEach((p, i) => {
     if (tackler && p.num === tackler.num) return;
+    /* Cluster over the ball, same idea as the attacking cleaners — not a
+     * queue stretching back from the contact. First man over it, the rest
+     * on alternate shoulders. */
+    const dSide = i % 2 === 0 ? 1 : -1;
+    const dRing = Math.floor(i / 2);
     players.push({
       role: i === 0 ? 'JACKAL' : 'COUNTER', num: p.num, team: dTeam,
-      x: cx + 0.5 + i * 0.4, z: cz + dir * (1.0 + i * 0.5), down: false,
+      x: cx + (i === 0 ? 0.2 : dSide * (0.55 + dRing * 0.3)),
+      z: cz + dir * (i === 0 ? 0.4 : 0.65 + dRing * 0.4),
+      down: false,
     });
   });
 

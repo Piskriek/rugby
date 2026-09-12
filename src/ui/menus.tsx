@@ -25,7 +25,7 @@ export type Mode = 'FRIENDLY' | 'LEAGUE' | 'WORLD_CUP' | 'FIVE_NATIONS' | 'CLINI
 
 /* ============================ TITLE ============================ */
 
-export function TitleScreen({ onStart }: { onStart: () => void }) {
+export function TitleScreen({ onStart, onQuickStart }: { onStart: () => void; onQuickStart?: () => void }) {
   const [tick, setTick] = useState(0);
   const padRef = useRef<PrevGp>(emptyPrev());
   React.useEffect(() => {
@@ -64,6 +64,14 @@ export function TitleScreen({ onStart }: { onStart: () => void }) {
         </div>
         <div className="mt-8 flex flex-col items-center gap-2">
           <Btn onClick={onStart}>PRESS FIRE TO CONTINUE</Btn>
+          {onQuickStart && (
+            <button
+              onClick={onQuickStart}
+              className="border-2 border-[#e8cf46] bg-[#2a2412] px-4 py-2 text-[11px] font-black tracking-[0.18em] text-[#e8cf46] hover:bg-[#3a3216] hover:text-[#ffe46a]"
+            >
+              ▶ QUICK START (15v15)
+            </button>
+          )}
           <div className="text-[9px] tracking-[0.3em] text-[#6f7f96]">© 1991 · THE ORIGINAL SPORT OF KINGS, IN SIXTEEN COLOURS</div>
         </div>
         <div className="mt-6 grid max-w-2xl grid-cols-2 gap-x-8 gap-y-1 text-[9px] tracking-[0.16em] text-[#5f6f86] sm:grid-cols-4">

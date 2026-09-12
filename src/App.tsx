@@ -219,7 +219,7 @@ export default function App() {
     </div>
   );
 
-  if (screen === 'TITLE') return shell(<TitleScreen onStart={() => setScreen('MODE')} />, false);
+  if (screen === 'TITLE') return shell(<TitleScreen onStart={() => setScreen('MODE')} onQuickStart={quickStart} />, false);
 
   if (screen === 'MODE') return shell(
     <ModeScreen
