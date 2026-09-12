@@ -1785,7 +1785,7 @@ export class ThreePlayerManager {
       case 'sprint': return { name: 'Run', loop: true };
       case 'crouch': return { name: this.pick('ScrumCrouch', 'Crouch', 'Jackal'), loop: true };
       case 'bind': return { name: this.pick('ScrumDrive', 'ScrumBind', 'Push'), loop: true };
-      case 'ruck': return { name: this.pick('Jackal', 'RuckDive', 'Push'), loop: true };
+      case 'ruck': return { name: this.pick('Push', 'RuckDive', 'Jackal'), loop: true };
       case 'jump': return { name: this.pick('JumpLand', 'Jump', 'LineoutJump'), loop: false };
       case 'lineoutJump': return { name: this.pick('LineoutJump', 'JumpLand', 'Jump'), loop: false };
       case 'catch': return { name: this.pick('Catch', 'CatchHigh', 'LineoutJump'), loop: false };
@@ -2727,6 +2727,15 @@ export class ThreePlayerManager {
   private applyProcedural(
     inst: PlayerInstance, state: string, partner: PlayerInstance | null, step: number,
   ) {
+    /* GET-UP & GROUNDED ARM SETTLE: pull splayed arms toward the hips on any
+     * downed, rising, or falling body so clamped frames and stand-up clips
+     * do not read as T-poses. Runs unconditionally before the ragdoll check
+     * so it never gets blocked by ragW. */
+    const settling = state === 'getup' || state === 'present'
+      || state === 'rollAway' || state === 'grounded'
+      || state === 'tackleGround' || state === 'carrierFall';
+    this.applyArmSettle(inst, settling ? 1 : 0, step);
+
     /* A SOLVED fall owns this man's whole body: the root tilt, the torso dip and
      * the thrash would all fight it for the same bones, and the argument is lost
      * by whichever runs last. The arm reach still runs below, at reduced weight,
@@ -2839,16 +2848,6 @@ export class ThreePlayerManager {
      * mechanism — a spine under load that the clip has no idea about — so the
      * strip borrows the thrash rather than inventing a fourth procedural pass. */
     this.applySpineThrash(inst, inst.st.spd, Math.max(latched ? 1 : 0, Math.min(1, inst.st.strip) * 0.75), step);
-
-    /* --- 4. the arm settle (no wings while down or getting up) ---
-     * getup: the stand-up clip splays both arms for most of the rise.
-     * present/rollAway/grounded: the clamped final frames of the tackle
-     * clips leave a man lying on the turf with a wing held full horizontal
-     * for the whole ruck. Mid-fall and mid-dive states keep their flail —
-     * reaching and crashing are supposed to have arms in them. */
-    const settling = state === 'getup' || state === 'present'
-      || state === 'rollAway' || state === 'grounded';
-    this.applyArmSettle(inst, settling ? 1 : 0, step);
   }
 
   /**
@@ -3100,10 +3099,11 @@ export class ThreePlayerManager {
       }
       /* A man getting to his feet hands his body back to the animator; the
        * weight below fades it out rather than snapping the pose. */
-      if (st.tackleRole === null && desired !== 'grounded' && desired !== 'getup'
-        && (locomoting || desired === 'ruck' || desired === 'bind')) {
+      if (st.tackleRole === null && desired !== 'grounded'
+        && (desired === 'getup' || locomoting || desired === 'ruck' || desired === 'bind')) {
         inst.rag?.dispose();
         inst.rag = null;
+        inst.proc.ragW = 0;
       }
 
       if (st.tackleRole) {
@@ -3211,22 +3211,14 @@ export class ThreePlayerManager {
         this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
         st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
         st.plantX = a.rx; st.plantZ = a.rz;
-      } else if ((desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup'))
-        /* THE DIVE IS NOT A CORPSE. The lie flag is armed the instant a dive
-         * or tackle one-shot fires, and this catch-all runs every frame after
-         * — so from frame two of a dive it used to swap the flying man onto
-         * the flat arms-out Death clip while he was still airborne (the
-         * visible "T-pose in the air" during tackles). A locked dive/tackle
-         * one-shot owns the body until its clock runs out; the Death hold is
-         * only for men who are down with nothing else playing. */
-        && st.oneShot !== 'dive' && st.oneShot !== 'tackle') {
+      } else if (desired === 'grounded' && st.oneShot !== 'dive' && st.oneShot !== 'tackle') {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
           const action = this.play(inst, 'grounded', 0.25, 0.2);
           action?.setLoop(THREE.LoopRepeat, Infinity);
         }
         st.lie = true;
-        if (desired === 'grounded') { st.oneShot = 'grounded'; st.lock = 0; }
+        st.oneShot = 'grounded'; st.lock = 0;
       } else if (['bind', 'ruck', 'jump', 'crouch', 'lineoutJump', 'catch'].includes(desired)) {
         st.oneShot = null;
         if (inst.active?.name !== desired) this.play(inst, desired, 0.18, 1);
@@ -3245,17 +3237,12 @@ export class ThreePlayerManager {
         }
         else {
           if (st.lie && st.oneShot !== 'getup') {
-            if (st.spd > 3.5) {
-              /* he is already on his feet and moving — the lie flag is stale;
-               * throwing him back to the deck for a stand-up is what made a
-               * jogging player visibly slam down. */
-              st.lie = false;
-              this.setLocomotion(inst, desired, st.spd);
-            } else {
-              this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
-              st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
-              st.plantX = a.rx; st.plantZ = a.rz;
-            }
+            /* The engine says the player is locomoting — they are ON THEIR FEET.
+             * Drop the stale lie flag immediately; do not drop them to the deck
+             * to play GetUp when they slow down or bump into another player. */
+            st.lie = false;
+            st.oneShot = null;
+            this.setLocomotion(inst, desired, st.spd);
           } else {
             st.oneShot = null;
             st.lie = false;
