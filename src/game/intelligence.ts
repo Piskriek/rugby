@@ -324,6 +324,17 @@ export function separate(
       if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
         || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
+      /* MEN WHO ARE NOT IN PLAY DO NOT SHUNT. A man climbing off the floor
+       * (recoverT, down already cleared by clearRuck) and a man mid-flight
+       * (diveT) used to be pushed here every frame — up to MAX_SHOVE a piece
+       * of grass per frame — and because tickRecovery only re-anchors when
+       * drift exceeds its slack, the shove won and the getting-up man slid
+       * across the pitch (measured: 13 m/s render speed during getup). Both
+       * states are owned by their own clocks; separation must not fight
+       * them. Their vx/vz are pinned by tickRecovery anyway. */
+      if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+      if ((a.diveT ?? 0) > 0 || (b.diveT ?? 0) > 0) continue;
+
       /* T-04. Opposing players must not run through one another. Two cases:
        *
        * TEAM-MATES — the existing rule. The carrier has right of way; his own

@@ -196,6 +196,14 @@ const THRASH_FREQ = 15;
 const THRASH_RATE = 10;
 /** Speed the thrash is scaled against — a rough top sprint, m/s. */
 const THRASH_REF_SPEED = 9;
+/* GET-UP ARM SETTLE. The stand-up clip (MX_StandUp, and the GetUp stand-in)
+ * swings both arms out near-horizontal for most of the rise — every player
+ * who got off the turf did a brief T-pose, dozens of times a match. The arms
+ * are pulled toward a down/pressed pose for the length of the get-up only. */
+const SETTLE_RATE = 12;
+const SETTLE_WEIGHT = 0.78;
+/** Arms already within ~75° of straight down are left to the animation. */
+const SETTLE_FREE_DOT = 0.25;
 
 /* --- scratch objects. Allocated once; a per-frame `new` here would be
  *     thirty vectors a frame per player and a guaranteed GC stutter. ------ */
@@ -236,6 +244,8 @@ interface PlayerInstance {
     thrash: number;
     /** 0..1 weight of the forward torso dip as he closes on the waist */
     dip: number;
+    /** 0..1 weight of the get-up arm settle (pulls splayed arms down) */
+    settle: number;
     /** free-running phase for the wobble, so two men never wobble in sync */
     phase: number;
     /** the FSM state resolved this frame, for the post-mixer pass */
@@ -734,7 +744,7 @@ export class ThreePlayerManager {
       actor, team, num, root, mixer, clips, badgeMat, shadow: shadowRef,
       active: null,
       proc: {
-        tilt: 0, reach: 0, thrash: 0, dip: 0,
+        tilt: 0, reach: 0, thrash: 0, dip: 0, settle: 0,
         phase: (num * 1.7 + (team === 'B' ? 0.9 : 0)) % 6.283, state: 'idle',
       },
       st: {
@@ -1312,6 +1322,70 @@ export class ThreePlayerManager {
 
     /* --- 3. the struggle (carrier's spine) --- */
     this.applySpineThrash(inst, inst.st.spd, latched ? 1 : 0, step);
+
+    /* --- 4. the arm settle (no wings while down or getting up) ---
+     * getup: the stand-up clip splays both arms for most of the rise.
+     * present/rollAway/grounded: the clamped final frames of the tackle
+     * clips leave a man lying on the turf with a wing held full horizontal
+     * for the whole ruck. Mid-fall and mid-dive states keep their flail —
+     * reaching and crashing are supposed to have arms in them. */
+    const settling = state === 'getup' || state === 'present'
+      || state === 'rollAway' || state === 'grounded';
+    this.applyArmSettle(inst, settling ? 1 : 0, step);
+  }
+
+  /**
+   * 4 — GET-UP ARM SETTLE.
+   *
+   * The stand-up clips hold both arms out near-horizontal for most of the
+   * rise (measured in world space: MX_StandUp keeps them at ~0.8–0.98 of
+   * full horizontal from t=0.3 s to t=1.2 s). Since a man gets off the deck
+   * after EVERY tackle and ruck, that read as a constant stream of T-poses.
+   * This pass pulls any arm that is splayed outward back toward the ground —
+   * arms pressing down is exactly what a real get-up looks like — and leaves
+   * arms that are already low untouched, so the push-off motion survives.
+   * Runs after the mixer like the reach pass, so the write sticks this frame.
+   */
+  private applyArmSettle(inst: PlayerInstance, weight: number, step: number) {
+    const p = inst.proc;
+    p.settle += (weight - p.settle) * (1 - Math.exp(-SETTLE_RATE * step));
+    if (p.settle < 0.01) return;
+    const rig = this.resolveRig(inst);
+    /* Target is the BODY'S down axis (chest up, negated), not world down. A
+     * standing man's body-down IS world down, but a man rising at an angle or
+     * lying on the turf has a tilted torso — pulling his arms to world down
+     * there still leaves them sticking out of his silhouette. Pulling them to
+     * his own hips tucks them at his side in every orientation. */
+    const chest = rig.spine[1] ?? rig.spine[0];
+    if (!chest) return;
+    chest.updateWorldMatrix(true, false);
+    _dir.set(0, 1, 0).applyQuaternion(
+      _qb.setFromRotationMatrix(_mat.extractRotation(chest.matrixWorld)),
+    ).normalize().negate();                        // down along the torso
+    for (const bone of rig.upperArms) {
+      if (!bone || !bone.parent) continue;
+      bone.updateWorldMatrix(true, false);
+      /* the arm's current world direction (bone +Y points shoulder→elbow) */
+      _v2.set(0, 1, 0).applyQuaternion(
+        _qb.setFromRotationMatrix(_mat.extractRotation(bone.matrixWorld)),
+      ).normalize();
+      /* how far it already lies at the side: 1 = down the torso, 0 = sticking
+       * straight out perpendicular to the body */
+      const downDot = _v2.dot(_dir);
+      if (downDot > SETTLE_FREE_DOT) continue;   // tucked enough — leave the anim alone
+      /* ramp the pull the more splayed the arm is (full strength once the arm
+       * is perpendicular to the torso or beyond) */
+      const gate = Math.min(1, Math.max(0, (SETTLE_FREE_DOT - downDot) / SETTLE_FREE_DOT));
+      _q.setFromUnitVectors(_v2, _dir);
+      const parentWorld = _qb.setFromRotationMatrix(
+        _mat.extractRotation(bone.parent.matrixWorld),
+      ).invert();
+      const boneWorld = _qBone.setFromRotationMatrix(
+        _mat.extractRotation(bone.matrixWorld),
+      );
+      const wanted = parentWorld.multiply(_q).multiply(boneWorld);
+      bone.quaternion.slerp(wanted, p.settle * SETTLE_WEIGHT * gate);
+    }
   }
 
   /* ------------------------------------------------------------- update -- */
@@ -1526,7 +1600,15 @@ export class ThreePlayerManager {
          * mid-rise and he snaps to a run from a crouch. */
         this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
         st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
-      } else if (desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup')) {
+      } else if ((desired === 'grounded' || (st.lie && !locomoting && desired !== 'getup'))
+        /* THE DIVE IS NOT A CORPSE. The lie flag is armed the instant a dive
+         * or tackle one-shot fires, and this catch-all runs every frame after
+         * — so from frame two of a dive it used to swap the flying man onto
+         * the flat arms-out Death clip while he was still airborne (the
+         * visible "T-pose in the air" during tackles). A locked dive/tackle
+         * one-shot owns the body until its clock runs out; the Death hold is
+         * only for men who are down with nothing else playing. */
+        && st.oneShot !== 'dive' && st.oneShot !== 'tackle') {
         // hold the downed/lying pose on a near-frozen Death clip
         if (inst.active?.name !== 'grounded') {
           const action = this.play(inst, 'grounded', 0.25, 0.2);
@@ -1538,12 +1620,30 @@ export class ThreePlayerManager {
         st.oneShot = null;
         if (inst.active?.name !== desired) this.play(inst, desired, 0.18, 1);
       } else if (locomoting) {
-        // stood back up -> let the GetUp one-shot finish, then locomotion takes over
-        if (st.oneShot === 'getup') { /* held until lock expires */ }
+        // stood back up -> locomotion takes over
+        if (st.oneShot === 'getup') {
+          /* RELEASE THE MOMENT THE ENGINE DOES. The one-shot is held only
+           * while the engine still says getup (see the lock-renew below);
+           * once he is freed — a whistle mid-rise, an early recovery — the
+           * stand-up must stop immediately. Holding it out had men jogging
+           * to the set piece inside the arms-out stand-up clip for up to a
+           * second and a half — the "arms out while jogging into position"
+           * sight. The crossfade out starts wherever the rise got to. */
+          st.oneShot = null; st.lock = 0; st.lie = false;
+          this.setLocomotion(inst, desired, st.spd);
+        }
         else {
           if (st.lie && st.oneShot !== 'getup') {
-            this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
-            st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
+            if (st.spd > 3.5) {
+              /* he is already on his feet and moving — the lie flag is stale;
+               * throwing him back to the deck for a stand-up is what made a
+               * jogging player visibly slam down. */
+              st.lie = false;
+              this.setLocomotion(inst, desired, st.spd);
+            } else {
+              this.play(inst, 'getup', 0.18, this.fitTimeScale('getup', RECOVER_SECONDS));
+              st.oneShot = 'getup'; st.lock = RECOVER_SECONDS; st.lie = false;
+            }
           } else {
             st.oneShot = null;
             st.lie = false;
@@ -1561,6 +1661,15 @@ export class ThreePlayerManager {
             this.play(inst, 'tryLoop', 0.15, 1);
           } else if (st.oneShot === 'tryLoop' && desired !== 'try') {
             st.oneShot = null;
+          } else if (st.oneShot === 'getup' && desired === 'getup') {
+            /* HOLD THE RISE. The engine's get-up lock can outlive
+             * RECOVER_SECONDS (a missed dive holds clip='getup' for
+             * DIVE_MISS_RECOVERY = 1.6 s vs this 1.53 s lock) — releasing
+             * early dropped him to locomotion for a frame and immediately
+             * re-fired GetUp from its lying first frame: the visible snap
+             * back down. Renew the lock and keep the final standing pose
+             * until the engine actually releases him. */
+            st.lock = 0.2;
           } else if (st.oneShot !== 'grounded' && st.oneShot !== 'tryLoop') {
             st.oneShot = null;
             this.setLocomotion(inst, this.locomotion(st.spd), st.spd);

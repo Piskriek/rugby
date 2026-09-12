@@ -4082,6 +4082,21 @@ export class Director {
         if (p.clip === 'dive') { p.clip = 'ready'; p.clipT = 0; }
         continue;
       }
+      /* THE FLIGHT ACTUALLY FLIES. The launch in engine/open.ts writes a
+       * velocity along the line to the carrier, but think() hands airborne
+       * men over to this clock and never steers them — and nothing else in
+       * the engine integrates a Live position except steer(). Until this
+       * write existed the diver froze in mid-air, the carrier walked out of
+       * the extended reach radius, and every dive that was not a head-on
+       * collision missed (measured: 30 launches, 0 hands-on, ~0.3 m of
+       * travel while "airborne"). Carrying the launch velocity here is the
+       * locked-trajectory risk the dive is supposed to have: he goes where
+       * he launched, a good runner can step inside it, and the reach test in
+       * upOpen is the only thing that can catch him. */
+      p.x = clamp(p.x + p.vx * dt, -34.5, 34.5);
+      p.z = clamp(p.z + p.vz * dt, -61, 61);
+      p.movedBy = 'dive';
+      if (Math.abs(p.vz) > 0.4) p.face = p.vz > 0 ? 1 : -1;
       const left = t - dt;
       if (left > 0) { p.diveT = left; continue; }
       p.diveT = 0;

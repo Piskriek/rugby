@@ -487,11 +487,16 @@ export function upOpen(d: Director, dt: number, _input: Input, pressed: Set<stri
        * man simply jogged on, so diving was strictly better than not. */
       diver.diveT = DIVE_FLIGHT_SECONDS;
       /* he commits his body along the line to the man — the lunge is what
-       * carries him the last metre into the radius. */
+       * carries him the last metre into the radius. A man arriving at full
+       * sprint keeps his momentum (a dive must not brake him to 5.2 m/s, or
+       * the fastest carriers outrun every launch); slower arrivals get the
+       * lunge floor so a flat-footed defender still closes the last metre. */
       const lx = car.x - diver.x, lz = car.z - diver.z;
       const ld = Math.max(0.4, Math.hypot(lx, lz));
-      diver.vx = (lx / ld) * 5.2;
-      diver.vz = (lz / ld) * 5.2;
+      const own = Math.hypot(diver.vx, diver.vz);
+      const lunge = Math.max(5.2, own * 0.9);
+      diver.vx = (lx / ld) * lunge;
+      diver.vz = (lz / ld) * lunge;
     }
   }
 
