@@ -648,11 +648,18 @@ export function separate(
       if ((a.latchedBy && a.latchedBy === `${b.team}:${b.num}`)
         || (b.latchedBy && b.latchedBy === `${a.team}:${a.num}`)) continue;
 
-      /* GET-UP LOCK. A shove on a man climbing off the turf both slides him
-       * and (via the renderer's spd>2.2 heading) turns him mid-rise. */
-      if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
-      /* Bound ruck/set-piece men are owned by placeBound. Shoving a jackal
+      /* MEN WHO ARE NOT IN PLAY DO NOT SHUNT. A man climbing off the floor
+       * (recoverT, down already cleared by clearRuck) and a man mid-flight
+       * (diveT) used to be pushed here every frame — up to MAX_SHOVE a piece
+       * of grass per frame — and because tickRecovery only re-anchors when
+       * drift exceeds its slack, the shove won and the getting-up man slid
+       * across the pitch (measured: 13 m/s render speed during getup). Both
+       * states are owned by their own clocks; separation must not fight
+       * them. Their vx/vz are pinned by tickRecovery anyway.
+       * Bound ruck/set-piece men are owned by placeBound. Shoving a jackal
        * off the ball (or a cleaner off the gate) is the in-place jitter. */
+      if ((a.recoverT ?? 0) > 0 || (b.recoverT ?? 0) > 0) continue;
+      if ((a.diveT ?? 0) > 0 || (b.diveT ?? 0) > 0) continue;
       if (a.bound || b.bound) continue;
 
       const dx = b.x - a.x, dz = b.z - a.z;
